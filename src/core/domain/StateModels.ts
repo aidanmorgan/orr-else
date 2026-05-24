@@ -1,0 +1,247 @@
+import { ChecklistItem } from '../ProtocolParser.js';
+import {
+  ActionContextMode,
+  ActionRunContext,
+  ActionType,
+  ProjectToolType,
+  CwdMode,
+  ThinkingLevel,
+  ToolValidationCondition
+} from '../../constants/index.js';
+
+/**
+ * Domain types for configured Orr Else states.
+ */
+
+export interface AgentIdentity {
+  role: string;
+  expertise: string;
+  constraints: string[];
+}
+
+export type LLMThinkingLevel = ThinkingLevel | string;
+export type ConfiguredActionContextMode = ActionContextMode | string;
+export type ConfiguredActionRunContext = ActionRunContext | string;
+
+export interface LLMProviderConfig {
+  provider: string;
+  model: string;
+  thinking?: LLMThinkingLevel;
+}
+
+export interface ResolvedLLMConfig extends LLMProviderConfig {
+  providerKey: string;
+}
+
+export interface BaseProjectToolConfig {
+  name: string;
+  description?: string;
+  type: ProjectToolType;
+  optional?: boolean;
+  inlineResultBytes?: number;
+  usageNotes?: string[];
+}
+
+export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
+  type: ProjectToolType.COMMAND;
+  command: string;
+  defaultArgs?: string[];
+  argsMode?: 'replace' | 'append';
+  allowArgs?: boolean;
+  cwd?: CwdMode | string;
+  allowCwdOverride?: boolean;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+  successExitCodes?: number[];
+  acceptMaxBuffer?: boolean;
+  env?: Record<string, string>;
+}
+
+export interface ToolValidationRule {
+  tool: string;
+  condition: ToolValidationCondition;
+  message?: string;
+}
+
+export interface ProjectMcpToolConfig extends BaseProjectToolConfig {
+  type: ProjectToolType.MCP;
+  server: string;
+  operations?: Record<string, string> | string[];
+  configPath?: string;
+  argumentDefaults?: Record<string, Record<string, unknown>>;
+  argumentAllowlist?: Record<string, string[]>;
+}
+
+export interface ProjectExtensionToolConfig extends BaseProjectToolConfig {
+  type: ProjectToolType.EXTENSION;
+}
+
+export type ProjectToolConfig = (ProjectCommandToolConfig | ProjectMcpToolConfig | ProjectExtensionToolConfig) & {
+  validationRules?: ToolValidationRule[];
+};
+
+export interface CompatibilityDiscoveryConfig {
+  masterRules?: string[];
+  ruleDirs?: string[];
+  hookDirs?: string[];
+  docsDirs?: string[];
+  agentDirs?: string[];
+}
+
+export interface ArtifactConfig {
+  baseDir?: string;
+  templates?: Record<string, string>;
+}
+
+export interface PiShellPolicyConfig {
+  disallowProjectToolFallback?: boolean;
+  blockedCommandPatterns?: string[];
+}
+
+export interface PiIntegrationConfig {
+  tools?: string[];
+  observedTools?: string[];
+  skillPaths?: string[];
+  workerArgs?: string[];
+  workerExtensions?: string[];
+  shell?: PiShellPolicyConfig;
+}
+
+export interface ValidationGateConfig {
+  id: string;
+  description?: string;
+  states?: string[];
+  beforeStates?: string[];
+  afterStates?: string[];
+  checklist?: ChecklistItem[] | string;
+  required?: boolean;
+}
+
+export interface TeammateAction {
+  id: string;
+  type: ActionType;
+  context?: ConfiguredActionRunContext;
+  prompt?: string;
+  checklist?: ChecklistItem[] | string;
+  tool?: string;
+  arguments?: Record<string, unknown>;
+  command?: string;
+  requiredTools?: string[];
+  requiredSkills?: string[];
+  contextMode?: ConfiguredActionContextMode;
+  maxContextTokens?: number;
+  handoverRequired?: boolean;
+}
+
+export type ActionDefinition = TeammateAction;
+
+export interface SDLCState {
+  id: string;
+  identity: AgentIdentity;
+  baseInstructions: string;
+  harnessRestartPrompt?: string;
+  contextRestartPrompt?: string;
+  ruleCategories?: string[]; // Folders in .pi/rules to load
+  llmProvider?: string;
+  model?: string;
+  thinking?: LLMThinkingLevel;
+  checklist?: ChecklistItem[] | string;
+  actions: TeammateAction[];
+  skills?: string[];
+  defaultActionContextMode?: ConfiguredActionContextMode;
+  maxContextTokens?: number;
+  handoverRequired?: boolean;
+  contextRotThreshold?: number;
+  on?: Record<string, string>;
+  transitions: Record<string, string>;
+  requiredTools?: string[];
+  requiredSkills?: string[];
+}
+
+export interface HarnessConfig {
+  settings: {
+    maxConcurrentSlots: number;
+    handoverTemplate: string;
+    agentTurnTimeoutMs: number;
+    teammateNoProgressTimeoutMs?: number;
+    processReapIntervalMs: number;
+    teamLeadSystemPrompt?: string;
+    projectObjective?: string;
+    startState?: string;
+    workflowVersion?: string;
+    harnessRestartEvent: string;
+    harnessRestartPrompt?: string;
+    contextRestartEvent: string;
+    contextRestartPrompt?: string;
+    compatibilityMode?: string;
+    compatibility?: { modes?: Record<string, CompatibilityDiscoveryConfig> };
+    pi?: PiIntegrationConfig;
+    eventStore?: { enabled?: boolean; dir?: string; name?: string; fileName?: string };
+    contextRestartRequirements?: { rereadFiles?: string[]; requireEvidence?: boolean };
+    traceability?: { requirePlanToBead?: boolean; requireBeadToPlan?: boolean; evidenceStore?: string };
+    reviewArtifacts?: { shipPostReview?: { state?: string; store?: string; eventType?: string; required?: boolean } };
+    transactionalState?: {
+      enabled?: boolean;
+      requireReadSet?: boolean;
+      requireWriteSet?: boolean;
+      requireAssumptions?: boolean;
+      requireVersionDependencies?: boolean;
+      requireVerifierObligations?: boolean;
+      requireConflictPolicy?: boolean;
+      evidenceStore?: string;
+    };
+    artifacts?: ArtifactConfig;
+    defaultActionContextMode?: ConfiguredActionContextMode;
+    defaultModel: string;
+    defaultProvider: string;
+    modelProviders: Record<string, LLMProviderConfig>;
+    stateContextRotThreshold: number;
+    harnessContextRotThreshold: number;
+    contextMonitor?: {
+      autoRestartCompactionCount?: number;
+    };
+    observability?: {
+      enabled: boolean;
+      dir?: string;
+      fileName?: string;
+      retentionDays?: number;
+      collector?: {
+        endpoint: string;
+        headers?: Record<string, string>;
+        timeoutMs?: number;
+      };
+    };
+  };
+  scheduler: {
+    weights: {
+      waitTime: number;
+      executionTime: number;
+      progress: number;
+      penalty: number;
+    }
+  };
+  validationGates?: ValidationGateConfig[];
+  states: Record<string, SDLCState>;
+  tools?: ProjectToolConfig[];
+}
+
+/**
+ * First-class Checklist domain entity
+ */
+export class Checklist {
+  constructor(public readonly items: ChecklistItem[]) {}
+
+  public validate(results: Record<string, { checked: boolean; evidence?: string }>): { 
+    valid: boolean; 
+    missing: string[] 
+  } {
+    const missing = this.items
+      .filter(item => item.mandatory && (!results[item.text] || !results[item.text].checked))
+      .map(item => item.text);
+    
+    return {
+      valid: missing.length === 0,
+      missing
+    };
+  }
+}
