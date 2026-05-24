@@ -1,0 +1,459 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["settings", "scheduler", "states"],
+  "additionalProperties": false,
+  "properties": {
+    "settings": {
+      "type": "object",
+      "required": ["maxConcurrentSlots", "handoverTemplate", "defaultModel", "startState"],
+      "properties": {
+        "maxConcurrentSlots": { "type": "integer", "minimum": 1 },
+        "handoverTemplate": { "type": "string" },
+        "agentTurnTimeoutMs": { "type": "integer" },
+        "processReapIntervalMs": { "type": "integer" },
+        "teamLeadSystemPrompt": { "type": "string" },
+        "projectObjective": { "type": "string" },
+        "startState": { "type": "string" },
+        "workflowVersion": { "type": "string" },
+        "harnessRestartEvent": { "type": "string" },
+        "harnessRestartPrompt": { "type": "string" },
+        "contextRestartEvent": { "type": "string" },
+        "contextRestartPrompt": { "type": "string" },
+        "compatibilityMode": { "type": "string" },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "modes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "masterRules": { "type": "array", "items": { "type": "string" } },
+                  "ruleDirs": { "type": "array", "items": { "type": "string" } },
+                  "hookDirs": { "type": "array", "items": { "type": "string" } },
+                  "docsDirs": { "type": "array", "items": { "type": "string" } },
+                  "agentDirs": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "pi": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "tools": { "type": "array", "items": { "type": "string" } },
+            "observedTools": { "type": "array", "items": { "type": "string" } },
+            "skillPaths": { "type": "array", "items": { "type": "string" } },
+            "workerArgs": { "type": "array", "items": { "type": "string" } },
+            "workerExtensions": { "type": "array", "items": { "type": "string" } },
+            "shell": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "disallowProjectToolFallback": { "type": "boolean" },
+                "blockedCommandPatterns": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        },
+        "eventStore": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dir": { "type": "string" },
+            "name": { "type": "string" },
+            "fileName": { "type": "string" }
+          }
+        },
+        "contextRestartRequirements": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rereadFiles": { "type": "array", "items": { "type": "string" } },
+            "requireEvidence": { "type": "boolean" }
+          }
+        },
+        "traceability": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "requirePlanToBead": { "type": "boolean" },
+            "requireBeadToPlan": { "type": "boolean" },
+            "evidenceStore": { "type": "string" }
+          }
+        },
+        "reviewArtifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "shipPostReview": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "state": { "type": "string" },
+                "store": { "type": "string" },
+                "eventType": { "type": "string" },
+                "required": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "transactionalState": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "requireReadSet": { "type": "boolean" },
+            "requireWriteSet": { "type": "boolean" },
+            "requireAssumptions": { "type": "boolean" },
+            "requireVersionDependencies": { "type": "boolean" },
+            "requireVerifierObligations": { "type": "boolean" },
+            "requireConflictPolicy": { "type": "boolean" },
+            "evidenceStore": { "type": "string" }
+          }
+        },
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseDir": { "type": "string" },
+            "templates": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          }
+        },
+        "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
+        "defaultModel": { "type": "string" },
+        "defaultProvider": { "type": "string" },
+        "modelProviders": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["provider", "model"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] }
+            }
+          }
+        },
+        "stateContextRotThreshold": { "type": "integer", "minimum": 1 },
+        "harnessContextRotThreshold": { "type": "integer", "minimum": 1 },
+        "observability": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "dir": { "type": "string" },
+            "fileName": { "type": "string" },
+            "retentionDays": { "type": "integer", "minimum": 1 },
+            "collector": {
+              "type": "object",
+              "required": ["endpoint"],
+              "additionalProperties": false,
+              "properties": {
+                "endpoint": { "type": "string" },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": { "type": "string" }
+                },
+                "timeoutMs": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "required": ["weights"],
+      "properties": {
+        "weights": {
+          "type": "object",
+          "required": ["waitTime", "executionTime", "progress", "penalty"],
+          "properties": {
+            "waitTime": { "type": "number" },
+            "executionTime": { "type": "number" },
+            "progress": { "type": "number" },
+            "penalty": { "type": "number" }
+          }
+        }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["name", "type", "command"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
+              "description": { "type": "string" },
+              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "type": { "const": "command" },
+              "command": { "type": "string" },
+              "defaultArgs": { "type": "array", "items": { "type": "string" } },
+              "argsMode": { "type": "string", "enum": ["replace", "append"] },
+              "allowArgs": { "type": "boolean" },
+              "cwd": { "type": "string" },
+              "allowCwdOverride": { "type": "boolean" },
+              "timeoutMs": { "type": "integer", "minimum": 1 },
+              "maxOutputBytes": { "type": "integer", "minimum": 1 },
+              "inlineResultBytes": { "type": "integer", "minimum": 1 },
+              "acceptMaxBuffer": { "type": "boolean" },
+              "successExitCodes": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "optional": { "type": "boolean" },
+              "validationRules": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tool", "condition"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tool": { "type": "string" },
+                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["name", "type", "server"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
+              "description": { "type": "string" },
+              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "type": { "const": "mcp" },
+              "server": { "type": "string" },
+              "configPath": { "type": "string" },
+              "inlineResultBytes": { "type": "integer", "minimum": 1 },
+              "argumentDefaults": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "argumentAllowlist": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                }
+              },
+              "operations": {
+                "oneOf": [
+                  { "type": "array", "items": { "type": "string" } },
+                  {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  }
+                ]
+              },
+              "optional": { "type": "boolean" },
+              "validationRules": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tool", "condition"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tool": { "type": "string" },
+                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["name", "type"],
+            "additionalProperties": false,
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
+              "description": { "type": "string" },
+              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "type": { "const": "extension" },
+              "inlineResultBytes": { "type": "integer", "minimum": 1 },
+              "optional": { "type": "boolean" },
+              "validationRules": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tool", "condition"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tool": { "type": "string" },
+                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "validationGates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string" },
+          "description": { "type": "string" },
+          "states": { "type": "array", "items": { "type": "string" } },
+          "beforeStates": { "type": "array", "items": { "type": "string" } },
+          "afterStates": { "type": "array", "items": { "type": "string" } },
+          "required": { "type": "boolean" },
+          "checklist": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["text"],
+                  "properties": {
+                    "text": { "type": "string" },
+                    "mandatory": { "type": "boolean" },
+                    "type": { "type": "string", "enum": ["manual", "tool", "script"] },
+                    "tool": { "type": "string" },
+                    "script": { "type": "string" }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["identity", "baseInstructions", "actions", "transitions"],
+        "additionalProperties": false,
+        "properties": {
+          "identity": {
+            "type": "object",
+            "required": ["role", "expertise", "constraints"],
+            "properties": {
+              "role": { "type": "string" },
+              "expertise": { "type": "string" },
+              "constraints": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "baseInstructions": { "type": "string" },
+          "harnessRestartPrompt": { "type": "string" },
+          "contextRestartPrompt": { "type": "string" },
+          "ruleCategories": { "type": "array", "items": { "type": "string" } },
+          "skills": { "type": "array", "items": { "type": "string" } },
+          "requiredTools": { "type": "array", "items": { "type": "string" } },
+          "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
+          "maxContextTokens": { "type": "integer", "minimum": 1 },
+          "handoverRequired": { "type": "boolean" },
+          "llmProvider": { "type": "string" },
+          "model": { "type": "string" },
+          "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] },
+          "contextRotThreshold": { "type": "integer", "minimum": 1 },
+          "handoverTemplate": { "type": "string" },
+          "qualityCheckCommand": { "type": "string" },
+          "checklist": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["text"],
+                  "properties": {
+                    "text": { "type": "string" },
+                    "mandatory": { "type": "boolean" },
+                    "type": { "type": "string", "enum": ["manual", "tool", "script"] },
+                    "tool": { "type": "string" },
+                    "script": { "type": "string" }
+                  }
+                }
+              }
+            ]
+          },
+          "on": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "actions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "type"],
+              "properties": {
+                "id": { "type": "string" },
+                "type": { "type": "string", "enum": ["prompt", "checklist", "tool", "script"] },
+                "context": { "type": "string", "enum": ["parent", "fresh"], "default": "parent" },
+                "prompt": { "type": "string" },
+                "tool": { "type": "string" },
+                "arguments": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "command": { "type": "string" },
+                "contextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
+                "maxContextTokens": { "type": "integer", "minimum": 1 },
+                "handoverRequired": { "type": "boolean" },
+                "checklist": {
+                  "oneOf": [
+                    { "type": "string" },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": ["text"],
+                        "properties": {
+                          "text": { "type": "string" },
+                          "mandatory": { "type": "boolean" },
+                          "type": { "type": "string", "enum": ["manual", "tool", "script"] },
+                          "tool": { "type": "string" },
+                          "script": { "type": "string" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "transitions": {
+            "type": "object",
+            "properties": {
+            },
+            "additionalProperties": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}
