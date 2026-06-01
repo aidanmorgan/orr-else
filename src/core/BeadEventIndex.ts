@@ -1,0 +1,144 @@
+/**
+ * BeadEventIndex – manages per-bead JSONL index files within an event-store
+ * directory.  Extracted from EventStore (structural split, no semantic change).
+ *
+ * Responsibilities:
+ *  - Computing index-file paths (by-bead/<sanitised-beadId>.jsonl)
+ *  - Appending events to a bead's index (with stale-index cleanup on failure)
+ *  - Reading indexed + gap events back for a given beadId
+ */
+
+import * as fs from 'fs';
+import * as path from 'path';
+import { Logger } from './Logger.js';
+import { JsonlEventLog } from './JsonlEventLog.js';
+import { Component, EventStoreDefaults } from '../constants/index.js';
+import type { DomainEvent } from './EventStoreTypes.js';
+
+const existsSync = fs.existsSync;
+const mkdirAsync = fs.promises.mkdir;
+const rmAsync = fs.promises.rm;
+
+/** Stored in the <beadId>.jsonl.ready marker; tracks per-source-file read offsets. */
+export interface BeadIndexMarker {
+  sources?: Record<string, number>;
+}
+
+/** The subset of an event-store location that BeadEventIndex needs. */
+export interface BeadIndexLocation {
+  dir: string;
+}
+
+export class BeadEventIndex {
+  constructor(private readonly eventLog: JsonlEventLog) {}
+
+  // ---------------------------------------------------------------------------
+  // Path helpers
+  // ---------------------------------------------------------------------------
+
+  private safeIndexFileName(beadId: string): string {
+    const sanitized = beadId
+      .replace(EventStoreDefaults.UNSAFE_INDEX_PATH_SEGMENT_PATTERN, '-')
+      .replace(/^-+|-+$/g, '');
+    return `${sanitized || 'bead'}${EventStoreDefaults.INDEX_FILE_EXTENSION}`;
+  }
+
+  private indexDir(location: BeadIndexLocation): string {
+    return path.join(location.dir, EventStoreDefaults.BEAD_INDEX_DIR);
+  }
+
+  private indexPath(location: BeadIndexLocation, beadId: string): string {
+    return path.join(this.indexDir(location), this.safeIndexFileName(beadId));
+  }
+
+  private indexReadyPath(location: BeadIndexLocation, beadId: string): string {
+    return `${this.indexPath(location, beadId)}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Marker I/O
+  // ---------------------------------------------------------------------------
+
+  async readMarker(location: BeadIndexLocation, beadId: string): Promise<BeadIndexMarker | undefined> {
+    const markerPath = this.indexReadyPath(location, beadId);
+    if (!existsSync(markerPath)) return undefined;
+    try {
+      const text = await fs.promises.readFile(markerPath, 'utf8');
+      const marker = JSON.parse(text) as BeadIndexMarker;
+      return (marker && typeof marker === 'object') ? marker as BeadIndexMarker : {};
+    } catch {
+      return {};
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Write
+  // ---------------------------------------------------------------------------
+
+  async append(location: BeadIndexLocation, beadId: string, event: DomainEvent): Promise<void> {
+    const dir = this.indexDir(location);
+    await mkdirAsync(dir, { recursive: true });
+    const iPath = this.indexPath(location, beadId);
+    const rPath = this.indexReadyPath(location, beadId);
+    try {
+      await this.eventLog.append(iPath, event);
+    } catch (error) {
+      await rmAsync(iPath, { force: true }).catch(() => {});
+      await rmAsync(rPath, { force: true }).catch(() => {});
+      Logger.warn(Component.CORE, 'Removed stale bead event index after append failure', {
+        beadId,
+        indexPath: iPath,
+        readyPath: rPath,
+        error: String(error)
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Read
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns the ordered, de-duplicated events for `beadId` using the index
+   * file (if a .ready marker exists) and catching up from the primary JSONL
+   * files for any bytes not yet indexed.
+   *
+   * Returns `undefined` when no .ready marker exists (caller must full-scan).
+   */
+  async eventsForBead(
+    location: BeadIndexLocation,
+    beadId: string,
+    primaryFilePaths: string[],
+    isDomainEvent: (v: unknown) => v is DomainEvent,
+    beadIdFor: (e: DomainEvent) => string | undefined,
+    compareEvents: (a: DomainEvent, b: DomainEvent) => number
+  ): Promise<DomainEvent[] | undefined> {
+    const iPath = this.indexPath(location, beadId);
+    const marker = await this.readMarker(location, beadId);
+    if (!existsSync(iPath) || marker === undefined) return undefined;
+
+    const events: DomainEvent[] = [];
+
+    // Read the index file
+    await this.eventLog.scan(iPath, value => {
+      if (!isDomainEvent(value)) return;
+      if (beadIdFor(value) !== beadId) return;
+      events.push(value);
+    });
+
+    // Top-up from primary files for bytes beyond what the index captured
+    for (const filePath of primaryFilePaths) {
+      const indexedSize = marker.sources?.[path.basename(filePath)] || 0;
+      const currentSize = fs.statSync(filePath).size;
+      if (indexedSize >= currentSize) continue;
+      await this.eventLog.scanFromOffset(filePath, indexedSize, value => {
+        if (!isDomainEvent(value)) return;
+        if (beadIdFor(value) !== beadId) return;
+        events.push(value);
+      });
+    }
+
+    // De-duplicate and sort
+    return [...new Map(events.map(e => [e.id, e])).values()].sort(compareEvents);
+  }
+}
