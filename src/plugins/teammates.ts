@@ -10,6 +10,7 @@ import { ConfigLoader } from '../core/ConfigLoader.js';
 import { Logger } from '../core/Logger.js';
 import { Observability } from '../core/Observability.js';
 import { EventStore } from '../core/EventStore.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { resolvePiSkillPaths, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
 import {
   Component,
@@ -65,7 +66,8 @@ export class TeammateFactory {
     private readonly eventStore: EventStore,
     private readonly maxSlots: number = Defaults.MAX_SLOTS,
     private readonly sessionName: string = Defaults.TMUX_SESSION,
-    private readonly extensionPath?: string
+    private readonly extensionPath?: string,
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
   ) {}
 
   public async getActiveTeammateCount(): Promise<number> {
@@ -189,7 +191,7 @@ export class TeammateFactory {
 
   private beadIdFromCurrentPath(currentPath: string): string | undefined {
     if (!currentPath) return undefined;
-    const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot() || process.cwd();
+    const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot() || process.cwd();
     const worktreesRoot = path.resolve(projectRoot, WorktreeDefaults.ROOT_DIR);
     const absoluteCurrentPath = path.resolve(currentPath);
     const relativePath = path.relative(worktreesRoot, absoluteCurrentPath);
@@ -267,7 +269,7 @@ export class TeammateFactory {
 
       if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Spawning teammate for ${beadId}...`);
 
-      const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot() || process.cwd();
+      const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot() || process.cwd();
       const runDir = worktreePath;
       const extensionPath = this.extensionPath || path.join(projectRoot, Defaults.PROJECT_EXTENSION_PATH);
       const config = await this.configLoader.load();

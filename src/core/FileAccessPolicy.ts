@@ -14,6 +14,7 @@ import {
 } from '../constants/index.js';
 import { Logger } from './Logger.js';
 import { getProjectRoot } from './Paths.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';
 import type { EventStore } from './EventStore.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
@@ -74,11 +75,12 @@ export class FileAccessPolicy {
   constructor(
     private readonly eventStore: EventStore,
     private readonly shellCommandParser: ShellCommandParser,
-    private readonly planWriteSet: PlanWriteSet
+    private readonly planWriteSet: PlanWriteSet,
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
   ) {}
 
   public async apply(event: any): Promise<PolicyResult | null> {
-    if (process.env[EnvVars.WORKER_MODE] !== ProcessFlag.TRUE) return null;
+    if (this.env.env(EnvVars.WORKER_MODE) !== ProcessFlag.TRUE) return null;
     if (event.toolName === NativePiToolName.READ) {
       return await this.applyNativeReadPolicy(event);
     }
@@ -255,10 +257,10 @@ export class FileAccessPolicy {
 
   private context(): MutationContext {
     return {
-      beadId: process.env[EnvVars.BEAD_ID],
-      stateId: process.env[EnvVars.STATE_ID],
-      projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
-      worktreePath: process.env[EnvVars.WORKTREE_PATH] || '',
+      beadId: this.env.env(EnvVars.BEAD_ID),
+      stateId: this.env.env(EnvVars.STATE_ID),
+      projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot(),
+      worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || '',
       cwd: process.cwd()
     };
   }

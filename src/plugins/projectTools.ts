@@ -14,6 +14,7 @@ import lockfile from 'proper-lockfile';
 import { v7 as uuidv7 } from 'uuid';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import { getProjectRoot } from '../core/Paths.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { resolveTemplateString, type TemplateContext } from '../core/PiIntegration.js';
 import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import { ProjectToolConfig, ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolPathArgumentConfig, ProjectCommandArgumentPathConfig } from '../core/domain/StateModels.js';
@@ -1035,29 +1036,29 @@ async function boundedCommandFile(filePath: string, limitBytes: number): Promise
  * Resolves a context field from args with fixed precedence:
  * 1. args.[key]            — top-level keys (legacy shims, checked first for backward compat)
  * 2. args.arguments.[key]  — nested arguments.* form (canonical; prefer this in new callers)
- * 3. process.env[envVar]   — environment fallback (optional)
+ * 3. env.env(envVar)       — environment fallback (optional)
  * Keys are [canonical, ...aliases] and are tried in that order within each tier.
  */
-export function resolveContextField(args: any, keys: [string, ...string[]], envVar?: string): string | undefined {
+export function resolveContextField(args: any, keys: [string, ...string[]], envVar?: string, env: RuntimeEnvironment = nodeRuntimeEnvironment): string | undefined {
   for (const key of keys) {
     if (args?.[key]) return args[key];
   }
   for (const key of keys) {
     if (args?.arguments?.[key]) return args.arguments[key];
   }
-  return envVar ? process.env[envVar] : undefined;
+  return envVar ? env.env(envVar) : undefined;
 }
 
-function beadIdFromArgs(args: any): string | undefined {
-  return resolveContextField(args, ['beadId', 'id'], EnvVars.BEAD_ID);
+function beadIdFromArgs(args: any, env?: RuntimeEnvironment): string | undefined {
+  return resolveContextField(args, ['beadId', 'id'], EnvVars.BEAD_ID, env);
 }
 
-function stateIdFromArgs(args: any): string | undefined {
-  return resolveContextField(args, ['stateId', 'state'], EnvVars.STATE_ID);
+function stateIdFromArgs(args: any, env?: RuntimeEnvironment): string | undefined {
+  return resolveContextField(args, ['stateId', 'state'], EnvVars.STATE_ID, env);
 }
 
-function actionIdFromArgs(args: any): string | undefined {
-  return resolveContextField(args, ['actionId', 'action'], EnvVars.ACTION_ID);
+function actionIdFromArgs(args: any, env?: RuntimeEnvironment): string | undefined {
+  return resolveContextField(args, ['actionId', 'action'], EnvVars.ACTION_ID, env);
 }
 
 function cwdOverrideFromArgs(args: any): string | undefined {
@@ -1075,36 +1076,36 @@ function pathSegment(value: string | undefined, fallback: string): string {
   return sanitized || fallback;
 }
 
-function baseTemplateContext(definition: ProjectToolConfig, args: any): TemplateContext {
-  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot();
-  const worktreeRoot = process.env[EnvVars.WORKTREE_PATH] || projectRoot;
+function baseTemplateContext(definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment): TemplateContext {
+  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || getProjectRoot();
+  const worktreeRoot = env.env(EnvVars.WORKTREE_PATH) || projectRoot;
   return {
-    configPath: process.env[EnvVars.CONFIG_PATH],
+    configPath: env.env(EnvVars.CONFIG_PATH),
     projectRoot,
     worktreePath: worktreeRoot,
-    frameworkRoot: frameworkRootFromArgs(args, projectRoot),
-    beadId: pathSegment(beadIdFromArgs(args), ProjectToolDefaults.UNASSIGNED_BEAD_ID),
-    stateId: pathSegment(stateIdFromArgs(args), ProjectToolDefaults.UNSPECIFIED_STATE_ID),
-    actionId: pathSegment(actionIdFromArgs(args), ProjectToolDefaults.UNSPECIFIED_ACTION_ID),
+    frameworkRoot: frameworkRootFromArgs(args, projectRoot, env),
+    beadId: pathSegment(beadIdFromArgs(args, env), ProjectToolDefaults.UNASSIGNED_BEAD_ID),
+    stateId: pathSegment(stateIdFromArgs(args, env), ProjectToolDefaults.UNSPECIFIED_STATE_ID),
+    actionId: pathSegment(actionIdFromArgs(args, env), ProjectToolDefaults.UNSPECIFIED_ACTION_ID),
     toolName: pathSegment(definition.name, definition.name)
   };
 }
 
-function frameworkRootFromArgs(args: any, fallbackRoot?: string): string | undefined {
+function frameworkRootFromArgs(args: any, fallbackRoot?: string, env: RuntimeEnvironment = nodeRuntimeEnvironment): string | undefined {
   const value = typeof args?.frameworkRoot === 'string' && args.frameworkRoot.trim()
     ? args.frameworkRoot
-    : process.env[EnvVars.FRAMEWORK_ROOT] || fallbackRoot;
+    : env.env(EnvVars.FRAMEWORK_ROOT) || fallbackRoot;
   if (!value) return undefined;
   return path.resolve(value);
 }
 
-function frameworkRootFromConfig(config: HarnessConfig): string | undefined {
+function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment): string | undefined {
   const value = config.settings.artifacts?.templates?.orrElseFrameworkRoot;
   if (typeof value !== 'string' || !value.trim()) return undefined;
-  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot();
+  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || getProjectRoot();
   const context: TemplateContext = {
     projectRoot,
-    worktreePath: process.env[EnvVars.WORKTREE_PATH] || projectRoot
+    worktreePath: env.env(EnvVars.WORKTREE_PATH) || projectRoot
   };
   const resolved = resolveTemplateString(value, context);
   return path.isAbsolute(resolved) ? resolved : path.resolve(projectRoot, resolved);
@@ -1139,8 +1140,8 @@ function resolveToolCwd(definition: ProjectToolConfig, templateContext: Template
   return resolveCwdValue(configuredCwd, templateContext);
 }
 
-function executionContext(pathFactory: ToolCallPathFactory, definition: ProjectToolConfig, args: any): ProjectToolExecutionContext {
-  const initialContext = baseTemplateContext(definition, args);
+function executionContext(pathFactory: ToolCallPathFactory, definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment): ProjectToolExecutionContext {
+  const initialContext = baseTemplateContext(definition, args, env);
   const cwd = resolveToolCwd(definition, initialContext, args);
   const invocationContext = {
     ...initialContext,
@@ -4190,10 +4191,11 @@ export async function executeConfiguredProjectTool(
   pathFactory: ToolCallPathFactory,
   definition: ProjectToolConfig,
   args: Record<string, unknown>,
-  ctx: ExtensionContext
+  ctx: ExtensionContext,
+  env: RuntimeEnvironment = nodeRuntimeEnvironment
 ): Promise<unknown> {
-  const beadId = beadIdFromArgs(args);
-  const context = executionContext(pathFactory, definition, args);
+  const beadId = beadIdFromArgs(args, env);
+  const context = executionContext(pathFactory, definition, args, env);
   const stateId = context.templateContext.stateId;
   const actionId = context.templateContext.actionId;
   if (definition.type === ProjectToolType.EXTENSION) {
@@ -4420,7 +4422,8 @@ export function registerConfiguredProjectTools(
   config: HarnessConfig,
   seen: Set<string>,
   wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
-  runtimeContext?: () => ProjectToolRuntimeContext | undefined
+  runtimeContext?: () => ProjectToolRuntimeContext | undefined,
+  env: RuntimeEnvironment = nodeRuntimeEnvironment
 ) {
   const tools = config.tools || [];
   for (const definition of tools) {
@@ -4450,12 +4453,12 @@ export function registerConfiguredProjectTools(
           }),
       execute: async (params: any, ctx: ExtensionContext) => {
         const hiddenContext = runtimeContext?.() || {};
-        const configuredFrameworkRoot = frameworkRootFromConfig(config);
+        const configuredFrameworkRoot = frameworkRootFromConfig(config, env);
         return await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
           ...(params || {}),
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {})
-        }, ctx);
+        }, ctx, env);
       }
     }));
   }

@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { ConfigLoader } from './ConfigLoader.js';
 import { getProjectRoot, resolveProject } from './Paths.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { ArtifactPathDefaults, EnvVars } from '../constants/index.js';
 
 export interface ArtifactPathContext {
@@ -46,7 +47,10 @@ export interface ArtifactPathResolution {
 }
 
 export class ArtifactPaths {
-  constructor(private readonly configLoader: ConfigLoader) {}
+  constructor(
+    private readonly configLoader: ConfigLoader,
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+  ) {}
 
   public async resolve(context: ArtifactPathContext): Promise<ArtifactPathResolution> {
     const config = await this.configLoader.load();
@@ -79,8 +83,8 @@ export class ArtifactPaths {
         stateId: context.stateId || '',
         actionId: context.actionId || '',
         artifactId: context.artifactId || name,
-        projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
-        worktreePath: process.env[EnvVars.WORKTREE_PATH] || process.env[EnvVars.PROJECT_ROOT] || getProjectRoot()
+        projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot(),
+        worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot()
       });
       const resolved = path.isAbsolute(rendered) ? rendered : resolveProject(rendered);
       paths[name] = resolved;

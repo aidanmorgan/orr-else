@@ -12,6 +12,7 @@ import { PlanWriteSet } from './PlanWriteSet.js';
 import { ProtocolInjector } from './ProtocolInjector.js';
 import { ProtocolParser } from './ProtocolParser.js';
 import { RequiredToolResolver } from './RequiredToolResolver.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { Scheduler } from './Scheduler.js';
 import { ShellCommandParser } from './ShellCommandParser.js';
 import { TelemetryStore } from './Telemetry.js';
@@ -85,21 +86,21 @@ export interface RuntimeServices {
   };
 }
 
-export function createRuntimeServices(): RuntimeServices {
-  const configLoader = new ConfigLoader();
-  const eventStore = new EventStore(configLoader);
-  const observability = new Observability(configLoader);
+export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvironment): RuntimeServices {
+  const configLoader = new ConfigLoader(env);
+  const eventStore = new EventStore(configLoader, undefined, env);
+  const observability = new Observability(configLoader, env);
   const flowManager = new FlowManager();
   const domainEventEmitter = new DomainEventEmitter(eventStore);
   const domainEvents = new DomainEvents(domainEventEmitter);
   const shellCommandParser = new ShellCommandParser();
 
-  const artifactPaths = new ArtifactPaths(configLoader);
+  const artifactPaths = new ArtifactPaths(configLoader, env);
   const planWriteSet = new PlanWriteSet(configLoader, artifactPaths);
 
-  const bdPlugin = createBdPlugin(eventStore);
+  const bdPlugin = createBdPlugin(eventStore, env);
   const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
-  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore);
+  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, undefined, undefined, undefined, env);
 
   return {
     configLoader,
@@ -118,7 +119,7 @@ export function createRuntimeServices(): RuntimeServices {
     telemetryStore: new TelemetryStore(),
     artifactPaths,
     planWriteSet,
-    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet),
+    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env),
     shellCommandParser,
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),

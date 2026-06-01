@@ -27,6 +27,7 @@ import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { resolveProject } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OtelAttr, ToolResultStatus } from '../constants/index.js';
 
 export interface SpanContext {
@@ -153,9 +154,9 @@ function cleanAttributes(attributes: SpanAttributes): Attributes {
  * Defaults to a single JSONL file per Pi process under .pi/otel.
  */
 export class Observability {
-  private readonly sessionId = process.env[EnvVars.OBSERVABILITY_SESSION_ID] || uuidv7();
-  private readonly sessionStateId = process.env[EnvVars.SESSION_STATE_ID] || null;
-  private readonly sessionTraceId = this.sessionId.replace(/-/g, '');
+  private readonly sessionId: string;
+  private readonly sessionStateId: string | null;
+  private readonly sessionTraceId: string;
   private readonly contextStorage = new AsyncLocalStorage<SpanContext>();
   private readonly activeSpans: Map<string, OtelSpan> = new Map();
   private readonly calledTools: Set<string> = new Set();
@@ -168,7 +169,14 @@ export class Observability {
   private currentFileName: string | null = null;
   private currentFilePath: string | null = null;
 
-  constructor(private readonly configLoader: ConfigLoader) {}
+  constructor(
+    private readonly configLoader: ConfigLoader,
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+  ) {
+    this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
+    this.sessionStateId = this.env.env(EnvVars.SESSION_STATE_ID) || null;
+    this.sessionTraceId = this.sessionId.replace(/-/g, '');
+  }
 
   public async initialize(): Promise<void> {
     await this.init();
@@ -296,10 +304,10 @@ export class Observability {
           'service.instance.id': this.sessionId,
           'session.id': this.sessionId,
           'session.state_id': this.sessionStateId || undefined,
-          [OtelAttr.ORR_ELSE_BEAD_ID]: process.env[EnvVars.BEAD_ID] || undefined,
-          [OtelAttr.ORR_ELSE_STATE_ID]: process.env[EnvVars.STATE_ID] || undefined,
-          [OtelAttr.ORR_ELSE_ACTION_ID]: process.env[EnvVars.ACTION_ID] || undefined,
-          [OtelAttr.ORR_ELSE_WORKER_ID]: process.env[EnvVars.WORKER_ID] || undefined,
+          [OtelAttr.ORR_ELSE_BEAD_ID]: this.env.env(EnvVars.BEAD_ID) || undefined,
+          [OtelAttr.ORR_ELSE_STATE_ID]: this.env.env(EnvVars.STATE_ID) || undefined,
+          [OtelAttr.ORR_ELSE_ACTION_ID]: this.env.env(EnvVars.ACTION_ID) || undefined,
+          [OtelAttr.ORR_ELSE_WORKER_ID]: this.env.env(EnvVars.WORKER_ID) || undefined,
           'process.pid': process.pid,
           ...attributes
         })
@@ -370,8 +378,8 @@ export class Observability {
   public getTraceContext(): SpanContext | undefined {
     const active = this.contextStorage.getStore();
     if (active) return active;
-    const traceId = process.env[EnvVars.TRACE_ID];
-    const spanId = process.env[EnvVars.SPAN_ID];
+    const traceId = this.env.env(EnvVars.TRACE_ID);
+    const spanId = this.env.env(EnvVars.SPAN_ID);
     if (traceId && spanId) {
       return {
         traceId,
@@ -407,7 +415,7 @@ export class Observability {
   }
 
   private resolveFileName(configuredFileName?: string): string {
-    const configured = process.env[EnvVars.OBSERVABILITY_FILE_NAME] || configuredFileName || ObservabilityDefaults.JSONL_FILE_TEMPLATE;
+    const configured = this.env.env(EnvVars.OBSERVABILITY_FILE_NAME) || configuredFileName || ObservabilityDefaults.JSONL_FILE_TEMPLATE;
     const substituted = configured.replace(/\{\{\s*sessionId\s*\}\}/g, this.sessionId);
     return path.basename(substituted);
   }

@@ -5,6 +5,7 @@ import { getProjectRoot, resolveProject } from './Paths.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { isRecord, mergeReplacingArraysAndDeletingUndefined, type UnknownRecord } from './RecordUtils.js';
 import { isRestartTransition } from './EventUtils.js';
 import {
@@ -142,12 +143,15 @@ interface DynamicChecklistRun {
 
 export class EventStore {
   private currentLocation: EventStoreLocation | null | undefined;
-  private sessionId = process.env[EnvVars.OBSERVABILITY_SESSION_ID] || uuidv7();
+  private sessionId: string;
 
   constructor(
     private readonly configLoader: ConfigLoader,
-    private readonly eventLog: JsonlEventLog = new JsonlEventLog()
-  ) {}
+    private readonly eventLog: JsonlEventLog = new JsonlEventLog(),
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+  ) {
+    this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
+  }
 
   public setSessionId(sessionId: string): void {
     if (this.sessionId === sessionId) return;

@@ -8,6 +8,7 @@ import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProject } from './Paths.js';
 import { Logger } from './Logger.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import {
   Component,
   DEFAULT_OBSERVED_PI_TOOLS,
@@ -102,6 +103,8 @@ export class ConfigLoader {
   private cachedPath: string | null = null;
   private cachedSignature: { mtimeMs: number; ctimeMs: number; size: number } | null = null;
 
+  constructor(private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment) {}
+
   private normalizeConfigPath(filePath: string): string {
     return path.isAbsolute(filePath) ? filePath : resolveProject(filePath);
   }
@@ -116,7 +119,7 @@ export class ConfigLoader {
   }
 
   public getConfigPath(): string {
-    return this.normalizeConfigPath(this.configPath || process.env[CONFIG_ENV_VAR] || DEFAULT_CONFIG_FILE);
+    return this.normalizeConfigPath(this.configPath || this.env.env(CONFIG_ENV_VAR) || DEFAULT_CONFIG_FILE);
   }
 
   public reset(): void {
