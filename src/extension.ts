@@ -88,6 +88,7 @@ import {
   OtelAttr
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
+import { requireTool } from './core/ToolRegistry.js';
 import { Teammate } from './core/Teammate.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
 import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServices.js';
@@ -1683,6 +1684,7 @@ async function resolveEvidenceFromPath(rawPath: string): Promise<{ ok: true; evi
 
 async function tickChecklistItems(items: ChecklistTickInput[], services: RuntimeServices): Promise<Record<string, unknown>> {
   if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
+  const run = activeRun;
   if (!Array.isArray(items) || items.length === 0) {
     return { status: ToolResultStatus.REJECTED, message: 'At least one checklist item is required.' };
   }
@@ -1716,11 +1718,11 @@ async function tickChecklistItems(items: ChecklistTickInput[], services: Runtime
   const resolvedItems = itemsWithEvidence.map(item => ({
     ...item,
     originalText: item.text,
-    text: resolveChecklistTickText(activeRun!.requiredItems, item.text) || item.text.trim()
+    text: resolveChecklistTickText(run.requiredItems, item.text) || item.text.trim()
   }));
   const uniqueItems = Array.from(new Map(resolvedItems.map(item => [item.text, item])).values());
   const rejected = uniqueItems
-    .filter(item => !activeRun!.requiredItems.some(required => required.text === item.text))
+    .filter(item => !run.requiredItems.some(required => required.text === item.text))
     .map(item => item.originalText);
   if (rejected.length > 0) {
     const validItems = activeRun.requiredItems.map(item => item.text);
@@ -1788,14 +1790,15 @@ async function runParentSequenceActionsBeforeActive(
   services: RuntimeServices
 ): Promise<void> {
   if (!activeRun || activeRun.parentSequenceCompleted) return;
-  const activeIndex = activeRun.state.actions.findIndex(action => action.id === activeRun!.action.id);
-  const precedingActions = activeIndex <= 0 ? [] : activeRun.state.actions.slice(0, activeIndex);
+  const run = activeRun;
+  const activeIndex = run.state.actions.findIndex(action => action.id === run.action.id);
+  const precedingActions = activeIndex <= 0 ? [] : run.state.actions.slice(0, activeIndex);
 
   for (const action of precedingActions) {
-    if (isActionCompleted(config, activeRun.stateId, action, activeRun.completedActionIds)) continue;
+    if (isActionCompleted(config, run.stateId, action, run.completedActionIds)) continue;
 
     if (actionRunContext(action) === ActionRunContext.FRESH) {
-      throw new Error(`Action ${action.id} requests fresh context but has not completed before ${activeRun.action.id}.`);
+      throw new Error(`Action ${action.id} requests fresh context but has not completed before ${run.action.id}.`);
     }
 
     if (action.type !== ActionType.TOOL || !action.tool) {
@@ -1811,8 +1814,8 @@ async function runParentSequenceActionsBeforeActive(
     }
 
     const result = await executeConfiguredProjectTool(services.eventStore, services.toolCallPathFactory, definition, {
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
+      beadId: run.beadId,
+      stateId: run.stateId,
       actionId: action.id,
       arguments: action.arguments || {}
     }, ctx);
@@ -1829,12 +1832,12 @@ async function runParentSequenceActionsBeforeActive(
       throw new Error(`Sequenced action ${action.id} failed: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
     }
 
-    const actionKey = actionCompletionKey(config, activeRun.stateId, action.id);
-    const completedActionIds = appendCompletedActionId(activeRun.completedActionIds, activeRun.stateId, action.id, config);
-    activeRun.completedActionIds = completedActionIds;
+    const actionKey = actionCompletionKey(config, run.stateId, action.id);
+    const completedActionIds = appendCompletedActionId(run.completedActionIds, run.stateId, action.id, config);
+    run.completedActionIds = completedActionIds;
     await services.eventStore.record(DomainEventName.ACTION_COMPLETED, {
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
+      beadId: run.beadId,
+      stateId: run.stateId,
       actionId: action.id,
       actionKey,
       tool: action.tool,
@@ -1842,7 +1845,7 @@ async function runParentSequenceActionsBeforeActive(
     });
   }
 
-  activeRun.parentSequenceCompleted = true;
+  run.parentSequenceCompleted = true;
 }
 
 function buildWorkerEvent(type: TeammateEventType, fields: any): TeammateEvent {
@@ -2024,7 +2027,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   if (event.type === TeammateEventType.TEAMMATE_EXITED) {
     currentSupervisor.markBeadExited(beadId);
-    const releaseTool = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+    const releaseTool = requireTool(services.plugins.bd, PluginToolName.BD_RELEASE);
     const pauseUntilMs = typeof event.pauseUntilMs === 'number' ? event.pauseUntilMs : undefined;
     if (event.capacityLimited === true && pauseUntilMs) {
       currentSupervisor.pauseSchedulingUntil(pauseUntilMs, event.summary || 'Harness capacity limit reached');
@@ -2044,12 +2047,12 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   Logger.info(Component.ORR_ELSE, `Teammate signal received: ${event.type} for ${beadId}`);
 
   const config = await services.configLoader.load();
-  const releaseTool = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+  const releaseTool = requireTool(services.plugins.bd, PluginToolName.BD_RELEASE);
 
   if (event.type === TeammateEventType.STATE_TRANSITIONED) {
     const state = config.states[event.stateId];
     const actionKey = event.actionId ? actionCompletionKey(config, event.stateId, event.actionId) : undefined;
-    const bead = await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_GET_BEAD)!.execute({ id: beadId, includeDetails: true }) as Bead;
+    const bead = await requireTool(services.plugins.bd, PluginToolName.BD_GET_BEAD).execute({ id: beadId, includeDetails: true }) as Bead;
     const completedActionIds = event.transitionEvent === EventName.SUCCESS
       ? appendCompletedActionId(bead.completedActionIds || [], event.stateId, event.actionId, config)
       : (bead.completedActionIds || []);
@@ -2099,14 +2102,14 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, transitionEventData);
 
     if (nextState === BeadStatus.COMPLETED && event.transitionEvent === EventName.SUCCESS) {
-      const mergeTool = services.plugins.git.tools.find(t => t.name === PluginToolName.MERGE_AND_COMMIT)!;
+      const mergeTool = requireTool(services.plugins.git, PluginToolName.MERGE_AND_COMMIT);
       const mergeResult = await mergeTool.execute({
         beadId,
         closeAfterMerge: true,
         closeReason: event.summary
       }, ctx);
       if ((mergeResult as any)?.success !== true) {
-        await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS)!.execute({
+        await requireTool(services.plugins.bd, PluginToolName.BD_UPDATE_STATUS).execute({
           id: beadId,
           status: BeadStatus.BLOCKED,
           notes: `Harness-owned terminal merge failed: ${JSON.stringify(mergeResult)}`
@@ -2118,7 +2121,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         return;
       }
 
-      await services.plugins.git.tools.find(t => t.name === PluginToolName.REMOVE_WORKTREE)!.execute({ beadId, force: true }, ctx);
+      await requireTool(services.plugins.git, PluginToolName.REMOVE_WORKTREE).execute({ beadId, force: true }, ctx);
       currentSupervisor.markBeadExited(beadId);
       return;
     }

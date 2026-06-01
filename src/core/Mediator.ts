@@ -6,10 +6,9 @@ export class Mediator {
   constructor(private readonly domainEvents: DomainEvents) {}
 
   public on(event: string, handler: (data: unknown) => Promise<void>) {
-    if (!this.handlers.has(event)) {
-      this.handlers.set(event, []);
-    }
-    this.handlers.get(event)!.push(handler);
+    const list = this.handlers.get(event) ?? [];
+    list.push(handler);
+    this.handlers.set(event, list);
   }
 
   public async notify(event: string, data: unknown) {

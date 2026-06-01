@@ -335,7 +335,6 @@ describe('Supervisor', () => {
       } as any,
       { maxSlots: 1, clock: createFakeClock() }
     );
-    (supervisor as any).resolveToolHandles();
 
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
     const config = { settings: {} } as any;
@@ -371,7 +370,6 @@ describe('Supervisor', () => {
       } as any,
       { maxSlots: 1, clock: createFakeClock() }
     );
-    (supervisor as any).resolveToolHandles();
 
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
     const config = { settings: {} } as any;

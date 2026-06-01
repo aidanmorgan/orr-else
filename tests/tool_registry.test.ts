@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { BuiltInToolName, PluginToolName } from '../src/constants/index.js';
 import { createRuntimeServices } from '../src/core/RuntimeServices.js';
-import { createToolRegistryComposition, ToolRegistry } from '../src/core/ToolRegistry.js';
+import { createToolRegistryComposition, requireTool, ToolRegistry } from '../src/core/ToolRegistry.js';
+import type { RuntimePlugin } from '../src/core/RuntimeServices.js';
 
 describe('ToolRegistry composition', () => {
   it('exposes the existing orchestrator and state tool sets from injected runtime plugins', () => {
@@ -44,5 +45,44 @@ describe('ToolRegistry composition', () => {
 
     expect(registry.getAllTools().map(tool => tool.name)).toContain(PluginToolName.SPAWN_TEAMMATE);
     expect(registry.getAllTools().map(tool => tool.name)).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+  });
+});
+
+describe('requireTool', () => {
+  function fakePlugin(toolNames: string[]): RuntimePlugin {
+    return {
+      name: 'fake-plugin',
+      tools: toolNames.map(name => ({
+        name,
+        description: `Tool ${name}`,
+        execute: () => {}
+      }))
+    };
+  }
+
+  it('returns the tool when it is registered in the plugin', () => {
+    const plugin = fakePlugin(['tool-a', 'tool-b']);
+    const result = requireTool(plugin, 'tool-a');
+    expect(result.name).toBe('tool-a');
+  });
+
+  it('throws a descriptive error when the tool is missing', () => {
+    const plugin = fakePlugin(['tool-a', 'tool-b']);
+    expect(() => requireTool(plugin, 'tool-missing')).toThrow(
+      'Required tool "tool-missing" is not registered in plugin "fake-plugin"'
+    );
+  });
+
+  it('error message lists the available tool names', () => {
+    const plugin = fakePlugin(['tool-a', 'tool-b']);
+    expect(() => requireTool(plugin, 'tool-missing')).toThrow(
+      'Available tools: [tool-a, tool-b]'
+    );
+  });
+
+  it('returns the same object reference (not a copy)', () => {
+    const plugin = fakePlugin(['tool-a']);
+    const result = requireTool(plugin, 'tool-a');
+    expect(result).toBe(plugin.tools[0]);
   });
 });

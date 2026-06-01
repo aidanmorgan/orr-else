@@ -57,27 +57,28 @@ export class LoggerService {
     ];
   }
 
-  private init() {
+  private init(): winston.Logger {
     // When custom transports are injected, skip logDir-based identity check
     // (there is no rotating file whose dir we need to track).
     if (this.transports !== null) {
-      if (this.logger) return;
-      const logLevel = this.resolveLevel();
-      this.logger = winston.createLogger({
-        level: logLevel,
-        format: combine(
-          errors({ stack: true }),
-          timestamp({ format: LoggingDefaults.TIMESTAMP_FORMAT }),
-          json()
-        ),
-        defaultMeta: { pid: process.pid, version: App.VERSION },
-        transports: this.transports
-      });
-      return;
+      if (!this.logger) {
+        const logLevel = this.resolveLevel();
+        this.logger = winston.createLogger({
+          level: logLevel,
+          format: combine(
+            errors({ stack: true }),
+            timestamp({ format: LoggingDefaults.TIMESTAMP_FORMAT }),
+            json()
+          ),
+          defaultMeta: { pid: process.pid, version: App.VERSION },
+          transports: this.transports
+        });
+      }
+      return this.logger;
     }
 
     const logDir = resolveProject(LoggingDefaults.DIR);
-    if (this.logger && this.logDir === logDir) return;
+    if (this.logger && this.logDir === logDir) return this.logger;
     if (this.logger) {
       this.logger.close();
       this.logger = null;
@@ -98,6 +99,7 @@ export class LoggerService {
     this.logDir = logDir;
 
     this.logger.debug('Logger initialized', { logDir, level: this.logger.level });
+    return this.logger;
   }
 
   /**
@@ -113,23 +115,19 @@ export class LoggerService {
   }
 
   public info(component: string, message: string, metadata?: LogMetadata) {
-    this.init();
-    this.logger!.info(message, { component, ...metadata });
+    this.init().info(message, { component, ...metadata });
   }
 
   public error(component: string, message: string, metadata?: LogMetadata) {
-    this.init();
-    this.logger!.error(message, { component, ...metadata });
+    this.init().error(message, { component, ...metadata });
   }
 
   public warn(component: string, message: string, metadata?: LogMetadata) {
-    this.init();
-    this.logger!.warn(message, { component, ...metadata });
+    this.init().warn(message, { component, ...metadata });
   }
 
   public debug(component: string, message: string, metadata?: LogMetadata) {
-    this.init();
-    this.logger!.debug(message, { component, ...metadata });
+    this.init().debug(message, { component, ...metadata });
   }
 
   public close() {

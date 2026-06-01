@@ -9,6 +9,7 @@ import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
 import type { RuntimeServices, RuntimeTool } from './RuntimeServices.js';
+import { requireTool } from './ToolRegistry.js';
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
@@ -197,25 +198,26 @@ export class Supervisor {
     });
   }
 
-  /** Resolve and cache the three tool handles used during claim/spawn.
-   * Called once per scanAndSpawn invocation; subsequent calls are no-ops. */
-  private resolveToolHandles(): void {
-    if (!this.bdClaimTool) {
-      this.bdClaimTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_CLAIM)!;
-    }
-    if (!this.bdReleaseTool) {
-      this.bdReleaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
-    }
-    if (!this.createWorktreeTool) {
-      this.createWorktreeTool = this.services.plugins.git?.tools.find(t => t.name === PluginToolName.CREATE_WORKTREE)!;
-    }
+  /** Lazily resolve and cache the bd_claim tool handle. Throws if not registered. */
+  private requireBdClaimTool(): RuntimeTool {
+    this.bdClaimTool ??= requireTool(this.services.plugins.bd, PluginToolName.BD_CLAIM);
+    return this.bdClaimTool;
+  }
+
+  /** Lazily resolve and cache the bd_release tool handle. Throws if not registered. */
+  private requireBdReleaseTool(): RuntimeTool {
+    this.bdReleaseTool ??= requireTool(this.services.plugins.bd, PluginToolName.BD_RELEASE);
+    return this.bdReleaseTool;
+  }
+
+  /** Lazily resolve and cache the create_worktree tool handle. Throws if not registered. */
+  private requireCreateWorktreeTool(): RuntimeTool {
+    this.createWorktreeTool ??= requireTool(this.services.plugins.git, PluginToolName.CREATE_WORKTREE);
+    return this.createWorktreeTool;
   }
 
   private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
-    if (!this.bdReleaseTool) {
-      this.bdReleaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
-    }
-    await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch((error: unknown) => {
+    await Promise.resolve(this.requireBdReleaseTool().execute({ id: claimed.id })).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
         beadId: claimed.id,
         error: String(error)
@@ -236,7 +238,11 @@ export class Supervisor {
   private async claimAndSpawnBead(bead: ScoredBead & { stateId: string }, config: HarnessConfig): Promise<boolean> {
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
 
-    const claimed = await this.bdClaimTool!.execute({
+    const bdClaimTool = this.requireBdClaimTool();
+    const bdReleaseTool = this.requireBdReleaseTool();
+    const createWorktreeTool = this.requireCreateWorktreeTool();
+
+    const claimed = await bdClaimTool.execute({
       id: bead.id,
       owner: App.DISPLAY_NAME,
       stateId: bead.stateId,
@@ -251,16 +257,16 @@ export class Supervisor {
     }
 
     if (this.stopping) {
-      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      await Promise.resolve(bdReleaseTool.execute({ id: claimed.id })).catch(() => {});
       this.startedBeads.delete(claimed.id);
       return false;
     }
 
     // Mandatory Worktree Isolation
-    const result = await this.createWorktreeTool!.execute({ beadId: claimed.id }, this.ctx);
+    const result = await createWorktreeTool.execute({ beadId: claimed.id }, this.ctx);
     const worktreePath = (result as any)?.path;
     if ((result as any)?.success !== true || !worktreePath) {
-      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      await Promise.resolve(bdReleaseTool.execute({ id: claimed.id })).catch(() => {});
       throw new Error((result as any)?.error || `Failed to provision mandatory worktree for ${claimed.id}`);
     }
     await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
@@ -276,7 +282,7 @@ export class Supervisor {
 
     const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx);
     if (!spawned.success) {
-      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      await Promise.resolve(bdReleaseTool.execute({ id: claimed.id })).catch(() => {});
       throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
     }
     Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
@@ -438,7 +444,6 @@ export class Supervisor {
       return;
     }
 
-    this.resolveToolHandles();
     const config = await this.services.configLoader.load();
     const noProgressTimeoutMs = config.settings.teammateNoProgressTimeoutMs || SupervisorDefaults.NO_PROGRESS_TIMEOUT_MS;
     const activeStartedBeads = await this.activeStartedBeadIds();
@@ -789,7 +794,7 @@ export class Supervisor {
   ): Promise<void> {
     if (inactiveBeadIds.length === 0) return;
     const config = await this.services.configLoader.load();
-    const releaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+    const releaseTool = this.requireBdReleaseTool();
 
     for (const beadId of inactiveBeadIds) {
       const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;

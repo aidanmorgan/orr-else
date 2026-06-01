@@ -2,6 +2,22 @@ import type { RuntimePlugin, RuntimeServices, RuntimeTool } from './RuntimeServi
 
 export type HarnessTool = RuntimeTool;
 
+/**
+ * Look up a required tool by name within a plugin's tool list.
+ * Throws a descriptive error if the tool is not registered, so callers get a
+ * clear message instead of a downstream `Cannot read properties of undefined`.
+ */
+export function requireTool(plugin: RuntimePlugin, name: string): RuntimeTool {
+  const tool = plugin.tools.find(t => t.name === name);
+  if (!tool) {
+    throw new Error(
+      `Required tool "${name}" is not registered in plugin "${plugin.name}". ` +
+      `Available tools: [${plugin.tools.map(t => t.name).join(', ')}]`
+    );
+  }
+  return tool;
+}
+
 export interface ToolRegistryComposition {
   orchestratorPlugins: RuntimePlugin[];
   statePlugins: RuntimePlugin[];
