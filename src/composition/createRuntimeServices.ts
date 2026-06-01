@@ -72,12 +72,23 @@ export function createRuntimeServices(
   const apiAddress: ApiAddress = {};
 
   const bdPlugin = createBdPlugin(eventStore, env, projectRoot);
-  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin, projectRoot);
+
+  // WI-merge: TeammateFactory is created below; we forward its liveness check to
+  // createGitPlugin via a closure so that auto-remove can gate on live panes without
+  // importing TeammateFactory into the plugin layer.  The closure is safe because
+  // teammateFactory is assigned before any tool execute() call can run.
+  let teammateFactoryRef: TeammateFactory | undefined;
+  const getLiveTeammateBeadIds = () =>
+    teammateFactoryRef
+      ? teammateFactoryRef.getLiveTeammateBeadIds()
+      : Promise.resolve(new Set<string>());
+
+  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin, projectRoot, getLiveTeammateBeadIds);
 
   // WI-20: single factory. Extension.ts uses ??= so SESSION_START-constructed
   // factory is reused for coordinator. This instance is the default for tests
   // and the fallback createRuntimeServices() call path.
-  const teammateFactory = new TeammateFactory(
+  const teammateFactory: TeammateFactory = new TeammateFactory(
     observability,
     configLoader,
     eventStore,
@@ -88,6 +99,9 @@ export function createRuntimeServices(
     env,
     projectRoot
   );
+  // Bind the factory reference so the getLiveTeammateBeadIds closure above
+  // resolves to the correct instance at execute() time.
+  teammateFactoryRef = teammateFactory;
 
   return assembleRuntimeServices(
     {

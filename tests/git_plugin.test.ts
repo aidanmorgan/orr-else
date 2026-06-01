@@ -6,7 +6,7 @@ import { execFileSync } from 'child_process';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createGitPlugin } from '../src/plugins/git.js';
-import { PluginToolName } from '../src/constants/index.js';
+import { DomainEventName, PluginToolName, WorktreePreserveReason } from '../src/constants/index.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -266,5 +266,281 @@ describe('git plugin merge finalization', () => {
 
     expect(result).toMatchObject({ success: true });
     expect(git(tempRoot, ['show', 'HEAD:source.txt'])).toBe('after\n');
+  });
+});
+
+describe('git plugin — auto-remove worktree after merge', () => {
+  let tempRoot: string;
+  let previousCwd: string;
+
+  beforeEach(() => {
+    previousCwd = process.cwd();
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-git-auto-remove-')));
+    makeRepo(tempRoot);
+    process.chdir(tempRoot);
+  });
+
+  afterEach(() => {
+    process.chdir(previousCwd);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('merged+clean+inactive: removes the worktree and prunes metadata after a successful merge', async () => {
+    // Arrange: worktree with a clean committed change, no live teammate
+    const beadId = 'bd-auto-rm';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'auto-rm\n');
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type, data });
+      return originalRecord(type, data);
+    };
+
+    // No live teammates — empty set
+    const getLiveTeammateBeadIds = async () => new Set<string>();
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, getLiveTeammateBeadIds);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    // Act
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // Assert: merge succeeded
+    expect(result).toMatchObject({ success: true });
+    expect(git(tempRoot, ['show', `HEAD:source.txt`])).toBe('auto-rm\n');
+
+    // Assert: worktree directory removed from disk
+    expect(fs.existsSync(worktreePath)).toBe(false);
+
+    // Assert: WORKTREE_AUTO_REMOVED event emitted with bounded telemetry (no full path)
+    const autoRemovedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVED);
+    expect(autoRemovedEvent).toBeDefined();
+    expect(autoRemovedEvent!.data.beadId).toBe(beadId);
+    expect(autoRemovedEvent!.data.worktree).toBe(beadId); // basename only
+    expect(autoRemovedEvent!.data).not.toHaveProperty('path'); // no full path in telemetry
+
+    // Assert: git worktree list no longer includes the removed worktree
+    const worktreeList = git(tempRoot, ['worktree', 'list', '--porcelain']);
+    expect(worktreeList).not.toContain(worktreePath);
+  });
+
+  it('dirty worktree: preserved with DIRTY reason code, merge still succeeds', async () => {
+    // Arrange: worktree with a committed change (merge can proceed), but a NEW untracked file
+    // is written to the worktree by the liveness callback (which runs before the dirty check,
+    // since ACTIVE is gated first).  This simulates a concurrent process creating files in
+    // the worktree between the merge and the auto-remove check.
+    const beadId = 'bd-dirty';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    // Pre-commit the change so MERGE_AND_COMMIT's auto-commit step is a no-op
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'committed\n');
+    git(worktreePath, ['add', 'source.txt']);
+    git(worktreePath, ['commit', '-m', 'committed change']);
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type, data });
+      return originalRecord(type, data);
+    };
+
+    // The liveness callback (Gate 1: ACTIVE) is invoked before Gate 2 (DIRTY).
+    // We use it here as an injection point to write a new untracked file to the worktree,
+    // simulating a concurrent process that creates artifacts between the merge and auto-remove.
+    const getLiveTeammateBeadIds = async () => {
+      // Inject dirty file while Gate 1 runs (before Gate 2 / dirty check)
+      fs.writeFileSync(path.join(worktreePath, 'runtime-artifact.tmp'), 'runtime-dirty\n');
+      return new Set<string>(); // not active
+    };
+
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, getLiveTeammateBeadIds);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    // Act
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // Assert: merge succeeded despite dirty worktree
+    expect(result).toMatchObject({ success: true });
+
+    // Assert: worktree preserved on disk
+    expect(fs.existsSync(worktreePath)).toBe(true);
+
+    // Assert: WORKTREE_AUTO_REMOVE_PRESERVED emitted with DIRTY reason
+    const preservedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED);
+    expect(preservedEvent).toBeDefined();
+    expect(preservedEvent!.data.beadId).toBe(beadId);
+    expect(preservedEvent!.data.reason).toBe(WorktreePreserveReason.DIRTY);
+
+    // Assert: no auto-remove event
+    expect(emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVED)).toBeUndefined();
+  });
+
+  it('active worktree (live teammate): preserved with ACTIVE reason code, merge still succeeds', async () => {
+    // Arrange: clean worktree, but a "live" teammate is running
+    const beadId = 'bd-active';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'active\n');
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type, data });
+      return originalRecord(type, data);
+    };
+
+    // Simulate a live teammate for this bead
+    const getLiveTeammateBeadIds = async () => new Set<string>([beadId]);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, getLiveTeammateBeadIds);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    // Act
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // Assert: merge succeeded
+    expect(result).toMatchObject({ success: true });
+
+    // Assert: worktree preserved because teammate is still live
+    expect(fs.existsSync(worktreePath)).toBe(true);
+
+    // Assert: WORKTREE_AUTO_REMOVE_PRESERVED emitted with ACTIVE reason
+    const preservedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED);
+    expect(preservedEvent).toBeDefined();
+    expect(preservedEvent!.data.beadId).toBe(beadId);
+    expect(preservedEvent!.data.reason).toBe(WorktreePreserveReason.ACTIVE);
+
+    // Assert: no auto-remove event
+    expect(emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVED)).toBeUndefined();
+  });
+
+  it('unmerged branch: preserved with UNMERGED reason code, merge still succeeds', async () => {
+    // Arrange: make Gate 3 (MERGED) see a genuine exit-1 from
+    // `git merge-base --is-ancestor <branch> <target>` — the correct POSIX signal
+    // for "branch has commits not yet reachable from target".
+    //
+    // Strategy: use the getLiveTeammateBeadIds callback (which runs at Gate 1, before
+    // Gate 3) as an injection point.  After MERGE_AND_COMMIT merges the bead's
+    // changes into main, the callback adds an extra commit on the bead branch that is
+    // NOT in main.  Gate 3 then calls merge-base --is-ancestor; because the bead branch
+    // now points past main, the command exits 1 and the new exit-code-aware gate records
+    // UNMERGED and preserves the worktree.
+    //
+    // This drives a REAL exit-1 — no branch-deletion / fatal-error hacks.
+    const beadId = 'bd-unmerged';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    // Pre-commit the bead's change so MERGE_AND_COMMIT's auto-commit step is a no-op
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'unmerged-setup\n');
+    git(worktreePath, ['add', 'source.txt']);
+    git(worktreePath, ['commit', '-m', 'pre-committed change for merge']);
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type, data });
+      return originalRecord(type, data);
+    };
+
+    // Gate 1 (ACTIVE) runs before Gate 3 (MERGED).  Inside this callback, after the
+    // merge has committed the bead's changes into main, we advance the bead branch
+    // by one extra commit that is NOT in main.  This makes --is-ancestor exit 1.
+    const getLiveTeammateBeadIds = async () => {
+      fs.writeFileSync(path.join(worktreePath, 'extra.txt'), 'post-merge-commit\n');
+      git(worktreePath, ['add', 'extra.txt']);
+      git(worktreePath, ['commit', '-m', 'extra commit on bead — NOT in main']);
+      return new Set<string>(); // not active — Gate 1 passes, Gate 3 runs
+    };
+
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, getLiveTeammateBeadIds);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    // Act
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // Assert: merge itself succeeded (pre-committed change is in main)
+    expect(result).toMatchObject({ success: true });
+    expect(git(tempRoot, ['show', 'HEAD:source.txt'])).toBe('unmerged-setup\n');
+
+    // Assert: worktree preserved on disk (UNMERGED gate fired, not removed)
+    expect(fs.existsSync(worktreePath)).toBe(true);
+
+    // Assert: WORKTREE_AUTO_REMOVE_PRESERVED emitted with UNMERGED reason
+    const preservedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED);
+    expect(preservedEvent).toBeDefined();
+    expect(preservedEvent!.data.beadId).toBe(beadId);
+    expect(preservedEvent!.data.reason).toBe(WorktreePreserveReason.UNMERGED);
+
+    // Assert: no auto-remove event (the worktree was NOT deleted)
+    expect(emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVED)).toBeUndefined();
+  });
+
+  it('stale metadata (worktree dir gone but git metadata present): git worktree prune clears it', async () => {
+    // Arrange: create and then manually delete a worktree dir, leaving git metadata stale
+    const beadId = 'bd-stale-meta';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+
+    // Verify metadata is present
+    const listBefore = git(tempRoot, ['worktree', 'list', '--porcelain']);
+    expect(listBefore).toContain(worktreePath);
+
+    // Manually delete the directory (simulate a crash leaving stale metadata)
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+
+    // Run git worktree prune to clear stale metadata (same command auto-remove uses)
+    git(tempRoot, ['worktree', 'prune']);
+
+    // Assert: git no longer lists the stale worktree
+    const listAfter = git(tempRoot, ['worktree', 'list', '--porcelain']);
+    expect(listAfter).not.toContain(worktreePath);
+  });
+
+  it('auto-remove failure does not fail the merge (best-effort)', async () => {
+    // Arrange: getLiveTeammateBeadIds throws — merge must still succeed
+    const beadId = 'bd-liveness-err';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'liveness-err\n');
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string; data: Record<string, unknown> }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type, data });
+      return originalRecord(type, data);
+    };
+
+    // Liveness check throws
+    const getLiveTeammateBeadIds = async (): Promise<Set<string>> => {
+      throw new Error('tmux unavailable in test');
+    };
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, getLiveTeammateBeadIds);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    // Act
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // Assert: merge succeeded despite liveness error
+    expect(result).toMatchObject({ success: true });
+    expect(git(tempRoot, ['show', 'HEAD:source.txt'])).toBe('liveness-err\n');
+
+    // Assert: worktree preserved (UNKNOWN reason) and merge event recorded
+    const mergeSucceeded = emittedEvents.find(e => e.type === DomainEventName.MERGE_AND_COMMIT_SUCCEEDED);
+    expect(mergeSucceeded).toBeDefined();
+
+    const preservedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED);
+    expect(preservedEvent).toBeDefined();
+    expect(preservedEvent!.data.reason).toBe(WorktreePreserveReason.UNKNOWN);
   });
 });

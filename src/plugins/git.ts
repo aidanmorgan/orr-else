@@ -2,10 +2,11 @@ import { Type } from "@earendil-works/pi-ai";
 import * as path from 'path';
 import * as fs from 'fs';
 import * as lockfile from 'proper-lockfile';
+import { execa } from 'execa';
 import { simpleGit } from 'simple-git';
 import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
-import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults } from '../constants/index.js';
+import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults, WorktreePreserveReason } from '../constants/index.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
 import type { MergeResult, RuntimePlugin, RuntimeTool, WorktreeResult } from '../core/RuntimeServices.js';
 
@@ -245,7 +246,160 @@ async function autoRestoreConfiguredPaths(
 
 export type { WorktreeResult, MergeResult };
 
-export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin, projectRoot: string = process.cwd()): RuntimePlugin {
+/**
+ * Attempt to auto-remove a worktree after a successful merge.
+ *
+ * Gating (all three must pass inside the git lock):
+ *   1. NOT ACTIVE — no live teammate pane for this bead (cheapest check; avoids unnecessary I/O)
+ *   2. NOT DIRTY  — `git status --porcelain` is empty
+ *   3. MERGED     — no unmerged commits from the bead branch remain on the target branch
+ *
+ * When all gates pass the worktree is removed and `git worktree prune` is run to
+ * clear stale metadata.  On any gate failure the worktree is preserved and a
+ * concise WORKTREE_AUTO_REMOVE_PRESERVED event is emitted with an explicit reason code.
+ *
+ * MERGE_AND_COMMIT success behaviour is preserved: a removal failure never fails
+ * the merge — this function is always best-effort and logged.
+ */
+async function autoRemoveWorktreeAfterMerge(
+  eventStore: EventStore,
+  beadId: string,
+  branchName: string,
+  targetBranch: string,
+  worktreePath: string,
+  gitLockFile: string,
+  projectRoot: string,
+  getLiveTeammateBeadIds: (() => Promise<Set<string>>) | undefined
+): Promise<void> {
+  if (!fs.existsSync(worktreePath)) return;
+
+  await withGitLock(eventStore, PluginToolName.REMOVE_WORKTREE, beadId, gitLockFile, async () => {
+    // Re-check existence inside the lock (another process may have removed it).
+    if (!fs.existsSync(worktreePath)) return;
+
+    // Gate 1: NOT ACTIVE — no live teammate pane for this bead.
+    // Checked first (cheapest): if unavailable, preserve conservatively.
+    if (getLiveTeammateBeadIds) {
+      let liveBeadIds: Set<string>;
+      try {
+        liveBeadIds = await getLiveTeammateBeadIds();
+      } catch {
+        await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+          beadId,
+          worktree: path.basename(worktreePath),
+          reason: WorktreePreserveReason.UNKNOWN
+        });
+        Logger.warn(Component.GIT, `Auto-remove skipped: could not determine liveness for ${beadId}`, {
+          reason: WorktreePreserveReason.UNKNOWN
+        });
+        return;
+      }
+      if (liveBeadIds.has(beadId)) {
+        await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+          beadId,
+          worktree: path.basename(worktreePath),
+          reason: WorktreePreserveReason.ACTIVE
+        });
+        Logger.info(Component.GIT, `Auto-remove skipped: worktree ${beadId} has a live teammate`, {
+          reason: WorktreePreserveReason.ACTIVE
+        });
+        return;
+      }
+    }
+
+    // Gate 2: NOT DIRTY — check for uncommitted or untracked changes.
+    const statusOutput = await git([GitSubcommand.STATUS, GitFlag.PORCELAIN], worktreePath);
+    if (statusOutput.trim()) {
+      await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+        beadId,
+        worktree: path.basename(worktreePath),
+        reason: WorktreePreserveReason.DIRTY
+      });
+      Logger.info(Component.GIT, `Auto-remove skipped: worktree ${beadId} has uncommitted changes`, {
+        reason: WorktreePreserveReason.DIRTY
+      });
+      return;
+    }
+
+    // Gate 3: MERGED — confirm the branch commits are all reachable from the target branch.
+    // `git merge-base --is-ancestor <branch> <target>` exits:
+    //   0 → branch IS an ancestor of target (fully merged) → proceed to remove
+    //   1 → branch is NOT an ancestor (unmerged commits remain) → PRESERVE with UNMERGED
+    //   other / error → fail-safe → PRESERVE with UNKNOWN
+    //
+    // simpleGit.raw() returns empty string for BOTH exit 0 and exit 1 — it only
+    // throws on fatal errors (exit 128).  We must inspect the exit code explicitly,
+    // so we use execa with reject:false to capture it without throwing on non-zero.
+    let mergeCheckExitCode: number | undefined;
+    try {
+      const mergeCheck = await execa(
+        'git', ['merge-base', '--is-ancestor', branchName, targetBranch],
+        { cwd: projectRoot, reject: false }
+      );
+      mergeCheckExitCode = mergeCheck.exitCode;
+    } catch (fatalError) {
+      // execa itself threw (e.g. git binary not found) — fail-safe
+      await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+        beadId,
+        worktree: path.basename(worktreePath),
+        reason: WorktreePreserveReason.UNKNOWN
+      });
+      Logger.warn(Component.GIT, `Auto-remove skipped: merge-base check threw unexpectedly for ${branchName}`, {
+        reason: WorktreePreserveReason.UNKNOWN,
+        error: String(fatalError)
+      });
+      return;
+    }
+    if (mergeCheckExitCode === 1) {
+      // Not an ancestor — unmerged commits remain on the bead branch.
+      await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+        beadId,
+        worktree: path.basename(worktreePath),
+        reason: WorktreePreserveReason.UNMERGED
+      });
+      Logger.info(Component.GIT, `Auto-remove skipped: branch ${branchName} not fully merged into ${targetBranch}`, {
+        reason: WorktreePreserveReason.UNMERGED
+      });
+      return;
+    }
+    if (mergeCheckExitCode !== 0) {
+      // Unexpected exit code (128 = fatal git error, etc.) — fail-safe preserve.
+      await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED, {
+        beadId,
+        worktree: path.basename(worktreePath),
+        reason: WorktreePreserveReason.UNKNOWN
+      });
+      Logger.warn(Component.GIT, `Auto-remove skipped: merge-base check returned unexpected exit code ${mergeCheckExitCode} for ${branchName}`, {
+        reason: WorktreePreserveReason.UNKNOWN
+      });
+      return;
+    }
+
+    // All gates passed — remove the worktree.
+    await git([GitSubcommand.WORKTREE, 'remove', GitFlag.FORCE, worktreePath], projectRoot);
+
+    // Prune stale worktree metadata from git's internal tracking.
+    await git([GitSubcommand.WORKTREE, 'prune'], projectRoot);
+
+    await eventStore.record(DomainEventName.WORKTREE_AUTO_REMOVED, {
+      beadId,
+      worktree: path.basename(worktreePath),
+      branchName,
+      targetBranch
+    });
+    Logger.info(Component.GIT, `Auto-removed merged worktree for ${beadId}`, {
+      worktree: path.basename(worktreePath)
+    });
+  });
+}
+
+export function createGitPlugin(
+  eventStore: EventStore,
+  configLoader?: ConfigLoader,
+  bdPlugin?: RuntimePlugin,
+  projectRoot: string = process.cwd(),
+  getLiveTeammateBeadIds?: () => Promise<Set<string>>
+): RuntimePlugin {
   const gitLockFile = path.join(projectRoot, WorktreeDefaults.GIT_LOCK_FILE);
 
   return {
@@ -424,6 +578,24 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
             ui.ui?.setWorkingMessage(undefined);
           }
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_SUCCEEDED, { beadId, branchName, targetBranch, message: commitMessage });
+
+          // Best-effort auto-remove: never fails the merge.
+          await autoRemoveWorktreeAfterMerge(
+            eventStore,
+            beadId,
+            branchName,
+            targetBranch,
+            worktreePath,
+            gitLockFile,
+            projectRoot,
+            getLiveTeammateBeadIds
+          ).catch(removeError => {
+            Logger.warn(Component.GIT, `Auto-remove of worktree for ${beadId} failed (non-fatal)`, {
+              worktree: path.basename(worktreePath),
+              error: String(removeError)
+            });
+          });
+
           return { success: true };
         } catch (error) {
           let abortError: string | undefined;

@@ -110,6 +110,21 @@ export enum MergeAndCommitStatus {
   FAILED = 'failed'
 }
 
+/**
+ * Reason codes for preserving a worktree instead of auto-removing it after merge.
+ * Surfaced in WORKTREE_AUTO_REMOVE_PRESERVED domain events.
+ */
+export enum WorktreePreserveReason {
+  /** The worktree has uncommitted or untracked changes. */
+  DIRTY = 'DIRTY',
+  /** A live teammate pane is still using this bead's worktree. */
+  ACTIVE = 'ACTIVE',
+  /** The bead branch has commits not yet merged into the target branch. */
+  UNMERGED = 'UNMERGED',
+  /** Liveness could not be determined; preserving conservatively. */
+  UNKNOWN = 'UNKNOWN'
+}
+
 export enum DomainEventName {
   AGENT_TURN_FAILED = 'AGENT_TURN_FAILED',
   ASSIGNMENT_FAILED = 'ASSIGNMENT_FAILED',
@@ -186,6 +201,8 @@ export enum DomainEventName {
   WORKTREE_REMOVE_FAILED = 'WORKTREE_REMOVE_FAILED',
   WORKTREE_REMOVE_SKIPPED = 'WORKTREE_REMOVE_SKIPPED',
   WORKTREE_REMOVED = 'WORKTREE_REMOVED',
+  WORKTREE_AUTO_REMOVED = 'WORKTREE_AUTO_REMOVED',
+  WORKTREE_AUTO_REMOVE_PRESERVED = 'WORKTREE_AUTO_REMOVE_PRESERVED',
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED'
 }
 
