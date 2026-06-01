@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BeadId } from '../types/index.js';
+import { BeadId } from '../types/ids.js';
 import {
   DomainEventName,
   EventName,

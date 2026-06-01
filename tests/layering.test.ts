@@ -55,18 +55,7 @@ const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
 
 const pluginImplementationAllowlist: AllowlistEntry[] = [];
 
-const cycleAllowlist: AllowlistEntry[] = [
-  {
-    importer: 'src/core/TeammateEvents.ts',
-    imported: 'src/types/index.ts',
-    reason: 'Existing type-contract cycle between teammate event payloads and shared bead types.'
-  },
-  {
-    importer: 'src/types/index.ts',
-    imported: 'src/core/TeammateEvents.ts',
-    reason: 'Existing type-contract cycle between shared bead types and teammate event payload exports.'
-  }
-];
+const cycleAllowlist: AllowlistEntry[] = [];
 
 function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join('/');

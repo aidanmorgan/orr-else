@@ -1,6 +1,7 @@
 import { BeadStatus, EventName, RestartKind, TeammateEventType } from '../constants/index.js';
+import type { BeadId } from './ids.js';
 
-export type BeadId = string & { readonly __brand: unique symbol };
+export type { BeadId } from './ids.js';
 
 /**
  * Shared mutable holder for the SignalingServer's bound address (WI-7).
