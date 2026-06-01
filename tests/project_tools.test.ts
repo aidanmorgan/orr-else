@@ -1091,7 +1091,11 @@ describe('project tool command arguments', () => {
     expect(fs.existsSync(marker)).toBe(false);
   });
 
-  it('leaves normal artifact_validator output unchanged when no unsupported output-control flag is present', async () => {
+  it('suppresses raw stdout/stderr and keeps structuredResult when artifact_validator has no unsupported output-control flag', async () => {
+    // When a structuredResult is present (produced here by structuredPayloadSummary from
+    // the checks array), raw stdout/stderr are suppressed from the model-facing result per
+    // the generalized hasStructuredModelSummary suppression rule.  The compact structured
+    // payload and metadata fields remain visible; the archive preserves the full raw output.
     const payload = JSON.stringify({
       tool: 'artifact_validator',
       status: ToolResultStatus.PASSED,
@@ -1118,11 +1122,10 @@ describe('project tool command arguments', () => {
       }
     }, {} as any);
 
+    // Compact metadata fields are retained
     expect(result).toMatchObject({
       tool: 'artifact_validator',
       status: ToolResultStatus.PASSED,
-      stdout: payload,
-      stderr: '',
       stdoutBytes: Buffer.byteLength(payload),
       stderrBytes: 0,
       stdoutTruncated: false,
@@ -1130,6 +1133,15 @@ describe('project tool command arguments', () => {
       maxBufferExceeded: false,
       nextAction: 'use_result'
     });
+    // structuredResult is present (passedCheckCount from the checks array)
+    const structuredResult = (result as any).structuredResult;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.passedCheckCount).toBe(1);
+    expect(structuredResult.rejectedCheckCount).toBe(0);
+    // Raw stdout/stderr are suppressed from the model-facing result (hasStructuredModelSummary=true)
+    expect((result as any).stdout).toBeUndefined();
+    expect((result as any).stderr).toBeUndefined();
+    // No output-control flag issues
     expect(result.unsupportedOutputControlFlag).toBeUndefined();
     expect(result.failureCategory).toBeUndefined();
     expect(result.remediation).toBeUndefined();
@@ -2817,5 +2829,331 @@ describe('per-tool structured summarizer registry', () => {
     // If the registry had clobbered, we'd see counts.total/affectedPaths instead.
     expect(structuredResult.counts).toBeUndefined();
     expect(structuredResult.affectedPaths).toBeUndefined();
+  });
+});
+
+// pi-experiment-b77h: generalized hasStructuredModelSummary suppression
+// Suppresses raw stdout/stderr/output/result from model-facing result when
+// structuredResult OR diagnosticSummary is present, while keeping archives and
+// actionable failure fields.
+describe('generalized structuredModelSummary suppression (b77h)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousRoot: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-b77h-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    setProjectRoot(tempRoot);
+    configLoader = new ConfigLoader();
+    eventStore = new EventStore(configLoader);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-b77h-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  // (a) non-diagnostic structuredResult suppresses raw stdout/stderr/result on both inline
+  //     and truncated paths, and keeps structuredResult + outputArchive
+  it('(a) structuredResult (non-diagnostic) suppresses raw stdout/stderr on inline AND truncated paths; keeps structuredResult + archive', async () => {
+    // Payload produces a structuredResult via structuredPayloadSummary (checks array).
+    // With filler to force the truncated path.
+    const checksPayload = JSON.stringify({
+      tool: 'coding_standards',
+      status: ToolResultStatus.PASSED,
+      artifact: 'implementation',
+      checks: [
+        { name: 'style', status: ToolResultStatus.PASSED, message: 'ok' },
+        { name: 'coverage', status: ToolResultStatus.PASSED, message: 'ok' }
+      ],
+      errors_by_tool: {
+        eslint: []
+      }
+    });
+
+    // --- TRUNCATED PATH (with filler that pushes past inlineResultBytes) ---
+    const truncatedResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'coding_standards',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'coding_standards',
+          status: 'PASSED',
+          artifact: 'implementation',
+          checks: [
+            { name: 'style', status: 'PASSED', message: 'ok' },
+            { name: 'coverage', status: 'PASSED', message: 'ok' }
+          ],
+          errors_by_tool: { eslint: [] },
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'verify'
+    }, {} as any) as any;
+
+    expect(truncatedResult.status).toBe(ToolResultStatus.PASSED);
+    expect(truncatedResult.outputTruncated).toBe(true);
+    // Raw payload fields must be absent on truncated path
+    expect(truncatedResult.stdout).toBeUndefined();
+    expect(truncatedResult.stderr).toBeUndefined();
+    expect((truncatedResult as any).result).toBeUndefined();
+    // structuredResult with gate-evidence (passedCheckCount from checks) is present
+    expect(truncatedResult.structuredResult).toBeDefined();
+    expect(truncatedResult.structuredResult.passedCheckCount).toBe(2);
+    expect(truncatedResult.structuredResult.rejectedCheckCount).toBe(0);
+    // outputArchive is attached (raw payload archived)
+    expect(truncatedResult.outputArchive).toBeDefined();
+    expect(truncatedResult.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+
+    // --- INLINE PATH (small payload, no filler, fits under default 4 KiB inline cap) ---
+    const inlineResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'coding_standards',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stdout.write(${JSON.stringify(checksPayload)})`
+      ],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'verify'
+    }, {} as any) as any;
+
+    expect(inlineResult.status).toBe(ToolResultStatus.PASSED);
+    // Small result fits inline (no outputTruncated)
+    expect(inlineResult.outputTruncated).toBeUndefined();
+    // Raw payload fields must be absent on inline path too
+    expect(inlineResult.stdout).toBeUndefined();
+    expect(inlineResult.stderr).toBeUndefined();
+    expect((inlineResult as any).result).toBeUndefined();
+    // structuredResult is present
+    expect(inlineResult.structuredResult).toBeDefined();
+    expect(inlineResult.structuredResult.passedCheckCount).toBe(2);
+  });
+
+  // (b) FAILURE with structuredResult keeps failureCategory + diagnosticPreview (actionable)
+  //     while raw stdout/stderr are suppressed.  Uses a clean JSON stdout (no mixed output)
+  //     so structuredPayloadSummary can extract the checks array into structuredResult.
+  it('(b) FAILURE with structuredResult keeps failureCategory + diagnosticPreview actionable while raw is suppressed', async () => {
+    // The tool outputs structured JSON, then exits non-zero.  The stderr carries raw
+    // diagnostic lines so commandDiagnosticPreview can extract a diagnosticPreview.
+    // The stdout JSON has a checks array so structuredPayloadSummary fires.
+    // filler pushes the serialized past inlineResultBytes → truncated path.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'pytest',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'pytest',
+          status: 'REJECTED',
+          checks: [
+            { name: 'test-suite', status: 'REJECTED', message: 'test_example.py::test_add FAILED' }
+          ],
+          errors_by_tool: { pytest: [{ tool: 'pytest', file: 'test_example.py', line: 10, message: 'AssertionError', blocking: true }] },
+          filler: 'x'.repeat(10000)
+        }));
+        process.stderr.write('ERROR test_example.py::test_add FAILED\\nAssertionError: assert 1 == 2\\n');
+        process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'verify'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    expect(result.outputTruncated).toBe(true);
+    // failureCategory must be present (failure stays actionable)
+    expect(result.failureCategory).toBeDefined();
+    // diagnosticPreview must be present for actionable failure context
+    expect(result.diagnosticPreview).toBeDefined();
+    expect(result.diagnosticPreview).toMatch(/ERROR|AssertionError|FAILED/);
+    // structuredResult with rejection evidence is present
+    expect(result.structuredResult).toBeDefined();
+    expect(result.structuredResult.rejectedCheckCount).toBe(1);
+    // Raw stdout is suppressed (structuredResult present)
+    expect(result.stdout).toBeUndefined();
+    // outputArchive is present (raw preserved in archive)
+    expect(result.outputArchive).toBeDefined();
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+  });
+
+  // (c) small plain-text no-summary result still works and has no duplicate raw fields
+  it('(c) small plain-text result without structuredResult has no duplicate raw fields', async () => {
+    // A simple passing tool with no checks/structured keys — no structuredResult generated.
+    // The raw stdout appears directly in the model-facing result (no suppression).
+    // resultPreview is hidden on inline path, so no duplicate.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'simple_grep',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'process.stdout.write("match found at line 42\\n");'],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'search'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    // No structuredResult (tool has no structured output)
+    expect(result.structuredResult).toBeUndefined();
+    // No diagnosticSummary
+    expect(result.diagnosticSummary).toBeUndefined();
+    // Small result is inline — no outputTruncated
+    expect(result.outputTruncated).toBeUndefined();
+    // Raw stdout present (no suppression without structuredResult)
+    expect(result.stdout).toContain('match found at line 42');
+    // resultPreview is hidden on inline path (MODEL_HIDDEN_RESULT_KEYS) — no duplicate
+    expect((result as any).resultPreview).toBeUndefined();
+    // No output duplication: stdout carries the raw text once and only once
+    const resultJson = JSON.stringify(result);
+    const occurrences = (resultJson.match(/match found at line 42/g) || []).length;
+    expect(occurrences).toBe(1);
+  });
+
+  // (d) 7i0 diagnostic behavior still holds (regression guard for exact 7i0 behavior)
+  it('(d) 7i0 diagnostic behavior preserved: diagnosticSummary suppresses raw MCP result on inline path', async () => {
+    // Identical to the inline-path test from the 7i0 regression suite to confirm
+    // the generalized suppression is a strict superset that does not break 7i0.
+    const diagnosticFile = path.join(tempWorktree, 'packages/b77h_inline_target.py');
+    const rawDiagnosticLines = [
+      diagnosticFile,
+      'Diagnostics in File: 3',
+      'ERROR at L10:C1: Import "ceridwen_foundation.generated.b77h_module_0" could not be resolved (Source: Pyright, Code: reportMissingImports)',
+      'ERROR at L11:C1: Import "ceridwen_foundation.generated.b77h_module_1" could not be resolved (Source: Pyright, Code: reportMissingImports)',
+      'ERROR at L12:C1: Import "ceridwen_foundation.generated.b77h_module_2" could not be resolved (Source: Pyright, Code: reportMissingImports)'
+    ].join('\n');
+
+    const mcpContent = {
+      content: [{ type: 'text', text: rawDiagnosticLines }]
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any) as any;
+
+    // 7i0 behavior preserved: inline path, no outputTruncated
+    expect(result.outputTruncated).toBeUndefined();
+    // Compact summary must be present
+    expect(result.resultPreview).toContain('Diagnostics in File: 3');
+    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=3');
+    // Raw module names must NOT appear inline
+    expect(result.resultPreview).not.toContain('b77h_module_0');
+    // Raw MCP result field must be absent (suppressed by hasStructuredModelSummary)
+    expect((result as any).result).toBeUndefined();
+    // diagnosticSummary is present
+    const summary = result.diagnosticSummary;
+    expect(summary).toBeDefined();
+    expect(summary.totalDiagnostics).toBe(3);
+    expect(summary.missingImportCount).toBe(3);
+  });
+
+  // Token metric: model-facing size with structuredResult is substantially smaller than the
+  // archived (raw) payload.  Uses maxOutputBytes large enough to capture the full filler
+  // so the archive bytes reflect the actual raw payload size.
+  it('token metric: model-facing result with structuredResult is compact vs raw payload size', async () => {
+    // Build a large payload with a checks array (triggers structuredResult via structuredPayloadSummary)
+    // plus filler to force the truncated path.
+    // maxOutputBytes is set large so the full filler is captured by boundedCommandFile,
+    // ensuring serialized.length (== archive bytes) reflects the actual large payload.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'coding_standards',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `
+          const checks = Array.from({ length: 30 }, (_, i) => ({
+            name: 'check-' + i,
+            status: 'PASSED',
+            message: 'check ' + i + ' passed with details: ' + 'x'.repeat(200)
+          }));
+          console.log(JSON.stringify({
+            tool: 'coding_standards',
+            status: 'PASSED',
+            checks,
+            filler: 'x'.repeat(30000)
+          }));
+        `
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 60_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'verify'
+    }, {} as any) as any;
+
+    const modelFacingJson = JSON.stringify(result);
+    const modelFacingBytes = Buffer.byteLength(modelFacingJson);
+
+    // Model-facing result must be compact — well within 5 KiB
+    expect(modelFacingBytes).toBeLessThan(5 * 1024);
+    // structuredResult is present
+    expect(result.structuredResult).toBeDefined();
+    expect(result.structuredResult.passedCheckCount).toBe(30);
+    // Raw stdout is suppressed
+    expect(result.stdout).toBeUndefined();
+    // Archive is attached and truncated (payload exceeded inlineResultBytes cap)
+    expect(result.outputArchive).toMatchObject({ truncated: true });
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // The archive bytes reflect the bounded serialized output; model-facing is even smaller
+    // because the compact structuredResult replaces the raw payload fields.
+    // (archive bytes = serialized bounded-stdout result; model-facing = compact summary only)
+    expect(result.outputArchive.bytes).toBeGreaterThan(modelFacingBytes);
   });
 });

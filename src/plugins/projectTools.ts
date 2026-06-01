@@ -1811,6 +1811,22 @@ const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   ProjectToolResultKey.FRAMEWORK_TOOL_CALLS
 ]);
 
+/**
+ * Raw payload keys suppressed from the model-facing result when a compact structured
+ * model summary is present (structuredResult or diagnosticSummary).  The full raw
+ * content is preserved in the output archive and remains recoverable via the existing
+ * archive path — only the inline model-facing payload is bounded.
+ *
+ * Named constant so the suppression set has a stable identity and is reusable across
+ * the inline and preview paths.
+ */
+const MODEL_RAW_SUPPRESSED_KEYS = new Set<string>([
+  ProjectToolResultKey.STDOUT,
+  ProjectToolResultKey.STDERR,
+  'output',
+  'result'
+]);
+
 function withoutUndefined(record: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
 }
@@ -1821,14 +1837,25 @@ function resultRecord(result: unknown): Record<string, unknown> {
 
 function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult {
   const record = resultRecord(result);
-  // When a diagnosticSummary is present the compact grouped text in RESULT_PREVIEW
-  // is the authoritative model-facing representation. Suppress the raw MCP `result`
-  // key (which would otherwise dump tens-of-KiB diagnostic lines inline) and keep
-  // RESULT_PREVIEW visible so the summary reaches the model.  All other keys
+  // When a structuredResult OR diagnosticSummary is present the compact structured
+  // payload is the authoritative model-facing representation.  Suppress the raw
+  // stdout/stderr/output/result fields (which can be tens of KiB) and keep
+  // RESULT_PREVIEW visible so the compact summary reaches the model.  All other keys
   // follow the standard MODEL_HIDDEN_RESULT_KEYS filter unchanged.
-  const hasDiagnosticSummary = Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
-  const hiddenKeys = hasDiagnosticSummary
-    ? new Set([...MODEL_HIDDEN_RESULT_KEYS].filter(k => k !== ProjectToolResultKey.RESULT_PREVIEW).concat('result'))
+  //
+  // This is a strict superset of the 7i0 diagnostic-suppression behavior:
+  //   - hasDiagnosticSummary=true  → hasStructuredModelSummary=true  (7i0 path preserved)
+  //   - hasStructuredResult=true   → hasStructuredModelSummary=true  (new generalization)
+  //
+  // Requirement 4 (failures stay actionable): failureCategory, diagnosticPreview, and
+  // the compact RESULT_PREVIEW all remain visible; the raw content is archived.
+  const hasStructuredModelSummary =
+    Boolean(record[ProjectToolResultKey.STRUCTURED_RESULT]) || Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
+  const hiddenKeys = hasStructuredModelSummary
+    ? new Set([
+        ...MODEL_HIDDEN_RESULT_KEYS,
+        ...MODEL_RAW_SUPPRESSED_KEYS
+      ].filter(k => k !== ProjectToolResultKey.RESULT_PREVIEW))
     : MODEL_HIDDEN_RESULT_KEYS;
   const modelFacing = Object.fromEntries(
     Object.entries(record).filter(([key, value]) => !hiddenKeys.has(key) && value !== undefined)
@@ -2354,26 +2381,50 @@ function commandPayloadPreviewText(record: Record<string, unknown>): string | un
 }
 
 function resultPreviewText(record: Record<string, unknown>, limitBytes: number): string | undefined {
-  // When a diagnosticSummary is present the compact grouped preview in
-  // RESULT_PREVIEW is already the authoritative model-facing text.  Skip raw
-  // MCP content so tens-of-KiB diagnostic payloads do not reappear alongside
-  // the summary and create token pressure.  The raw text remains retrievable
-  // via the outputArchive and by rerunning the tool with narrower arguments.
-  // Correctness: RESULT_PREVIEW is only populated here when applyDiagnosticModelSummary
-  // has already run (caller: persistAndBoundResult).  commandPayloadPreviewText below
-  // reads RESULT_PREVIEW and returns it directly for the hasDiagnosticSummary branch.
-  const hasDiagnosticSummary = Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
-  const mcpText = hasDiagnosticSummary ? undefined : textFromMcpContent(record.result);
+  // When a structuredResult OR diagnosticSummary is present the compact structured
+  // payload is already the authoritative model-facing text.  Skip raw MCP content
+  // and raw output/stdout/stderr text so large payloads do not reappear alongside
+  // the summary and create token pressure.  The raw text remains retrievable via the
+  // outputArchive and by rerunning the tool with narrower arguments.
+  //
+  // Strict superset of 7i0 diagnostic behavior:
+  //   - hasDiagnosticSummary=true  → hasStructuredModelSummary=true  (7i0 preserved)
+  //   - hasStructuredResult=true   → hasStructuredModelSummary=true  (new generalization)
+  //
+  // Requirement 3 (no duplicate raw fields): when raw content is suppressed in the
+  // model-facing result, it is also excluded from the preview source so the same bytes
+  // do not reappear under a different key.
+  //
+  // Correctness: RESULT_PREVIEW is only populated before this call when
+  // applyDiagnosticModelSummary or buildCommandResult have already set it.
+  // commandPayloadPreviewText reads RESULT_PREVIEW and returns it directly for
+  // the hasStructuredModelSummary branch, then returns undefined for the raw fallbacks
+  // (which are skipped by hasStructuredModelSummary below).
+  const hasStructuredModelSummary =
+    Boolean(record[ProjectToolResultKey.STRUCTURED_RESULT]) || Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
+
+  if (hasStructuredModelSummary) {
+    // Raw MCP content, raw stdout/stderr, and raw output are all suppressed — only the
+    // compact RESULT_PREVIEW (placed by applyDiagnosticModelSummary or buildCommandResult)
+    // is eligible.  commandPayloadPreviewText is intentionally bypassed here because its
+    // raw stdout/stderr fallback path would duplicate content already hidden from the
+    // model-facing result.
+    const existingPreview = typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string'
+      && String(record[ProjectToolResultKey.RESULT_PREVIEW]).trim()
+      ? String(record[ProjectToolResultKey.RESULT_PREVIEW])
+      : undefined;
+    if (!existingPreview) return undefined;
+    return boundedPreviewText(existingPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+  }
+
+  const mcpText = textFromMcpContent(record.result);
   const commandText = commandPayloadPreviewText(record);
   const outputText = typeof record.output === 'string' && record.output.trim()
     ? record.output
     : undefined;
   const preview = mcpText || commandText || outputText;
   if (!preview) return undefined;
-  const cap = hasDiagnosticSummary
-    ? ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES
-    : limitBytes;
-  return boundedPreviewText(preview, cap);
+  return boundedPreviewText(preview, limitBytes);
 }
 
 function structuredCommandResultPreview(record: Record<string, unknown> | undefined): string | undefined {
