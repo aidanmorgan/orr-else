@@ -204,7 +204,8 @@ export enum DomainEventName {
   WORKTREE_AUTO_REMOVED = 'WORKTREE_AUTO_REMOVED',
   WORKTREE_AUTO_REMOVE_PRESERVED = 'WORKTREE_AUTO_REMOVE_PRESERVED',
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
-  RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED'
+  RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
+  DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE'
 }
 
 export enum BeadsCliCommand {
@@ -678,8 +679,19 @@ export enum Component {
   WORKLOG = 'WorklogManager',
   PROGRESS = 'ProgressManager',
   PROJECT_TOOLS = 'ProjectTools',
-  RETENTION = 'RetentionCleanup'
+  RETENTION = 'RetentionCleanup',
+  BUILD_PROVENANCE = 'BuildProvenance'
 }
+
+/**
+ * Named thresholds and field keys for build provenance / staleness checks.
+ */
+export const BuildProvenanceDefaults = {
+  /** Sentinel used for any provenance field that could not be read. */
+  UNKNOWN: 'unknown',
+  /** Key used for coordinator identity in event payloads. */
+  PROVENANCE_KEY: 'buildProvenance'
+} as const;
 
 export const WorktreeDefaults = {
   AUTO_RESTORE_STATE_ID: 'worktree_reuse',

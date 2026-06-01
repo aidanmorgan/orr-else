@@ -3,6 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { computeBuildProvenance, runStalenessPreflightWarn } from './core/BuildProvenance.js';
 import { Command } from 'commander';
 import { parse as parseShellCommand } from 'shell-quote';
 import { z } from 'zod';
@@ -2171,10 +2172,18 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   if (options.configPath) services.configLoader.setConfigPath(options.configPath);
   session.currentFlowOptions = { ...options };
   const runtimeObservability = await initializeObservability(services);
+
+  // Build provenance: best-effort, never blocks startup.
+  const buildProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
+  if (buildProvenance) {
+    await runStalenessPreflightWarn(buildProvenance, services.eventStore).catch(() => {});
+  }
+
   await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
     beadId: options.beadId,
     maxSlots: options.maxSlots,
-    autoContinue: options.autoContinue
+    autoContinue: options.autoContinue,
+    buildProvenance
   });
 
   const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore);
@@ -2348,6 +2357,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const config = await services.configLoader.load();
     const runtimeObservability = await initializeObservability(services);
     session.piToolObservability = runtimeObservability;
+
+    // Worker-mode startup provenance: best-effort, never blocks startup.
+    if (isWorkerMode()) {
+      const workerProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
+      if (workerProvenance) {
+        await runStalenessPreflightWarn(workerProvenance, services.eventStore).catch(() => {});
+        await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
+          isWorker: true,
+          beadId: process.env[EnvVars.BEAD_ID],
+          stateId: process.env[EnvVars.STATE_ID],
+          workerId: process.env[EnvVars.WORKER_ID],
+          buildProvenance: workerProvenance
+        }).catch(() => {});
+      }
+    }
+
     const wrappedToolNames = new Set<string>([
       ...Object.values(BuiltInToolName),
       ...Object.values(PluginToolName),

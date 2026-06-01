@@ -11,6 +11,7 @@ import { Observability } from '../core/Observability.js';
 import { redactPaneText } from '../core/PaneTextRedactor.js';
 import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
+import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 import { resolvePiSkillPaths, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
 import {
@@ -357,6 +358,9 @@ export class TeammateFactory {
 
       const traceContext = this.observability.getTraceContext();
 
+      // Compute coordinator build provenance for spawn evidence. Best-effort.
+      const spawnProvenance = await computeBuildProvenance(configPath).catch(() => undefined);
+
       const env = [
         [EnvVars.WORKER_MODE, ProcessFlag.TRUE],
         [EnvVars.PROJECT_ROOT, projectRoot],
@@ -416,7 +420,8 @@ export class TeammateFactory {
         thinking: llm.thinking,
         skillPaths,
         workerExtensions,
-        workerArgs
+        workerArgs,
+        buildProvenance: spawnProvenance
       });
 
       const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
