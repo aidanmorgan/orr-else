@@ -308,6 +308,78 @@ describe('Supervisor', () => {
     expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
   });
 
+  it('claimAndSpawnBead releases lease when worktree provisioning fails', async () => {
+    const claim = vi.fn(async () => ({ id: 'bead-1' }));
+    const release = vi.fn(async () => ({}));
+    const createWorktree = vi.fn(async () => ({ success: false, error: 'disk full' }));
+    const records: Array<{ event: string; data: any }> = [];
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux: vi.fn() } as any,
+      { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        plugins: {
+          bd: { tools: [
+            { name: 'bd_claim', execute: claim },
+            { name: 'bd_release', execute: release }
+          ]},
+          git: { tools: [{ name: 'create_worktree', execute: createWorktree }] }
+        }
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+    (supervisor as any).resolveToolHandles();
+
+    const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
+    const config = { settings: {} } as any;
+    await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('disk full');
+    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+  });
+
+  it('claimAndSpawnBead releases lease when spawn fails', async () => {
+    const claim = vi.fn(async () => ({ id: 'bead-1' }));
+    const release = vi.fn(async () => ({}));
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/bead-1' }));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: false, error: 'tmux unavailable' }));
+    const records: Array<{ event: string; data: any }> = [];
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux } as any,
+      { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        plugins: {
+          bd: { tools: [
+            { name: 'bd_claim', execute: claim },
+            { name: 'bd_release', execute: release }
+          ]},
+          git: { tools: [{ name: 'create_worktree', execute: createWorktree }] }
+        }
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+    (supervisor as any).resolveToolHandles();
+
+    const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
+    const config = { settings: {} } as any;
+    await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('tmux unavailable');
+    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(records.some(r => r.event === 'WORKTREE_PROVISIONED')).toBe(true);
+  });
+
   it('collectSlotHealthSnapshot returns snapshot with correctly measured fields for seeded state', async () => {
     const staleProgressAtMs = NOW_MS - STALE_PROGRESS_AGE_MS;
     const { supervisor, clock } = supervisorHarness(staleProgressAtMs, undefined, new Set(['bead-1', 'bead-2']), 3);

@@ -6,10 +6,12 @@ import { SignalingServer } from './SignalingServer.js';
 import { TeammateFactory } from '../plugins/teammates.js';
 import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
+import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
-import type { RuntimeServices } from './RuntimeServices.js';
+import type { RuntimeServices, RuntimeTool } from './RuntimeServices.js';
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
+import type { HarnessConfig } from './ConfigLoader.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
@@ -84,6 +86,10 @@ export class Supervisor {
   private lastCapacityUnderfillDigest = '';
   private lastMissingStartedBeadIds = new Set<string>();
   private readonly clock: Clock;
+  // Cached tool handles — resolved once on first use (see resolveToolHandles).
+  private bdClaimTool?: RuntimeTool;
+  private bdReleaseTool?: RuntimeTool;
+  private createWorktreeTool?: RuntimeTool;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -191,9 +197,25 @@ export class Supervisor {
     });
   }
 
+  /** Resolve and cache the three tool handles used during claim/spawn.
+   * Called once per scanAndSpawn invocation; subsequent calls are no-ops. */
+  private resolveToolHandles(): void {
+    if (!this.bdClaimTool) {
+      this.bdClaimTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_CLAIM)!;
+    }
+    if (!this.bdReleaseTool) {
+      this.bdReleaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+    }
+    if (!this.createWorktreeTool) {
+      this.createWorktreeTool = this.services.plugins.git?.tools.find(t => t.name === PluginToolName.CREATE_WORKTREE)!;
+    }
+  }
+
   private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
-    const releaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
-    await Promise.resolve(releaseTool.execute({ id: claimed.id })).catch((error: unknown) => {
+    if (!this.bdReleaseTool) {
+      this.bdReleaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+    }
+    await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
         beadId: claimed.id,
         error: String(error)
@@ -205,6 +227,60 @@ export class Supervisor {
       pauseUntil: this.pausedUntilIso(),
       reason: this.schedulingPausedReason
     });
+  }
+
+  /** Claim one bead, provision its worktree, record the event, and spawn a teammate.
+   * Owns the full claim → worktree → record → spawn sequence for a single bead,
+   * including releasing the lease on every failure path.
+   * Returns true on success; throws on hard failure (caller catches and records). */
+  private async claimAndSpawnBead(bead: ScoredBead & { stateId: string }, config: HarnessConfig): Promise<boolean> {
+    if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
+
+    const claimed = await this.bdClaimTool!.execute({
+      id: bead.id,
+      owner: App.DISPLAY_NAME,
+      stateId: bead.stateId,
+      leaseTtlMs: config.settings?.agentTurnTimeoutMs || Defaults.LEASE_TTL_MS
+    }, this.ctx) as Bead;
+
+    // Post-claim pause check: pause was detected while the claim was in-flight.
+    // Release the lease we just acquired and signal the caller to break.
+    if (this.isSchedulingPaused()) {
+      await this.releaseClaimedAfterPause(claimed);
+      return false;
+    }
+
+    if (this.stopping) {
+      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      this.startedBeads.delete(claimed.id);
+      return false;
+    }
+
+    // Mandatory Worktree Isolation
+    const result = await this.createWorktreeTool!.execute({ beadId: claimed.id }, this.ctx);
+    const worktreePath = (result as any)?.path;
+    if ((result as any)?.success !== true || !worktreePath) {
+      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      throw new Error((result as any)?.error || `Failed to provision mandatory worktree for ${claimed.id}`);
+    }
+    await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
+
+    // Post-worktree pause check: pause was detected after worktree provisioning.
+    // Release the lease (worktree already provisioned) and signal the caller to break.
+    if (this.isSchedulingPaused()) {
+      await this.releaseClaimedAfterPause(claimed);
+      return false;
+    }
+
+    if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
+
+    const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx);
+    if (!spawned.success) {
+      await Promise.resolve(this.bdReleaseTool!.execute({ id: claimed.id })).catch(() => {});
+      throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
+    }
+    Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
+    return true;
   }
 
   private async step() {
@@ -362,6 +438,7 @@ export class Supervisor {
       return;
     }
 
+    this.resolveToolHandles();
     const config = await this.services.configLoader.load();
     const noProgressTimeoutMs = config.settings.teammateNoProgressTimeoutMs || SupervisorDefaults.NO_PROGRESS_TIMEOUT_MS;
     const activeStartedBeads = await this.activeStartedBeadIds();
@@ -394,10 +471,6 @@ export class Supervisor {
 
     for (const bead of assignments) {
       if (this.stopping) break;
-      if (this.isSchedulingPaused()) {
-        this.reportPausedScheduling();
-        break;
-      }
       const currentSlots = Math.min(
         Math.max(0, this.options.maxSlots - (await this.activeStartedBeadIds()).size),
         await this.factory.getAvailableSlots()
@@ -406,50 +479,8 @@ export class Supervisor {
       this.startedBeads.add(bead.id);
       this.startedBeadAtMs.set(bead.id, this.clock.now());
       try {
-        if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
-        
-        const claimTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_CLAIM)!;
-        const claimed = await claimTool.execute({
-          id: bead.id,
-          owner: App.DISPLAY_NAME,
-          stateId: bead.stateId,
-          leaseTtlMs: config.settings?.agentTurnTimeoutMs || Defaults.LEASE_TTL_MS
-        }, this.ctx) as Bead;
-
-        if (this.isSchedulingPaused()) {
-          await this.releaseClaimedAfterPause(claimed);
-          break;
-        }
-
-        if (this.stopping) {
-          await Promise.resolve(this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!.execute({ id: claimed.id })).catch(() => {});
-          this.startedBeads.delete(claimed.id);
-          break;
-        }
-
-        // Mandatory Worktree Isolation
-        const createWorktreeTool = this.services.plugins.git.tools.find(t => t.name === PluginToolName.CREATE_WORKTREE)!;
-        const result = await createWorktreeTool.execute({ beadId: claimed.id }, this.ctx);
-        const worktreePath = (result as any)?.path;
-        if ((result as any)?.success !== true || !worktreePath) {
-          await Promise.resolve(this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!.execute({ id: claimed.id })).catch(() => {});
-          throw new Error((result as any)?.error || `Failed to provision mandatory worktree for ${claimed.id}`);
-        }
-        await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
-
-        if (this.isSchedulingPaused()) {
-          await this.releaseClaimedAfterPause(claimed);
-          break;
-        }
-
-        if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
-        
-        const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx);
-        if (!spawned.success) {
-          await Promise.resolve(this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!.execute({ id: claimed.id })).catch(() => {});
-          throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
-        }
-        Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
+        const spawned = await this.claimAndSpawnBead(bead, config);
+        if (!spawned) break;
       } catch (error) {
         this.startedBeads.delete(bead.id);
         this.startedBeadAtMs.delete(bead.id);
