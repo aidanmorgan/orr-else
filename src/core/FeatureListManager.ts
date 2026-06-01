@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventStore } from './EventStore.js';
-import { DomainEventName, FeatureStatus } from '../constants/index.js';
+import { Component, DomainEventName, FeatureStatus } from '../constants/index.js';
+import { Logger } from './Logger.js';
 
 export interface Feature {
   id: string;
@@ -24,7 +25,8 @@ export class FeatureListManager {
     if (!fs.existsSync(this.filePath)) return [];
     try {
       return JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
-    } catch {
+    } catch (error) {
+      Logger.warn(Component.CORE, 'Failed to parse feature list file', { filePath: this.filePath, error: String(error) });
       return [];
     }
   }

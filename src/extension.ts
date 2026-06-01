@@ -1986,7 +1986,10 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   const priorEvents = await services.eventStore.eventsForBead(beadId);
   const appliedEvent = findAppliedTeammateSignal(priorEvents, event);
-  const beadProjection = await services.eventStore.projectBead(beadId, { includeDetails: false }).catch(() => undefined);
+  const beadProjection = await services.eventStore.projectBead(beadId, { includeDetails: false }).catch((error: unknown) => {
+    Logger.warn(Component.ORR_ELSE, 'Failed to project bead during teammate event handling', { beadId, error: String(error) });
+    return undefined;
+  });
   const currentStateId = beadProjection?.status;
   const processedKeys = new Set<string>();
   if (currentSupervisor.isSignalProcessed(event.idempotencyKey)) processedKeys.add(event.idempotencyKey);

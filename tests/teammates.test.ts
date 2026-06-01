@@ -6,6 +6,7 @@ import { execa } from 'execa';
 import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxOptionValue } from '../src/constants/index.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
+import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
 import { setProjectRoot } from '../src/core/Paths.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
@@ -89,6 +90,7 @@ states:
       process.env[EnvVars.PROJECT_ROOT] = previousProjectRoot;
     }
     setProjectRoot(process.cwd());
+    vi.restoreAllMocks();
   });
 
   it('spawns Pi teammates in tmux with automatic teammate-mode environment', async () => {
@@ -304,5 +306,39 @@ states:
     const exitedEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_PROCESS_EXITED);
     expect(exitedEvents).toHaveLength(1);
     expect(exitedEvents[0].data.beadId).toBe('bead-term');
+  });
+
+  // ---------------------------------------------------------------------------
+  // WI-18 — ensureAgentsWindow catch: warn logged, spawn return value unchanged
+  // ---------------------------------------------------------------------------
+  it('(WI-18) warns when set-window-option fails but spawn still succeeds', async () => {
+    // Simulate: has-session succeeds, list-windows succeeds, new-window succeeds,
+    // set-window-option throws, split-window (spawn) still runs and succeeds.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('set-window-option')) throw new Error('set-window-option: tmux error');
+      if (args.includes('split-window')) return { stdout: '%42\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    // Intercept Logger.warn to capture calls without relying on file transport
+    const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
+    vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
+    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+
+    // (b) return value / control flow: spawn still resolves to success
+    const result = await factory.spawnTeammateInTmux('bead-wi18' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    // (a) warn was emitted with sessionName + error context
+    const warnCall = warnCalls.find(([, msg]) => msg.includes('agents window'));
+    expect(warnCall).toBeDefined();
+    const [component, , metadata] = warnCall!;
+    expect(component).toBe('TeammateFactory');
+    expect(metadata?.sessionName).toBeDefined();
+    expect(typeof metadata?.error).toBe('string');
+    expect((metadata?.error as string).length).toBeGreaterThan(0);
   });
 });

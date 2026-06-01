@@ -1,9 +1,10 @@
 import { execa } from 'execa';
-import { DomainEventName, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/index.js';
+import { Component, DomainEventName, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/index.js';
 import type { BeadId } from '../types/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
+import { Logger } from './Logger.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
 
 export interface TransactionalStateValidation {
@@ -67,7 +68,9 @@ export class TransactionalStateGuard {
         unapprovedPaths: [],
         ignoredWriteSetPaths,
         reason
-      }).catch(() => {});
+      }).catch((error: unknown) => {
+        Logger.warn(Component.CORE, 'Failed to record transactional state rejection (ignored write set)', { beadId, stateId, error: String(error) });
+      });
       return result;
     }
 
@@ -121,7 +124,9 @@ export class TransactionalStateGuard {
       allowedWriteSet,
       unapprovedPaths,
       reason
-    }).catch(() => {});
+    }).catch((error: unknown) => {
+      Logger.warn(Component.CORE, 'Failed to record transactional state rejection (unapproved paths)', { beadId, stateId, error: String(error) });
+    });
 
     return result;
   }

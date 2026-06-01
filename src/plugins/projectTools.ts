@@ -3305,8 +3305,12 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         result
       };
     } finally {
-      await client.close().catch(() => {});
-      await transport.close().catch(() => {});
+      await client.close().catch((error: unknown) => {
+        Logger.warn(Component.PROJECT_TOOLS, 'Failed to close MCP client', { server: definition.server, error: String(error) });
+      });
+      await transport.close().catch((error: unknown) => {
+        Logger.warn(Component.PROJECT_TOOLS, 'Failed to close MCP transport', { server: definition.server, error: String(error) });
+      });
     }
   } catch (error) {
     const message = String(error);

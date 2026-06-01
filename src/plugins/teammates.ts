@@ -239,8 +239,9 @@ export class TeammateFactory {
         TmuxOption.REMAIN_ON_EXIT,
         TmuxOptionValue.OFF
       ]);
-    } catch {
+    } catch (error) {
       // Session might not exist yet if just created
+      Logger.warn(Component.FACTORY, 'Failed to configure agents window in tmux session', { sessionName: this.sessionName, error: String(error) });
     }
   }
 

@@ -1,11 +1,12 @@
 import { execFileSync } from 'child_process';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
+import { Logger } from '../src/core/Logger.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { TransactionalStateGuard } from '../src/core/TransactionalStateGuard.js';
@@ -67,6 +68,7 @@ states:
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     setProjectRoot(previousRoot);
     configLoader.reset();
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -155,5 +157,71 @@ states:
     const events = await eventStore.readAll();
     expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_AUTO_RESTORE_STARTED)).toBe(true);
     expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_AUTO_RESTORE_SUCCEEDED)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // WI-18 — TransactionalStateGuard eventStore.record failure sites
+  //
+  // BEFORE: eventStore.record rejections in the two validateSuccess catch arms
+  //         were swallowed with .catch(() => {}).  No diagnosis trail.
+  // AFTER:  each rejection still swallowed (control flow / return value
+  //         unchanged) AND emits Logger.warn with beadId, stateId, error.
+  // ---------------------------------------------------------------------------
+
+  it('(WI-18a) warns when eventStore.record rejects for the ignored-write-set rejection path, return value unchanged', async () => {
+    // Force the ignored write set path: plan contract contains a path that git
+    // will ignore.
+    fs.writeFileSync(path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), JSON.stringify({
+      writeSet: [{ path: 'ignored-tests/new_test.py' }]
+    }));
+
+    // Stub eventStore.record so it rejects.
+    vi.spyOn(eventStore, 'record').mockRejectedValue(new Error('store unavailable'));
+    // Intercept Logger.warn to avoid the real DailyRotateFile transport writing
+    // to the tempRoot that afterEach will delete.
+    const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
+    vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
+
+    // (a) Return value is unchanged — still a failed validation result.
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+    expect(result.passed).toBe(false);
+    expect(result.ignoredWriteSetPaths).toEqual(['ignored-tests/new_test.py']);
+
+    // (b) A warn was emitted with beadId, stateId, and a non-empty error string.
+    const warnCall = warnCalls.find(([, msg]) => msg.includes('transactional state rejection'));
+    expect(warnCall).toBeDefined();
+    const [component, , metadata] = warnCall!;
+    expect(component).toBe('Core');
+    expect(metadata?.beadId).toBe('bd-1');
+    expect(metadata?.stateId).toBe('Implementation');
+    expect(typeof metadata?.error).toBe('string');
+    expect((metadata?.error as string)).toContain('store unavailable');
+  });
+
+  it('(WI-18b) warns when eventStore.record rejects for the unapproved-paths rejection path, return value unchanged', async () => {
+    // Write an unapproved file to the worktree.
+    fs.writeFileSync(path.join(worktreePath, 'uv.lock'), 'changed\n');
+
+    // Stub eventStore.record so it rejects.
+    vi.spyOn(eventStore, 'record').mockRejectedValue(new Error('store unavailable'));
+    // Intercept Logger.warn to avoid the real DailyRotateFile transport writing
+    // to the tempRoot that afterEach will delete.
+    const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
+    vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
+
+    // (a) Return value is unchanged — still a failed validation result.
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+    expect(result.passed).toBe(false);
+    expect(result.unapprovedPaths).toContain('uv.lock');
+
+    // (b) A warn was emitted with beadId, stateId, and a non-empty error string.
+    const warnCall = warnCalls.find(([, msg]) => msg.includes('transactional state rejection'));
+    expect(warnCall).toBeDefined();
+    const [component, , metadata] = warnCall!;
+    expect(component).toBe('Core');
+    expect(metadata?.beadId).toBe('bd-1');
+    expect(metadata?.stateId).toBe('Implementation');
+    expect(typeof metadata?.error).toBe('string');
+    expect((metadata?.error as string)).toContain('store unavailable');
   });
 });
