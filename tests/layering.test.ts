@@ -28,8 +28,8 @@ const srcDir = path.join(rootDir, 'src');
 const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
   {
     layer: 'composition',
-    pattern: /^src\/(?:extension|main|teammate_entry)\.ts$/,
-    intent: 'Process and extension entrypoints compose core services, plugins, and external APIs.'
+    pattern: /^src\/(?:extension|main|teammate_entry)\.ts$|^src\/extension\//,
+    intent: 'Process and extension entrypoints (and their extracted controller modules) compose core services, plugins, and external APIs.'
   },
   {
     layer: 'tools',

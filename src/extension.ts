@@ -94,6 +94,34 @@ import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
 import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
+import type { ActiveRun } from './extension/SessionTypes.js';
+import {
+  isRecord,
+  summarizeForEvent,
+  stringifySpanAttribute,
+  textIndicatesFailure,
+  contentIndicatesFailure,
+  nestedResultIndicatesFailure,
+  resultIndicatesFailure,
+  resultIndicatesSuccess,
+  externalPiToolEventIndicatesFailure,
+  externalPiToolResultFromEvent,
+  agentEventError,
+  eventToolCallId
+} from './extension/PiEventAdapters.js';
+import {
+  buildWorkerEventFrom,
+  teammateSignalEventData,
+  hasAppliedTeammateSignal,
+  postWorkerSignal
+} from './extension/SignalController.js';
+import {
+  isContextOverflowFailure,
+  isUsageLimitFailure,
+  isHarnessTransientFailureInternal,
+  compactLifecycleFailureSummary,
+  handleAgentLifecycleFailure
+} from './extension/AgentLifecycleController.js';
 
 /**
  * Orr Else Extension
@@ -224,24 +252,7 @@ interface FlowOptions {
   configPath?: string;
 }
 
-interface ActiveRun {
-  beadId: BeadId;
-  stateId: string;
-  state: SDLCState;
-  action: TeammateAction;
-  requiredItems: ChecklistItem[];
-  startedAt: number;
-  worktreePath?: string;
-  progressManager?: ProgressManager;
-  worklogManager: WorklogManager;
-  checkpointAccepted: boolean;
-  parentSequenceCompleted: boolean;
-  completedActionIds: string[];
-  terminalFailureLimitScanned?: boolean;
-  terminalFailureLimitScan?: Promise<DomainEvent | undefined>;
-  terminalFailureLimitEvent?: DomainEvent;
-  terminalFailureLimitResult?: Record<string, unknown>;
-}
+// ActiveRun is imported from ./extension/SessionTypes.js
 
 interface ChecklistTickInput {
   text: string;
@@ -325,85 +336,7 @@ function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {
   return requiredTools.length > 0 ? requiredTools : undefined;
 }
 
-const EVENT_DETAIL_KEYS = new Set([
-  'artifact',
-  'artifactContents',
-  'content',
-  'details',
-  'diagnostic',
-  'documents',
-  'evidence',
-  'handover',
-  'output',
-  'outputPreview',
-  'params',
-  'result',
-  'resultPreview',
-  'stderr',
-  'stdout',
-  'text'
-]);
-
-function truncateEventText(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit)}...` : value;
-}
-
-function summarizeEventString(value: string, key?: string): string {
-  const limit = key && EVENT_DETAIL_KEYS.has(key)
-    ? WorkerDefaults.EVENT_DETAIL_PREVIEW_CHARS
-    : WorkerDefaults.EVENT_PREVIEW_CHARS;
-  return truncateEventText(value, limit);
-}
-
-function summarizeEventValue(value: unknown, depth: number, seen: WeakSet<object>, key?: string): unknown {
-  if (value === undefined || value === null) return value;
-  if (typeof value === 'string') return summarizeEventString(value, key);
-  if (typeof value !== 'object') return value;
-  if (seen.has(value)) return '[Circular]';
-  if (depth >= 5) return '[MaxDepth]';
-
-  seen.add(value);
-  if (Array.isArray(value)) {
-    const limit = WorkerDefaults.EVENT_ARRAY_PREVIEW_ITEMS;
-    const items = value.slice(0, limit).map(item => summarizeEventValue(item, depth + 1, seen, key));
-    return value.length > limit
-      ? [...items, { omittedItems: value.length - limit }]
-      : items;
-  }
-
-  const output: Record<string, unknown> = {};
-  const entries = Object.entries(value as Record<string, unknown>);
-  for (const [entryKey, entryValue] of entries.slice(0, WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS)) {
-    output[entryKey] = summarizeEventValue(entryValue, depth + 1, seen, entryKey);
-  }
-  if (entries.length > WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS) {
-    output.omittedKeys = entries.length - WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS;
-  }
-  return output;
-}
-
-function summarizeForEvent(value: unknown): unknown {
-  if (value === undefined) return undefined;
-  if (typeof value === 'string') {
-    return summarizeEventString(value);
-  }
-  try {
-    const json = JSON.stringify(value);
-    if (json.length <= WorkerDefaults.EVENT_PREVIEW_CHARS) return value;
-    const summarized = summarizeEventValue(value, 0, new WeakSet<object>());
-    const summarizedJson = JSON.stringify(summarized);
-    return summarizedJson.length > WorkerDefaults.EVENT_PREVIEW_CHARS * 3
-      ? {
-        preview: `${summarizedJson.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`,
-        truncated: true,
-        bytes: json.length,
-        summarizedBytes: summarizedJson.length
-      }
-      : summarized;
-  } catch {
-    return String(value);
-  }
-}
+// summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
 
 function beadIdFromToolParams(params: any, session: ExtensionSession): string | undefined {
   return params?.beadId || params?.id || params?.arguments?.beadId || params?.arguments?.id || session.activeRun?.beadId || process.env[EnvVars.BEAD_ID];
@@ -427,137 +360,24 @@ function toolSpanAttributes(toolName: string, params: unknown, beadId: string | 
   };
 }
 
-function externalPiToolResultFromEvent(event: any): Record<string, unknown> {
-  const failed = externalPiToolEventIndicatesFailure(event);
-  return {
-    tool: event.toolName,
-    status: failed ? ToolResultStatus.REJECTED : ToolResultStatus.PASSED,
-    isError: failed,
-    content: summarizeForEvent(event.content),
-    details: summarizeForEvent(event.details)
-  };
-}
+// externalPiToolResultFromEvent, textIndicatesFailure, contentIndicatesFailure,
+// nestedResultIndicatesFailure, externalPiToolEventIndicatesFailure are imported
+// from ./extension/PiEventAdapters.js
 
-function textIndicatesFailure(text: string): boolean {
-  return text.startsWith('Error') || text.startsWith('Failed') || text.startsWith('REJECTED');
-}
+// agentEventError, isContextOverflowFailure, isUsageLimitFailure,
+// compactLifecycleFailureSummary are imported from ./extension/AgentLifecycleController.js
 
-function contentIndicatesFailure(content: unknown): boolean {
-  if (typeof content === 'string') return textIndicatesFailure(content.trim());
-  if (!Array.isArray(content)) return false;
-  return content.some(item => isRecord(item) && typeof item.text === 'string' && textIndicatesFailure(item.text.trim()));
-}
-
-function nestedResultIndicatesFailure(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.isError === true || value.success === false) return true;
-  if (value.status === ToolResultStatus.REJECTED || value.status === ToolResultStatus.UNAVAILABLE) return true;
-  if (typeof value.error === 'string' && value.error.length > 0) return true;
-  if (contentIndicatesFailure(value.content)) return true;
-  return nestedResultIndicatesFailure(value.details) || nestedResultIndicatesFailure(value.mcpResult);
-}
-
-function externalPiToolEventIndicatesFailure(event: any): boolean {
-  return event.isError === true || nestedResultIndicatesFailure(event.details) || contentIndicatesFailure(event.content);
-}
-
-function normalizeStopReason(value: unknown): string | null {
-  return typeof value === 'string' ? value.toLowerCase() : null;
-}
-
-function agentMessageError(value: unknown): string | null {
-  if (!isRecord(value)) return null;
-  const stopReason = normalizeStopReason(value.stopReason || value.stop_reason);
-  const errorMessage = typeof value.errorMessage === 'string'
-    ? value.errorMessage
-    : typeof value.error_message === 'string'
-      ? value.error_message
-      : typeof value.error === 'string'
-        ? value.error
-        : null;
-  if (stopReason === 'error' || errorMessage) {
-    return errorMessage || `Agent turn ended with stop reason: ${stopReason}`;
-  }
-  return null;
-}
-
-function agentEventError(event: any): string | null {
-  const direct = typeof event?.error === 'string'
-    ? event.error
-    : isRecord(event?.error) && typeof event.error.errorMessage === 'string'
-      ? event.error.errorMessage
-      : null;
-  if (direct) return direct;
-
-  const candidates = [
-    event?.message,
-    ...(Array.isArray(event?.messages) ? event.messages : [])
-  ];
-  for (const candidate of candidates) {
-    const messageError = agentMessageError(candidate);
-    if (messageError) return messageError;
-  }
-  return null;
-}
-
-function isContextOverflowFailure(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return normalized.includes(AgentFailureCode.CONTEXT_LENGTH_EXCEEDED)
-    || normalized.includes('context length exceeded')
-    || normalized.includes('context window')
-    || normalized.includes('too many compactions')
-    || normalized.includes('auto-compact')
-    || normalized.includes('auto compact');
-}
-
-function isUsageLimitFailure(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return normalized.includes(AgentFailureCode.USAGE_LIMIT_REACHED)
-    || normalized.includes('usage limit has been reached');
-}
-
+/**
+ * Public export for test consumers — delegates to the controller module.
+ * The function body stays here to preserve the re-export contract.
+ */
 export function isHarnessTransientFailure(error: string): boolean {
-  const normalized = error.toLowerCase();
-  return normalized.includes(AgentFailureCode.WEBSOCKET_ERROR)
-    || normalized.includes(AgentFailureCode.WEBSOCKET_CLOSED)
-    || normalized.includes(AgentFailureCode.CONNECTION_RESET)
-    || normalized.includes(AgentFailureCode.NETWORK_ERROR)
-    || normalized.includes(AgentFailureCode.RESPONSE_HEADERS_TIMEOUT);
+  return isHarnessTransientFailureInternal(error);
 }
 
-function compactLifecycleFailureSummary(source: PiEventName, error: string): string {
-  if (isUsageLimitFailure(error)) {
-    return `${AgentFailureSummary.USAGE_LIMIT} Source: ${source}. ${AgentFailureSummary.EVENT_STORE_DETAILS}`;
-  }
-  if (isContextOverflowFailure(error)) {
-    return `${AgentFailureSummary.CONTEXT_OVERFLOW} Source: ${source}. ${AgentFailureSummary.EVENT_STORE_DETAILS}`;
-  }
-  if (isHarnessTransientFailure(error)) {
-    return `${AgentFailureSummary.HARNESS_TRANSIENT} Source: ${source}. ${AgentFailureSummary.EVENT_STORE_DETAILS}`;
-  }
-  const compactError = error.length > WorkerDefaults.EVENT_PREVIEW_CHARS
-    ? `${error.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`
-    : error;
-  return `Agent lifecycle failure during ${source}: ${compactError}`;
-}
+// usageLimitResetMs is private in ./extension/AgentLifecycleController.js
 
-function usageLimitResetMs(error: string): number | undefined {
-  const resetMatch = /"resets_at"\s*:\s*(\d+)/.exec(error)
-    || /"X-Codex-Primary-Reset-At"\s*:\s*"?(\d+)"?/.exec(error);
-  if (!resetMatch) return undefined;
-  const parsed = Number.parseInt(resetMatch[1], Numeric.DECIMAL_RADIX);
-  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-  return parsed > Numeric.UNIX_SECONDS_MS_THRESHOLD ? parsed : parsed * TimeMs.SECOND;
-}
-
-function stringifySpanAttribute(value: unknown): string {
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
+// stringifySpanAttribute is imported from ./extension/PiEventAdapters.js
 
 function commandMatchesPattern(command: string, pattern: string): boolean {
   try {
@@ -879,9 +699,7 @@ function oversizedReadPolicyRejection(event: any): string | null {
     'Use smaller targeted reads, codemap, ast_grep, reference_docs, or artifact validators instead of loading broad file slices.';
 }
 
-function eventToolCallId(event: any): string | undefined {
-  return typeof event.toolCallId === 'string' ? event.toolCallId : undefined;
-}
+// eventToolCallId is imported from ./extension/PiEventAdapters.js
 
 function registerProviderRequestCap(pi: ExtensionAPI, session: ExtensionSession): void {
   if (session.providerRequestCapRegistered) return;
@@ -1060,128 +878,30 @@ function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServ
   });
 
   pi.on(PiEventName.TURN_END, async (event: any, ctx: ExtensionContext) => {
-    await handleAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services, session);
+    await dispatchAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services, session);
     await recordTurnUsage(event, services, session);
   });
 
   pi.on(PiEventName.AGENT_END, async (event: any, ctx: ExtensionContext) => {
-    await handleAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services, session);
+    await dispatchAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services, session);
     Logger.info(Component.OBSERVABILITY, 'Session token usage summary', services.telemetryStore.getSummary());
   });
 }
 
-async function handleAgentLifecycleFailure(event: any, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
-  if (!isWorkerMode() || !session.activeRun || session.agentFailureSignaled) return;
-  const error = agentEventError(event);
-  if (!error) return;
-
-  session.agentFailureSignaled = true;
-  const activeRun = session.activeRun;
-  const summary = compactLifecycleFailureSummary(source, error);
-  await services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
-    beadId: activeRun.beadId,
-    stateId: activeRun.stateId,
-    actionId: activeRun.action.id,
-    source,
-    summary,
-    error
-  }).catch(recordError => {
-    Logger.warn(Component.ORR_ELSE, 'Failed to record agent lifecycle failure', {
-      beadId: activeRun?.beadId,
-      error: String(recordError)
-    });
+// handleAgentLifecycleFailure is imported from ./extension/AgentLifecycleController.js
+// The local shim below wires the session-mutation callbacks and env-resolved
+// buildWorkerEvent so the controller module remains process.env-free.
+async function dispatchAgentLifecycleFailure(event: any, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
+  await handleAgentLifecycleFailure(event, ctx, source, services, {
+    isWorker: isWorkerMode(),
+    activeRun: session.activeRun,
+    agentFailureSignaled: session.agentFailureSignaled,
+    setAgentFailureSignaled: (v: boolean) => { session.agentFailureSignaled = v; },
+    buildWorkerEvent: (type, fields) => buildWorkerEvent(type, fields)
   });
-
-  await activeRun.worklogManager.appendEntry(activeRun.beadId, activeRun.stateId, 'Agent lifecycle failure', summary).catch(() => undefined);
-  await activeRun.progressManager?.appendLog(summary).catch(() => undefined);
-
-  if (isUsageLimitFailure(error)) {
-    const pauseUntilMs = usageLimitResetMs(error) || Date.now() + SupervisorDefaults.CAPACITY_LIMIT_FALLBACK_PAUSE_MS;
-    await services.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
-      actionId: activeRun.action.id,
-      pauseUntil: new Date(pauseUntilMs).toISOString(),
-      error
-    }).catch(recordError => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record harness capacity limit', {
-        beadId: activeRun?.beadId,
-        error: String(recordError)
-      });
-    });
-
-    const exitedEvent = buildWorkerEvent(TeammateEventType.TEAMMATE_EXITED, {
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
-      summary,
-      capacityLimited: true,
-      pauseUntilMs
-    });
-    await postWorkerSignal(services, exitedEvent).catch(signalError => {
-      Logger.error(Component.ORR_ELSE, 'Failed to signal harness capacity limit', {
-        beadId: activeRun?.beadId,
-        error: String(signalError)
-      });
-    });
-
-    setTimeout(() => {
-      if (ctx.hasUI) ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), 'Shutting down after capacity limit...');
-      ctx.shutdown();
-    }, WorkerDefaults.SHUTDOWN_AFTER_SIGNAL_MS);
-    return;
-  }
-
-  const isContextRestart = isContextOverflowFailure(error);
-  const isHarnessRestart = isHarnessTransientFailure(error);
-  const config = await services.configLoader.load();
-  const teammateEventType = isContextRestart
-    ? TeammateEventType.CONTEXT_RESTART_REQUESTED
-    : isHarnessRestart
-      ? TeammateEventType.HARNESS_RESTART_REQUESTED
-      : TeammateEventType.STATE_BLOCKED;
-  const teammateEvent = buildWorkerEvent(teammateEventType, {
-    beadId: activeRun.beadId,
-    stateId: activeRun.stateId,
-    actionId: activeRun.action.id,
-    transitionEvent: isContextRestart
-      ? config.settings.contextRestartEvent || EventName.CONTEXT_RESTART
-      : isHarnessRestart
-        ? config.settings.harnessRestartEvent || EventName.HARNESS_RESTART
-      : EventName.BLOCKED,
-    summary,
-    evidence: summary,
-    handover: summary
-  });
-  await postWorkerSignal(services, teammateEvent).catch(signalError => {
-    Logger.error(Component.ORR_ELSE, 'Failed to signal agent lifecycle failure', {
-      beadId: activeRun?.beadId,
-      error: String(signalError)
-    });
-  });
-
-  setTimeout(() => {
-    if (ctx.hasUI) {
-      const status = isContextRestart
-        ? 'Shutting down for context restart...'
-        : isHarnessRestart
-          ? 'Shutting down for harness restart...'
-          : 'Shutting down after agent failure...';
-      ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), status);
-    }
-    ctx.shutdown();
-  }, WorkerDefaults.SHUTDOWN_AFTER_SIGNAL_MS);
 }
 
-function resultIndicatesFailure(result: unknown): boolean {
-  if (typeof result === 'string') return textIndicatesFailure(result);
-  if (!isRecord(result)) return false;
-  return nestedResultIndicatesFailure(result);
-}
-
-function resultIndicatesSuccess(result: unknown): boolean {
-  if (!isRecord(result)) return false;
-  return result.success === true || result.status === ToolResultStatus.PASSED;
-}
+// resultIndicatesFailure and resultIndicatesSuccess are imported from ./extension/PiEventAdapters.js
 
 function spanCompletionForToolResult(result: unknown): SpanCompletion {
   if (!resultIndicatesFailure(result)) return { status: SpanStatusValue.OK };
@@ -1505,9 +1225,7 @@ function isWorkerMode(): boolean {
   return process.env[EnvVars.WORKER_MODE] === ProcessFlag.TRUE && !!process.env[EnvVars.BEAD_ID] && !!process.env[EnvVars.STATE_ID];
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
+// isRecord is imported from ./extension/PiEventAdapters.js
 
 function parseJsonIfString(value: unknown): unknown {
   if (typeof value !== 'string') return value;
@@ -1545,52 +1263,8 @@ function normalizeChecklistItem(raw: Record<string, unknown>): ChecklistItem | n
   } as ChecklistItem;
 }
 
-function teammateSignalEventData(event: TeammateEvent): Record<string, unknown> {
-  const data: Record<string, unknown> = {
-    type: event.type,
-    beadId: event.beadId,
-    workerId: event.workerId,
-    sessionStateId: event.sessionStateId,
-    stateId: event.stateId,
-    idempotencyKey: event.idempotencyKey
-  };
-  const anyEvent = event as unknown as Record<string, unknown>;
-  for (const key of ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']) {
-    if (anyEvent[key] !== undefined) data[key] = anyEvent[key];
-  }
-  return data;
-}
-
-async function hasAppliedTeammateSignal(services: RuntimeServices, event: TeammateEvent): Promise<boolean> {
-  const events = await services.eventStore.eventsForBead(event.beadId);
-  return findAppliedTeammateSignal(events, event) !== undefined;
-}
-
-async function postWorkerSignal(services: RuntimeServices, event: TeammateEvent): Promise<void> {
-  await services.eventStore.record(DomainEventName.SIGNAL_INTENT_RECORDED, teammateSignalEventData(event));
-
-  try {
-    await postHarnessSignal(event);
-    await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, teammateSignalEventData(event));
-    return;
-  } catch (error) {
-    const applied = await hasAppliedTeammateSignal(services, event).catch(() => false);
-    await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
-      ...teammateSignalEventData(event),
-      error: String(error),
-      appliedAfterTransportFailure: applied
-    }).catch(() => {});
-
-    if (applied) {
-      await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
-        ...teammateSignalEventData(event),
-        source: 'event-store-reconcile'
-      });
-      return;
-    }
-    throw error;
-  }
-}
+// teammateSignalEventData, hasAppliedTeammateSignal, postWorkerSignal are
+// imported from ./extension/SignalController.js
 
 function actionRunContext(action: TeammateAction): ActionRunContext {
   if (action.context === ActionRunContext.FRESH || action.contextMode === ActionContextMode.SUBAGENT) {
@@ -1921,21 +1595,18 @@ async function runParentSequenceActionsBeforeActive(
   run.parentSequenceCompleted = true;
 }
 
+/**
+ * Build a TeammateEvent. Resolves env values here (extension.ts is the
+ * allowed boundary for process.env) and delegates to buildWorkerEventFrom
+ * in SignalController.ts which is env-free.
+ */
 function buildWorkerEvent(type: TeammateEventType, fields: any): TeammateEvent {
-  const timestamp = Date.now();
-  const workerId = process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`;
-  const sessionStateId = process.env[EnvVars.SESSION_STATE_ID];
-  const event: Partial<TeammateEvent> = {
-    ...fields,
-    type,
-    beadId: fields.beadId || process.env[EnvVars.BEAD_ID],
-    workerId,
-    sessionStateId,
-    stateId: fields.stateId || process.env[EnvVars.STATE_ID] || fields.nextPhase || WorkerDefaults.UNKNOWN_STATE_ID,
-    timestamp
-  };
-  event.idempotencyKey = createTeammateEventIdempotencyKey(event);
-  return event as TeammateEvent;
+  return buildWorkerEventFrom(type, fields, {
+    workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
+    sessionStateId: process.env[EnvVars.SESSION_STATE_ID],
+    beadId: process.env[EnvVars.BEAD_ID],
+    stateId: process.env[EnvVars.STATE_ID]
+  }, WorkerDefaults.UNKNOWN_STATE_ID);
 }
 
 function seedCompletedActionToolEvidence(
