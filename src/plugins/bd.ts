@@ -822,14 +822,25 @@ export function createBdPlugin(eventStore: EventStore) {
         id: Type.String({ description: 'The ID of the Bead' })
       }),
       execute: async ({ id }: { id: string }) => {
-        const issue = await getIssue(eventStore, id);
-	        if (issue.status === BeadsIssueStatus.IN_PROGRESS) {
-	           await runBd(eventStore, ['update', id, '--status', BeadsIssueStatus.OPEN]);
-	        }
-	        await eventStore.record(DomainEventName.BEAD_RELEASED, { beadId: id });
-	        const result = await normalizeIssue(eventStore, await getIssue(eventStore, id));
-	        return result;
-	      }
+        let issue: BeadsIssueRecord | undefined;
+        try {
+          issue = await getIssue(eventStore, id);
+        } catch {
+          // Bead no longer exists in the task store (deleted/purged). Record a
+          // tombstone so slot-health pruning can clean up the tracked entry and
+          // future projections exclude this ID from live/ready accounting.
+          Logger.info(Component.BEADS_CLI, 'Bead not found during release; recording tombstone and releasing slot', { beadId: id });
+          await eventStore.record(DomainEventName.BEAD_RELEASED, { beadId: id, tombstoned: true });
+          await eventStore.record(DomainEventName.BEAD_TOMBSTONED, { beadId: id });
+          return { id, tombstoned: true };
+        }
+        if (issue.status === BeadsIssueStatus.IN_PROGRESS) {
+          await runBd(eventStore, ['update', id, '--status', BeadsIssueStatus.OPEN]);
+        }
+        await eventStore.record(DomainEventName.BEAD_RELEASED, { beadId: id });
+        const result = await normalizeIssue(eventStore, await getIssue(eventStore, id));
+        return result;
+      }
     },
     {
       name: PluginToolName.BD_UPDATE_STATUS,

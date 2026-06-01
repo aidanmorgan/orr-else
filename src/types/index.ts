@@ -82,6 +82,10 @@ export interface HarnessBeadMetadata {
     expiresAt: string;
   };
   leaseSessionId?: string;
+  /** Set when a BEAD_TOMBSTONED event has been recorded — the task-store
+   *  record no longer exists and this Bead must not be scheduled or counted
+   *  as live/ready work. */
+  tombstoned?: boolean;
 }
 
 export interface BeadsIssueRecord {

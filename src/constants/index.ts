@@ -122,6 +122,7 @@ export enum DomainEventName {
   BEAD_METADATA_MERGED = 'BEAD_METADATA_MERGED',
   BEAD_RELEASED = 'BEAD_RELEASED',
   BEAD_STATUS_UPDATED = 'BEAD_STATUS_UPDATED',
+  BEAD_TOMBSTONED = 'BEAD_TOMBSTONED',
   ACTION_COMPLETED = 'ACTION_COMPLETED',
   CHECKLIST_ITEM_ADDED = 'CHECKLIST_ITEM_ADDED',
   CHECKLIST_ITEM_TICKED = 'CHECKLIST_ITEM_TICKED',
@@ -946,7 +947,31 @@ export const ProjectToolDefaults = {
   // Char limit applied to individual message/rule strings before they are stored.
   COMMAND_FAILURE_MESSAGE_CHARS: 200,
   // Char limit applied to a single representative traceback/context line.
-  COMMAND_FAILURE_CONTEXT_LINE_CHARS: 160
+  COMMAND_FAILURE_CONTEXT_LINE_CHARS: 160,
+  // Bounded-storage / scratch-cleanup constants.
+  //
+  // ROOT CAUSE: Each project-tool invocation allocates a unique scratch dir at
+  //   .tmp/tool-calls/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}
+  // The harness exports TMPDIR/TMP/TEMP pointing at the `tmp/` sub-directory of
+  // that callDir so child processes (e.g. `uv`, Python pip) use it for their
+  // caches.  Once persistAndBoundResult() writes the structured JSON output to
+  // `output/<name>-<id>.json`, the raw scratch tree (uv-cache, package
+  // environments, pip download dirs) is no longer needed by the harness and is
+  // never removed.  Repeated reference_docs calls therefore accumulate one full
+  // uv-cache/package-env tree per invocation.
+  //
+  // FIX: after the output JSON is safely persisted, remove only the `tmp/`
+  // sub-directory (SCRATCH_DIR_NAME) inside the unique invocation callDir.  The
+  // `output/` sub-directory and its JSON artifact are preserved intact.  The
+  // callDir itself is also preserved so any future harness code that scans it
+  // still finds the output tree.  Cleanup is keyed by toolInvocationId so
+  // parallel teammates never touch each other's dirs.
+  //
+  // SCRATCH_CLEANUP_ENABLED: set to true to activate post-result tmpDir removal.
+  SCRATCH_CLEANUP_ENABLED: true,
+  // Log one concise summary entry per invocation (bytes reclaimed, dirs removed).
+  // Never dumps individual file paths so the log stays bounded.
+  SCRATCH_CLEANUP_LOG_SUMMARY: true
 } as const;
 
 export const LoggingDefaults = {

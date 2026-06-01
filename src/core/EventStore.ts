@@ -85,6 +85,10 @@ export interface BeadStateChartProjection {
   lease?: HarnessBeadMetadata['lease'];
   leaseSessionId?: string;
   worktreePath?: string;
+  /** True when a BEAD_TOMBSTONED event has been recorded for this Bead —
+   *  the task-store record no longer exists and the Bead must not be
+   *  scheduled or counted as live/ready work. */
+  tombstoned?: boolean;
   handovers: Record<string, string>;
   completedActionIds: string[];
   compactionCount?: number;
@@ -812,6 +816,11 @@ export class EventStore {
           projection.lease = undefined;
           projection.leaseSessionId = undefined;
           break;
+        case DomainEventName.BEAD_TOMBSTONED:
+          projection.tombstoned = true;
+          projection.lease = undefined;
+          projection.leaseSessionId = undefined;
+          break;
       }
     }
 
@@ -902,6 +911,11 @@ export class EventStore {
           delete projection.lease;
           delete projection.leaseSessionId;
           break;
+        case DomainEventName.BEAD_TOMBSTONED:
+          projection.tombstoned = true;
+          delete projection.lease;
+          delete projection.leaseSessionId;
+          break;
         case DomainEventName.BEAD_STATUS_UPDATED:
           if (data.status) projection.status = data.status;
           break;
@@ -944,6 +958,7 @@ export class EventStore {
     projection.restartEvent = stateChart.restartEvent;
     projection.restartFromState = stateChart.restartFromState;
     projection.restartTargetState = stateChart.restartTargetState;
+    if (stateChart.tombstoned) projection.tombstoned = true;
 
     if (includeDetails) {
       const dynamicChecklists: Record<string, DynamicChecklistRun> = workflowScoped

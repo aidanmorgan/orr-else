@@ -568,6 +568,7 @@ export class Supervisor {
         case DomainEventName.BEAD_RELEASED:
         case DomainEventName.BEAD_CLOSED:
         case DomainEventName.TEAMMATE_PROCESS_EXITED:
+        case DomainEventName.BEAD_TOMBSTONED:
           latestTrackedState = 'inactive';
           break;
         case DomainEventName.BEAD_STATUS_UPDATED:

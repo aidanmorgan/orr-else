@@ -3,7 +3,7 @@ import { execa } from 'execa';
 import { createBdPlugin, parseFlatListOutput, parseReadyPlainOutput } from '../src/plugins/bd.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
-import { App, BeadsDefaults, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
+import { App, BeadsDefaults, DomainEventName, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
 
 const execaMock = vi.hoisted(() => {
   function bdOutput(args: string[], options: any) {
@@ -387,6 +387,122 @@ describe('Beads JSONL compatibility tools', () => {
     expect(detailed.checkpoints).toHaveLength(StateChartToolDefaults.DETAIL_CHECKPOINTS);
     expect(detailed.transitions).toHaveLength(StateChartToolDefaults.DETAIL_TRANSITIONS);
     expect(detailed.transitions[0].summary.length).toBeLessThan(600);
+  });
+
+  // --- BD_RELEASE missing-bead regression tests (pi-experiment-59au) ---
+
+  it('BD_RELEASE does not throw and records BEAD_RELEASED + BEAD_TOMBSTONED when the bead no longer exists', async () => {
+    // The fix: when getIssue throws "Bead <id> not found" during BD_RELEASE.execute,
+    // the catch block records BEAD_RELEASED (tombstoned:true) and BEAD_TOMBSTONED,
+    // then returns { id, tombstoned: true } instead of rethrowing.
+    //
+    // Pre-fix failure reason: BD_RELEASE had no try/catch around the getIssue call.
+    // A missing bead caused getIssue to throw, which propagated out of execute —
+    // meaning (a) execute threw instead of returning, (b) neither BEAD_RELEASED nor
+    // BEAD_TOMBSTONED was recorded, and (c) the supervisor slot was NOT freed.
+    const missingBeadId = 'bd-missing-59au';
+    // Make execa return an empty array for 'show' so getIssue throws "Bead not found"
+    vi.mocked(execa).mockImplementationOnce(async (bin: string, args: string[], _options: any = {}) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('show')) {
+        return { stdout: '[]', stderr: '' };
+      }
+      throw new Error('unexpected call during missing-bead test');
+    });
+
+    const recordedEvents: Array<{ event: string; data: any }> = [];
+    const mockEventStore = {
+      record: vi.fn(async (event: string, data: any) => {
+        recordedEvents.push({ event, data });
+      }),
+      projectBead: vi.fn(async () => ({})),
+      projectBeads: vi.fn(async () => new Map())
+    } as any;
+
+    const releaseTool = createBdPlugin(mockEventStore).tools.find(t => t.name === 'bd_release');
+    if (!releaseTool) throw new Error('missing bd_release tool');
+
+    // Must NOT throw — the fix catches the missing-bead error
+    const result = await releaseTool.execute({ id: missingBeadId }) as any;
+
+    // Returns the tombstone sentinel
+    expect(result).toEqual({ id: missingBeadId, tombstoned: true });
+
+    // Must record BEAD_RELEASED (with tombstoned:true) then BEAD_TOMBSTONED
+    expect(recordedEvents).toContainEqual({
+      event: DomainEventName.BEAD_RELEASED,
+      data: expect.objectContaining({ beadId: missingBeadId, tombstoned: true })
+    });
+    expect(recordedEvents).toContainEqual({
+      event: DomainEventName.BEAD_TOMBSTONED,
+      data: expect.objectContaining({ beadId: missingBeadId })
+    });
+
+    // BEAD_RELEASED must appear before BEAD_TOMBSTONED (event ordering contract)
+    const releasedIndex = recordedEvents.findIndex(e => e.event === DomainEventName.BEAD_RELEASED);
+    const tombstonedIndex = recordedEvents.findIndex(e => e.event === DomainEventName.BEAD_TOMBSTONED);
+    expect(releasedIndex).toBeLessThan(tombstonedIndex);
+  });
+
+  it('BD_RELEASE records only BEAD_RELEASED (no tombstone) for a bead that still exists', async () => {
+    // Confirm the pre-existing happy path is unaffected by the fix.
+    // Pre-fix failure reason: this test would still pass without the fix because
+    // the normal (bead-present) path was unchanged — so this test guards that
+    // the fix does not regress the normal release flow.
+    const existingBeadId = 'bd-existing-59au';
+    // The default execa mock already handles 'show' returning a valid record and
+    // 'update' returning an updated record, but we need a custom show that returns
+    // the right ID.  Override for this test.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[], _options: any = {}) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('show')) {
+        return {
+          stdout: `[{"id":"${existingBeadId}","title":"Existing","status":"open","priority":1}]`,
+          stderr: ''
+        };
+      }
+      if (args.includes('update')) {
+        return {
+          stdout: `[{"id":"${existingBeadId}","title":"Existing","status":"open","priority":1}]`,
+          stderr: ''
+        };
+      }
+      if (args.includes('export')) {
+        return { stdout: `{"id":"${existingBeadId}","title":"Existing"}`, stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    });
+
+    const recordedEvents: Array<{ event: string; data: any }> = [];
+    const mockEventStore = {
+      record: vi.fn(async (event: string, data: any) => {
+        recordedEvents.push({ event, data });
+      }),
+      projectBead: vi.fn(async () => ({})),
+      projectBeads: vi.fn(async () => new Map())
+    } as any;
+
+    const releaseTool = createBdPlugin(mockEventStore).tools.find(t => t.name === 'bd_release');
+    if (!releaseTool) throw new Error('missing bd_release tool');
+
+    const result = await releaseTool.execute({ id: existingBeadId }) as any;
+
+    // Returns a normal Bead record (not a tombstone sentinel)
+    expect(result.id).toBe(existingBeadId);
+    expect(result.tombstoned).toBeUndefined();
+
+    // Records BEAD_RELEASED without a tombstone flag
+    expect(recordedEvents).toContainEqual({
+      event: DomainEventName.BEAD_RELEASED,
+      data: expect.objectContaining({ beadId: existingBeadId })
+    });
+    const releasedEvent = recordedEvents.find(e => e.event === DomainEventName.BEAD_RELEASED);
+    expect(releasedEvent?.data?.tombstoned).toBeUndefined();
+
+    // Must NOT record BEAD_TOMBSTONED
+    expect(recordedEvents.some(e => e.event === DomainEventName.BEAD_TOMBSTONED)).toBe(false);
+
+    vi.mocked(execa).mockClear();
   });
 
   it('parses compact ready and list output without loading full JSON records', () => {

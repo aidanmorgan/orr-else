@@ -413,4 +413,134 @@ describe('Supervisor', () => {
     // noProgressTimeoutMs resolved from config
     expect(snapshot.noProgressTimeoutMs).toBe(IMMEDIATE_NO_PROGRESS_TIMEOUT_MS);
   });
+
+  // --- Stale-Bead-ID regression tests (pi-experiment-59au) ---
+
+  it('pruning via hasDurableInactiveEvent recognizes BEAD_TOMBSTONED as a durable-inactive marker', async () => {
+    // Scenario 1: a Bead that goes missing during an active heartbeat.
+    // When BD_RELEASE records BEAD_TOMBSTONED (new behaviour), the supervisor
+    // must treat it as durable-inactive and prune the tracked slot.
+    const now = NOW_MS;
+    const tombstonedEvents = [
+      domainEvent('claim-t', DomainEventName.BEAD_CLAIMED, 'bead-tombstoned', now - (TimeMs.SECOND * 3), { stateId: 'Planning' }),
+      // BD_RELEASE now records BEAD_RELEASED then BEAD_TOMBSTONED for missing beads
+      domainEvent('rel-t', DomainEventName.BEAD_RELEASED, 'bead-tombstoned', now - TimeMs.SECOND, { tombstoned: true }),
+      domainEvent('tomb-t', DomainEventName.BEAD_TOMBSTONED, 'bead-tombstoned', now - TimeMs.SECOND)
+    ];
+    const { supervisor, records, clock } = supervisorHarness(
+      now,
+      [{ workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: now }],
+      new Set(['bead-1']),
+      2,
+      new Map([['bead-tombstoned', tombstonedEvents]])
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-tombstoned');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    (supervisor as any).startedBeadAtMs.set('bead-tombstoned', clock.now() - (TimeMs.SECOND * 4));
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    // Tombstoned bead must be pruned from slot tracking
+    expect((supervisor as any).startedBeads.has('bead-tombstoned')).toBe(false);
+    expect((supervisor as any).missingStartedBeadChecks.has('bead-tombstoned')).toBe(false);
+    // The existing bead must still be tracked
+    expect((supervisor as any).startedBeads.has('bead-1')).toBe(true);
+    // Slot health must not count the tombstoned bead as a tracked active bead
+    expect(records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED)?.data?.trackedBeadIds).not.toContain('bead-tombstoned');
+  });
+
+  it('reconcileStartedBeads releases a missing Bead cleanly when BD_RELEASE records BEAD_TOMBSTONED', async () => {
+    // Scenario 2: a Bead goes missing during process-exit release.
+    // BD_RELEASE succeeds (returns { tombstoned: true }) even when the Bead no
+    // longer exists in the task store.  The supervisor release path must not
+    // retry or spam logs — one info log is acceptable.
+    const { supervisor, records, release, clock } = supervisorHarness(NOW_MS, [], new Set());
+    // Seed the tracking maps as if the bead was started but then its pane disappeared
+    (supervisor as any).startedBeads.add('bead-missing');
+    (supervisor as any).startedBeadAtMs.set('bead-missing', clock.now() - TimeMs.MINUTE);
+    (supervisor as any).missingStartedBeadChecks.set('bead-missing', Defaults.TEAMMATE_MISSING_REAP_THRESHOLD - 1);
+
+    // Wire release to succeed (simulating BD_RELEASE's new no-throw behaviour for missing beads)
+    release.mockResolvedValueOnce({ id: 'bead-missing', tombstoned: true });
+
+    await (supervisor as any).reconcileStartedBeads();
+
+    // Release must be called exactly once — no retry loop
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledWith({ id: 'bead-missing' });
+    // Slot must be freed
+    expect((supervisor as any).startedBeads.has('bead-missing')).toBe(false);
+    // A TEAMMATE_PROCESS_EXITED event must be recorded (existing behaviour)
+    expect(records.some(r => r.event === DomainEventName.TEAMMATE_PROCESS_EXITED)).toBe(true);
+  });
+
+  it('hasDurableInactiveEvent returns true for BEAD_CLAIMED + BEAD_TOMBSTONED alone (no BEAD_RELEASED)', () => {
+    // Isolated guard for the BEAD_TOMBSTONED case in hasDurableInactiveEvent.
+    //
+    // Pre-fix failure reason: BEAD_TOMBSTONED was absent from the switch statement in
+    // hasDurableInactiveEvent.  With only BEAD_CLAIMED + BEAD_TOMBSTONED in the event
+    // list (no BEAD_RELEASED to trigger the inactive branch), latestTrackedState stayed
+    // 'active' (set by BEAD_CLAIMED) and the method returned false — meaning the bead
+    // was NOT treated as durable-inactive, the slot was never pruned from startedBeads,
+    // and the supervisor would keep counting it as an occupied slot indefinitely.
+    const now = NOW_MS;
+    const { supervisor } = supervisorHarness(now);
+    const events: DomainEvent[] = [
+      domainEvent('claim-isolated', DomainEventName.BEAD_CLAIMED, 'bead-tombstoned-only', now - (TimeMs.SECOND * 3), { stateId: 'Planning' }),
+      // Deliberately NO BEAD_RELEASED — only the tombstone event from the new fix path
+      domainEvent('tomb-isolated', DomainEventName.BEAD_TOMBSTONED, 'bead-tombstoned-only', now - TimeMs.SECOND)
+    ];
+    (supervisor as any).startedBeadAtMs.set('bead-tombstoned-only', now - (TimeMs.SECOND * 4));
+
+    const result = (supervisor as any).hasDurableInactiveEvent('bead-tombstoned-only', events);
+
+    // With the fix, BEAD_TOMBSTONED sets latestTrackedState = 'inactive' → returns true
+    expect(result).toBe(true);
+  });
+
+  it('pruneDurablyInactiveStartedBeads prunes a bead with BEAD_CLAIMED + BEAD_TOMBSTONED alone', async () => {
+    // Integration-level check: pruneDurablyInactiveStartedBeads must remove the bead from
+    // startedBeads when the event history contains only BEAD_CLAIMED + BEAD_TOMBSTONED
+    // (no BEAD_RELEASED).
+    //
+    // Pre-fix failure reason: same as the unit test above — hasDurableInactiveEvent returned
+    // false for a tombstone-only history, so pruneDurablyInactiveStartedBeads never called
+    // markBeadExited and the bead stayed in startedBeads, inflating slot counts.
+    const now = NOW_MS;
+    const tombstonedOnlyEvents = [
+      domainEvent('claim-prune', DomainEventName.BEAD_CLAIMED, 'bead-prune-tombstone', now - (TimeMs.SECOND * 3), { stateId: 'Planning' }),
+      domainEvent('tomb-prune', DomainEventName.BEAD_TOMBSTONED, 'bead-prune-tombstone', now - TimeMs.SECOND)
+    ];
+    const { supervisor, clock } = supervisorHarness(
+      now,
+      [],
+      new Set(),
+      1,
+      new Map([['bead-prune-tombstone', tombstonedOnlyEvents]])
+    );
+    (supervisor as any).startedBeads.add('bead-prune-tombstone');
+    (supervisor as any).startedBeadAtMs.set('bead-prune-tombstone', clock.now() - (TimeMs.SECOND * 4));
+
+    // pruneDurablyInactiveStartedBeads takes the live-bead set; empty = all tracked are "missing"
+    await (supervisor as any).pruneDurablyInactiveStartedBeads(new Set<string>());
+
+    expect((supervisor as any).startedBeads.has('bead-prune-tombstone')).toBe(false);
+  });
+
+  it('hasDurableInactiveEvent returns false for an active Bead with no tombstone (existing path unaffected)', () => {
+    // Scenario 3: normal existing-Bead scheduling must be unaffected.
+    // A Bead with only BEAD_CLAIMED / TEAMMATE_SPAWNED events is not durable-inactive.
+    const now = NOW_MS;
+    const { supervisor } = supervisorHarness(now);
+    const events: DomainEvent[] = [
+      domainEvent('claim', DomainEventName.BEAD_CLAIMED, 'bead-active', now - TimeMs.SECOND, { stateId: 'Planning' }),
+      domainEvent('spawn', DomainEventName.TEAMMATE_SPAWNED, 'bead-active', now - 500, { stateId: 'Planning' })
+    ];
+    (supervisor as any).startedBeadAtMs.set('bead-active', now - TimeMs.SECOND);
+
+    const result = (supervisor as any).hasDurableInactiveEvent('bead-active', events);
+
+    expect(result).toBe(false);
+  });
 });
