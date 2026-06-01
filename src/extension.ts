@@ -1,4 +1,16 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentEndEvent,
+  BeforeAgentStartEvent,
+  BeforeProviderRequestEvent,
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  SessionStartEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  TurnEndEvent,
+  TurnStartEvent
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import * as fs from 'fs';
 import * as path from 'path';
@@ -30,7 +42,7 @@ import {
   findAppliedTeammateSignal,
   isStatusMutatingTeammateEvent
 } from './core/TeammateEvents.js';
-import { capAnthropicMaxTokens, resolveMaxOutputTokens } from './core/ProviderRequestCap.js';
+import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from './core/ProviderRequestCap.js';
 import { buildTurnUsageRecord } from './core/TokenUsage.js';
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
 import { postHarnessSignal } from './core/HarnessApiClient.js';
@@ -321,7 +333,7 @@ async function initializeObservability(services: RuntimeServices): Promise<Obser
   return runtimeObservability;
 }
 
-function toolResult(value: any) {
+function toolResult(value: unknown) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
   return {
     content: [{ type: 'text' as const, text }],
@@ -339,8 +351,17 @@ function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {
 
 // summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
 
-function beadIdFromToolParams(params: any, session: ExtensionSession): string | undefined {
-  return params?.beadId || params?.id || params?.arguments?.beadId || params?.arguments?.id || session.activeRun?.beadId || process.env[EnvVars.BEAD_ID];
+function beadIdFromToolParams(params: Record<string, unknown> | undefined, session: ExtensionSession): string | undefined {
+  if (!params) return session.activeRun?.beadId || process.env[EnvVars.BEAD_ID];
+  const args = isRecord(params.arguments) ? params.arguments : undefined;
+  return (
+    (typeof params.beadId === 'string' ? params.beadId : undefined) ||
+    (typeof params.id === 'string' ? params.id : undefined) ||
+    (args && typeof args.beadId === 'string' ? args.beadId : undefined) ||
+    (args && typeof args.id === 'string' ? args.id : undefined) ||
+    session.activeRun?.beadId ||
+    process.env[EnvVars.BEAD_ID]
+  );
 }
 
 function activeSpanAttributes(beadId: string | undefined, session: ExtensionSession): SpanAttributes {
@@ -489,9 +510,10 @@ const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
   `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read project-tool output archives directly. ` +
   'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';
 
-function nativeToolPath(event: any): string {
+function nativeToolPath(event: ToolCallEvent): string {
+  const input = event.input as Record<string, unknown>;
   for (const key of NATIVE_PATH_INPUT_KEYS) {
-    const value = event.input?.[key];
+    const value = input[key];
     if (typeof value === 'string' && value.trim()) return value;
   }
   return '';
@@ -556,7 +578,7 @@ function isOperationalMutationPath(requestedPath: string): boolean {
     || OPERATIONAL_MUTATION_DIRS.some(directory => pathWithin(relativePath, directory));
 }
 
-function nativeOperationalMutationPolicyRejection(event: any): string | null {
+function nativeOperationalMutationPolicyRejection(event: ToolCallEvent): string | null {
   if (!isWorkerMode() || !NATIVE_OPERATIONAL_MUTATION_TOOLS.has(event.toolName)) return null;
   const requestedPath = nativeToolPath(event);
   if (!requestedPath || !isOperationalMutationPath(requestedPath)) return null;
@@ -578,10 +600,11 @@ function gitSubcommand(args: Array<{ text: string }>): string | undefined {
   return undefined;
 }
 
-function shellOperationalMutationPolicyRejection(event: any, services: RuntimeServices): string | null {
+function shellOperationalMutationPolicyRejection(event: ToolCallEvent, services: RuntimeServices): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
-  if (event.input?.[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
-  const command = typeof event.input?.command === 'string' ? event.input.command : '';
+  const input = event.input as Record<string, unknown>;
+  if (input[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
+  const command = typeof input.command === 'string' ? input.command : '';
   if (!command.trim()) return null;
 
   let commands;
@@ -622,12 +645,13 @@ export function shouldPersistBlockedBeadStatus(eventType: string, nextState: str
   return eventType === TeammateEventType.STATE_BLOCKED || nextState === BeadStatus.BLOCKED;
 }
 
-function shellPolicyRejection(event: any, config: HarnessConfig, services: RuntimeServices): string | null {
+function shellPolicyRejection(event: ToolCallEvent, config: HarnessConfig, services: RuntimeServices): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
-  if (event.input?.[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
+  const input = event.input as Record<string, unknown>;
+  if (input[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
 
   const policy = config.settings.pi?.shell;
-  const command = typeof event.input?.command === 'string' ? event.input.command : '';
+  const command = typeof input.command === 'string' ? input.command : '';
   if (!command.trim()) return null;
 
   for (const pattern of policy?.blockedCommandPatterns || []) {
@@ -648,10 +672,11 @@ function shellPolicyRejection(event: any, config: HarnessConfig, services: Runti
   return null;
 }
 
-function mcpPolicyRejection(event: any, config: HarnessConfig): string | null {
+function mcpPolicyRejection(event: ToolCallEvent, config: HarnessConfig): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.MCP) return null;
   const policy = config.settings.pi?.mcp;
-  const requestedTool = typeof event.input?.tool === 'string' ? event.input.tool.trim() : '';
+  const input = event.input as Record<string, unknown>;
+  const requestedTool = typeof input.tool === 'string' ? input.tool.trim() : '';
   const isMcpToolCall = requestedTool.length > 0;
 
   if (policy?.allowToolCalls === false) {
@@ -674,7 +699,7 @@ function mcpPolicyRejection(event: any, config: HarnessConfig): string | null {
   return null;
 }
 
-function operationalArtifactReadPolicyRejection(event: any): string | null {
+function operationalArtifactReadPolicyRejection(event: ToolCallEvent): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.READ) return null;
   const requestedPath = nativeToolPath(event);
   if (!requestedPath.trim()) return null;
@@ -690,9 +715,10 @@ function operationalArtifactReadPolicyRejection(event: any): string | null {
     'inside a teammate context. Use `bd_get_state_chart`, `bd_get_bead`, `get_artifact_paths`, and configured artifacts for state reconstruction.';
 }
 
-function oversizedReadPolicyRejection(event: any): string | null {
+function oversizedReadPolicyRejection(event: ToolCallEvent): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.READ) return null;
-  const limit = Number(event.input?.limit);
+  const input = event.input as Record<string, unknown>;
+  const limit = Number(input.limit);
   if (!Number.isFinite(limit) || limit <= NativeReadPolicyDefaults.MAX_LIMIT_LINES) return null;
 
   return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` limit ${Math.floor(limit)} exceeds ` +
@@ -706,12 +732,13 @@ function registerProviderRequestCap(pi: ExtensionAPI, session: ExtensionSession)
   if (session.providerRequestCapRegistered) return;
   session.providerRequestCapRegistered = true;
 
-  pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: any) => {
+  pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: BeforeProviderRequestEvent) => {
     const cap = resolveMaxOutputTokens(process.env[EnvVars.MAX_OUTPUT_TOKENS]);
-    const payload = event?.payload;
+    const payload = event.payload;
     const originalMaxTokens =
       payload && typeof payload === 'object' ? (payload as { max_tokens?: unknown }).max_tokens : undefined;
-    const capped = capAnthropicMaxTokens(payload, cap);
+    // capAnthropicMaxTokens guards payload shape internally (non-object → null).
+    const capped = capAnthropicMaxTokens(payload as CappableAnthropicPayload, cap);
     if (!capped) return undefined;
     Logger.info(Component.ORR_ELSE, 'Capped Anthropic max_tokens to fit subscription included quota', {
       originalMaxTokens,
@@ -726,14 +753,15 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, se
   if (session.piToolObserverRegistered) return;
   session.piToolObserverRegistered = true;
 
-  pi.on(PiEventName.TOOL_CALL, async (event: any) => {
+  pi.on(PiEventName.TOOL_CALL, async (event: ToolCallEvent) => {
     if (!session.observedPiTools.has(event.toolName)) return;
     const runtimeObservability = session.piToolObservability;
     const toolCallId = eventToolCallId(event);
     const fileMutationPolicyResult = await services.fileMutationPolicy.apply(event);
-    const beadId = beadIdFromToolParams(event.input, session);
+    const input = event.input as Record<string, unknown>;
+    const beadId = beadIdFromToolParams(input, session);
     runtimeObservability?.recordToolInvocation(event.toolName);
-    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, event.input, beadId, session, true));
+    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, input, beadId, session, true));
     if (span && toolCallId) session.observedPiToolSpans.set(toolCallId, span);
 
     await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
@@ -741,7 +769,7 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, se
       tool: event.toolName,
       externalPiTool: true,
       toolCallId,
-      params: summarizeForEvent(event.input)
+      params: summarizeForEvent(input)
     }).catch(error => {
       Logger.warn(Component.ORR_ELSE, 'Failed to record Pi tool invocation start', {
         tool: event.toolName,
@@ -792,7 +820,7 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, se
     };
   });
 
-  pi.on(PiEventName.TOOL_RESULT, async (event: any) => {
+  pi.on(PiEventName.TOOL_RESULT, async (event: ToolResultEvent) => {
     if (!session.observedPiTools.has(event.toolName)) return;
     const runtimeObservability = session.piToolObservability;
     const beadId = beadIdFromToolParams(event.input, session);
@@ -830,20 +858,26 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, se
   });
 }
 
-async function recordTurnUsage(event: any, services: RuntimeServices, session: ExtensionSession): Promise<void> {
+async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServices, session: ExtensionSession): Promise<void> {
   const endTimeMs = Date.now();
   const startTimeMs = session.currentTurnStartMs ?? endTimeMs;
   session.currentTurnStartMs = undefined;
 
-  const record = buildTurnUsageRecord(event?.message?.usage, {
-    beadId: process.env[EnvVars.BEAD_ID] || App.COORDINATOR_ID,
-    stateId: process.env[EnvVars.STATE_ID] || App.COORDINATOR_ID,
-    actionId: process.env[EnvVars.ACTION_ID] || App.TURN_ACTION_ID,
-    workerId: process.env[EnvVars.WORKER_ID] || App.COORDINATOR_ID,
-    model: event?.message?.model || process.env[EnvVars.LLM_MODEL] || App.UNKNOWN_MODEL,
-    startTimeMs,
-    endTimeMs
-  });
+  // message is AgentMessage (union of Message | CustomAgentMessages); usage/model are on AssistantMessage only.
+  // Access through unknown so we don't depend on which union member is present at runtime.
+  const msg: Record<string, unknown> = isRecord(event.message) ? (event.message as unknown as Record<string, unknown>) : {};
+  const record = buildTurnUsageRecord(
+    isRecord(msg.usage) ? (msg.usage as Parameters<typeof buildTurnUsageRecord>[0]) : undefined,
+    {
+      beadId: process.env[EnvVars.BEAD_ID] || App.COORDINATOR_ID,
+      stateId: process.env[EnvVars.STATE_ID] || App.COORDINATOR_ID,
+      actionId: process.env[EnvVars.ACTION_ID] || App.TURN_ACTION_ID,
+      workerId: process.env[EnvVars.WORKER_ID] || App.COORDINATOR_ID,
+      model: (typeof msg.model === 'string' ? msg.model : undefined) || process.env[EnvVars.LLM_MODEL] || App.UNKNOWN_MODEL,
+      startTimeMs,
+      endTimeMs
+    }
+  );
   if (!record) return;
 
   services.telemetryStore.recordTurn(record.telemetry);
@@ -874,16 +908,16 @@ function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServ
   if (session.agentLifecycleObserverRegistered) return;
   session.agentLifecycleObserverRegistered = true;
 
-  pi.on(PiEventName.TURN_START, async (event: any) => {
-    session.currentTurnStartMs = typeof event?.timestamp === 'number' ? event.timestamp : Date.now();
+  pi.on(PiEventName.TURN_START, async (event: TurnStartEvent) => {
+    session.currentTurnStartMs = typeof event.timestamp === 'number' ? event.timestamp : Date.now();
   });
 
-  pi.on(PiEventName.TURN_END, async (event: any, ctx: ExtensionContext) => {
+  pi.on(PiEventName.TURN_END, async (event: TurnEndEvent, ctx: ExtensionContext) => {
     await dispatchAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services, session);
     await recordTurnUsage(event, services, session);
   });
 
-  pi.on(PiEventName.AGENT_END, async (event: any, ctx: ExtensionContext) => {
+  pi.on(PiEventName.AGENT_END, async (event: AgentEndEvent, ctx: ExtensionContext) => {
     await dispatchAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services, session);
     Logger.info(Component.OBSERVABILITY, 'Session token usage summary', services.telemetryStore.getSummary());
   });
@@ -892,7 +926,7 @@ function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServ
 // handleAgentLifecycleFailure is imported from ./extension/AgentLifecycleController.js
 // The local shim below wires the session-mutation callbacks and env-resolved
 // buildWorkerEvent so the controller module remains process.env-free.
-async function dispatchAgentLifecycleFailure(event: any, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
+async function dispatchAgentLifecycleFailure(event: AgentEndEvent | TurnEndEvent, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
   await handleAgentLifecycleFailure(event, ctx, source, services, {
     isWorker: isWorkerMode(),
     activeRun: session.activeRun,
@@ -1601,7 +1635,7 @@ async function runParentSequenceActionsBeforeActive(
  * allowed boundary for process.env) and delegates to buildWorkerEventFrom
  * in SignalController.ts which is env-free.
  */
-function buildWorkerEvent(type: TeammateEventType, fields: any): TeammateEvent {
+function buildWorkerEvent(type: TeammateEventType, fields: Partial<TeammateEvent> & Record<string, unknown>): TeammateEvent {
   return buildWorkerEventFrom(type, fields, {
     workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
     sessionStateId: process.env[EnvVars.SESSION_STATE_ID],
@@ -2337,7 +2371,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     void runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
   });
 
-  pi.on(PiEventName.BEFORE_AGENT_START, async (event: any) => {
+  pi.on(PiEventName.BEFORE_AGENT_START, async (event: BeforeAgentStartEvent) => {
     if (!isWorkerMode()) return;
     const config = await services.configLoader.load();
     if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
@@ -2353,7 +2387,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     return skillPaths.length > 0 ? { skillPaths } : {};
   });
 
-  pi.on(PiEventName.SESSION_START, async (_event: any, ctx: any) => {
+  pi.on(PiEventName.SESSION_START, async (_event: SessionStartEvent, ctx: ExtensionContext) => {
     const config = await services.configLoader.load();
     const runtimeObservability = await initializeObservability(services);
     session.piToolObservability = runtimeObservability;

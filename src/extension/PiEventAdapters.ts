@@ -5,6 +5,7 @@
  * into typed shapes. No process.env reads — all values are parameters.
  */
 
+import type { ToolCallEvent, ToolResultEvent } from '@earendil-works/pi-coding-agent';
 import { WorkerDefaults, ToolResultStatus } from '../constants/index.js';
 
 // ── shared ───────────────────────────────────────────────────────────────────
@@ -138,11 +139,11 @@ export function resultIndicatesSuccess(result: unknown): boolean {
   return result.success === true || result.status === ToolResultStatus.PASSED;
 }
 
-export function externalPiToolEventIndicatesFailure(event: any): boolean {
+export function externalPiToolEventIndicatesFailure(event: ToolResultEvent): boolean {
   return event.isError === true || nestedResultIndicatesFailure(event.details) || contentIndicatesFailure(event.content);
 }
 
-export function externalPiToolResultFromEvent(event: any): Record<string, unknown> {
+export function externalPiToolResultFromEvent(event: ToolResultEvent): Record<string, unknown> {
   const failed = externalPiToolEventIndicatesFailure(event);
   return {
     tool: event.toolName,
@@ -175,17 +176,19 @@ function agentMessageError(value: unknown): string | null {
   return null;
 }
 
-export function agentEventError(event: any): string | null {
-  const direct = typeof event?.error === 'string'
-    ? event.error
-    : isRecord(event?.error) && typeof event.error.errorMessage === 'string'
-      ? event.error.errorMessage
+export function agentEventError(event: unknown): string | null {
+  const rec = isRecord(event) ? event : undefined;
+  const errorField = rec?.error;
+  const direct = typeof errorField === 'string'
+    ? errorField
+    : isRecord(errorField) && typeof errorField.errorMessage === 'string'
+      ? errorField.errorMessage
       : null;
   if (direct) return direct;
 
   const candidates = [
-    event?.message,
-    ...(Array.isArray(event?.messages) ? event.messages : [])
+    rec?.message,
+    ...(Array.isArray(rec?.messages) ? rec.messages : [])
   ];
   for (const candidate of candidates) {
     const messageError = agentMessageError(candidate);
@@ -196,6 +199,6 @@ export function agentEventError(event: any): string | null {
 
 // ── event tool call ID ────────────────────────────────────────────────────────
 
-export function eventToolCallId(event: any): string | undefined {
+export function eventToolCallId(event: ToolCallEvent | ToolResultEvent): string | undefined {
   return typeof event.toolCallId === 'string' ? event.toolCallId : undefined;
 }

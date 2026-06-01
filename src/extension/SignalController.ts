@@ -8,6 +8,7 @@
  * them in via the WorkerEnv parameter bag.
  */
 
+import type { BeadId } from '../types/ids.js';
 import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { createTeammateEventIdempotencyKey, findAppliedTeammateSignal } from '../core/TeammateEvents.js';
 import { postHarnessSignal } from '../core/HarnessApiClient.js';
@@ -54,21 +55,22 @@ export function teammateSignalEventData(event: TeammateEvent): Record<string, un
  */
 export function buildWorkerEventFrom(
   type: TeammateEventType,
-  fields: any,
+  fields: Partial<TeammateEvent> & Record<string, unknown>,
   env: WorkerEnv,
   unknownStateId: string
 ): TeammateEvent {
-  const event: Partial<TeammateEvent> = {
+  const nextPhase = typeof fields.nextPhase === 'string' ? fields.nextPhase : undefined;
+  const event: Record<string, unknown> = {
     ...fields,
     type,
     beadId: fields.beadId || env.beadId,
     workerId: env.workerId,
     sessionStateId: env.sessionStateId,
-    stateId: fields.stateId || env.stateId || fields.nextPhase || unknownStateId,
+    stateId: fields.stateId || env.stateId || nextPhase || unknownStateId,
     timestamp: Date.now()
   };
-  event.idempotencyKey = createTeammateEventIdempotencyKey(event);
-  return event as TeammateEvent;
+  event.idempotencyKey = createTeammateEventIdempotencyKey(event as Partial<TeammateEvent>);
+  return event as unknown as TeammateEvent;
 }
 
 // ── signal posting with reconcile ────────────────────────────────────────────

@@ -8,7 +8,7 @@
  * parameter bag; the composition root resolves them from process.env.
  */
 
-import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import type { AgentEndEvent, TurnEndEvent, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { Logger } from '../core/Logger.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
@@ -95,13 +95,13 @@ export interface AgentLifecycleFailureContext {
    * identity. Provided by the composition root (extension.ts) so this module
    * never reads process.env itself.
    */
-  buildWorkerEvent: (type: TeammateEventType, fields: any) => TeammateEvent;
+  buildWorkerEvent: (type: TeammateEventType, fields: Partial<TeammateEvent> & Record<string, unknown>) => TeammateEvent;
 }
 
 // ── agent lifecycle failure handler ──────────────────────────────────────────
 
 export async function handleAgentLifecycleFailure(
-  event: any,
+  event: AgentEndEvent | TurnEndEvent,
   ctx: ExtensionContext,
   source: PiEventName,
   services: RuntimeServices,
