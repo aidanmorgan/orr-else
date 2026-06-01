@@ -19,6 +19,7 @@ import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import { ProjectToolConfig, ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolPathArgumentConfig, ProjectCommandArgumentPathConfig } from '../core/domain/StateModels.js';
 import { Logger } from '../core/Logger.js';
 import { EventStore, type DomainEvent } from '../core/EventStore.js';
+import { isRestartTransition } from '../core/EventUtils.js';
 import { Component, ProjectToolType, CwdMode, EnvVars, ToolResultStatus, Defaults, DomainEventName, EventName, WorkerDefaults, CommandExitCode, CommandErrorCode, ProjectToolDefaults, TeammateEventType, ToolDefaults } from '../constants/index.js';
 
 const DEFAULT_MCP_CONFIG_PATH = '{{projectRoot}}/.pi/mcp/config.json';
@@ -1628,12 +1629,6 @@ function isProjectToolStateRunStart(
   if (data.stateId !== stateId) return false;
   if (actionId && data.actionId && data.actionId !== actionId) return false;
   return true;
-}
-
-function isRestartTransition(transitionEvent: unknown): boolean {
-  return transitionEvent === EventName.RESTART
-    || transitionEvent === EventName.CONTEXT_RESTART
-    || transitionEvent === EventName.HARNESS_RESTART;
 }
 
 function summarizeToolResult(result: unknown): unknown {

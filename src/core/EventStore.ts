@@ -6,6 +6,7 @@ import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { isRecord, mergeReplacingArraysAndDeletingUndefined, type UnknownRecord } from './RecordUtils.js';
+import { isRestartTransition } from './EventUtils.js';
 import {
   ActionCompletionKey,
   BeadStatus,
@@ -490,7 +491,7 @@ export class EventStore {
   ): boolean {
     if (event.type !== DomainEventName.STATE_TRANSITION_APPLIED) return false;
     const data = event.data || {};
-    if (this.isRestartTransition(data.transitionEvent)) return false;
+    if (isRestartTransition(data.transitionEvent)) return false;
     if (options.stateId && data.fromState !== options.stateId && data.nextState !== options.stateId) return false;
     if (options.actionId && data.actionId && data.actionId !== options.actionId) return false;
     return true;
@@ -509,7 +510,7 @@ export class EventStore {
     ) {
       return false;
     }
-    if (this.isRestartTransition(data.transitionEvent)) return false;
+    if (isRestartTransition(data.transitionEvent)) return false;
     if (options.stateId && data.stateId !== options.stateId) return false;
     if (options.actionId && data.actionId && data.actionId !== options.actionId) return false;
     return true;
@@ -524,12 +525,6 @@ export class EventStore {
     if (options.stateId && data.stateId !== options.stateId) return false;
     if (options.actionId && data.actionId && data.actionId !== options.actionId) return false;
     return true;
-  }
-
-  private isRestartTransition(transitionEvent: unknown): boolean {
-    return transitionEvent === EventName.RESTART
-      || transitionEvent === EventName.CONTEXT_RESTART
-      || transitionEvent === EventName.HARNESS_RESTART;
   }
 
   public async projectBeadStateChart(beadId: string): Promise<BeadStateChartProjection> {
