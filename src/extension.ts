@@ -98,7 +98,8 @@ import {
   ReviewArtifactStore,
   ToolDefaults,
   LLMProviderName,
-  OtelAttr
+  OtelAttr,
+  PathContextDefaults
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { requireTool } from './core/ToolRegistry.js';
@@ -107,6 +108,7 @@ import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
+import { PathContext } from './core/PathContext.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
 import {
   isRecord,
@@ -198,6 +200,7 @@ interface ExtensionSession {
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
   compatibilityContextToolRegistered: boolean;
+  readPathContextToolRegistered: boolean;
   piToolObserverRegistered: boolean;
   providerRequestCapRegistered: boolean;
   claudeCodeLoginRegistered: boolean;
@@ -227,6 +230,7 @@ function createExtensionSession(): ExtensionSession {
     artifactPathsToolRegistered: false,
     queryArtifactToolRegistered: false,
     compatibilityContextToolRegistered: false,
+    readPathContextToolRegistered: false,
     piToolObserverRegistered: false,
     providerRequestCapRegistered: false,
     claudeCodeLoginRegistered: false,
@@ -2484,6 +2488,39 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         }),
         execute: async (params: { includeDocs?: boolean; includeAgents?: boolean; maxDocs?: number; maxAgents?: number }) =>
           services.instructionLoader.compatibilityContext(await services.configLoader.load(), params)
+      }) as any);
+    }
+
+    if (!session.readPathContextToolRegistered) {
+      session.readPathContextToolRegistered = true;
+      const pathContext = new PathContext(services.projectRoot);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.READ_PATH_CONTEXT,
+        description:
+          'Resolve a candidate file path and validate optional read offsets BEFORE issuing a raw read call. ' +
+          'Returns: existence, canonical relative path, total lines, valid offset range (min/max), whether the requested offset is valid, a corrected offset hint if out of range, and nearest existing file matches for ENOENT cases. ' +
+          'Use this tool when a file path or line offset is uncertain — it eliminates wasted ENOENT retries and EOF errors. ' +
+          'Paths outside the active worktree or project root return a structured out_of_scope rejection (no content leak). ' +
+          `Up to ${PathContextDefaults.MAX_NEAR_MATCHES} nearest matches are returned. ` +
+          `The optional slice parameter (offset + limit, capped at ${PathContextDefaults.MAX_SLICE_LINES} lines) returns bounded file content when both are valid.`,
+        parameters: Type.Object({
+          filePath: Type.String({ description: 'The candidate file path to inspect. May be absolute or relative to cwd.' }),
+          offset: Type.Optional(Type.Number({ description: '1-based line offset to validate. Response indicates whether this offset is within the file and provides the valid range.' })),
+          limit: Type.Optional(Type.Number({ description: `Number of lines to request starting at offset. Capped at ${PathContextDefaults.MAX_SLICE_LINES}. Requires offset to be valid.` }))
+        }),
+        execute: async (params: { filePath: string; offset?: number; limit?: number }) => {
+          const result = pathContext.resolve(params);
+          // Emit a bounded domain event recording the avoided-retry category.
+          // Best-effort: never blocks the tool response.
+          services.eventStore.record(DomainEventName.PATH_CONTEXT_RESOLVED, {
+            exists: result.status === 'found',
+            outOfScope: result.status === 'out_of_scope',
+            offsetCorrected: result.status === 'found' && result.correctedOffset !== null,
+            beadId: process.env[EnvVars.BEAD_ID],
+            stateId: process.env[EnvVars.STATE_ID]
+          }).catch(() => {});
+          return result;
+        }
       }) as any);
     }
 

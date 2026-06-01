@@ -35,6 +35,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     deferredWI: undefined
   },
   {
+    file: 'src/core/PathContext.ts',
+    reason: 'Reads WORKTREE_PATH/PROJECT_ROOT to determine allowed roots for scope-checking, mirroring the ArtifactQuery.ts pattern. Not in WI-2 scope; to be replaced with injected RuntimeEnvironment in a follow-up.',
+    deferredWI: undefined
+  },
+  {
     file: 'src/extension.ts',
     reason: 'Composition-root entrypoint. Multiple deferred items: WI-4 (session state), WI-20 (TeammateFactory construction). WorkerContext resolution (WI-6) is intentionally kept here as the boundary. API_PORT/API_BASE write-back removed by WI-7.',
     deferredWI: 'WI-4,WI-20'

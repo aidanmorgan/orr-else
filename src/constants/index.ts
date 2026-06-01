@@ -221,7 +221,8 @@ export enum DomainEventName {
   BEAD_QUARANTINED = 'BEAD_QUARANTINED',
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
   RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
-  DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE'
+  DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
+  PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED'
 }
 
 export enum BeadsCliCommand {
@@ -601,6 +602,7 @@ export enum BuiltInToolName {
   GET_ARTIFACT_PATHS = 'get_artifact_paths',
   QUERY_ARTIFACT = 'query_artifact',
   GET_COMPATIBILITY_CONTEXT = 'get_compatibility_context',
+  READ_PATH_CONTEXT = 'read_path_context',
   HARNESS_STATUS = 'harness_status'
 }
 
@@ -1126,6 +1128,18 @@ export const OtelAttr = {
 /**
  * Defaults
  */
+export const PathContextDefaults = {
+  /**
+   * Maximum number of nearest-match file candidates returned per read_path_context call.
+   * Mirrors PATH_CONTEXT_MAX_NEAR_MATCHES in PathContext.ts — kept here as the
+   * single constant source so prompt descriptions can reference it without
+   * importing the core module.
+   */
+  MAX_NEAR_MATCHES: 5,
+  /** Maximum lines returnable in a single safe_read_slice request. */
+  MAX_SLICE_LINES: 400
+} as const;
+
 export const Defaults = {
   API_PORT: '3000',
   API_HOST: '127.0.0.1',
