@@ -50,6 +50,14 @@
             "skillPaths": { "type": "array", "items": { "type": "string" } },
             "workerArgs": { "type": "array", "items": { "type": "string" } },
             "workerExtensions": { "type": "array", "items": { "type": "string" } },
+            "mcp": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "allowToolCalls": { "type": "boolean" },
+                "blockedToolPatterns": { "type": "array", "items": { "type": "string" } }
+              }
+            },
             "shell": {
               "type": "object",
               "additionalProperties": false,
@@ -110,6 +118,10 @@
             "enabled": { "type": "boolean" },
             "requireReadSet": { "type": "boolean" },
             "requireWriteSet": { "type": "boolean" },
+            "autoRestoreUnapprovedPaths": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
             "requireAssumptions": { "type": "boolean" },
             "requireVersionDependencies": { "type": "boolean" },
             "requireVerifierObligations": { "type": "boolean" },
@@ -199,14 +211,46 @@
               "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
               "description": { "type": "string" },
               "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "failureLimit": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
+                  "suggestedOutcome": { "type": "string" },
+                  "suggestedOutcomeByState": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "suggestedOutcomeByAction": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "message": { "type": "string" },
+                  "terminal": { "type": "boolean" }
+                }
+              },
               "type": { "const": "command" },
               "command": { "type": "string" },
               "defaultArgs": { "type": "array", "items": { "type": "string" } },
               "argsMode": { "type": "string", "enum": ["replace", "append"] },
               "allowArgs": { "type": "boolean" },
+              "argumentPathScope": {
+                "type": "object",
+                "additionalProperties": false,
+	                "properties": {
+	                  "root": { "type": "string" },
+	                  "rootKind": { "type": "string", "enum": ["worktree", "project", "framework", "workspace"] },
+	                  "workspaceRoot": { "type": "string" },
+	                  "virtualRoots": { "type": "array", "items": { "type": "string" } },
+	                  "mustStayInsideRoot": { "type": "boolean" },
+	                  "positionals": { "type": "boolean" },
+                  "flags": { "type": "array", "items": { "type": "string" } }
+                }
+              },
               "cwd": { "type": "string" },
               "allowCwdOverride": { "type": "boolean" },
               "timeoutMs": { "type": "integer", "minimum": 1 },
+              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "maxOutputBytes": { "type": "integer", "minimum": 1 },
               "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
@@ -244,9 +288,29 @@
               "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
               "description": { "type": "string" },
               "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "failureLimit": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
+                  "suggestedOutcome": { "type": "string" },
+                  "suggestedOutcomeByState": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "suggestedOutcomeByAction": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "message": { "type": "string" },
+                  "terminal": { "type": "boolean" }
+                }
+              },
               "type": { "const": "mcp" },
               "server": { "type": "string" },
               "configPath": { "type": "string" },
+              "timeoutMs": { "type": "integer", "minimum": 1 },
+              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "argumentDefaults": {
                 "type": "object",
@@ -260,6 +324,23 @@
                 "additionalProperties": {
                   "type": "array",
                   "items": { "type": "string" }
+                }
+              },
+              "pathArguments": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "additionalProperties": false,
+	                    "properties": {
+	                      "root": { "type": "string" },
+	                      "rootKind": { "type": "string", "enum": ["worktree", "project", "framework", "workspace"] },
+	                      "workspaceRoot": { "type": "string" },
+	                      "virtualRoots": { "type": "array", "items": { "type": "string" } },
+	                      "mustStayInsideRoot": { "type": "boolean" }
+	                    }
+                  }
                 }
               },
               "operations": {
@@ -295,6 +376,24 @@
               "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
               "description": { "type": "string" },
               "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "failureLimit": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
+                  "suggestedOutcome": { "type": "string" },
+                  "suggestedOutcomeByState": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "suggestedOutcomeByAction": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "message": { "type": "string" },
+                  "terminal": { "type": "boolean" }
+                }
+              },
               "type": { "const": "extension" },
               "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "optional": { "type": "boolean" },
@@ -372,7 +471,30 @@
           "contextRestartPrompt": { "type": "string" },
           "ruleCategories": { "type": "array", "items": { "type": "string" } },
           "skills": { "type": "array", "items": { "type": "string" } },
-          "requiredTools": { "type": "array", "items": { "type": "string" } },
+          "requiredTools": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                { "type": "string" },
+                {
+                  "type": "object",
+                  "required": ["name"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": { "type": "string" },
+                    "when": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "writeSetIncludesAny": { "type": "array", "items": { "type": "string" } },
+                        "writeSetIncludesAll": { "type": "array", "items": { "type": "string" } }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
           "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
           "maxContextTokens": { "type": "integer", "minimum": 1 },
           "handoverRequired": { "type": "boolean" },

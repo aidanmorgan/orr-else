@@ -1,0 +1,84 @@
+Here is the fully updated, comprehensive EARS requirements document. It incorporates the entire system architecture, including the latest additions for Aggregate Roots, Computed Properties, and Optimistic Concurrency Control.
+
+---
+
+## 1. Glossary and System Definitions
+
+To prevent ambiguity, the following terms are strictly defined for use within this document:
+
+* **Framework:** The generic, reusable engine responsible for routing, validation, event sourcing, state management, and error simulation.
+* **Consumer Implementation:** The external repository/configuration that imports the Framework and provides the OpenAPI specification, Behavior Configurations, and Seed Data.
+* **State Graph:** The unified, ephemeral, in-memory data structure representing the current state of the entire API.
+* **Event Store:** The append-only, in-memory log of all state-mutation events.
+* **Proxy Interface:** An abstraction layer exposed by the Framework that allows the Consumer Implementation to interact with data without writing or manipulating raw JSON or database queries.
+* **Aggregate Root:** A cluster of domain objects treated as a single unit for data changes, ensuring transactional consistency boundaries.
+* **Computed Property:** A derived value calculated dynamically at read-time based on the state of an Aggregate Root and its child entities.
+* **Seed Data:** The initial "known values" provided by the Consumer Implementation to populate the system upon startup.
+
+---
+
+## 2. Ubiquitous Requirements
+
+*Pattern: `The <system name> shall <system response>.*`
+
+1. **The Framework shall** accept an OpenAPI specification document as the strict source of truth for the API interface.
+2. **The Framework shall** maintain an ephemeral, in-memory State Graph.
+3. **The Framework shall** provide a Proxy Interface to the Consumer Implementation to encapsulate direct interactions with the State Graph.
+4. **The Framework shall** accept Behavior Configurations defined within a single file or distributed across multiple files.
+5. **The Framework shall** parse a Domain Specific Language (DSL) used by the Consumer Implementation to map API endpoints to state mutations.
+6. **The Framework shall** provide a Standard Mutation Vocabulary within the DSL.
+7. **The Framework shall** execute arbitrary code snippets embedded within the DSL.
+8. **The Framework shall** support the importation and execution of reusable mutation libraries within the Behavior Configuration.
+9. **The Framework shall** abstract all underlying Event Sourcing and Command Query Responsibility Segregation (CQRS) mechanics from the Consumer Implementation.
+10. **The Framework shall** support the definition of Aggregate Roots to encapsulate related state and enforce consistency rules.
+
+---
+
+## 3. Event-Driven Requirements
+
+*Pattern: `WHEN <trigger>, the <system name> shall <system response>.*`
+
+11. **WHEN** the Framework boots, **the Framework shall** dynamically generate routing paths and validation rules directly from the OpenAPI specification document.
+12. **WHEN** the Framework boots, **the Framework shall** aggregate all provided Behavior Configuration files into a single unified behavioral map.
+13. **WHEN** the Framework boots, **the Framework shall** ingest the Consumer Implementation's Seed Data to populate the initial State Graph.
+14. **WHEN** the Framework receives an incoming HTTP request, **the Framework shall** validate the request payload against the corresponding OpenAPI schema.
+15. **WHEN** a configured Magic Header is detected in an incoming HTTP request, **the Framework shall** bypass normal validation and routing to return the exact HTTP status code mapped to that header.
+16. **WHEN** a configured Magic Value is detected in an incoming HTTP request payload, **the Framework shall** bypass normal routing to return the deterministic domain error mapped to that value.
+17. **WHEN** the Framework generates a state-mutation event, **the Framework shall** append the event to the Event Store.
+18. **WHEN** an event is appended to the Event Store, **the Framework shall** project the event onto the State Graph.
+19. **WHEN** an Aggregate Root successfully processes a state-mutation command, **the Framework shall** increment the internal version identifier of that Aggregate Root.
+
+---
+
+## 4. Unwanted Behavior Requirements
+
+*Pattern: `IF <trigger>, THEN the <system name> shall <system response>.*`
+
+20. **IF** the Framework detects a syntax error while parsing the DSL during boot, **THEN the Framework shall** halt initialization and throw a developer error.
+21. **IF** an incoming HTTP request payload fails OpenAPI schema validation, **THEN the Framework shall** return an HTTP 400-level error response without evaluating further logic.
+22. **IF** an embedded code snippet throws an unhandled exception during execution, **THEN the Framework shall** halt the mutation sequence and return an HTTP 500-level error response.
+23. **IF** a Behavior Configuration references a target path that does not exist in the State Graph, **THEN the Framework shall** halt the mutation sequence and return an HTTP 404-level error response.
+24. **IF** an incoming HTTP request attempts to dispatch a command using an outdated Aggregate Root version identifier, **THEN the Framework shall** reject the command and return an HTTP 409-level error response.
+
+---
+
+## 5. State-Driven Requirements
+
+*Pattern: `WHILE <precondition>, the <system name> shall <system response>.*`
+
+25. **WHILE** the Framework is active, **the Framework shall** persist all state data entirely in-memory.
+26. **WHILE** executing embedded code snippets, **the Framework shall** expose the execution context to the host language debugger.
+27. **WHILE** the Framework is processing a state-mutation command, **the Framework shall** route the command to the specific Aggregate Root definition associated with the target entity.
+28. **WHILE** querying the State Graph, **the Framework shall** dynamically calculate and return any Computed Properties defined in the Aggregate Root schema.
+
+---
+
+## 6. Complex Requirements
+
+*Pattern: `WHILE <precondition>, WHEN <trigger>, the <system name> shall <system response>.` (Or combining with `IF`)*
+
+29. **WHILE** an endpoint's Behavior Configuration specifies a Standard Mutation within the DSL, **WHEN** the Framework processes a valid HTTP request for that endpoint, **the Framework shall** automatically translate the configuration into a state-mutation event.
+30. **WHILE** an endpoint's Behavior Configuration specifies an embedded code snippet, **WHEN** the Framework processes a valid HTTP request for that endpoint, **the Framework shall** pass the request context and Proxy Interface to the sandboxed code execution environment.
+31. **WHILE** query parameters are present in an HTTP GET request, **WHEN** the Framework processes the request, **the Framework shall** automatically translate the parameters to query the State Graph without requiring custom logic from the Consumer Implementation.
+32. **WHILE** the Framework is active, **WHEN** the Framework receives a state-reset command, **the Framework shall** clear the Event Store, wipe the State Graph, and re-apply the initial Seed Data.
+33. **WHILE** the Consumer Implementation interacts with the Proxy Interface, **IF** the Consumer Implementation references a property not defined in the OpenAPI specification, **THEN the Framework shall** immediately throw a developer error.

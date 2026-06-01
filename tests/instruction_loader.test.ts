@@ -117,5 +117,7 @@ describe('InstructionLoader compatibility context', () => {
     expect(protocol).toContain(PluginToolName.BD_GET_STATE_CHART);
     expect(protocol).toContain(NativePiToolName.BASH);
     expect(protocol).toContain(`${NativeReadPolicyDefaults.MAX_LIMIT_LINES} lines`);
+    expect(protocol).toContain('Do not issue concurrent calls to the same configured project tool');
+    expect(protocol).toContain('Use `ast_grep` only for valid AST-shaped structural patterns');
   });
 });

@@ -1,13 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import fg from 'fast-glob';
 import { SDLCState } from './domain/StateModels.js';
 import { resolveProject } from './Paths.js';
 import { CompatibilityContextDefaults } from '../constants/index.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 
 const MARKDOWN_EXTENSION = '.md';
-const IGNORED_COMPATIBILITY_ENTRY_NAMES = new Set(['.DS_Store', '__pycache__']);
-const IGNORED_HOOK_DIRECTORY_NAMES = new Set(['vendor', '__pycache__']);
+const COMPATIBILITY_GLOB_IGNORES = ['**/.DS_Store', '**/__pycache__/**'];
+const HOOK_GLOB_IGNORES = ['.DS_Store', 'vendor/**', '__pycache__/**'];
 
 export const CompatibilityPathGroup = {
   MASTER_RULES: 'masterRules',
@@ -48,27 +49,24 @@ export class InstructionLoader {
 
   private markdownFiles(dir: string): string[] {
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    const files: string[] = [];
-    for (const entry of entries) {
-      if (IGNORED_COMPATIBILITY_ENTRY_NAMES.has(entry.name)) continue;
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) files.push(...this.markdownFiles(fullPath));
-      if (entry.isFile() && entry.name.endsWith(MARKDOWN_EXTENSION)) files.push(fullPath);
-    }
-    return files;
+    return fg.sync(`**/*${MARKDOWN_EXTENSION}`, {
+      cwd: dir,
+      absolute: true,
+      onlyFiles: true,
+      dot: true,
+      ignore: COMPATIBILITY_GLOB_IGNORES
+    }).sort();
   }
 
   private directHookFiles(dir: string): string[] {
     if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
-    return fs.readdirSync(dir, { withFileTypes: true })
-      .filter(entry => {
-        if (IGNORED_COMPATIBILITY_ENTRY_NAMES.has(entry.name)) return false;
-        if (entry.isDirectory()) return !IGNORED_HOOK_DIRECTORY_NAMES.has(entry.name);
-        return entry.isFile();
-      })
-      .filter(entry => entry.isFile())
-      .map(entry => path.join(dir, entry.name));
+    return fg.sync('*', {
+      cwd: dir,
+      absolute: true,
+      onlyFiles: true,
+      dot: true,
+      ignore: HOOK_GLOB_IGNORES
+    }).sort();
   }
 
   private existingFile(file: string): string | undefined {
@@ -99,9 +97,13 @@ export class InstructionLoader {
       for (const dir of searchDirs) {
         const catDir = path.join(dir, cat);
         if (fs.existsSync(catDir) && fs.statSync(catDir).isDirectory()) {
-          const files = fs.readdirSync(catDir).filter(f => f.endsWith('.md'));
+          const files = fg.sync(`*${MARKDOWN_EXTENSION}`, {
+            cwd: catDir,
+            absolute: true,
+            onlyFiles: true
+          }).sort();
           for (const file of files) {
-            rules.push(fs.readFileSync(path.join(catDir, file), 'utf8'));
+            rules.push(fs.readFileSync(file, 'utf8'));
           }
         }
       }

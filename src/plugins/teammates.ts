@@ -1,8 +1,8 @@
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import * as path from 'path';
 import { Type } from "@earendil-works/pi-ai";
 import { v7 as uuidv7 } from 'uuid';
+import { execa } from 'execa';
+import { parse as parseShellCommand, quote as quoteShellArgs } from 'shell-quote';
 import type { BeadId } from '../types/index.js';
 
 import { getProjectRoot } from '../core/Paths.js';
@@ -24,10 +24,10 @@ import {
   TmuxCommand,
   TmuxFormat,
   TmuxOption,
-  TmuxOptionValue
+  TmuxOptionValue,
+  TeammatePaneCleanupReason,
+  WorktreeDefaults
 } from '../constants/index.js';
-
-const execFileAsync = promisify(execFile);
 
 const SAFE_REF = /^[A-Za-z0-9._-]+$/;
 
@@ -36,18 +36,17 @@ interface TmuxPane {
   paneTitle: string;
   currentCommand: string;
   startCommand: string;
+  currentPath: string;
   dead: boolean;
 }
 
 async function tmux(args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync('tmux', args, { encoding: 'utf8' });
-  return stdout;
+  const result = await execa('tmux', args);
+  return result.stdout;
 }
 
-function shellQuote(s: string): string {
-  if (!s) return "''";
-  if (!/[^A-Za-z0-9_/:=-]/.test(s)) return s;
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+function shellQuoteValue(value: string): string {
+  return quoteShellArgs([value]);
 }
 
 function assertSafeBeadId(id: string) {
@@ -55,6 +54,10 @@ function assertSafeBeadId(id: string) {
 }
 
 export class TeammateFactory {
+  private lastLiveTeammatePanes: TmuxPane[] = [];
+  private paneListFailed = false;
+  private lastPaneListFailureMessage = '';
+
   constructor(
     private readonly observability: Observability,
     private readonly configLoader: ConfigLoader,
@@ -79,9 +82,32 @@ export class TeammateFactory {
 
   private async getLiveTeammatePanes(): Promise<TmuxPane[]> {
     try {
-      return (await this.listAgentPanes()).filter(pane => !pane.dead && this.isTeammatePane(pane));
-    } catch {
-      return [];
+      const panes = await this.listAgentPanes();
+      await this.removeDeadTeammatePanes(panes);
+      const livePanes = panes.filter(pane => !pane.dead && this.isTeammatePane(pane));
+      this.lastLiveTeammatePanes = livePanes;
+      this.paneListFailed = false;
+      this.lastPaneListFailureMessage = '';
+      return livePanes;
+    } catch (error) {
+      this.paneListFailed = true;
+      const message = String(error);
+      const fallbackPanes = this.lastLiveTeammatePanes.filter(pane => !pane.dead);
+      await this.eventStore.record(DomainEventName.TEAMMATE_PANE_SCAN_FAILED, {
+        sessionName: this.sessionName,
+        error: message,
+        fallbackPaneCount: fallbackPanes.length,
+        failClosed: true
+      }).catch(() => {});
+      if (message !== this.lastPaneListFailureMessage) {
+        this.lastPaneListFailureMessage = message;
+        Logger.warn(Component.FACTORY, 'Unable to list Orr Else teammate panes; failing closed for slot allocation', {
+          sessionName: this.sessionName,
+          fallbackPaneCount: fallbackPanes.length,
+          error: message
+        });
+      }
+      return fallbackPanes;
     }
   }
 
@@ -91,16 +117,21 @@ export class TeammateFactory {
       TmuxFormat.PANE_TITLE,
       TmuxFormat.PANE_CURRENT_COMMAND,
       TmuxFormat.PANE_START_COMMAND,
+      TmuxFormat.PANE_CURRENT_PATH,
       TmuxFormat.PANE_DEAD
     ].join(TmuxFormat.FIELD_SEPARATOR);
     const output = await tmux([TmuxCommand.LIST_PANES, '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
     return output.trim().split('\n').filter(Boolean).map(line => {
-      const [paneId = '', paneTitle = '', currentCommand = '', startCommand = '', dead = '0'] = line.split(TmuxFormat.FIELD_SEPARATOR);
+      const parts = line.split(TmuxFormat.FIELD_SEPARATOR);
+      const [paneId = '', paneTitle = '', currentCommand = '', startCommand = ''] = parts;
+      const currentPath = parts.length >= 6 ? parts[4] || '' : '';
+      const dead = parts.length >= 6 ? parts[5] || '0' : parts[4] || '0';
       return {
         paneId,
         paneTitle,
         currentCommand,
         startCommand,
+        currentPath,
         dead: dead === '1'
       };
     });
@@ -108,25 +139,83 @@ export class TeammateFactory {
 
   private isTeammatePane(pane: TmuxPane): boolean {
     return pane.paneTitle.startsWith(Defaults.AGENT_PANE_PREFIX) ||
-      pane.currentCommand === Defaults.NODE_PROCESS_COMMAND ||
-      pane.startCommand.includes(`${EnvVars.WORKER_MODE}=`);
+      pane.startCommand.includes(`${EnvVars.WORKER_MODE}=`) ||
+      this.beadIdFromCurrentPath(pane.currentPath) !== undefined;
+  }
+
+  private async removeDeadTeammatePanes(panes: TmuxPane[]): Promise<void> {
+    const deadPanes = panes.filter(pane => pane.dead && this.isTeammatePane(pane));
+    if (deadPanes.length === 0) return;
+
+    const removedPaneIds: string[] = [];
+    const beadIds = new Set<string>();
+
+    for (const pane of deadPanes) {
+      const beadId = this.beadIdFromPane(pane);
+      if (beadId) beadIds.add(beadId);
+      try {
+        await tmux([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
+        removedPaneIds.push(pane.paneId);
+      } catch (error) {
+        Logger.warn(Component.FACTORY, 'Unable to remove dead Orr Else teammate pane', {
+          paneId: pane.paneId,
+          beadId,
+          error: String(error)
+        });
+      }
+    }
+
+    if (removedPaneIds.length === 0) return;
+    await this.eventStore.record(DomainEventName.TEAMMATE_DEAD_PANES_REMOVED, {
+      reason: TeammatePaneCleanupReason.DEAD_TMUX_PANE,
+      paneIds: removedPaneIds,
+      beadIds: [...beadIds].sort()
+    }).catch(() => {});
+    Logger.warn(Component.FACTORY, 'Removed dead Orr Else teammate panes', {
+      reason: TeammatePaneCleanupReason.DEAD_TMUX_PANE,
+      paneIds: removedPaneIds,
+      beadIds: [...beadIds].sort()
+    });
   }
 
   private beadIdFromPane(pane: TmuxPane): string | undefined {
     if (pane.paneTitle.startsWith(Defaults.AGENT_PANE_PREFIX)) {
       return pane.paneTitle.slice(Defaults.AGENT_PANE_PREFIX.length) || undefined;
     }
-    return this.envValueFromStartCommand(pane.startCommand, EnvVars.BEAD_ID);
+    return this.envValueFromStartCommand(pane.startCommand, EnvVars.BEAD_ID) ||
+      this.beadIdFromCurrentPath(pane.currentPath);
+  }
+
+  private beadIdFromCurrentPath(currentPath: string): string | undefined {
+    if (!currentPath) return undefined;
+    const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot() || process.cwd();
+    const worktreesRoot = path.resolve(projectRoot, WorktreeDefaults.ROOT_DIR);
+    const absoluteCurrentPath = path.resolve(currentPath);
+    const relativePath = path.relative(worktreesRoot, absoluteCurrentPath);
+    if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) return undefined;
+    const [beadId] = relativePath.split(path.sep);
+    if (!beadId || !SAFE_REF.test(beadId)) return undefined;
+    return beadId;
   }
 
   private envValueFromStartCommand(command: string, key: string): string | undefined {
-    const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const match = command.match(new RegExp(`(?:^|\\s)${escapedKey}=('([^']*)'|"([^"]*)"|([^\\s]+))`));
-    return match?.[2] || match?.[3] || match?.[4] || undefined;
+    const assignment = this.shellWords(command)
+      .filter((part): part is string => typeof part === 'string')
+      .find(part => part.startsWith(`${key}=`));
+    return assignment?.slice(key.length + 1) || undefined;
+  }
+
+  private shellWords(command: string): unknown[] {
+    const parsed = parseShellCommand(command);
+    if (parsed.length === 1 && typeof parsed[0] === 'string' && parsed[0].includes(' ')) {
+      return parseShellCommand(parsed[0]);
+    }
+    return parsed;
   }
 
   public async getAvailableSlots(): Promise<number> {
     const active = await this.getActiveTeammateCount();
+    if (this.paneListFailed) return 0;
     return Math.max(0, this.maxSlots - active);
   }
 
@@ -147,7 +236,7 @@ export class TeammateFactory {
         '-t',
         `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`,
         TmuxOption.REMAIN_ON_EXIT,
-        TmuxOptionValue.ON
+        TmuxOptionValue.OFF
       ]);
     } catch {
       // Session might not exist yet if just created
@@ -204,11 +293,17 @@ export class TeammateFactory {
         [EnvVars.LLM_PROVIDER, llm.provider],
         [EnvVars.LLM_MODEL, llm.model],
         [EnvVars.LLM_THINKING, llm.thinking || ''],
+        [EnvVars.MAX_OUTPUT_TOKENS, process.env[EnvVars.MAX_OUTPUT_TOKENS] || ''],
         [EnvVars.CONFIG_PATH, configPath],
+        [EnvVars.API_PORT, apiPort],
         [EnvVars.API_BASE, apiBase],
         [EnvVars.TRACE_ID, traceContext?.traceId || ''],
-        [EnvVars.SPAN_ID, traceContext?.spanId || '']
-      ].map(([key, value]) => `${key}=${shellQuote(value)}`);
+        [EnvVars.SPAN_ID, traceContext?.spanId || ''],
+        // Opt the worker into Anthropic's 1-hour prompt-cache TTL. Inter-role
+        // handoffs routinely exceed the 5-minute default; 1h writes are 2×
+        // base input but pay back from the first cache read (~0.1× base).
+        [EnvVars.ENABLE_PROMPT_CACHING_1H, ProcessFlag.TRUE]
+      ].map(([key, value]) => `${key}=${shellQuoteValue(value)}`);
 
       const args = [
         PiCliCommand.PI,
@@ -221,18 +316,18 @@ export class TeammateFactory {
         PiCliFlag.NO_SESSION,
         ...workerArgs,
         `Orr Else teammate bootstrap for ${beadId}/${stateId}.`
-      ].map(shellQuote);
+      ];
 
-      const command = `${env.join(' ')} ${args.join(' ')}`;
+      const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
       Logger.info(Component.FACTORY, 'Spawning Orr Else teammate in tmux', {
         beadId,
         stateId,
         workerId,
         provider: llm.provider,
         model: llm.model,
-        skillPaths,
-        workerExtensions,
-        workerArgs,
+        skillCount: skillPaths.length,
+        workerExtensionCount: workerExtensions.length,
+        workerArgsCount: workerArgs.length,
         runDir
       });
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWN_STARTED, {

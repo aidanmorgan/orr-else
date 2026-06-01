@@ -1,38 +1,50 @@
-import { signalingPlugin } from '../plugins/signaling.js';
-import { teammatePlugin, TeammateFactory } from '../plugins/teammates.js';
-import type { RuntimeServices } from './RuntimeServices.js';
+import type { RuntimePlugin, RuntimeServices, RuntimeTool } from './RuntimeServices.js';
 
-export interface HarnessTool {
-  name: string;
-  description: string;
-  parameters: any;
-  execute: (args: any, context?: any) => Promise<any>;
+export type HarnessTool = RuntimeTool;
+
+export interface ToolRegistryComposition {
+  orchestratorPlugins: RuntimePlugin[];
+  statePlugins: RuntimePlugin[];
+}
+
+type RuntimePluginProvider = Pick<RuntimeServices, 'plugins'>;
+
+export function createToolRegistryComposition(services: RuntimePluginProvider): ToolRegistryComposition {
+  return {
+    orchestratorPlugins: [
+      services.plugins.bd,
+      services.plugins.git,
+      services.plugins.teammates,
+      services.plugins.mailbox,
+      services.plugins.meta
+    ],
+    statePlugins: [
+      services.plugins.mailbox,
+      services.plugins.quality,
+      services.plugins.signaling
+    ]
+  };
+}
+
+function isRuntimePluginProvider(input: ToolRegistryComposition | RuntimePluginProvider): input is RuntimePluginProvider {
+  return 'plugins' in input;
 }
 
 export class ToolRegistry {
-  constructor(private readonly services: RuntimeServices) {}
+  private readonly composition: ToolRegistryComposition;
+
+  constructor(composition: ToolRegistryComposition | RuntimePluginProvider) {
+    this.composition = isRuntimePluginProvider(composition)
+      ? createToolRegistryComposition(composition)
+      : composition;
+  }
 
   public getOrchestratorTools(): HarnessTool[] {
-    const factory = new TeammateFactory(
-      this.services.observability,
-      this.services.configLoader,
-      this.services.eventStore
-    );
-    return [
-      ...this.services.plugins.bd.tools,
-      ...this.services.plugins.git.tools,
-      ...teammatePlugin(factory).tools,
-      ...this.services.plugins.mailbox.tools,
-      ...this.services.plugins.meta.tools
-    ] as any;
+    return this.composition.orchestratorPlugins.flatMap(plugin => plugin.tools);
   }
 
   public getStateTools(): HarnessTool[] {
-    return [
-      ...this.services.plugins.mailbox.tools,
-      ...this.services.plugins.quality.tools,
-      ...signalingPlugin.tools
-    ] as any;
+    return this.composition.statePlugins.flatMap(plugin => plugin.tools);
   }
 
   public getAllTools(): HarnessTool[] {

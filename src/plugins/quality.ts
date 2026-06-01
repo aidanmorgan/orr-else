@@ -1,10 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { execa } from 'execa';
 import { Logger } from '../core/Logger.js';
 import { Component, PluginToolName, ToolResultStatus } from '../constants/index.js';
-
-const execFileAsync = promisify(execFile);
 
 export function createQualityPlugin() {
   return {
@@ -14,7 +11,7 @@ export function createQualityPlugin() {
       name: PluginToolName.RUN_QUALITY_CHECKS,
       description: "Performs mandatory code quality, complexity, and idiomatic checks.",
       parameters: Type.Object({
-        command: Type.String({ description: "Optional command to run instead of the default TypeScript checks", optional: true })
+        command: Type.Optional(Type.String({ description: "Optional command to run instead of the default TypeScript checks" }))
       }),
       execute: async ({ command }: any, ctx: any) => {
         try {
@@ -22,11 +19,11 @@ export function createQualityPlugin() {
           
           let output = '';
           if (command) {
-            const { stdout } = await execFileAsync('sh', ['-lc', command], { encoding: 'utf8' });
+            const { stdout } = await execa('sh', ['-lc', command]);
             output = stdout;
           } else {
-            const build = await execFileAsync('npm', ['run', 'build'], { encoding: 'utf8' });
-            const test = await execFileAsync('npm', ['test'], { encoding: 'utf8' });
+            const build = await execa('npm', ['run', 'build']);
+            const test = await execa('npm', ['test']);
             output = `${build.stdout}\n${test.stdout}`;
           }
           

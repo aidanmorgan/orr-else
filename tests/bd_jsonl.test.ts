@@ -1,16 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { execFile, spawn } from 'child_process';
+import { execa } from 'execa';
 import { createBdPlugin, parseFlatListOutput, parseReadyPlainOutput } from '../src/plugins/bd.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
+import { App, BeadsDefaults, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
 
-const { promisifyCustom } = vi.hoisted(() => ({
-  promisifyCustom: Symbol.for('nodejs.util.promisify.custom')
-}));
-
-vi.mock('child_process', () => {
-  function bdOutput(bin: string, args: string[], options: any) {
-    if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+const execaMock = vi.hoisted(() => {
+  function bdOutput(args: string[], options: any) {
     expect(options.maxBuffer).toBeGreaterThan(1024 * 1024);
     if (args.includes('ready')) return `
 📋 Ready work (1 issues with no active blockers):
@@ -25,58 +21,22 @@ vi.mock('child_process', () => {
       expect(options.input).toBe('{"title":"Imported"}\n');
       return '{"created":1,"updated":0}';
     }
+    if (args.includes('update')) return '[{"id":"bd-1","title":"Updated","status":"in_progress","priority":1}]';
+    if (args.includes('show')) return '[{"id":"bd-1","title":"Shown","status":"in_progress","priority":1}]';
     return '{}';
   }
 
-  return {
-    execFile: Object.assign(
-      vi.fn((bin: string, args: string[], options: any, callback: Function) => {
-        callback(null, bdOutput(bin, args, options), '');
-      }),
-      {
-        [promisifyCustom]: vi.fn(async (bin: string, args: string[], options: any) => ({
-          stdout: bdOutput(bin, args, options),
-          stderr: ''
-        }))
-      }
-    ),
-    spawn: vi.fn((bin: string, args: string[]) => {
-      const handlers: Record<string, Function> = {};
-      const stdoutHandlers: Record<string, Function> = {};
-      const stderrHandlers: Record<string, Function> = {};
-      const output = bdOutput(bin, args, { maxBuffer: 64 * 1024 * 1024, input: '{"title":"Imported"}\n' });
-      const child = {
-        stdout: {
-          on: vi.fn((event: string, handler: Function) => {
-            stdoutHandlers[event] = handler;
-            return child.stdout;
-          })
-        },
-        stderr: {
-          on: vi.fn((event: string, handler: Function) => {
-            stderrHandlers[event] = handler;
-            return child.stderr;
-          })
-        },
-        stdin: {
-          end: vi.fn((input: string) => {
-            expect(input).toBe('{"title":"Imported"}\n');
-            queueMicrotask(() => {
-              stdoutHandlers.data?.(Buffer.from(output));
-              stderrHandlers.data?.(Buffer.from(''));
-              handlers.close?.(0);
-            });
-          })
-        },
-        on: vi.fn((event: string, handler: Function) => {
-          handlers[event] = handler;
-          return child;
-        }),
-        kill: vi.fn()
-      };
-      return child;
-    })
-  };
+  return vi.fn(async (bin: string, args: string[], options: any = {}) => {
+    if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+    return {
+      stdout: bdOutput(args, options),
+      stderr: ''
+    };
+  });
+});
+
+vi.mock('execa', () => {
+  return { execa: execaMock };
 });
 
 let bdPlugin: ReturnType<typeof createBdPlugin>;
@@ -90,16 +50,14 @@ function tool(name: string) {
 describe('Beads JSONL compatibility tools', () => {
   beforeEach(() => {
     bdPlugin = createBdPlugin(new EventStore(new ConfigLoader()));
-    vi.mocked(execFile).mockClear();
-    vi.mocked((execFile as any)[promisifyCustom]).mockClear();
-    vi.mocked(spawn).mockClear();
+    vi.mocked(execa).mockClear();
   });
 
   it('exports JSONL without adding JSON output mode', async () => {
     const result = await tool('bd_export_jsonl').execute({ includeMemories: true });
     expect(result).toBe('{"id":"bd-1","title":"Exported"}');
 
-    const call = vi.mocked((execFile as any)[promisifyCustom]).mock.calls[0];
+    const call = vi.mocked(execa).mock.calls[0];
     expect(call[0]).toBe('bd');
     expect(call[1]).toContain('export');
     expect(call[1]).toContain('--include-memories');
@@ -118,12 +76,26 @@ describe('Beads JSONL compatibility tools', () => {
     const result = await tool('bd_import_jsonl').execute({ jsonl: '{"title":"Imported"}\n', dedup: true });
     expect(result).toEqual({ created: 1, updated: 0 });
 
-    const call = vi.mocked(spawn).mock.calls[0];
+    const call = vi.mocked(execa).mock.calls[0];
     expect(call[0]).toBe('bd');
     expect(call[1]).toContain('import');
     expect(call[1]).toContain('-');
     expect(call[1]).toContain('--dedup');
     expect(call[1]).toContain('--json');
+    expect(call[2]?.input).toBe('{"title":"Imported"}\n');
+  });
+
+  it('exports project issues JSONL after mutating Beads commands', async () => {
+    const result = await tool('bd_claim').execute({ id: 'bd-1' });
+
+    expect(result.id).toBe('bd-1');
+    const calls = vi.mocked(execa).mock.calls;
+    expect(calls[0][1]).toEqual(expect.arrayContaining(['update', 'bd-1', '--claim', '--json']));
+
+    const exportCall = calls.find(call => call[1].includes('export') && call[1].includes('--output'));
+    expect(exportCall).toBeDefined();
+    expect(exportCall?.[1]).not.toContain('--json');
+    expect(exportCall?.[1].some(arg => arg.endsWith('.beads/issues.jsonl'))).toBe(true);
   });
 
   it('bounds ready-work reads with an explicit limit', async () => {
@@ -131,9 +103,10 @@ describe('Beads JSONL compatibility tools', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe('bd-1');
+    expect(result[0].priority).toBe(1);
     expect(result[0].assigned_to).toBe('Aidan Morgan');
 
-    const call = vi.mocked((execFile as any)[promisifyCustom]).mock.calls[0];
+    const call = vi.mocked(execa).mock.calls[0];
     expect(call[1]).toContain('ready');
     expect(call[1]).toContain('--limit');
     expect(call[1]).toContain('7');
@@ -141,11 +114,50 @@ describe('Beads JSONL compatibility tools', () => {
     expect(call[1]).not.toContain('--json');
   });
 
+  it('serializes concurrent bd CLI calls through a project lock', async () => {
+    let activeCalls = 0;
+    let maxActiveCalls = 0;
+    const readyOutput = `
+📋 Ready work (1 issues with no active blockers):
+
+1. [● P1] [task] bd-1: Ready
+   Assignee: Aidan Morgan
+`;
+    const delayedReady = async (bin: string, _args: string[], _options: any = {}) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      activeCalls += 1;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      activeCalls -= 1;
+      return {
+        stdout: readyOutput,
+        stderr: ''
+      };
+    };
+    vi.mocked(execa)
+      .mockImplementationOnce(delayedReady)
+      .mockImplementationOnce(delayedReady);
+
+    await Promise.all([
+      tool('bd_ready').execute({ limit: 1 }),
+      tool('bd_ready').execute({ limit: 1 })
+    ]);
+
+    expect(maxActiveCalls).toBe(1);
+  });
+
+  it('keeps abandoned bd lock recovery below the wrapped tool timeout', () => {
+    const worstCaseLockWaitMs = BeadsDefaults.CLI_LOCK_RETRIES * BeadsDefaults.CLI_LOCK_RETRY_MAX_MS;
+
+    expect(BeadsDefaults.CLI_LOCK_STALE_MS).toBeLessThan(ToolDefaults.WRAPPER_TIMEOUT_MS);
+    expect(worstCaseLockWaitMs + BeadsDefaults.CLI_TIMEOUT_MS).toBeLessThan(ToolDefaults.WRAPPER_TIMEOUT_MS);
+  });
+
   it('does not pass Orr Else state names to bd --status', async () => {
     const result = await tool('bd_list').execute({ status: 'RequirementsAnalysis', limit: 5 });
 
     expect(result.filters).toEqual({ status: undefined, stateId: 'RequirementsAnalysis' });
-    const call = vi.mocked((execFile as any)[promisifyCustom]).mock.calls[0];
+    const call = vi.mocked(execa).mock.calls[0];
     expect(call[1]).toContain('list');
     expect(call[1]).not.toContain('--status');
     expect(call[1]).toContain('--limit');
@@ -156,9 +168,130 @@ describe('Beads JSONL compatibility tools', () => {
     const result = await tool('bd_list').execute({ status: 'in_progress', limit: 5 });
 
     expect(result.filters).toEqual({ status: 'in_progress', stateId: undefined });
-    const call = vi.mocked((execFile as any)[promisifyCustom]).mock.calls[0];
+    expect(result.items[0].priority).toBe(1);
+    const call = vi.mocked(execa).mock.calls[0];
     expect(call[1]).toContain('--status');
     expect(call[1]).toContain('in_progress');
+  });
+
+  it('uses fast native records for default bd_list reads', async () => {
+    const listPlugin = createBdPlugin({
+      projectBeads: async () => {
+        throw new Error('projectBeads should not run for unfiltered bd_list');
+      }
+    } as any);
+    const listTool = listPlugin.tools.find(candidate => candidate.name === 'bd_list');
+    if (!listTool) throw new Error('missing bd_list');
+
+    const result = await listTool.execute({ status: 'open', limit: 5 });
+
+    expect(result.items[0]).toMatchObject({
+      id: 'bd-1',
+      title: 'Ready',
+      status: 'ready',
+      priority: 1,
+      assigned_to: 'Aidan Morgan'
+    });
+  });
+
+  it('keeps projection scheduling fields in state-filtered compact bd_list records', async () => {
+    const projected = {
+      status: 'Planning',
+      assigned_to: App.DISPLAY_NAME,
+      retryCount: 2,
+      compactionCount: 1,
+      totalExecutionTimeMs: 1234,
+      lastActivity: '2026-01-01T00:00:00.000Z',
+      restartRequested: true,
+      restartKind: 'harness',
+      restartEvent: 'HARNESS_RESTART',
+      restartFromState: 'Planning',
+      restartTargetState: 'Planning'
+    };
+    const listPlugin = createBdPlugin({
+      projectBeads: async () => new Map([['bd-1', projected]])
+    } as any);
+    const listTool = listPlugin.tools.find(candidate => candidate.name === 'bd_list');
+    if (!listTool) throw new Error('missing bd_list');
+
+    const result = await listTool.execute({ status: 'Planning', limit: 5 });
+
+    expect(result.items[0]).toMatchObject(projected);
+    expect(result.items[0].priority).toBe(1);
+  });
+
+  it('can include projection metadata in native status bd_list records', async () => {
+    const projected = {
+      status: 'Planning',
+      assigned_to: App.DISPLAY_NAME,
+      lease: { owner: App.DISPLAY_NAME, expiresAt: '2026-01-01T00:00:00.000Z' },
+      leaseSessionId: 'previous-session'
+    };
+    const listPlugin = createBdPlugin({
+      projectBeads: async () => new Map([['bd-1', projected]])
+    } as any);
+    const listTool = listPlugin.tools.find(candidate => candidate.name === 'bd_list');
+    if (!listTool) throw new Error('missing bd_list');
+
+    const result = await listTool.execute({ status: 'in_progress', limit: 5, includeProjection: true });
+
+    expect(result.filters).toEqual({ status: 'in_progress', stateId: undefined });
+    expect(result.items[0]).toMatchObject({
+      id: 'bd-1',
+      status: 'Planning',
+      assigned_to: App.DISPLAY_NAME,
+      lease: projected.lease,
+      leaseSessionId: 'previous-session'
+    });
+  });
+
+  it('uses fast native records for default bd_get_bead reads', async () => {
+    const getPlugin = createBdPlugin({
+      projectBead: async () => {
+        throw new Error('projectBead should not run for default bd_get_bead');
+      }
+    } as any);
+    const getTool = getPlugin.tools.find(candidate => candidate.name === 'bd_get_bead');
+    if (!getTool) throw new Error('missing bd_get_bead');
+
+    const result = await getTool.execute({ id: 'bd-1' });
+
+    expect(result).toMatchObject({
+      id: 'bd-1',
+      title: 'Shown',
+      status: 'in_progress',
+      priority: 1
+    });
+  });
+
+  it('lets native closed status override stale projected state metadata', async () => {
+    vi.mocked(execa).mockImplementationOnce(async (bin: string, args: string[], options: any = {}) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      expect(args).toContain('show');
+      expect(options.maxBuffer).toBeGreaterThan(1024 * 1024);
+      return {
+        stdout: '[{"id":"bd-1","title":"Closed","status":"closed","priority":1}]',
+        stderr: ''
+      };
+    });
+    const getPlugin = createBdPlugin({
+      projectBead: async () => ({
+        status: 'RequirementsAnalysis',
+        assigned_to: App.DISPLAY_NAME
+      })
+    } as any);
+    const getTool = getPlugin.tools.find(candidate => candidate.name === 'bd_get_bead');
+    if (!getTool) throw new Error('missing bd_get_bead');
+
+    const result = await getTool.execute({ id: 'bd-1', includeDetails: true });
+
+    expect(result).toMatchObject({
+      id: 'bd-1',
+      title: 'Closed',
+      status: 'completed',
+      priority: 1,
+      assigned_to: App.DISPLAY_NAME
+    });
   });
 
   it('returns compact statechart projections by default', async () => {
@@ -197,12 +330,12 @@ describe('Beads JSONL compatibility tools', () => {
     expect(compact.checkedItems).toBeUndefined();
     expect(compact.checkedItemCount).toBe(2);
     expect(compact.completedActionCount).toBe(25);
-    expect(compact.recentCompletedActionIds).toHaveLength(20);
+    expect(compact.recentCompletedActionIds).toHaveLength(StateChartToolDefaults.RECENT_COMPLETED_ACTIONS);
     expect(compact.recentCheckpoints[0].summary.length).toBeLessThan(600);
 
     const detailed: any = await chartTool.execute({ id: 'bd-1', includeDetails: true });
     expect(detailed.checkedItems).toEqual({ a: { checked: true }, b: { checked: true } });
-    expect(detailed.completedActionIdsTruncated).toBe(false);
+    expect(detailed.completedActionIdsTruncated).toBe(25 > StateChartToolDefaults.DETAIL_COMPLETED_ACTIONS);
   });
 
   it('bounds detailed statechart projections', async () => {
@@ -246,13 +379,13 @@ describe('Beads JSONL compatibility tools', () => {
 
     const detailed: any = await chartTool.execute({ id: 'bd-1', includeDetails: true });
     expect(detailed.completedActionCount).toBe(120);
-    expect(detailed.completedActionIds).toHaveLength(100);
+    expect(detailed.completedActionIds).toHaveLength(StateChartToolDefaults.DETAIL_COMPLETED_ACTIONS);
     expect(detailed.completedActionIdsTruncated).toBe(true);
-    expect(Object.keys(detailed.checkedItems)).toHaveLength(100);
+    expect(Object.keys(detailed.checkedItems)).toHaveLength(StateChartToolDefaults.DETAIL_CHECKED_ITEMS);
     expect(detailed.checkedItemsTruncated).toBe(true);
-    expect(detailed.addedChecklistItems).toHaveLength(50);
-    expect(detailed.checkpoints).toHaveLength(20);
-    expect(detailed.transitions).toHaveLength(40);
+    expect(detailed.addedChecklistItems).toHaveLength(StateChartToolDefaults.DETAIL_ADDED_CHECKLIST_ITEMS);
+    expect(detailed.checkpoints).toHaveLength(StateChartToolDefaults.DETAIL_CHECKPOINTS);
+    expect(detailed.transitions).toHaveLength(StateChartToolDefaults.DETAIL_TRANSITIONS);
     expect(detailed.transitions[0].summary.length).toBeLessThan(600);
   });
 
@@ -266,6 +399,7 @@ describe('Beads JSONL compatibility tools', () => {
       id: 'cerdiwen-l7xr3',
       title: 'Fix compiler pytest collection blockers',
       issue_type: 'bug',
+      priority: 1,
       status: 'open',
       assignee: 'Aidan Morgan'
     }]);
@@ -274,6 +408,7 @@ describe('Beads JSONL compatibility tools', () => {
       id: 'cerdiwen-p44u1',
       title: 'Normalize crypto shapes',
       issue_type: 'task',
+      priority: 1,
       status: 'in_progress',
       assignee: undefined
     }]);

@@ -1,0 +1,159 @@
+import { execFileSync } from 'child_process';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
+import { ConfigLoader } from '../src/core/ConfigLoader.js';
+import { EventStore } from '../src/core/EventStore.js';
+import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
+import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
+import { TransactionalStateGuard } from '../src/core/TransactionalStateGuard.js';
+import { DomainEventName } from '../src/constants/index.js';
+
+function git(cwd: string, args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore' });
+}
+
+describe('TransactionalStateGuard', () => {
+  let tempRoot: string;
+  let worktreePath: string;
+  let previousRoot: string;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let guard: TransactionalStateGuard;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-transactional-'));
+    worktreePath = path.join(tempRoot, 'worktrees', 'bd-1');
+    setProjectRoot(tempRoot);
+
+    fs.mkdirSync(path.join(tempRoot, '.pi/artifacts/bd-1'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Implementation
+  transactionalState:
+    enabled: true
+    requireWriteSet: true
+  artifacts:
+    baseDir: .pi/artifacts
+    templates:
+      planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+states:
+  Implementation:
+    identity: { role: "Builder", expertise: "Implementation", constraints: [] }
+    baseInstructions: "Build"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
+`);
+    fs.writeFileSync(path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), JSON.stringify({
+      writeSet: [{ path: 'approved.py' }]
+    }));
+
+    git(tempRoot, ['init']);
+    fs.writeFileSync(path.join(tempRoot, 'approved.py'), 'print("old")\n');
+    fs.writeFileSync(path.join(tempRoot, 'uv.lock'), 'old\n');
+    fs.writeFileSync(path.join(tempRoot, '.gitignore'), 'ignored-tests/\n');
+    git(tempRoot, ['add', 'approved.py', 'uv.lock', '.gitignore']);
+    git(tempRoot, ['-c', 'user.name=Orr Else', '-c', 'user.email=orr-else@example.invalid', 'commit', '-m', 'initial']);
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-1', worktreePath]);
+
+    configLoader = new ConfigLoader();
+    eventStore = new EventStore(configLoader);
+    eventStore.setSessionId(`test-${process.pid}`);
+    const artifactPaths = new ArtifactPaths(configLoader);
+    guard = new TransactionalStateGuard(configLoader, artifactPaths, eventStore, new PlanWriteSet(configLoader, artifactPaths));
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    configLoader.reset();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('rejects dirty worktree paths outside the approved plan write set', async () => {
+    fs.writeFileSync(path.join(worktreePath, 'approved.py'), 'print("new")\n');
+    fs.writeFileSync(path.join(worktreePath, 'uv.lock'), 'new\n');
+
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+
+    expect(result.passed).toBe(false);
+    expect(result.unapprovedPaths).toEqual(['uv.lock']);
+
+    const events = await eventStore.readAll();
+    expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_REJECTED)).toBe(true);
+  });
+
+  it('passes when all dirty paths are in the approved plan write set', async () => {
+    fs.writeFileSync(path.join(worktreePath, 'approved.py'), 'print("new")\n');
+
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+
+    expect(result.passed).toBe(true);
+    expect(result.unapprovedPaths).toEqual([]);
+  });
+
+  it('rejects ignored untracked paths in the approved plan write set', async () => {
+    fs.writeFileSync(path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), JSON.stringify({
+      writeSet: [{ path: 'ignored-tests/new_test.py' }]
+    }));
+
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+
+    expect(result.passed).toBe(false);
+    expect(result.ignoredWriteSetPaths).toEqual(['ignored-tests/new_test.py']);
+
+    const events = await eventStore.readAll();
+    expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_REJECTED)).toBe(true);
+  });
+
+  it('does not let a stale plan write set block RequirementsAnalysis success', async () => {
+    fs.writeFileSync(path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), JSON.stringify({
+      writeSet: [{ path: 'ignored-tests/new_test.py' }]
+    }));
+
+    const result = await guard.validateSuccess('bd-1' as any, 'RequirementsAnalysis', worktreePath);
+
+    expect(result.passed).toBe(true);
+    expect(result.ignoredWriteSetPaths).toBeUndefined();
+
+    const events = await eventStore.readAll();
+    expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_REJECTED)).toBe(false);
+  });
+
+  it('auto-restores configured unapproved paths before passing the gate', async () => {
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Implementation
+  transactionalState:
+    enabled: true
+    requireWriteSet: true
+    autoRestoreUnapprovedPaths:
+      - uv.lock
+  artifacts:
+    baseDir: .pi/artifacts
+    templates:
+      planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+states:
+  Implementation:
+    identity: { role: "Builder", expertise: "Implementation", constraints: [] }
+    baseInstructions: "Build"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
+`);
+    configLoader.reset();
+    fs.writeFileSync(path.join(worktreePath, 'approved.py'), 'print("new")\n');
+    fs.writeFileSync(path.join(worktreePath, 'uv.lock'), 'new\n');
+
+    const result = await guard.validateSuccess('bd-1' as any, 'Implementation', worktreePath);
+
+    expect(result.passed).toBe(true);
+    expect(result.dirtyPaths).toEqual(['approved.py']);
+    expect(fs.readFileSync(path.join(worktreePath, 'uv.lock'), 'utf8')).toBe('old\n');
+
+    const events = await eventStore.readAll();
+    expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_AUTO_RESTORE_STARTED)).toBe(true);
+    expect(events.some(event => event.type === DomainEventName.TRANSACTIONAL_STATE_AUTO_RESTORE_SUCCEEDED)).toBe(true);
+  });
+});

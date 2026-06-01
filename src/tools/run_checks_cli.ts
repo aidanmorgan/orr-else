@@ -1,11 +1,13 @@
-import { execFileSync } from 'child_process';
+import { execa } from 'execa';
 
-try {
+async function main(): Promise<void> {
   console.log("Running deterministic quality audit...");
-  execFileSync('npm', ['run', 'build'], { stdio: 'inherit' });
-  execFileSync('npm', ['test'], { stdio: 'inherit' });
+  await execa('npm', ['run', 'build'], { stdout: 'inherit', stderr: 'inherit' });
+  await execa('npm', ['test'], { stdout: 'inherit', stderr: 'inherit' });
   console.log("PASSED");
-} catch (error) {
+}
+
+main().catch(() => {
   console.log("FAILED");
   process.exit(1);
-}
+});

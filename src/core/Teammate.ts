@@ -3,39 +3,25 @@ import { BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
+import { postHarnessSignal } from './HarnessApiClient.js';
 import {
-  ApiPath,
   EnvVars,
   TeammateEventType,
   Component,
   BuiltInToolName,
   PluginToolName,
-  Defaults,
   EventName,
   DomainEventName,
-  HttpMethod,
-  HttpHeader,
   WorkerDefaults,
   PiEventName
 } from '../constants/index.js';
 import { setProjectRoot } from './Paths.js';
 import { FlowManager } from './FlowManager.js';
 import { ConfigLoader } from './ConfigLoader.js';
+import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
 import { getConfiguredProjectToolNames } from '../plugins/projectTools.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
 import type { RuntimePlugin } from './RuntimeServices.js';
-
-async function apiRequest(path: string, method: string, body?: any) {
-  const apiPort = process.env[EnvVars.API_PORT] || Defaults.API_PORT;
-  const apiBase = process.env[EnvVars.API_BASE] || `http://${Defaults.API_HOST}:${apiPort}`;
-  const response = await fetch(`${apiBase}${path}`, {
-    method,
-    headers: { [HttpHeader.CONTENT_TYPE]: HttpHeader.APPLICATION_JSON },
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
-  if (!response.ok) throw new Error(`API Error: ${response.status}`);
-  return await response.json();
-}
 
 export class Teammate {
   constructor(
@@ -121,10 +107,30 @@ export class Teammate {
       }
     });
 
-    // 2. Heartbeat logic
+    // 2. Heartbeat logic with consecutive-failure tracking. The signaling
+    // server is a known single-point-of-failure (production telemetry: 210
+    // heartbeat NetworkErrors + 154 transport-error harness restarts). One
+    // failure is logged once at warn; subsequent consecutive failures fall
+    // to debug so they don't flood the log. The first heartbeat to succeed
+    // after a streak emits a recovery message.
+    let consecutiveHeartbeatFailures = 0;
     const heartbeat = setInterval(() => {
-      this.sendHeartbeat(beadId, stateId).catch(error => {
-        Logger.warn(Component.TEAMMATE, 'Worker heartbeat failed', { beadId: beadId, error: String(error) });
+      this.sendHeartbeat(beadId, stateId).then(() => {
+        if (consecutiveHeartbeatFailures > 0) {
+          Logger.info(Component.TEAMMATE, 'Worker heartbeat recovered', {
+            beadId,
+            previousFailures: consecutiveHeartbeatFailures
+          });
+          consecutiveHeartbeatFailures = 0;
+        }
+      }).catch(error => {
+        consecutiveHeartbeatFailures += 1;
+        const detail = { beadId, error: String(error), consecutiveFailures: consecutiveHeartbeatFailures };
+        if (consecutiveHeartbeatFailures === 1) {
+          Logger.warn(Component.TEAMMATE, 'Worker heartbeat failed', detail);
+        } else {
+          Logger.debug(Component.TEAMMATE, 'Worker heartbeat still failing', detail);
+        }
       });
     }, WorkerDefaults.HEARTBEAT_INTERVAL_MS);
 
@@ -147,7 +153,7 @@ export class Teammate {
     const summary = `PROGRAMMATIC AUTO-RESTART: Compaction threshold reached (Count: ${compactionCount}). Teammate process was automatically recycled by the harness to prevent implementation rot caused by context pollution.`;
     const event = {
       type: TeammateEventType.CONTEXT_RESTART_REQUESTED,
-      beadId,
+      beadId: beadId as BeadId,
       workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
       stateId,
       timestamp: Date.now(),
@@ -156,10 +162,23 @@ export class Teammate {
       summary,
       evidence: summary,
       handover: `AUTO-RESTART: Too many compactions (${compactionCount}). Fresh session required for quality.`
-    };
+    } satisfies Omit<ContextRestartRequestedEvent, 'idempotencyKey'>;
 
-    const idempotencyKey = `${event.type}-${event.beadId}-${event.workerId}-${event.timestamp}`;
-    await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, { ...event, idempotencyKey });
+    const signal: ContextRestartRequestedEvent = {
+      ...event,
+      idempotencyKey: createTeammateEventIdempotencyKey(event)
+    };
+    await this.eventStore.record(DomainEventName.SIGNAL_INTENT_RECORDED, signal);
+    try {
+      await postHarnessSignal(signal);
+      await this.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, signal);
+    } catch (error) {
+      await this.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+        ...signal,
+        error: String(error)
+      }).catch(() => {});
+      throw error;
+    }
     
     // Allow a moment for the signal to propagate before shutting down
     setTimeout(() => this.ctx.shutdown(), WorkerDefaults.SHUTDOWN_AFTER_RESTART_MS);

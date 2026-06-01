@@ -1,16 +1,43 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Supervisor } from '../src/core/Supervisor.js';
-import { DomainEventName, PluginToolName, TimeMs } from '../src/constants/index.js';
+import { Logger } from '../src/core/Logger.js';
+import { BeadStatus, Defaults, DomainEventName, PluginToolName, TimeMs } from '../src/constants/index.js';
+import type { Clock } from '../src/core/Clock.js';
+import type { DomainEvent } from '../src/core/EventStore.js';
 
 const IMMEDIATE_NO_PROGRESS_TIMEOUT_MS = 1;
 const STALE_PROGRESS_AGE_MS = TimeMs.MINUTE;
+const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
 
-function supervisorHarness(latestProgressAtMs: number) {
+function createFakeClock(nowMs = NOW_MS): Clock {
+  return {
+    now: () => nowMs,
+    date: (timestampMs?: number) => new Date(timestampMs === undefined ? nowMs : timestampMs)
+  };
+}
+
+function supervisorHarness(
+  latestProgressAtMs: number,
+  heartbeats?: any[],
+  liveBeadIds = new Set(['bead-1']),
+  maxSlots = 1,
+  eventsByBead = new Map<string, DomainEvent[]>()
+) {
+  const clock = createFakeClock();
+  const effectiveHeartbeats = heartbeats ?? [{
+    workerId: 'worker-1',
+    beadId: 'bead-1',
+    stateId: 'Planning',
+    timestampMs: clock.now()
+  }];
   const records: Array<{ event: string; data: any }> = [];
   const release = vi.fn(async () => ({ id: 'bead-1' }));
   const terminateTeammatesForBead = vi.fn(async () => ({ terminatedPaneIds: ['%1'] }));
   const eventStore = {
     record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+    eventsForBeads: vi.fn(async (beadIds: Iterable<string>) => new Map(
+      [...beadIds].map(beadId => [beadId, eventsByBead.get(beadId) || []])
+    )),
     latestEventsForBeads: vi.fn(async () => new Map([
       ['bead-1', {
         id: 'event-1',
@@ -25,15 +52,10 @@ function supervisorHarness(latestProgressAtMs: number) {
     {} as any,
     { hasUI: false } as any,
     {
-      getHeartbeatSnapshot: () => [{
-        workerId: 'worker-1',
-        beadId: 'bead-1',
-        stateId: 'Planning',
-        timestampMs: Date.now()
-      }]
+      getHeartbeatSnapshot: () => effectiveHeartbeats
     } as any,
     {
-      getLiveTeammateBeadIds: vi.fn(async () => new Set(['bead-1'])),
+      getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
       terminateTeammatesForBead
     } as any,
     { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
@@ -53,14 +75,24 @@ function supervisorHarness(latestProgressAtMs: number) {
         }
       }
     } as any,
-    { maxSlots: 1 }
+    { maxSlots, clock }
   );
-  return { supervisor, records, release, terminateTeammatesForBead };
+  return { supervisor, records, release, terminateTeammatesForBead, clock };
+}
+
+function domainEvent(id: string, type: DomainEventName, beadId: string, timestampMs: number, data: Record<string, unknown> = {}): DomainEvent {
+  return {
+    id,
+    type,
+    timestamp: new Date(timestampMs).toISOString(),
+    sessionId: 'session-1',
+    data: { beadId, ...data }
+  };
 }
 
 describe('Supervisor', () => {
   it('restarts a teammate that heartbeats without non-heartbeat progress', async () => {
-    const { supervisor, records, release, terminateTeammatesForBead } = supervisorHarness(Date.now() - STALE_PROGRESS_AGE_MS);
+    const { supervisor, records, release, terminateTeammatesForBead } = supervisorHarness(NOW_MS - STALE_PROGRESS_AGE_MS);
 
     await (supervisor as any).recordSlotHealth('test');
 
@@ -78,7 +110,7 @@ describe('Supervisor', () => {
   });
 
   it('keeps a teammate working when recent non-heartbeat progress exists', async () => {
-    const { supervisor, records, release, terminateTeammatesForBead } = supervisorHarness(Date.now());
+    const { supervisor, records, release, terminateTeammatesForBead } = supervisorHarness(NOW_MS);
 
     await (supervisor as any).recordSlotHealth('test');
 
@@ -88,5 +120,167 @@ describe('Supervisor', () => {
     });
     expect(terminateTeammatesForBead).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it('does not mark a live teammate stale when heartbeat is absent but progress is current', async () => {
+    const { supervisor, records, release, terminateTeammatesForBead, clock } = supervisorHarness(NOW_MS, []);
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - (TimeMs.MINUTE * 3));
+    const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    expect(records.find(record => record.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED)?.data).toMatchObject({
+      workingCount: 1,
+      staleBeadIds: [],
+      staleHeartbeatBeadIds: ['bead-1'],
+      heartbeatOnlyStaleBeadIds: ['bead-1'],
+      inactiveBeadIds: []
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.any(String),
+      'Teammate slot health check found underfilled or stale work',
+      expect.objectContaining({ heartbeatOnlyStaleBeadIds: ['bead-1'] })
+    );
+    warn.mockRestore();
+    expect(terminateTeammatesForBead).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('releases a tracked bead lease when its teammate pane disappears', async () => {
+    const { supervisor, records, release, clock } = supervisorHarness(NOW_MS, [], new Set());
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.MINUTE);
+    (supervisor as any).missingStartedBeadChecks.set('bead-1', Defaults.TEAMMATE_MISSING_REAP_THRESHOLD - 1);
+
+    await (supervisor as any).reconcileStartedBeads();
+
+    expect(records).toContainEqual({
+      event: DomainEventName.TEAMMATE_PROCESS_EXITED,
+      data: { beadId: 'bead-1' }
+    });
+    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
+  });
+
+  it('records a structured capacity underfill event when live panes drop below configured slots', async () => {
+    const now = NOW_MS;
+    const { supervisor, records } = supervisorHarness(
+      now,
+      [
+        { workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: now },
+        { workerId: 'worker-missing', beadId: 'bead-missing', stateId: 'Planning', timestampMs: now - TimeMs.SECOND }
+      ],
+      new Set(['bead-1']),
+      2
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-missing');
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    expect(records.find(record => record.event === DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED)?.data).toMatchObject({
+      stage: 'test',
+      expectedCount: 2,
+      activeCount: 1,
+      workingCount: 1,
+      missingSlotCount: 1,
+      liveBeadIds: ['bead-1'],
+      trackedBeadIds: ['bead-1', 'bead-missing'],
+      missingTrackedBeadIds: ['bead-missing'],
+      heartbeatOnlyLiveGaps: ['bead-missing']
+    });
+  });
+
+  it('treats tracked beads without live panes as immediate capacity underfill', async () => {
+    const now = NOW_MS;
+    const { supervisor, records } = supervisorHarness(
+      now,
+      [
+        { workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: now },
+        { workerId: 'worker-missing', beadId: 'bead-missing', stateId: 'Planning', timestampMs: now - TimeMs.SECOND }
+      ],
+      new Set(['bead-1', 'bead-missing']),
+      2
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-missing');
+    vi.mocked((supervisor as any).factory.getLiveTeammateBeadIds)
+      .mockResolvedValueOnce(new Set(['bead-1']))
+      .mockResolvedValueOnce(new Set(['bead-1', 'bead-missing']));
+
+    await (supervisor as any).activeStartedBeadIds();
+    await (supervisor as any).recordSlotHealth('test');
+
+    expect(records.find(record => record.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED)?.data).toMatchObject({
+      expectedCount: 2,
+      activeCount: 1,
+      liveBeadIds: ['bead-1'],
+      observedLiveBeadIds: ['bead-1', 'bead-missing'],
+      missingTrackedBeadIds: ['bead-missing']
+    });
+    expect(records.find(record => record.event === DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED)?.data).toMatchObject({
+      expectedCount: 2,
+      activeCount: 1,
+      missingSlotCount: 1,
+      liveBeadIds: ['bead-1'],
+      missingTrackedBeadIds: ['bead-missing']
+    });
+  });
+
+  it('prunes durably released and exited tracked beads from slot health', async () => {
+    const now = NOW_MS;
+    const releasedEvents = [
+      domainEvent('claimed-released', DomainEventName.BEAD_CLAIMED, 'bead-released', now - (TimeMs.SECOND * 3), { stateId: 'Planning' }),
+      domainEvent('exited-released', DomainEventName.TEAMMATE_PROCESS_EXITED, 'bead-released', now - (TimeMs.SECOND * 2)),
+      domainEvent('released-released', DomainEventName.BEAD_RELEASED, 'bead-released', now - TimeMs.SECOND)
+    ];
+    const terminalEvents = [
+      domainEvent('claimed-terminal', DomainEventName.BEAD_CLAIMED, 'bead-terminal', now - (TimeMs.SECOND * 3), { stateId: 'Planning' }),
+      domainEvent('terminal-status', DomainEventName.BEAD_STATUS_UPDATED, 'bead-terminal', now - TimeMs.SECOND, { status: BeadStatus.COMPLETED })
+    ];
+    const { supervisor, records, clock } = supervisorHarness(
+      now,
+      [{ workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: now }],
+      new Set(['bead-1']),
+      3,
+      new Map([
+        ['bead-released', releasedEvents],
+        ['bead-terminal', terminalEvents]
+      ])
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-released');
+    (supervisor as any).startedBeads.add('bead-terminal');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    (supervisor as any).startedBeadAtMs.set('bead-released', clock.now() - (TimeMs.SECOND * 4));
+    (supervisor as any).startedBeadAtMs.set('bead-terminal', clock.now() - (TimeMs.SECOND * 4));
+    (supervisor as any).missingStartedBeadChecks.set('bead-released', 1);
+    (supervisor as any).missingStartedBeadChecks.set('bead-terminal', 1);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    expect((supervisor as any).startedBeads.has('bead-released')).toBe(false);
+    expect((supervisor as any).startedBeads.has('bead-terminal')).toBe(false);
+    expect((supervisor as any).missingStartedBeadChecks.has('bead-released')).toBe(false);
+    expect((supervisor as any).missingStartedBeadChecks.has('bead-terminal')).toBe(false);
+    expect(records.find(record => record.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED)?.data).toMatchObject({
+      trackedBeadIds: ['bead-1'],
+      missingTrackedBeadIds: []
+    });
+  });
+
+  it('can preserve inactive restart backoff while clearing live tracking', () => {
+    const { supervisor, clock } = supervisorHarness(NOW_MS);
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now());
+    (supervisor as any).missingStartedBeadChecks.set('bead-1', 1);
+    (supervisor as any).inactiveRestartedAtMs.set('bead-1', clock.now());
+
+    supervisor.markBeadExited('bead-1', { preserveInactiveRestartBackoff: true });
+
+    expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
+    expect((supervisor as any).startedBeadAtMs.has('bead-1')).toBe(false);
+    expect((supervisor as any).missingStartedBeadChecks.has('bead-1')).toBe(false);
+    expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
   });
 });

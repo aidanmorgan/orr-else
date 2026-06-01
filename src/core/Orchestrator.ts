@@ -3,7 +3,7 @@ import { Scheduler, ScoredBead } from './Scheduler.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
-import { BeadsDefaults, BeadsIssueStatus, Component, Defaults, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { App, BeadsDefaults, BeadsIssueStatus, Component, Defaults, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { FlowManager } from './FlowManager.js';
 import type { RuntimePlugin } from './RuntimeServices.js';
 
@@ -55,29 +55,37 @@ export class Orchestrator {
     return Number.isFinite(expiresAtMs) && expiresAtMs > Date.now();
   }
 
-  private isResumableInProgress(bead: Bead): boolean {
-    return bead.assigned_to === 'Orr Else'
+  private isResumableHarnessWork(bead: Bead): boolean {
+    return bead.assigned_to === App.DISPLAY_NAME
       && !this.hasActiveLease(bead)
       && !TERMINAL_BEAD_STATUSES.has(bead.status);
+  }
+
+  private async recoverResumableStatus(
+    byId: Map<string, Bead>,
+    status: BeadsIssueStatus,
+    limit: number
+  ): Promise<void> {
+    const listed = await this.executeBdTool(PluginToolName.BD_LIST, {
+      status,
+      limit: this.inProgressRecoveryScanLimit(limit),
+      includeProjection: true,
+      includeNotesPreview: false
+    }) as { items?: Bead[] };
+    for (const bead of listed.items || []) {
+      if (byId.has(bead.id)) continue;
+      if (!this.isResumableHarnessWork(bead)) continue;
+      byId.set(bead.id, bead);
+    }
   }
 
   private async assignmentBacklog(limit: number): Promise<Bead[]> {
     const ready = await this.executeBdTool(PluginToolName.BD_READY, { limit }) as Bead[];
     const byId = new Map<string, Bead>();
     for (const bead of ready) byId.set(bead.id, bead);
-    if (byId.size >= limit) return [...byId.values()];
 
-    const listed = await this.executeBdTool(PluginToolName.BD_LIST, {
-      status: BeadsIssueStatus.IN_PROGRESS,
-      limit: this.inProgressRecoveryScanLimit(limit),
-      includeNotesPreview: false
-    }) as { items?: Bead[] };
-    for (const bead of listed.items || []) {
-      if (byId.size >= limit) break;
-      if (byId.has(bead.id)) continue;
-      if (!this.isResumableInProgress(bead)) continue;
-      byId.set(bead.id, bead);
-    }
+    await this.recoverResumableStatus(byId, BeadsIssueStatus.IN_PROGRESS, limit);
+    await this.recoverResumableStatus(byId, BeadsIssueStatus.OPEN, limit);
 
     return [...byId.values()];
   }

@@ -1,7 +1,12 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
+import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { Command } from 'commander';
+import { parse as parseShellCommand } from 'shell-quote';
+import { z } from 'zod';
+import escapeStringRegexp from 'escape-string-regexp';
 import { teammatePlugin, TeammateFactory } from './plugins/teammates.js';
 import {
   describeConfiguredProjectTools,
@@ -9,6 +14,7 @@ import {
   getConfiguredProjectToolNames,
   getHarnessRegisteredProjectToolNames,
   getNativePiExtensionProjectToolNames,
+  projectToolFailureLimitSuggestedOutcome,
   registerConfiguredProjectTools
 } from './plugins/projectTools.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
@@ -17,24 +23,30 @@ import { Bead, BeadId } from './types/index.js';
 import {
   TeammateEvent,
   createTeammateEventIdempotencyKey,
+  decideTeammateEventProcessing,
+  findAppliedTeammateSignal,
   isStatusMutatingTeammateEvent
 } from './core/TeammateEvents.js';
 import { getProjectRoot, setProjectRoot } from './core/Paths.js';
+import { capAnthropicMaxTokens, resolveMaxOutputTokens } from './core/ProviderRequestCap.js';
+import { buildTurnUsageRecord } from './core/TokenUsage.js';
+import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
+import { postHarnessSignal } from './core/HarnessApiClient.js';
 import { Logger } from './core/Logger.js';
-import { Observability, SpanStatusValue, type SpanCompletion, type SpanContext } from './core/Observability.js';
+import { Observability, SpanStatusValue, type SpanAttributes, type SpanCompletion, type SpanContext } from './core/Observability.js';
 import type { ChecklistItem } from './core/ProtocolParser.js';
-import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems } from './core/ChecklistRequirements.js';
+import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, resolveChecklistTickText } from './core/ChecklistRequirements.js';
 import { ProgressManager } from './core/ProgressManager.js';
 import { WorklogManager } from './core/WorklogManager.js';
-import { SDLCState, TeammateAction } from './core/domain/StateModels.js';
+import type { DomainEvent } from './core/EventStore.js';
+import { SDLCState, TeammateAction, RequiredTool } from './core/domain/StateModels.js';
 import {
   BeadStatus,
-  ApiPath,
   DomainEventName,
   EventName,
   ExtensionCommandAction,
-  HttpMethod,
   RestartKind,
+  TeammateEventDecisionAction,
   TeammateEventType,
   EnvVars,
   Component,
@@ -66,7 +78,11 @@ import {
   AgentFailureSummary,
   OperationalLogPath,
   OperationalArtifactPath,
-  NativeReadPolicyDefaults
+  NativeReadPolicyDefaults,
+  FileMutationPolicyDefaults,
+  ReviewArtifactKind,
+  ReviewArtifactStore,
+  ToolDefaults
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { Teammate } from './core/Teammate.js';
@@ -80,18 +96,54 @@ import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServi
 
 let supervisor: Supervisor | null = null;
 let activeRun: ActiveRun | null = null;
+// Per-(bead, tool) consecutive-failure counter. Only consulted in worker mode
+// (the LLM-driven path); supervisor-internal tool calls bypass the breaker.
+const toolBreakerFailures = new Map<string, number>();
+// In-session result memoisation for tools marked `cacheable: true` in their
+// project-tool config. Key: `${toolName}|${JSON.stringify(params)}`. Cleared
+// when a fresh worker run starts (initializeWorkerRun) and whenever a
+// non-cacheable tool runs (treated as a potential mutation). The LLM sees a
+// note that the result was served from cache.
+const toolResultCache = new Map<string, { result: unknown; recordedAt: number }>();
+// Per-(bead, state, blocker-fingerprint) re-entry counter. 53% of production
+// state transitions were self-loops; the same blocker repeated 52× in one
+// case before any escalation. After CYCLE_CAP same-blocker re-entries the
+// supervisor sends a BLOCKER mailbox message to TeamLead and marks the bead
+// blocked. Resets when the bead transitions to a *different* state.
+const stateCycleCounter = new Map<string, number>();
+const CYCLE_CAP_DEFAULT = 3;
 let artifactPathsToolRegistered = false;
 let compatibilityContextToolRegistered = false;
 let piToolObserverRegistered = false;
+let providerRequestCapRegistered = false;
+let claudeCodeLoginRegistered = false;
+let currentTurnStartMs: number | undefined;
 let agentLifecycleObserverRegistered = false;
 let piToolObservability: Observability | null = null;
 let observedPiTools = new Set<string>();
 let blockedObservedPiToolCallIds = new Set<string>();
 let observedPiToolSpans = new Map<string, SpanContext>();
+
+const FrameworkToolCallSchema = z.object({
+  tool: z.string(),
+  arguments: z.record(z.string(), z.unknown())
+}).passthrough();
+const FrameworkToolCallListSchema = z.array(FrameworkToolCallSchema);
 let checklistMutationQueue: Promise<unknown> = Promise.resolve();
 let currentFlowOptions: FlowOptions | null = null;
 let agentFailureSignaled = false;
 let processLifecycleObserversRegistered = false;
+const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
+  BuiltInToolName.ADD_CHECKLIST_ITEM,
+  BuiltInToolName.TICK_ITEM,
+  BuiltInToolName.TICK_ITEMS,
+  BuiltInToolName.GET_OUTSTANDING_TASKS,
+  BuiltInToolName.SUBMIT_CHECKPOINT,
+  BuiltInToolName.SUBMIT_REVIEW_ARTIFACT,
+  BuiltInToolName.SIGNAL_COMPLETION,
+  BuiltInToolName.REQUEST_CONTEXT_RESTART,
+  BuiltInToolName.REQUEST_HARNESS_RESTART
+]);
 
 interface FlowOptions {
   maxSlots: number;
@@ -113,11 +165,40 @@ interface ActiveRun {
   checkpointAccepted: boolean;
   parentSequenceCompleted: boolean;
   completedActionIds: string[];
+  terminalFailureLimitScanned?: boolean;
+  terminalFailureLimitScan?: Promise<DomainEvent | undefined>;
+  terminalFailureLimitEvent?: DomainEvent;
+  terminalFailureLimitResult?: Record<string, unknown>;
 }
 
 interface ChecklistTickInput {
   text: string;
-  evidence: string;
+  evidence?: string;
+  evidencePath?: string;
+}
+
+interface TerminalFailureLimitContext {
+  failedTool: string;
+  suggestedOutcome: string;
+  stateId: string;
+  actionId: string;
+}
+
+function routingHintSuggestedOutcomeFromResult(result: Record<string, any>): string | undefined {
+  const candidates = [
+    result.routingHint,
+    isRecord(result.structuredResult) ? result.structuredResult.routingHint : undefined,
+    isRecord(result.result) ? result.result.routingHint : undefined,
+    isRecord(result.result) && isRecord(result.result.structuredResult)
+      ? result.result.structuredResult.routingHint
+      : undefined
+  ];
+  for (const candidate of candidates) {
+    if (isRecord(candidate) && typeof candidate.suggestedOutcome === 'string') {
+      return candidate.suggestedOutcome;
+    }
+  }
+  return undefined;
 }
 
 function getObservability(services: RuntimeServices): Observability {
@@ -164,18 +245,89 @@ function toolResult(value: any) {
   };
 }
 
+function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {
+  const requiredTools = [
+    ...(run.state.requiredTools || []),
+    ...(run.action.requiredTools || [])
+  ];
+  return requiredTools.length > 0 ? requiredTools : undefined;
+}
+
+const EVENT_DETAIL_KEYS = new Set([
+  'artifact',
+  'artifactContents',
+  'content',
+  'details',
+  'diagnostic',
+  'documents',
+  'evidence',
+  'handover',
+  'output',
+  'outputPreview',
+  'params',
+  'result',
+  'resultPreview',
+  'stderr',
+  'stdout',
+  'text'
+]);
+
+function truncateEventText(value: string, limit: number): string {
+  return value.length > limit ? `${value.slice(0, limit)}...` : value;
+}
+
+function summarizeEventString(value: string, key?: string): string {
+  const limit = key && EVENT_DETAIL_KEYS.has(key)
+    ? WorkerDefaults.EVENT_DETAIL_PREVIEW_CHARS
+    : WorkerDefaults.EVENT_PREVIEW_CHARS;
+  return truncateEventText(value, limit);
+}
+
+function summarizeEventValue(value: unknown, depth: number, seen: WeakSet<object>, key?: string): unknown {
+  if (value === undefined || value === null) return value;
+  if (typeof value === 'string') return summarizeEventString(value, key);
+  if (typeof value !== 'object') return value;
+  if (seen.has(value)) return '[Circular]';
+  if (depth >= 5) return '[MaxDepth]';
+
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const limit = WorkerDefaults.EVENT_ARRAY_PREVIEW_ITEMS;
+    const items = value.slice(0, limit).map(item => summarizeEventValue(item, depth + 1, seen, key));
+    return value.length > limit
+      ? [...items, { omittedItems: value.length - limit }]
+      : items;
+  }
+
+  const output: Record<string, unknown> = {};
+  const entries = Object.entries(value as Record<string, unknown>);
+  for (const [entryKey, entryValue] of entries.slice(0, WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS)) {
+    output[entryKey] = summarizeEventValue(entryValue, depth + 1, seen, entryKey);
+  }
+  if (entries.length > WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS) {
+    output.omittedKeys = entries.length - WorkerDefaults.EVENT_OBJECT_PREVIEW_KEYS;
+  }
+  return output;
+}
+
 function summarizeForEvent(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (typeof value === 'string') {
-    return value.length > WorkerDefaults.EVENT_PREVIEW_CHARS
-      ? `${value.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`
-      : value;
+    return summarizeEventString(value);
   }
   try {
     const json = JSON.stringify(value);
-    return json.length > WorkerDefaults.EVENT_PREVIEW_CHARS
-      ? { preview: `${json.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`, truncated: true, bytes: json.length }
-      : value;
+    if (json.length <= WorkerDefaults.EVENT_PREVIEW_CHARS) return value;
+    const summarized = summarizeEventValue(value, 0, new WeakSet<object>());
+    const summarizedJson = JSON.stringify(summarized);
+    return summarizedJson.length > WorkerDefaults.EVENT_PREVIEW_CHARS * 3
+      ? {
+        preview: `${summarizedJson.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`,
+        truncated: true,
+        bytes: json.length,
+        summarizedBytes: summarizedJson.length
+      }
+      : summarized;
   } catch {
     return String(value);
   }
@@ -183,6 +335,24 @@ function summarizeForEvent(value: unknown): unknown {
 
 function beadIdFromToolParams(params: any): string | undefined {
   return params?.beadId || params?.id || params?.arguments?.beadId || params?.arguments?.id || activeRun?.beadId || process.env[EnvVars.BEAD_ID];
+}
+
+function activeSpanAttributes(beadId?: string): SpanAttributes {
+  return {
+    'orr_else.bead_id': beadId || activeRun?.beadId || process.env[EnvVars.BEAD_ID],
+    'orr_else.state_id': activeRun?.stateId || process.env[EnvVars.STATE_ID],
+    'orr_else.action_id': activeRun?.action?.id || process.env[EnvVars.ACTION_ID],
+    'orr_else.worker_id': process.env[EnvVars.WORKER_ID]
+  };
+}
+
+function toolSpanAttributes(toolName: string, params: unknown, beadId?: string, externalPiTool = false): SpanAttributes {
+  return {
+    'tool.name': toolName,
+    'tool.params': stringifySpanAttribute(summarizeForEvent(params)),
+    'tool.external_pi': externalPiTool || undefined,
+    ...activeSpanAttributes(beadId)
+  };
 }
 
 function externalPiToolResultFromEvent(event: any): Record<string, unknown> {
@@ -274,12 +444,13 @@ function isUsageLimitFailure(error: string): boolean {
     || normalized.includes('usage limit has been reached');
 }
 
-function isHarnessTransientFailure(error: string): boolean {
+export function isHarnessTransientFailure(error: string): boolean {
   const normalized = error.toLowerCase();
   return normalized.includes(AgentFailureCode.WEBSOCKET_ERROR)
     || normalized.includes(AgentFailureCode.WEBSOCKET_CLOSED)
     || normalized.includes(AgentFailureCode.CONNECTION_RESET)
-    || normalized.includes(AgentFailureCode.NETWORK_ERROR);
+    || normalized.includes(AgentFailureCode.NETWORK_ERROR)
+    || normalized.includes(AgentFailureCode.RESPONSE_HEADERS_TIMEOUT);
 }
 
 function compactLifecycleFailureSummary(source: PiEventName, error: string): string {
@@ -316,121 +487,235 @@ function stringifySpanAttribute(value: unknown): string {
   }
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
 function commandMatchesPattern(command: string, pattern: string): boolean {
   try {
     return new RegExp(pattern).test(command);
   } catch {
-    return command.includes(pattern);
+    return new RegExp(escapeStringRegexp(pattern)).test(command);
   }
 }
 
-function commandInvokesToolName(command: string, toolName: string): boolean {
-  return commandHeads(command).some(commandHead => commandHead === toolName);
+function commandInvokesToolName(command: string, toolName: string, services: RuntimeServices): boolean {
+  try {
+    return services.shellCommandParser.commandBasenames(command).some(commandHead => commandHead === toolName);
+  } catch {
+    return false;
+  }
 }
 
-const SHELL_CONTROL_OPERATORS = new Set(['&', '|', ';', '\n']);
-const SHELL_QUOTES = new Set(["'", '"']);
-const SHELL_ESCAPE = '\\';
-const SHELL_ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function isTerminalFailureLimitPayload(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && isRecord(value.failureLimit) && value.failureLimit.terminal === true;
+}
 
-function splitShellSegments(command: string): string[] {
-  const segments: string[] = [];
-  let current = '';
-  let quote: string | null = null;
-  let escaped = false;
+function terminalFailureLimitDataFromResult(result: unknown): Record<string, unknown> | undefined {
+  if (!isTerminalFailureLimitPayload(result)) return undefined;
+  return {
+    tool: typeof result.tool === 'string' ? result.tool : undefined,
+    result
+  };
+}
 
-  for (let index = 0; index < command.length; index += 1) {
-    const char = command[index];
+function scanTerminalFailureLimit(run: ActiveRun, services: RuntimeServices): Promise<DomainEvent | undefined> {
+  return services.eventStore.latestProjectToolFailureLimitEvent(run.beadId, {
+    stateId: run.stateId,
+    actionId: run.action.id,
+    terminalOnly: true
+  });
+}
 
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
+function preloadTerminalFailureLimit(run: ActiveRun, services: RuntimeServices): void {
+  if (run.terminalFailureLimitScanned || run.terminalFailureLimitScan) return;
+  run.terminalFailureLimitScan = scanTerminalFailureLimit(run, services)
+    .then(event => {
+      run.terminalFailureLimitScanned = true;
+      if (event) run.terminalFailureLimitEvent = event;
+      return event;
+    })
+    .catch(error => {
+      run.terminalFailureLimitScan = undefined;
+      Logger.warn(Component.ORR_ELSE, 'Unable to preload terminal project-tool failure limit', {
+        beadId: run.beadId,
+        stateId: run.stateId,
+        actionId: run.action.id,
+        error: String(error)
+      });
+      return undefined;
+    });
+}
+
+const SHELL_OPERATIONAL_MUTATION_COMMANDS = new Set<string>([
+  FileMutationPolicyDefaults.CP_COMMAND,
+  FileMutationPolicyDefaults.MKDIR_COMMAND,
+  FileMutationPolicyDefaults.MV_COMMAND,
+  FileMutationPolicyDefaults.RM_COMMAND,
+  FileMutationPolicyDefaults.RMDIR_COMMAND,
+  FileMutationPolicyDefaults.SED_COMMAND,
+  FileMutationPolicyDefaults.TEE_COMMAND,
+  FileMutationPolicyDefaults.TOUCH_COMMAND,
+  FileMutationPolicyDefaults.TRUNCATE_COMMAND
+]);
+const GIT_OPERATIONAL_MUTATION_SUBCOMMANDS = new Set<string>([
+  FileMutationPolicyDefaults.GIT_ADD_SUBCOMMAND,
+  FileMutationPolicyDefaults.GIT_CLEAN_SUBCOMMAND,
+  FileMutationPolicyDefaults.GIT_MV_SUBCOMMAND,
+  FileMutationPolicyDefaults.GIT_RM_SUBCOMMAND,
+  FileMutationPolicyDefaults.GIT_RESTORE_SUBCOMMAND,
+  FileMutationPolicyDefaults.GIT_CHECKOUT_SUBCOMMAND
+]);
+const NATIVE_PATH_INPUT_KEYS = [
+  'path',
+  'filePath',
+  'file_path',
+  'targetFile',
+  'target_file'
+] as const;
+const NATIVE_OPERATIONAL_MUTATION_TOOLS = new Set<string>([
+  NativePiToolName.EDIT,
+  NativePiToolName.WRITE
+]);
+const OPERATIONAL_READ_DIRS = [
+  OperationalArtifactPath.LEGACY_STATE_DIR,
+  OperationalArtifactPath.PI_EVENTS_DIR,
+  OperationalArtifactPath.PI_LOGS_DIR,
+  OperationalArtifactPath.PI_MAILBOX_DIR,
+  OperationalArtifactPath.PI_OTEL_DIR,
+  OperationalArtifactPath.PI_ARTIFACTS_DIR,
+  OperationalArtifactPath.PI_TOOL_OUTPUT_DIR
+] as const;
+const OPERATIONAL_MUTATION_DIRS = [
+  OperationalArtifactPath.LEGACY_STATE_DIR,
+  OperationalArtifactPath.PI_EVENTS_DIR,
+  OperationalArtifactPath.PI_LOGS_DIR,
+  OperationalArtifactPath.PI_MAILBOX_DIR,
+  OperationalArtifactPath.PI_OTEL_DIR,
+  OperationalArtifactPath.PI_TOOL_OUTPUT_DIR,
+  OperationalArtifactPath.TEMP_DIR
+] as const;
+const PROJECT_TOOL_CALL_OUTPUT_DIR = `${OperationalArtifactPath.TEMP_DIR}/tool-calls`;
+const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
+  `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read project-tool output archives directly. ` +
+  'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';
+
+function nativeToolPath(event: any): string {
+  for (const key of NATIVE_PATH_INPUT_KEYS) {
+    const value = event.input?.[key];
+    if (typeof value === 'string' && value.trim()) return value;
+  }
+  return '';
+}
+
+function toSlashPath(value: string): string {
+  return value.replaceAll(path.sep, '/');
+}
+
+function relativeOperationalPath(requestedPath: string): string {
+  const trimmed = requestedPath.trim();
+  if (!trimmed) return '';
+
+  if (!path.isAbsolute(trimmed)) return toSlashPath(trimmed).replace(/^\.\//, '');
+
+  const absolutePath = path.resolve(trimmed);
+  const roots = [
+    process.env[EnvVars.WORKTREE_PATH],
+    process.env[EnvVars.PROJECT_ROOT],
+    process.cwd()
+  ].filter((root): root is string => typeof root === 'string' && root.length > 0)
+    .map(root => path.resolve(root));
+
+  for (const root of roots) {
+    const relativePath = path.relative(root, absolutePath);
+    if (!relativePath || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))) {
+      return toSlashPath(relativePath || '.');
     }
-
-    if (char === SHELL_ESCAPE && quote !== "'") {
-      current += char;
-      escaped = true;
-      continue;
-    }
-
-    if (quote) {
-      if (char === quote) quote = null;
-      current += char;
-      continue;
-    }
-
-    if (SHELL_QUOTES.has(char)) {
-      quote = char;
-      current += char;
-      continue;
-    }
-
-    if (SHELL_CONTROL_OPERATORS.has(char)) {
-      if (current.trim()) segments.push(current.trim());
-      current = '';
-      while (command[index + 1] === char && char !== '\n') index += 1;
-      continue;
-    }
-
-    current += char;
   }
 
-  if (current.trim()) segments.push(current.trim());
-  return segments;
+  return toSlashPath(trimmed);
 }
 
-function splitShellTokens(segment: string): string[] {
-  const tokens: string[] = [];
-  let current = '';
-  let quote: string | null = null;
-  let escaped = false;
+function pathWithin(relativePath: string, directory: string): boolean {
+  const cleanPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
+  const cleanDirectory = directory.replace(/^\/+|\/+$/g, '');
+  return cleanPath === cleanDirectory || cleanPath.startsWith(`${cleanDirectory}/`);
+}
 
-  for (const char of segment) {
-    if (escaped) {
-      current += char;
-      escaped = false;
+function isProgressOrWorklogPath(relativePath: string): boolean {
+  const normalizedPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
+  const fileName = path.posix.basename(normalizedPath);
+  const readsProgressLog = fileName === OperationalLogPath.PROGRESS_FILE;
+  const readsWorklog = normalizedPath.split('/').includes(OperationalLogPath.WORKLOG_DIR)
+    && fileName.endsWith(OperationalLogPath.WORKLOG_FILE_SUFFIX);
+  return readsProgressLog || readsWorklog;
+}
+
+function isOperationalReadPath(requestedPath: string): boolean {
+  const relativePath = relativeOperationalPath(requestedPath);
+  return isProgressOrWorklogPath(relativePath)
+    || OPERATIONAL_READ_DIRS.some(directory => pathWithin(relativePath, directory));
+}
+
+function isProjectToolCallOutputPath(requestedPath: string): boolean {
+  return pathWithin(relativeOperationalPath(requestedPath), PROJECT_TOOL_CALL_OUTPUT_DIR);
+}
+
+function isOperationalMutationPath(requestedPath: string): boolean {
+  const relativePath = relativeOperationalPath(requestedPath);
+  return isProgressOrWorklogPath(relativePath)
+    || OPERATIONAL_MUTATION_DIRS.some(directory => pathWithin(relativePath, directory));
+}
+
+function nativeOperationalMutationPolicyRejection(event: any): string | null {
+  if (!isWorkerMode() || !NATIVE_OPERATIONAL_MUTATION_TOOLS.has(event.toolName)) return null;
+  const requestedPath = nativeToolPath(event);
+  if (!requestedPath || !isOperationalMutationPath(requestedPath)) return null;
+
+  return `PROTOCOL VIOLATION: \`${event.toolName}\` may not modify framework runtime artifacts ` +
+    'inside a teammate context. Use harness tools for state, progress, events, tool outputs, and generated temporary files.';
+}
+
+function gitSubcommand(args: Array<{ text: string }>): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]?.text || '';
+    if (token === FileMutationPolicyDefaults.ARG_SEPARATOR) continue;
+    if (token === FileMutationPolicyDefaults.GIT_CHDIR_OPTION) {
+      index += 1;
       continue;
     }
+    if (!token.startsWith('-')) return token;
+  }
+  return undefined;
+}
 
-    if (char === SHELL_ESCAPE && quote !== "'") {
-      escaped = true;
-      continue;
-    }
+function shellOperationalMutationPolicyRejection(event: any, services: RuntimeServices): string | null {
+  if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
+  if (event.input?.[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
+  const command = typeof event.input?.command === 'string' ? event.input.command : '';
+  if (!command.trim()) return null;
 
-    if (quote) {
-      if (char === quote) quote = null;
-      else current += char;
-      continue;
-    }
+  let commands;
+  try {
+    commands = services.shellCommandParser.parse(command).commands;
+  } catch {
+    return null;
+  }
+  for (const shellCommand of commands) {
+    const effective = services.shellCommandParser.effectiveCommand(shellCommand);
+    const commandName = effective.basename;
+    const isMutation = SHELL_OPERATIONAL_MUTATION_COMMANDS.has(commandName)
+      || (commandName === FileMutationPolicyDefaults.GIT_COMMAND && GIT_OPERATIONAL_MUTATION_SUBCOMMANDS.has(gitSubcommand(effective.args) || ''));
+    if (!isMutation) continue;
 
-    if (SHELL_QUOTES.has(char)) {
-      quote = char;
-      continue;
-    }
+    const target = [
+      effective.name,
+      ...effective.args.map(arg => arg.text),
+      ...effective.redirects.map(redirect => redirect.file?.text || '')
+    ].find(token => token && isOperationalMutationPath(token));
+    if (!target) continue;
 
-    if (/\s/.test(char)) {
-      if (current) tokens.push(current);
-      current = '';
-      continue;
-    }
-
-    current += char;
+    return `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` may not mutate framework runtime artifact path ` +
+      `\`${target}\` inside a teammate context. Leave harness artifacts to Orr Else.`;
   }
 
-  if (current) tokens.push(current);
-  return tokens;
-}
-
-function commandHeads(command: string): string[] {
-  return splitShellSegments(command)
-    .map(segment => splitShellTokens(segment).find(token => !SHELL_ENV_ASSIGNMENT.test(token)) || '')
-    .map(token => path.basename(token.replace(/^['"]|['"]$/g, '')))
-    .filter(Boolean);
+  return null;
 }
 
 function teammateEventTypeForOutcome(outcome: string): TeammateEventType {
@@ -440,8 +725,13 @@ function teammateEventTypeForOutcome(outcome: string): TeammateEventType {
   return TeammateEventType.STATE_TRANSITIONED;
 }
 
-function shellPolicyRejection(event: any, config: HarnessConfig): string | null {
+export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string): boolean {
+  return eventType === TeammateEventType.STATE_BLOCKED || nextState === BeadStatus.BLOCKED;
+}
+
+function shellPolicyRejection(event: any, config: HarnessConfig, services: RuntimeServices): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
+  if (event.input?.[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
 
   const policy = config.settings.pi?.shell;
   const command = typeof event.input?.command === 'string' ? event.input.command : '';
@@ -457,7 +747,7 @@ function shellPolicyRejection(event: any, config: HarnessConfig): string | null 
   if (!disallowProjectToolFallback) return null;
 
   for (const tool of config.tools || []) {
-    if (commandInvokesToolName(command, tool.name)) {
+    if (commandInvokesToolName(command, tool.name, services)) {
       return `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` may not invoke configured project tool \`${tool.name}\`. Use the \`${tool.name}\` tool call from harness.yaml.`;
     }
   }
@@ -465,20 +755,45 @@ function shellPolicyRejection(event: any, config: HarnessConfig): string | null 
   return null;
 }
 
-function operationalLogReadPolicyRejection(event: any): string | null {
+function mcpPolicyRejection(event: any, config: HarnessConfig): string | null {
+  if (!isWorkerMode() || event.toolName !== NativePiToolName.MCP) return null;
+  const policy = config.settings.pi?.mcp;
+  const requestedTool = typeof event.input?.tool === 'string' ? event.input.tool.trim() : '';
+  const isMcpToolCall = requestedTool.length > 0;
+
+  if (policy?.allowToolCalls === false) {
+    const requestedDescription = isMcpToolCall ? ` tool call \`${requestedTool}\`` : ' access';
+    return `PROTOCOL VIOLATION: direct Pi \`${NativePiToolName.MCP}\`${requestedDescription} is disabled by harness.yaml. Use the configured Orr Else project tool for this capability or route BLOCKED if none exists.`;
+  }
+
+  const blockedPatterns = policy?.blockedToolPatterns || [];
+  for (const pattern of blockedPatterns) {
+    let regex: RegExp;
+    try {
+      regex = new RegExp(pattern);
+    } catch (error) {
+      return `PROTOCOL VIOLATION: invalid harness.yaml Pi MCP blockedToolPatterns entry \`${pattern}\`: ${String(error)}`;
+    }
+    if (!requestedTool || !regex.test(requestedTool)) continue;
+    return `PROTOCOL VIOLATION: direct Pi \`${NativePiToolName.MCP}\` tool call \`${requestedTool}\` is blocked by harness.yaml. Use the configured Orr Else project tool for this capability or route BLOCKED if none exists.`;
+  }
+
+  return null;
+}
+
+function operationalArtifactReadPolicyRejection(event: any): string | null {
   if (!isWorkerMode() || event.toolName !== NativePiToolName.READ) return null;
-  const requestedPath = typeof event.input?.path === 'string' ? event.input.path : '';
+  const requestedPath = nativeToolPath(event);
   if (!requestedPath.trim()) return null;
+  if (isProjectToolCallOutputPath(requestedPath)) return PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE;
+  if (!isOperationalReadPath(requestedPath)) return null;
 
-  const normalizedPath = requestedPath.replaceAll(path.sep, '/');
-  const fileName = path.posix.basename(normalizedPath);
-  const readsProgressLog = fileName === OperationalLogPath.PROGRESS_FILE;
-  const readsWorklog = normalizedPath.split('/').includes(OperationalLogPath.WORKLOG_DIR)
-    && fileName.endsWith(OperationalLogPath.WORKLOG_FILE_SUFFIX);
-  if (!readsProgressLog && !readsWorklog) return null;
-
-  return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read raw operational logs ` +
-    `(\`${OperationalLogPath.PROGRESS_FILE}\` or \`${OperationalLogPath.WORKLOG_DIR}/*${OperationalLogPath.WORKLOG_FILE_SUFFIX}\`) ` +
+  return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read framework runtime artifacts ` +
+    `(\`${OperationalLogPath.PROGRESS_FILE}\`, \`${OperationalLogPath.WORKLOG_DIR}/*${OperationalLogPath.WORKLOG_FILE_SUFFIX}\`, ` +
+    `\`${OperationalArtifactPath.LEGACY_STATE_DIR}/\`, \`${OperationalArtifactPath.PI_EVENTS_DIR}/\`, ` +
+    `\`${OperationalArtifactPath.PI_LOGS_DIR}/\`, \`${OperationalArtifactPath.PI_MAILBOX_DIR}/\`, ` +
+    `\`${OperationalArtifactPath.PI_OTEL_DIR}/\`, \`${OperationalArtifactPath.PI_ARTIFACTS_DIR}/\`, ` +
+    `or \`${OperationalArtifactPath.PI_TOOL_OUTPUT_DIR}/\`) ` +
     'inside a teammate context. Use `bd_get_state_chart`, `bd_get_bead`, `get_artifact_paths`, and configured artifacts for state reconstruction.';
 }
 
@@ -496,6 +811,26 @@ function eventToolCallId(event: any): string | undefined {
   return typeof event.toolCallId === 'string' ? event.toolCallId : undefined;
 }
 
+function registerProviderRequestCap(pi: ExtensionAPI): void {
+  if (providerRequestCapRegistered) return;
+  providerRequestCapRegistered = true;
+
+  pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: any) => {
+    const cap = resolveMaxOutputTokens(process.env[EnvVars.MAX_OUTPUT_TOKENS]);
+    const payload = event?.payload;
+    const originalMaxTokens =
+      payload && typeof payload === 'object' ? (payload as { max_tokens?: unknown }).max_tokens : undefined;
+    const capped = capAnthropicMaxTokens(payload, cap);
+    if (!capped) return undefined;
+    Logger.info(Component.ORR_ELSE, 'Capped Anthropic max_tokens to fit subscription included quota', {
+      originalMaxTokens,
+      cappedMaxTokens: cap,
+      thinkingBudget: capped.thinking?.budget_tokens
+    });
+    return capped;
+  });
+}
+
 function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): void {
   if (piToolObserverRegistered) return;
   piToolObserverRegistered = true;
@@ -503,14 +838,11 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
   pi.on(PiEventName.TOOL_CALL, async (event: any) => {
     if (!observedPiTools.has(event.toolName)) return;
     const runtimeObservability = piToolObservability;
-    const beadId = beadIdFromToolParams(event.input);
     const toolCallId = eventToolCallId(event);
+    const fileMutationPolicyResult = await services.fileMutationPolicy.apply(event);
+    const beadId = beadIdFromToolParams(event.input);
     runtimeObservability?.recordToolInvocation(event.toolName);
-    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, {
-      'tool.name': event.toolName,
-      'tool.external_pi': true,
-      'tool.params': stringifySpanAttribute(summarizeForEvent(event.input))
-    });
+    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, event.input, beadId, true));
     if (span && toolCallId) observedPiToolSpans.set(toolCallId, span);
 
     await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
@@ -527,8 +859,13 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
     });
 
     const config = await services.configLoader.load();
-    const rejection = shellPolicyRejection(event, config)
-      || operationalLogReadPolicyRejection(event)
+    const rejection = fileMutationPolicyResult?.rejection
+      || await terminalFailureLimitRejection(event.toolName, services)
+      || shellPolicyRejection(event, config, services)
+      || mcpPolicyRejection(event, config)
+      || shellOperationalMutationPolicyRejection(event, services)
+      || operationalArtifactReadPolicyRejection(event)
+      || nativeOperationalMutationPolicyRejection(event)
       || oversizedReadPolicyRejection(event)
       || await checkToolValidationRules(event.toolName, config, runtimeObservability || getObservability(services));
     if (!rejection) return;
@@ -556,7 +893,12 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
         error: String(error)
       });
     });
-    return { block: true, reason: rejection };
+    return {
+      block: true,
+      reason: rejection,
+      ...(fileMutationPolicyResult?.nextAction ? { nextAction: fileMutationPolicyResult.nextAction } : {}),
+      ...(fileMutationPolicyResult?.recovery ? { recovery: fileMutationPolicyResult.recovery } : {})
+    };
   });
 
   pi.on(PiEventName.TOOL_RESULT, async (event: any) => {
@@ -597,16 +939,62 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
   });
 }
 
+async function recordTurnUsage(event: any, services: RuntimeServices): Promise<void> {
+  const endTimeMs = Date.now();
+  const startTimeMs = currentTurnStartMs ?? endTimeMs;
+  currentTurnStartMs = undefined;
+
+  const record = buildTurnUsageRecord(event?.message?.usage, {
+    beadId: process.env[EnvVars.BEAD_ID] || App.COORDINATOR_ID,
+    stateId: process.env[EnvVars.STATE_ID] || App.COORDINATOR_ID,
+    actionId: process.env[EnvVars.ACTION_ID] || App.TURN_ACTION_ID,
+    workerId: process.env[EnvVars.WORKER_ID] || App.COORDINATOR_ID,
+    model: event?.message?.model || process.env[EnvVars.LLM_MODEL] || App.UNKNOWN_MODEL,
+    startTimeMs,
+    endTimeMs
+  });
+  if (!record) return;
+
+  services.telemetryStore.recordTurn(record.telemetry);
+  await services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, record.event).catch(error => {
+    Logger.warn(Component.OBSERVABILITY, 'Failed to record token usage event', { error: String(error) });
+  });
+
+  try {
+    const span = services.observability.startSpan('llm_turn', {
+      'gen_ai.request.model': record.event.model,
+      'gen_ai.usage.input_tokens': record.event.inputTokens,
+      'gen_ai.usage.output_tokens': record.event.outputTokens,
+      'gen_ai.usage.cache_read_tokens': record.event.cacheReadTokens,
+      'gen_ai.usage.total_tokens': record.event.totalTokens,
+      'orr_else.bead_id': record.event.beadId,
+      'orr_else.state_id': record.event.stateId,
+      'orr_else.action_id': record.event.actionId,
+      'orr_else.worker_id': record.event.workerId,
+      'orr_else.cost_total': record.event.costTotal
+    });
+    services.observability.endSpan(span.spanId);
+  } catch (error) {
+    Logger.debug(Component.OBSERVABILITY, 'Skipped OTEL token-usage span', { error: String(error) });
+  }
+}
+
 function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServices): void {
   if (agentLifecycleObserverRegistered) return;
   agentLifecycleObserverRegistered = true;
 
+  pi.on(PiEventName.TURN_START, async (event: any) => {
+    currentTurnStartMs = typeof event?.timestamp === 'number' ? event.timestamp : Date.now();
+  });
+
   pi.on(PiEventName.TURN_END, async (event: any, ctx: ExtensionContext) => {
     await handleAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services);
+    await recordTurnUsage(event, services);
   });
 
   pi.on(PiEventName.AGENT_END, async (event: any, ctx: ExtensionContext) => {
     await handleAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services);
+    Logger.info(Component.OBSERVABILITY, 'Session token usage summary', services.telemetryStore.getSummary());
   });
 }
 
@@ -656,7 +1044,7 @@ async function handleAgentLifecycleFailure(event: any, ctx: ExtensionContext, so
       capacityLimited: true,
       pauseUntilMs
     });
-    await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, exitedEvent).catch(signalError => {
+    await postWorkerSignal(services, exitedEvent).catch(signalError => {
       Logger.error(Component.ORR_ELSE, 'Failed to signal harness capacity limit', {
         beadId: activeRun?.beadId,
         error: String(signalError)
@@ -691,7 +1079,7 @@ async function handleAgentLifecycleFailure(event: any, ctx: ExtensionContext, so
     evidence: summary,
     handover: summary
   });
-  await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, teammateEvent).catch(signalError => {
+  await postWorkerSignal(services, teammateEvent).catch(signalError => {
     Logger.error(Component.ORR_ELSE, 'Failed to signal agent lifecycle failure', {
       beadId: activeRun?.beadId,
       error: String(signalError)
@@ -762,16 +1150,112 @@ async function checkToolValidationRules(toolName: string, config: HarnessConfig,
       return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to be called first.`;
     }
 
-    if (rule.condition === ToolValidationCondition.PASSED && result?.status !== ToolResultStatus.PASSED) {
+    if (rule.condition === ToolValidationCondition.PASSED && !runtimeObservability.hasToolPassed(rule.tool)) {
       return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to have returned a \`PASSED\` status.`;
     }
 
-    if (rule.condition === ToolValidationCondition.SUCCEEDED && !resultIndicatesSuccess(result)) {
+    if (rule.condition === ToolValidationCondition.SUCCEEDED && !runtimeObservability.hasToolPassed(rule.tool) && !resultIndicatesSuccess(result)) {
       return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to have succeeded.`;
     }
   }
 
   return null;
+}
+
+async function terminalFailureLimitContext(services: RuntimeServices): Promise<TerminalFailureLimitContext | null> {
+  const run = activeRun;
+  if (!isWorkerMode() || !run) return null;
+
+  let data = run.terminalFailureLimitEvent?.data || run.terminalFailureLimitResult;
+
+  if (!data) {
+    if (run.terminalFailureLimitScanned) return null;
+    preloadTerminalFailureLimit(run, services);
+    const limitEvent = await run.terminalFailureLimitScan;
+    run.terminalFailureLimitScanned = true;
+    run.terminalFailureLimitScan = undefined;
+    if (!limitEvent) return null;
+    run.terminalFailureLimitEvent = limitEvent;
+    data = limitEvent.data || {};
+  }
+
+  const result = isRecord(data.result) ? data.result : {};
+  const failureLimit = isRecord(result.failureLimit) ? result.failureLimit : {};
+  const failedTool = typeof data.tool === 'string'
+    ? data.tool
+    : typeof result.tool === 'string'
+      ? result.tool
+      : 'unknown';
+  const config = await services.configLoader.load();
+  const failedToolDefinition = config.tools?.find(tool => tool.name === failedTool);
+  const recordedSuggestedOutcome = typeof failureLimit.suggestedOutcome === 'string'
+    ? failureLimit.suggestedOutcome
+    : routingHintSuggestedOutcomeFromResult(result);
+  const configuredSuggestedOutcome = projectToolFailureLimitSuggestedOutcome(
+    failedToolDefinition,
+    run.stateId,
+    run.action.id
+  );
+  const suggestedOutcome = recordedSuggestedOutcome || configuredSuggestedOutcome || EventName.BLOCKED;
+  return {
+    failedTool,
+    suggestedOutcome,
+    stateId: run.stateId,
+    actionId: run.action.id
+  };
+}
+
+async function terminalFailureLimitRejection(toolName: string, services: RuntimeServices): Promise<string | null> {
+  if (TERMINAL_FAILURE_ALLOWED_TOOLS.has(toolName)) return null;
+  const terminal = await terminalFailureLimitContext(services);
+  if (!terminal) return null;
+
+  return `PROTOCOL VIOLATION: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
+    `in ${terminal.stateId}/${terminal.actionId}. Do not call \`${toolName}\` or gather more evidence in this state. ` +
+    `Use \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with the failure-limit evidence, then ` +
+    `\`${BuiltInToolName.SIGNAL_COMPLETION}\` with outcome \`${terminal.suggestedOutcome}\`.`;
+}
+
+function lookupToolGuards(
+  toolName: string,
+  config: HarnessConfig
+): { timeoutMs: number; maxFailures: number; cacheable: boolean } {
+  const toolConfig = config.tools?.find(t => t.name === toolName);
+  return {
+    timeoutMs: toolConfig?.wrapperTimeoutMs ?? ToolDefaults.WRAPPER_TIMEOUT_MS,
+    maxFailures: toolConfig?.maxConsecutiveFailures ?? ToolDefaults.MAX_CONSECUTIVE_FAILURES,
+    cacheable: toolConfig?.cacheable === true
+  };
+}
+
+function toolCacheKey(toolName: string, params: unknown): string {
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(params ?? {});
+  } catch {
+    serialised = '[unserialisable]';
+  }
+  return `${toolName}|${serialised}`;
+}
+
+function breakerKey(beadId: string | undefined, toolName: string): string {
+  return `${beadId ?? '_'}|${toolName}`;
+}
+
+async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Tool ${toolName} exceeded harness wrapper timeout of ${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function wrapPluginTool(
@@ -801,27 +1285,100 @@ function wrapPluginTool(
       }
 
       const beadId = beadIdFromToolParams(params);
+      const { timeoutMs, maxFailures, cacheable } = lookupToolGuards(tool.name, config);
+      const breakerEnabled = isWorkerMode();
+      const key = breakerKey(beadId, tool.name);
+      const cacheKey = toolCacheKey(tool.name, params);
+
+      // Serve cacheable tools from the in-session memo when present. Any call
+      // to a non-cacheable tool below will clear the memo before executing,
+      // because we treat non-cacheable tools as potentially mutating.
+      if (cacheable && isWorkerMode()) {
+        const hit = toolResultCache.get(cacheKey);
+        if (hit) {
+          const ageMs = Date.now() - hit.recordedAt;
+          runtimeObservability.recordToolInvocation(tool.name, hit.result);
+          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+            beadId,
+            tool: tool.name,
+            result: summarizeForEvent(hit.result),
+            cached: true,
+            cacheAgeMs: ageMs
+          }).catch(() => {});
+          return toolResult(hit.result);
+        }
+      } else if (isWorkerMode() && toolResultCache.size > 0) {
+        toolResultCache.clear();
+      }
+
+      // Circuit breaker: short-circuit if this tool has failed maxFailures
+      // times in a row for this bead within the session.
+      if (breakerEnabled) {
+        const failures = toolBreakerFailures.get(key) ?? 0;
+        if (failures >= maxFailures) {
+          const message = `REJECTED: \`${tool.name}\` circuit open after ${failures} consecutive failures. Pick a different approach; the breaker resets when the bead transitions.`;
+          runtimeObservability.recordToolInvocation(tool.name, {
+            status: ToolResultStatus.REJECTED,
+            isError: true,
+            message
+          });
+          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+            beadId,
+            tool: tool.name,
+            result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' }
+          }).catch(() => {});
+          if (ctx.hasUI) ctx.ui.notify(message, 'error');
+          return toolResult(message);
+        }
+      }
+
       await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
         beadId,
         tool: tool.name,
         params: summarizeForEvent(params)
       });
 
+      const terminalRejection = await terminalFailureLimitRejection(tool.name, services);
+      if (terminalRejection) {
+        runtimeObservability.recordToolInvocation(tool.name, {
+          status: ToolResultStatus.REJECTED,
+          isError: true,
+          message: terminalRejection
+        });
+        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+          beadId,
+          tool: tool.name,
+          result: {
+            status: ToolResultStatus.REJECTED,
+            isError: true,
+            message: terminalRejection
+          }
+        });
+        if (ctx.hasUI) ctx.ui.notify(terminalRejection, 'error');
+        return toolResult(terminalRejection);
+      }
+
       const tracedExecute = runtimeObservability.tracedAsync(
         `tool:${tool.name}`,
-        {
-          'tool.name': tool.name,
-          'tool.params': JSON.stringify(params)
-        },
+        toolSpanAttributes(tool.name, params, beadId),
         async (p: any, c: ExtensionContext) => {
           if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
-          const result = await tool.execute(p || {}, c);
+          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => tool.execute(p || {}, c));
           if (c.hasUI) c.ui.setWorkingMessage(undefined);
 
           // Record invocation and result for audit
           runtimeObservability.recordToolInvocation(tool.name, result);
+          const terminalFailureLimitData = terminalFailureLimitDataFromResult(result);
+          const run = activeRun;
+          if (terminalFailureLimitData && run !== null && run.beadId === beadId) {
+            run.terminalFailureLimitResult = terminalFailureLimitData;
+            run.terminalFailureLimitScanned = true;
+          }
 
           if (resultIndicatesFailure(result)) {
+            if (breakerEnabled) {
+              toolBreakerFailures.set(key, (toolBreakerFailures.get(key) ?? 0) + 1);
+            }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
               beadId,
               tool: tool.name,
@@ -833,6 +1390,10 @@ function wrapPluginTool(
               if (c.hasUI) c.ui.notify(result.error || `Tool ${tool.name} failed`, 'error');
             }
           } else {
+            if (breakerEnabled) toolBreakerFailures.delete(key);
+            if (cacheable && isWorkerMode()) {
+              toolResultCache.set(cacheKey, { result, recordedAt: Date.now() });
+            }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
               tool: tool.name,
@@ -848,6 +1409,9 @@ function wrapPluginTool(
         const result = await tracedExecute(params, ctx);
         return toolResult(result);
       } catch (error) {
+        if (breakerEnabled) {
+          toolBreakerFailures.set(key, (toolBreakerFailures.get(key) ?? 0) + 1);
+        }
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
@@ -884,11 +1448,9 @@ function parseJsonIfString(value: unknown): unknown {
 
 function extractFrameworkToolCalls(value: unknown): Array<{ tool: string; arguments?: Record<string, unknown> }> {
   const parsed = parseJsonIfString(value);
-  if (Array.isArray(parsed)) {
-    return parsed.filter((item): item is { tool: string; arguments?: Record<string, unknown> } =>
-      isRecord(item) && typeof item.tool === 'string'
-    );
-  }
+  if (Array.isArray(parsed)) return FrameworkToolCallListSchema.safeParse(parsed).data || [];
+  const single = FrameworkToolCallSchema.safeParse(parsed);
+  if (single.success) return [single.data];
   if (!isRecord(parsed)) return [];
 
   if (Array.isArray(parsed.toolCalls)) return extractFrameworkToolCalls(parsed.toolCalls);
@@ -909,16 +1471,51 @@ function normalizeChecklistItem(raw: Record<string, unknown>): ChecklistItem | n
   } as ChecklistItem;
 }
 
-async function apiRequest(path: string, method: string, body?: any) {
-  const apiPort = process.env[EnvVars.API_PORT] || Defaults.API_PORT;
-  const apiBase = process.env[EnvVars.API_BASE] || `http://${Defaults.API_HOST}:${apiPort}`;
-  const response = await fetch(`${apiBase}${path}`, {
-    method,
-    headers: { [HttpHeader.CONTENT_TYPE]: HttpHeader.APPLICATION_JSON },
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
-  if (!response.ok) throw new Error(`API Error: ${response.status}`);
-  return await response.json();
+function teammateSignalEventData(event: TeammateEvent): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    type: event.type,
+    beadId: event.beadId,
+    workerId: event.workerId,
+    sessionStateId: event.sessionStateId,
+    stateId: event.stateId,
+    idempotencyKey: event.idempotencyKey
+  };
+  const anyEvent = event as unknown as Record<string, unknown>;
+  for (const key of ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']) {
+    if (anyEvent[key] !== undefined) data[key] = anyEvent[key];
+  }
+  return data;
+}
+
+async function hasAppliedTeammateSignal(services: RuntimeServices, event: TeammateEvent): Promise<boolean> {
+  const events = await services.eventStore.eventsForBead(event.beadId);
+  return findAppliedTeammateSignal(events, event) !== undefined;
+}
+
+async function postWorkerSignal(services: RuntimeServices, event: TeammateEvent): Promise<void> {
+  await services.eventStore.record(DomainEventName.SIGNAL_INTENT_RECORDED, teammateSignalEventData(event));
+
+  try {
+    await postHarnessSignal(event);
+    await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, teammateSignalEventData(event));
+    return;
+  } catch (error) {
+    const applied = await hasAppliedTeammateSignal(services, event).catch(() => false);
+    await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+      ...teammateSignalEventData(event),
+      error: String(error),
+      appliedAfterTransportFailure: applied
+    }).catch(() => {});
+
+    if (applied) {
+      await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
+        ...teammateSignalEventData(event),
+        source: 'event-store-reconcile'
+      });
+      return;
+    }
+    throw error;
+  }
 }
 
 function actionRunContext(action: TeammateAction): ActionRunContext {
@@ -1062,20 +1659,73 @@ async function addChecklistItemInner(rawItem: Record<string, unknown>, source: s
   };
 }
 
+async function resolveEvidenceFromPath(rawPath: string): Promise<{ ok: true; evidence: string } | { ok: false; error: string }> {
+  const run = activeRun;
+  if (!run || !run.worktreePath) {
+    return { ok: false, error: 'No active worktree to resolve evidencePath against.' };
+  }
+  const worktreeRoot = path.resolve(run.worktreePath);
+  const resolved = path.resolve(worktreeRoot, rawPath);
+  if (!resolved.startsWith(worktreeRoot + path.sep) && resolved !== worktreeRoot) {
+    return { ok: false, error: `evidencePath must stay inside the worktree (${run.worktreePath}).` };
+  }
+  try {
+    const evidence = await fs.promises.readFile(resolved, 'utf8');
+    if (!evidence.trim()) return { ok: false, error: `evidencePath resolved to an empty file: ${rawPath}` };
+    return { ok: true, evidence };
+  } catch (error) {
+    return { ok: false, error: `Failed to read evidencePath ${rawPath}: ${String(error)}` };
+  }
+}
+
 async function tickChecklistItems(items: ChecklistTickInput[], services: RuntimeServices): Promise<Record<string, unknown>> {
   if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
   if (!Array.isArray(items) || items.length === 0) {
     return { status: ToolResultStatus.REJECTED, message: 'At least one checklist item is required.' };
   }
 
-  const uniqueItems = Array.from(new Map(items.map(item => [item.text, item])).values());
-  const rejected = uniqueItems
-    .filter(item => !activeRun!.requiredItems.some(required => required.text === item.text))
-    .map(item => item.text);
-  if (rejected.length > 0) {
+  const evidenceResolution = await Promise.all(items.map(async item => {
+    if (item.evidence && item.evidence.trim().length > 0) return { ok: true, item };
+    if (item.evidencePath && item.evidencePath.trim().length > 0) {
+      const resolution = await resolveEvidenceFromPath(item.evidencePath);
+      if (!resolution.ok) {
+        return { ok: false as const, originalText: item.text, error: resolution.error };
+      }
+      return { ok: true, item: { ...item, evidence: resolution.evidence } };
+    }
+    return {
+      ok: false as const,
+      originalText: item.text,
+      error: 'Either `evidence` (inline) or `evidencePath` (artifact path) must be supplied.'
+    };
+  }));
+  const evidenceFailures = evidenceResolution.filter((entry): entry is { ok: false; originalText: string; error: string } => !entry.ok);
+  if (evidenceFailures.length > 0) {
     return {
       status: ToolResultStatus.REJECTED,
-      message: `Checklist item is not in the current phase checklist: ${rejected.join(', ')}`
+      message: `Evidence resolution failed: ${evidenceFailures.map(f => `${f.originalText}: ${f.error}`).join('; ')}`
+    };
+  }
+  const itemsWithEvidence = evidenceResolution
+    .filter((entry): entry is { ok: true; item: ChecklistTickInput & { evidence: string } } => entry.ok)
+    .map(entry => entry.item);
+
+  const resolvedItems = itemsWithEvidence.map(item => ({
+    ...item,
+    originalText: item.text,
+    text: resolveChecklistTickText(activeRun!.requiredItems, item.text) || item.text.trim()
+  }));
+  const uniqueItems = Array.from(new Map(resolvedItems.map(item => [item.text, item])).values());
+  const rejected = uniqueItems
+    .filter(item => !activeRun!.requiredItems.some(required => required.text === item.text))
+    .map(item => item.originalText);
+  if (rejected.length > 0) {
+    const validItems = activeRun.requiredItems.map(item => item.text);
+    return {
+      status: ToolResultStatus.REJECTED,
+      message: `Checklist item is not in the current phase checklist: ${rejected.join(', ')}. Retry with exact text from validItems.`,
+      rejectedItems: rejected,
+      validItems
     };
   }
 
@@ -1139,6 +1789,8 @@ async function runParentSequenceActionsBeforeActive(
   const precedingActions = activeIndex <= 0 ? [] : activeRun.state.actions.slice(0, activeIndex);
 
   for (const action of precedingActions) {
+    if (isActionCompleted(config, activeRun.stateId, action, activeRun.completedActionIds)) continue;
+
     if (actionRunContext(action) === ActionRunContext.FRESH) {
       throw new Error(`Action ${action.id} requests fresh context but has not completed before ${activeRun.action.id}.`);
     }
@@ -1228,14 +1880,21 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   const beadId = process.env[EnvVars.BEAD_ID] as BeadId | undefined;
   const stateId = process.env[EnvVars.STATE_ID];
   if (!beadId || !stateId) return;
+  // A fresh worker run starts with a clean tool-breaker and tool-cache state.
+  // Both are session-scoped; they do not carry across the bead transition
+  // that ended the prior run.
+  toolBreakerFailures.clear();
+  toolResultCache.clear();
 
   const config = await services.configLoader.load();
   const state = config.states[stateId];
   if (!state) throw new Error(`Configured state not found: ${stateId}`);
 
   const actionId = process.env[EnvVars.ACTION_ID];
-  const bead = await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_GET_BEAD)!.execute({ id: beadId }) as Bead;
-  const completedActionIds = bead.completedActionIds || [];
+  const beadProjection = await services.eventStore.projectBead(beadId, { includeDetails: true });
+  const completedActionIds = Array.isArray(beadProjection.completedActionIds)
+    ? beadProjection.completedActionIds
+    : [];
   const action = selectActiveAction(config, stateId, state, actionId, completedActionIds);
   if (!action) throw new Error(`State ${stateId} has no configured actions.`);
 
@@ -1243,7 +1902,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   const configuredRequiredItems = deriveChecklistItems(state, action, config, stateId);
   const requiredItems = mergeChecklistItems(
     configuredRequiredItems,
-    dynamicChecklistItemsForRun(bead, stateId, action.id)
+    dynamicChecklistItemsForRun(beadProjection as Bead, stateId, action.id)
   ).requiredItems;
   const worklogManager = new WorklogManager(services.eventStore);
   const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
@@ -1262,6 +1921,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     parentSequenceCompleted: false,
     completedActionIds
   };
+  preloadTerminalFailureLimit(activeRun, services);
   agentFailureSignaled = false;
   seedCompletedActionToolEvidence(runtimeObservability, state, config, stateId, completedActionIds);
 
@@ -1288,7 +1948,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
 
   return services.contextInjector.inject(
-    [stateInstructions, protocol, checklistProtocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),
+    [stateInstructions, protocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),
     {
       beadId: activeRun.beadId,
       projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
@@ -1305,7 +1965,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
       progressPath: activeRun.worktreePath ? path.join(activeRun.worktreePath, 'PROGRESS.md') : undefined,
       historyPath: activeRun.worklogManager.getWorklogPath(activeRun.beadId),
       rulePaths: services.instructionLoader.compatibilityPaths(config),
-      timestamp: new Date().toISOString()
+      outstandingChecklist: checklistProtocol
     }
   );
 }
@@ -1314,17 +1974,46 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   const currentSupervisor = supervisor;
   if (!currentSupervisor) return;
 
-  await services.eventStore.record(DomainEventName.TEAMMATE_EVENT, event);
+  const beadId = event.beadId as BeadId;
 
   if (event.type === TeammateEventType.HEARTBEAT) {
-    Logger.info(Component.ORR_ELSE, 'Received teammate heartbeat', { beadId: event.beadId, workerId: event.workerId });
+    Logger.debug(Component.ORR_ELSE, 'Received teammate heartbeat', { beadId: event.beadId, workerId: event.workerId });
     return;
   }
 
-  const beadId = event.beadId as BeadId;
+  const priorEvents = await services.eventStore.eventsForBead(beadId);
+  const appliedEvent = findAppliedTeammateSignal(priorEvents, event);
+  const beadProjection = await services.eventStore.projectBead(beadId, { includeDetails: false }).catch(() => undefined);
+  const currentStateId = beadProjection?.status;
+  const processedKeys = new Set<string>();
+  if (currentSupervisor.isSignalProcessed(event.idempotencyKey)) processedKeys.add(event.idempotencyKey);
+  const decision = appliedEvent
+    ? { action: TeammateEventDecisionAction.DUPLICATE, reason: `Signal already applied by ${appliedEvent.type}` }
+    : decideTeammateEventProcessing(event, processedKeys, currentStateId);
+
+  await services.eventStore.record(DomainEventName.TEAMMATE_EVENT, {
+    ...event,
+    processingDecision: decision.action,
+    processingReason: decision.reason
+  });
+
+  if (decision.action !== TeammateEventDecisionAction.ACCEPT) {
+    const logDuplicateDecision = decision.action === TeammateEventDecisionAction.DUPLICATE
+      ? Logger.info.bind(Logger)
+      : Logger.warn.bind(Logger);
+    logDuplicateDecision(Component.ORR_ELSE, 'Ignoring teammate signal after durable processing decision', {
+      beadId,
+      type: event.type,
+      stateId: event.stateId,
+      idempotencyKey: event.idempotencyKey,
+      decision: decision.action,
+      reason: decision.reason
+    });
+    return;
+  }
+
   if (ctx.hasUI) ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Processing ${event.type} for ${beadId}`);
 
-  if (currentSupervisor.isSignalProcessed(event.idempotencyKey)) return;
   currentSupervisor.markSignalProcessed(event.idempotencyKey);
 
   if (event.type === TeammateEventType.TEAMMATE_EXITED) {
@@ -1354,7 +2043,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   if (event.type === TeammateEventType.STATE_TRANSITIONED) {
     const state = config.states[event.stateId];
     const actionKey = event.actionId ? actionCompletionKey(config, event.stateId, event.actionId) : undefined;
-    const bead = await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_GET_BEAD)!.execute({ id: beadId }) as Bead;
+    const bead = await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_GET_BEAD)!.execute({ id: beadId, includeDetails: true }) as Bead;
     const completedActionIds = event.transitionEvent === EventName.SUCCESS
       ? appendCompletedActionId(bead.completedActionIds || [], event.stateId, event.actionId, config)
       : (bead.completedActionIds || []);
@@ -1365,6 +2054,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     if (nextAction) {
       await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
         beadId,
+        workerId: event.workerId,
+        sessionStateId: event.sessionStateId,
+        idempotencyKey: event.idempotencyKey,
         fromState: event.stateId,
         nextState: event.stateId,
         nextActionId: nextAction.id,
@@ -1386,6 +2078,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
     const transitionEventData = {
       beadId,
+      workerId: event.workerId,
+      sessionStateId: event.sessionStateId,
+      idempotencyKey: event.idempotencyKey,
       fromState: event.stateId,
       nextState,
       transitionEvent: event.transitionEvent,
@@ -1399,7 +2094,11 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
     if (nextState === BeadStatus.COMPLETED && event.transitionEvent === EventName.SUCCESS) {
       const mergeTool = services.plugins.git.tools.find(t => t.name === PluginToolName.MERGE_AND_COMMIT)!;
-      const mergeResult = await mergeTool.execute({ beadId }, ctx);
+      const mergeResult = await mergeTool.execute({
+        beadId,
+        closeAfterMerge: true,
+        closeReason: event.summary
+      }, ctx);
       if ((mergeResult as any)?.success !== true) {
         await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS)!.execute({
           id: beadId,
@@ -1413,11 +2112,6 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         return;
       }
 
-      await services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS)!.execute({
-        id: beadId,
-        status: BeadStatus.COMPLETED,
-        notes: event.summary
-      }, ctx);
       await services.plugins.git.tools.find(t => t.name === PluginToolName.REMOVE_WORKTREE)!.execute({ beadId, force: true }, ctx);
       currentSupervisor.markBeadExited(beadId);
       return;
@@ -1429,6 +2123,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
       beadId,
+      workerId: event.workerId,
+      sessionStateId: event.sessionStateId,
+      idempotencyKey: event.idempotencyKey,
       fromState: event.stateId,
       nextState,
       transitionEvent: event.transitionEvent,
@@ -1438,6 +2135,73 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       evidence: event.evidence,
       handover: event.handover
     });
+
+    if (shouldPersistBlockedBeadStatus(event.type, nextState)) {
+      const updateStatus = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
+      if (updateStatus) {
+        await Promise.resolve(updateStatus.execute({
+          id: beadId,
+          status: BeadStatus.BLOCKED,
+          notes: `Blocked in ${event.stateId} via ${event.transitionEvent}: ${event.summary}`
+        }, ctx)).catch(error => {
+          Logger.warn(Component.ORR_ELSE, 'Failed to update bead status after blocked teammate outcome', {
+            beadId,
+            stateId: event.stateId,
+            transitionEvent: event.transitionEvent,
+            error: String(error)
+          });
+        });
+      }
+    }
+
+    // Cycle-cap escalation. A self-loop with the same blocker means the LLM
+    // is grinding on something it can't unblock alone.
+    if (nextState === event.stateId) {
+      const fingerprint = (event.summary || event.evidence || '').slice(0, 200);
+      const cycleKey = `${beadId}|${event.stateId}|${fingerprint}`;
+      // Sweep counters for OTHER fingerprints in this (bead, state) — once we
+      // change blocker reason, any prior streak no longer matches the rule.
+      for (const key of stateCycleCounter.keys()) {
+        if (key.startsWith(`${beadId}|${event.stateId}|`) && key !== cycleKey) {
+          stateCycleCounter.delete(key);
+        }
+      }
+      const next = (stateCycleCounter.get(cycleKey) ?? 0) + 1;
+      stateCycleCounter.set(cycleKey, next);
+      const cap = (config.settings as any)?.cycleCap ?? CYCLE_CAP_DEFAULT;
+      if (next >= cap) {
+        Logger.warn(Component.ORR_ELSE, 'Cycle cap reached; escalating bead to TeamLead', {
+          beadId, stateId: event.stateId, cycle: next, fingerprint
+        });
+        const sendMessage = services.plugins.mailbox.tools.find(t => t.name === PluginToolName.SEND_MAILBOX_MESSAGE);
+        if (sendMessage) {
+          await Promise.resolve(sendMessage.execute({
+            to: 'TeamLead',
+            beadId,
+            type: 'BLOCKER',
+            content: `Cycle cap reached: ${beadId} re-entered ${event.stateId} ${next} times with the same blocker. Latest blocker: ${fingerprint}`
+          })).catch(error => {
+            Logger.warn(Component.ORR_ELSE, 'Failed to send cycle-cap mailbox message', { error: String(error) });
+          });
+        }
+        const updateStatus = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
+        if (updateStatus) {
+          await Promise.resolve(updateStatus.execute({
+            id: beadId,
+            status: BeadStatus.BLOCKED,
+            notes: `Auto-blocked after ${next} same-blocker re-entries in ${event.stateId}. Last blocker: ${fingerprint}`
+          })).catch(error => {
+            Logger.warn(Component.ORR_ELSE, 'Failed to update bead status after cycle cap', { error: String(error) });
+          });
+        }
+        stateCycleCounter.delete(cycleKey);
+      }
+    } else {
+      // Bead is leaving this state — drop any cycle counters scoped to it.
+      for (const key of stateCycleCounter.keys()) {
+        if (key.startsWith(`${beadId}|${event.stateId}|`)) stateCycleCounter.delete(key);
+      }
+    }
   }
 
   if (event.type === TeammateEventType.CONTEXT_RESTART_REQUESTED) {
@@ -1445,6 +2209,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
     await services.eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
       beadId,
+      workerId: event.workerId,
+      sessionStateId: event.sessionStateId,
+      idempotencyKey: event.idempotencyKey,
       stateId: event.stateId,
       targetState: nextState,
       transitionEvent: event.transitionEvent,
@@ -1460,6 +2227,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
     await services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
       beadId,
+      workerId: event.workerId,
+      sessionStateId: event.sessionStateId,
+      idempotencyKey: event.idempotencyKey,
       stateId: event.stateId,
       targetState: nextState,
       transitionEvent: event.transitionEvent,
@@ -1476,40 +2246,165 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   currentSupervisor.markBeadExited(beadId);
 }
 
-function flowStatus(services: RuntimeServices): string {
+interface ProjectToolStatusSummary {
+  total: number;
+  mcpBacked: number;
+  command: number;
+  nativeExtension: number;
+  nativeMcpFooterMeaning: string;
+}
+
+interface FlowStatusDetails {
+  mode: 'teammate' | 'coordinator' | 'inactive';
+  beadId?: string;
+  stateId?: string;
+  actionId?: string;
+  projectRoot?: string;
+  configPath?: string;
+  worktreePath?: string;
+  elapsedSeconds?: number;
+  requestedBead?: string;
+  maxSlots?: number;
+  autoContinue?: boolean;
+  checklist?: {
+    loaded: number;
+    mandatoryOutstanding?: number;
+  };
+  completedActionsKnown?: number;
+  checkpoint?: {
+    accepted: boolean;
+  };
+  configuredProjectTools?: ProjectToolStatusSummary;
+  nextHarnessAction: string;
+}
+
+async function configuredProjectToolStatus(services: RuntimeServices): Promise<ProjectToolStatusSummary | undefined> {
+  try {
+    const config = await services.configLoader.load();
+    const tools = config.tools || [];
+    if (tools.length === 0) return undefined;
+    return {
+      total: tools.length,
+      mcpBacked: tools.filter(tool => tool.type === ProjectToolType.MCP).length,
+      command: tools.filter(tool => tool.type === ProjectToolType.COMMAND).length,
+      nativeExtension: tools.filter(tool => tool.type === ProjectToolType.EXTENSION).length,
+      nativeMcpFooterMeaning: 'Pi UI MCP count is native-adapter-only and does not report Orr Else configured MCP-backed project tools.'
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function projectToolStatusText(status: ProjectToolStatusSummary | undefined): string | undefined {
+  if (!status) return undefined;
+  return `Configured project tools: ${status.total} total (${status.mcpBacked} Orr Else MCP-backed, ${status.command} command, ${status.nativeExtension} native extension). ${status.nativeMcpFooterMeaning}`;
+}
+
+async function activeRunOutstandingMandatoryCount(services: RuntimeServices, run: ActiveRun): Promise<number | undefined> {
+  try {
+    const projection = await services.eventStore.projectBead(run.beadId);
+    return missingMandatoryChecklistItems(run.requiredItems, projection.checklists as any).length;
+  } catch {
+    return undefined;
+  }
+}
+
+async function flowStatusDetails(services: RuntimeServices): Promise<FlowStatusDetails> {
+  const projectToolStatus = await configuredProjectToolStatus(services);
+
   if (activeRun) {
     const elapsedSeconds = Math.round((Date.now() - activeRun.startedAt) / TimeMs.SECOND);
-    return [
-      'Orr Else teammate active.',
-      `Bead: ${activeRun.beadId}`,
-      `State: ${activeRun.stateId}`,
-      `Action: ${activeRun.action.id}`,
-      `Project root: ${process.env[EnvVars.PROJECT_ROOT] || getProjectRoot()}`,
-      `Config path: ${process.env[EnvVars.CONFIG_PATH] || services.configLoader.getConfigPath()}`,
-      `Worktree: ${activeRun.worktreePath || process.cwd()}`,
-      `Elapsed: ${elapsedSeconds}s`,
-      `Checklist items loaded: ${activeRun.requiredItems.length}`,
-      `Completed actions known: ${activeRun.completedActionIds.length}`,
-      `Checkpoint accepted: ${activeRun.checkpointAccepted ? 'yes' : 'no'}`
-    ].join('\n');
+    const mandatoryOutstanding = await activeRunOutstandingMandatoryCount(services, activeRun);
+    const nextHarnessAction = !activeRun.checkpointAccepted
+      ? `call ${BuiltInToolName.SUBMIT_CHECKPOINT} with durable evidence before terminal completion`
+      : typeof mandatoryOutstanding === 'number' && mandatoryOutstanding > 0
+        ? `complete ${mandatoryOutstanding} mandatory checklist item(s) with ${BuiltInToolName.TICK_ITEMS}`
+        : `continue the phase objective; when evidence is complete, use ${BuiltInToolName.SIGNAL_COMPLETION} with the configured outcome`;
+    return {
+      mode: 'teammate',
+      beadId: activeRun.beadId,
+      stateId: activeRun.stateId,
+      actionId: activeRun.action.id,
+      projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
+      configPath: process.env[EnvVars.CONFIG_PATH] || services.configLoader.getConfigPath(),
+      worktreePath: activeRun.worktreePath || process.cwd(),
+      elapsedSeconds,
+      checklist: {
+        loaded: activeRun.requiredItems.length,
+        mandatoryOutstanding
+      },
+      completedActionsKnown: activeRun.completedActionIds.length,
+      checkpoint: {
+        accepted: activeRun.checkpointAccepted
+      },
+      configuredProjectTools: projectToolStatus,
+      nextHarnessAction
+    };
   }
 
   if (supervisor) {
+    return {
+      mode: 'coordinator',
+      requestedBead: currentFlowOptions?.beadId || 'backlog',
+      maxSlots: currentFlowOptions?.maxSlots ?? Defaults.MAX_SLOTS,
+      autoContinue: currentFlowOptions?.autoContinue !== false,
+      configPath: currentFlowOptions?.configPath || services.configLoader.getConfigPath(),
+      configuredProjectTools: projectToolStatus,
+      nextHarnessAction: 'monitor active teammate slots and process teammate signals'
+    };
+  }
+
+  return {
+    mode: 'inactive',
+    nextHarnessAction: 'start Orr Else with /orr-else'
+  };
+}
+
+function flowStatusText(details: FlowStatusDetails): string {
+  const projectToolStatus = projectToolStatusText(details.configuredProjectTools);
+
+  if (details.mode === 'teammate') {
+    return [
+      'Orr Else teammate active.',
+      `Bead: ${details.beadId}`,
+      `State: ${details.stateId}`,
+      `Action: ${details.actionId}`,
+      `Project root: ${details.projectRoot}`,
+      `Config path: ${details.configPath}`,
+      `Worktree: ${details.worktreePath}`,
+      `Elapsed: ${details.elapsedSeconds}s`,
+      `Checklist items loaded: ${details.checklist?.loaded ?? 0}`,
+      `Mandatory checklist outstanding: ${details.checklist?.mandatoryOutstanding ?? 'unknown'}`,
+      `Completed actions known: ${details.completedActionsKnown ?? 0}`,
+      `Checkpoint accepted: ${details.checkpoint?.accepted ? 'yes' : 'no'}`,
+      `Next harness action: ${details.nextHarnessAction}`,
+      projectToolStatus
+    ].filter(Boolean).join('\n');
+  }
+
+  if (details.mode === 'coordinator') {
     return [
       'Orr Else coordinator active.',
-      `Requested bead: ${currentFlowOptions?.beadId || 'backlog'}`,
-      `Max slots: ${currentFlowOptions?.maxSlots ?? Defaults.MAX_SLOTS}`,
-      `Auto-continue: ${currentFlowOptions?.autoContinue === false ? 'no' : 'yes'}`,
-      `Config: ${currentFlowOptions?.configPath || services.configLoader.getConfigPath()}`
-    ].join('\n');
+      `Requested bead: ${details.requestedBead}`,
+      `Max slots: ${details.maxSlots}`,
+      `Auto-continue: ${details.autoContinue ? 'yes' : 'no'}`,
+      `Config: ${details.configPath}`,
+      `Next harness action: ${details.nextHarnessAction}`,
+      projectToolStatus
+    ].filter(Boolean).join('\n');
   }
 
   return 'Orr Else is not running.';
 }
 
+async function flowStatus(services: RuntimeServices, format: 'json' | 'text' = 'json'): Promise<FlowStatusDetails | string> {
+  const details = await flowStatusDetails(services);
+  return format === 'text' ? flowStatusText(details) : details;
+}
+
 async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: FlowOptions, services: RuntimeServices): Promise<string> {
   if (isWorkerMode()) return 'This Pi process is an Orr Else teammate, not the coordinator.';
-  if (supervisor) return flowStatus(services);
+  if (supervisor) return (await flowStatus(services, 'text')) as string;
 
   if (ctx.hasUI) ctx.ui.notify('Starting Orr Else coordinator...', 'info');
   if (options.configPath) services.configLoader.setConfigPath(options.configPath);
@@ -1522,7 +2417,14 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   });
 
   const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services), runtimeObservability, services.eventStore);
-  await server.start();
+  const apiPort = await server.start();
+  const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
+  process.env[EnvVars.API_PORT] = String(apiPort);
+  process.env[EnvVars.API_BASE] = apiBase;
+  await services.eventStore.record(DomainEventName.HARNESS_API_BOUND, {
+    apiBase,
+    apiPort
+  });
 
   const factory = new TeammateFactory(
     runtimeObservability,
@@ -1541,39 +2443,64 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   
   await supervisor.start();
 
-  return `${flowStatus(services)}\nAttach with: tmux attach -t orr-else`;
+  return `${(await flowStatus(services, 'text')) as string}\nAttach with: tmux attach -t orr-else`;
 }
 
 type OrrElseParsedArgs = FlowOptions | ExtensionCommandAction.STATUS | ExtensionCommandAction.STOP;
 
+function splitOrrElseCommandLine(rawArgs: string): string[] {
+  return parseShellCommand(rawArgs)
+    .map(part => {
+      if (typeof part === 'string') return part;
+      throw new Error(`Unsupported shell token in /orr-else arguments: ${JSON.stringify(part)}`);
+    })
+    .filter(Boolean);
+}
+
 function parseOrrElseArgs(rawArgs: string, config?: HarnessConfig): OrrElseParsedArgs {
-  const tokens = rawArgs.trim().split(/\s+/).filter(Boolean);
-  const options: FlowOptions = {
-    maxSlots: config?.settings?.maxConcurrentSlots || Defaults.MAX_SLOTS,
+  const tokens = splitOrrElseCommandLine(rawArgs);
+  if (tokens[0] === ExtensionCommandAction.STATUS) return ExtensionCommandAction.STATUS;
+  if (tokens[0] === ExtensionCommandAction.STOP) return ExtensionCommandAction.STOP;
+
+  const command = new Command();
+  command
+    .name(BuiltInToolName.ORR_ELSE)
+    .allowExcessArguments(false)
+    .exitOverride()
+    .configureOutput({
+      writeOut: () => {},
+      writeErr: () => {}
+    })
+    .option(`${CliOption.CONFIG} <path>`)
+    .option(`${CliOption.BEAD} <id>`)
+    .option(`${CliOption.MAX_SLOTS} <n>`, 'Maximum teammate slots', (value: string) => Number.parseInt(value, Numeric.DECIMAL_RADIX));
+
+  command.parse(tokens, { from: 'user' });
+  const parsed = command.opts<{ config?: string; bead?: string; maxSlots?: number }>();
+  const maxSlots = parsed.maxSlots ?? config?.settings?.maxConcurrentSlots ?? Defaults.MAX_SLOTS;
+  if (!Number.isInteger(maxSlots) || maxSlots <= 0) {
+    throw new Error(`${CliOption.MAX_SLOTS} must be a positive integer`);
+  }
+
+  return {
+    configPath: parsed.config,
+    beadId: parsed.bead,
+    maxSlots,
     autoContinue: true
   };
-
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    if (token === ExtensionCommandAction.STATUS) return ExtensionCommandAction.STATUS;
-    if (token === ExtensionCommandAction.STOP) return ExtensionCommandAction.STOP;
-    if (token === CliOption.CONFIG && tokens[i + 1]) {
-      options.configPath = tokens[++i];
-    } else if (token === CliOption.BEAD && tokens[i + 1]) {
-      options.beadId = tokens[++i];
-    } else if (token === CliOption.MAX_SLOTS && tokens[i + 1]) {
-      options.maxSlots = parseInt(tokens[++i], Numeric.DECIMAL_RADIX);
-    }
-  }
-  return options;
 }
 
 export default async function orrElseExtension(pi: ExtensionAPI, providedServices?: RuntimeServices) {
-  registerProcessLifecycleObservers();
-  Logger.info(Component.ORR_ELSE, 'Orr Else extension loading', { version: App.VERSION });
-  
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
   setProjectRoot(projectRoot);
+  registerProcessLifecycleObservers();
+  Logger.info(Component.ORR_ELSE, 'Orr Else extension loading', { version: App.VERSION });
+
+  if (!claudeCodeLoginRegistered) {
+    claudeCodeLoginRegistered = true;
+    registerClaudeCodeLiveLogin(pi);
+  }
+
   const services = providedServices || createRuntimeServices();
 
   const seenTools = new Set<string>();
@@ -1585,7 +2512,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         const preliminary = parseOrrElseArgs(args);
         
         if (preliminary === ExtensionCommandAction.STATUS) {
-          ctx.ui.notify(flowStatus(services), 'info');
+          ctx.ui.notify((await flowStatus(services, 'text')) as string, 'info');
           return;
         }
         
@@ -1655,6 +2582,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       ...getNativePiExtensionProjectToolNames(config)
     ].filter(toolName => !wrappedToolNames.has(toolName)));
     registerPiToolObservers(pi, services);
+    registerProviderRequestCap(pi);
     registerAgentLifecycleObservers(pi, services);
     const wrapRuntimeTool = (tool: { name: string, description: string, parameters: any, execute: Function }) =>
       wrapPluginTool(tool, runtimeObservability, services);
@@ -1663,12 +2591,15 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       artifactPathsToolRegistered = true;
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.GET_ARTIFACT_PATHS,
-        description: 'Resolve configured stable artifact paths for the current Bead/state/action.',
+        description: 'Resolve configured stable artifact paths and bounded artifact content previews for the current Bead/state/action. Use this instead of native reads for .pi/artifacts files.',
         parameters: Type.Object({
           beadId: Type.String({ description: 'The Bead ID' }),
-          stateId: Type.String({ description: 'Optional state ID', optional: true }),
-          actionId: Type.String({ description: 'Optional action ID', optional: true }),
-          artifactId: Type.String({ description: 'Optional artifact ID for template expansion', optional: true })
+          stateId: Type.Optional(Type.String({ description: 'Optional state ID' })),
+          actionId: Type.Optional(Type.String({ description: 'Optional action ID' })),
+          artifactId: Type.Optional(Type.String({ description: 'Optional artifact ID for template expansion' })),
+          includeContent: Type.Optional(Type.Boolean({ description: 'Include bounded content previews for existing artifacts. Defaults to true.' })),
+          maxInlineBytes: Type.Optional(Type.Number({ description: 'Requested bytes to inline per artifact preview; the framework applies a hard safety cap.' })),
+          maxTotalInlineBytes: Type.Optional(Type.Number({ description: 'Requested aggregate bytes to inline across artifact previews; the framework applies a hard safety cap.' }))
         }),
         execute: async (params: any) => services.artifactPaths.resolve(params)
       }) as any);
@@ -1727,13 +2658,14 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.TICK_ITEM,
-      description: 'Tick one mandatory or optional checklist item for the current phase. Prefer tick_items for batched checklist updates.',
+      description: 'Tick one mandatory or optional checklist item for the current phase. Prefer tick_items for batched checklist updates. Supply evidence either inline via `evidence` or by reference via `evidencePath` (a worktree-relative path the harness reads; preferred for evidence larger than ~500 characters because the path stays small in your conversation history).',
       parameters: Type.Object({
         text: Type.String({ description: 'The EXACT text of the checklist item' }),
-        evidence: Type.String({ description: 'Specific evidence of completion (commands run, files changed, etc.)' })
+        evidence: Type.Optional(Type.String({ description: 'Inline evidence of completion. Use this for short evidence (≲500 chars).' })),
+        evidencePath: Type.Optional(Type.String({ description: 'Worktree-relative path to a file containing the evidence. Preferred for long evidence — keeps the prompt cache stable and your subsequent turns cheaper.' }))
       }),
-      execute: async ({ text, evidence }: { text: string, evidence: string }, ctx: ExtensionContext) => {
-        const result = await tickChecklistItems([{ text, evidence }], services);
+      execute: async ({ text, evidence, evidencePath }: { text: string, evidence?: string, evidencePath?: string }, ctx: ExtensionContext) => {
+        const result = await tickChecklistItems([{ text, evidence, evidencePath }], services);
         if (result.status === ToolResultStatus.PASSED) return `Successfully ticked: ${text}`;
         return `Error: ${result.message || 'Checklist item was rejected.'}`;
       }
@@ -1741,11 +2673,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.TICK_ITEMS,
-      description: 'Batch tick mandatory or optional checklist items for the current phase using event-store-backed state.',
+      description: 'Batch tick mandatory or optional checklist items for the current phase using event-store-backed state. For each item, supply evidence either inline via `evidence` or by reference via `evidencePath` (preferred for long evidence — keeps your conversation history small).',
       parameters: Type.Object({
         items: Type.Array(Type.Object({
           text: Type.String({ description: 'The EXACT text of the checklist item' }),
-          evidence: Type.String({ description: 'Specific evidence of completion (commands run, files changed, etc.)' })
+          evidence: Type.Optional(Type.String({ description: 'Inline evidence of completion. Use this for short evidence (≲500 chars).' })),
+          evidencePath: Type.Optional(Type.String({ description: 'Worktree-relative path to a file containing the evidence. Preferred for long evidence.' }))
         }), { description: 'Checklist items to mark complete.' })
       }),
       execute: async ({ items }: { items: ChecklistTickInput[] }, ctx: ExtensionContext) => tickChecklistItems(items, services)
@@ -1796,22 +2729,84 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           evidence
         });
 
-        await services.eventStore.record(DomainEventName.CHECKPOINT_SUBMITTED, {
+        const checkpointData = {
           beadId: activeRun.beadId,
+          workerId: event.workerId,
+          sessionStateId: event.sessionStateId,
           stateId: activeRun.stateId,
           actionId: activeRun.action.id,
           actionKey: actionCompletionKey(await services.configLoader.load(), activeRun.stateId, activeRun.action.id),
+          idempotencyKey: event.idempotencyKey,
           summary,
           evidence
-        });
-        
-        await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, event);
+        };
+
+        await postWorkerSignal(services, event);
+
+        await services.eventStore.record(DomainEventName.CHECKPOINT_SUBMITTED, checkpointData);
+        activeRun.checkpointAccepted = true;
         
         if (activeRun.progressManager) {
           await activeRun.progressManager.appendLog(`Checkpoint: ${summary.slice(0, WorkerDefaults.CHECKLIST_EVIDENCE_PREVIEW_CHARS)}...`);
         }
 
         return 'Checkpoint accepted and recorded.';
+      }
+    }));
+
+    pi.registerTool(wrapRuntimeTool({
+      name: BuiltInToolName.SUBMIT_REVIEW_ARTIFACT,
+      description: 'Persist the configured ship/post-review artifact to the Orr Else event store. Use this instead of native writes for event-store-backed review artifacts.',
+      parameters: Type.Object({
+        summary: Type.String({ description: 'Dense review artifact summary.' }),
+        artifact: Type.Any({ description: 'Structured review artifact payload, including verdict, specialist passes, evidence audit, routing outcome, and blockers.' }),
+        verdict: Type.Optional(Type.String({ description: 'Review verdict, for example APPROVED or REJECTED.' })),
+        outcome: Type.Optional(Type.String({ description: 'Configured statechart outcome the review will use, for example SUCCESS or IMPLEMENTATION_DEFECT.' }))
+      }),
+      execute: async (
+        { summary, artifact, verdict, outcome }: { summary: string; artifact: unknown; verdict?: string; outcome?: string },
+        _ctx: ExtensionContext
+      ) => {
+        if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
+        const config = await services.configLoader.load();
+        const reviewArtifactConfig = config.settings.reviewArtifacts?.shipPostReview;
+        const store = reviewArtifactConfig?.store || ReviewArtifactStore.EVENT_STORE;
+        if (store !== ReviewArtifactStore.EVENT_STORE) {
+          return {
+            status: ToolResultStatus.REJECTED,
+            message: `Configured ship/post-review store is ${store}; ${BuiltInToolName.SUBMIT_REVIEW_ARTIFACT} supports ${ReviewArtifactStore.EVENT_STORE}.`
+          };
+        }
+        if (reviewArtifactConfig?.state && reviewArtifactConfig.state !== activeRun.stateId) {
+          return {
+            status: ToolResultStatus.REJECTED,
+            message: `Ship/post-review artifact is configured for ${reviewArtifactConfig.state}, not ${activeRun.stateId}.`
+          };
+        }
+
+        const actionKey = actionCompletionKey(config, activeRun.stateId, activeRun.action.id);
+        const eventType = reviewArtifactConfig?.eventType || DomainEventName.SHIP_POST_REVIEW;
+        await services.eventStore.record(eventType, {
+          beadId: activeRun.beadId,
+          stateId: activeRun.stateId,
+          actionId: activeRun.action.id,
+          actionKey,
+          artifactKind: ReviewArtifactKind.SHIP_POST_REVIEW,
+          store,
+          summary,
+          verdict,
+          outcome,
+          artifact
+        });
+        await activeRun.worklogManager.appendEntry(activeRun.beadId, activeRun.stateId, 'Ship/post-review artifact recorded', summary);
+
+        return {
+          status: ToolResultStatus.PASSED,
+          artifactKind: ReviewArtifactKind.SHIP_POST_REVIEW,
+          store,
+          eventType,
+          summary
+        };
       }
     }));
 
@@ -1829,7 +2824,14 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 	        } catch (error) {
 	          return `REJECTED: ${String(error)}`;
 	        }
-	        
+
+        const terminal = await terminalFailureLimitContext(services);
+        if (terminal && outcome !== terminal.suggestedOutcome) {
+          return `REJECTED: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
+            `in ${terminal.stateId}/${terminal.actionId}. You MUST signal outcome ` +
+            `\`${terminal.suggestedOutcome}\`; outcome \`${outcome}\` is not permitted after this terminal verifier failure.`;
+        }
+
 	        if (outcome === EventName.SUCCESS) {
           const projection = await services.eventStore.projectBead(activeRun.beadId);
           const missing = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
@@ -1837,20 +2839,55 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
              return `REJECTED: You cannot signal SUCCESS yet. The following mandatory checklist items are missing:\n${missing.map(m => `- ${m}`).join('\n')}\nUse the \`${BuiltInToolName.TICK_ITEMS}\` tool to complete them in a batch.`;
           }
 
-          const requiredTools = activeRun.state.requiredTools || [];
-          const auditFailures: string[] = [];
-          for (const toolName of requiredTools) {
-            const result = runtimeObservability.getToolResult(toolName);
-            if (result === undefined) auditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
-            else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
-              auditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
-            } else if (resultIndicatesFailure(result)) {
-              auditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-            }
+          const requiredToolResolution = await services.requiredToolResolver.resolve(requiredToolsForRun(activeRun), {
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            worktreePath: activeRun.worktreePath,
+            projectRoot: getProjectRoot(),
+            config
+	          });
+	          const requiredTools = requiredToolResolution.toolNames;
+	          const auditFailures: string[] = [];
+	          for (const toolName of requiredTools) {
+	            const result = runtimeObservability.getToolResult(toolName);
+	            if (result === undefined) {
+	              auditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
+	            } else if (resultIndicatesSuccess(result)) {
+	              continue;
+	            } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
+	              auditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
+	            } else if (resultIndicatesFailure(result)) {
+	              auditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+	            } else {
+	              auditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+	            }
           }
           if (auditFailures.length > 0) {
             return `REJECTED: Protocol Violation. Programmatic audit failed:\n${auditFailures.map(f => `- ${f}`).join('\n')}\nYou MUST satisfy all programmatic gates before signaling completion.`;
           }
+
+          const planWriteSetPreflight = await services.planWriteSet.validatePlanContract({
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            worktreePath: activeRun.worktreePath || process.cwd(),
+            projectRoot: getProjectRoot()
+          });
+          if (!planWriteSetPreflight.passed) {
+            return `REJECTED: Plan write-set preflight failed.\n${planWriteSetPreflight.reason}\nRevise the plan contract before signaling SUCCESS.`;
+          }
+
+          const transactionalState = await services.transactionalStateGuard.validateSuccess(
+            activeRun.beadId,
+            activeRun.stateId,
+            activeRun.worktreePath || process.cwd()
+          );
+          if (!transactionalState.passed) {
+            return `REJECTED: Transactional state gate failed.\n${transactionalState.reason}\nUpdate the approved plan/write-set through the configured workflow or revert the unapproved files before signaling SUCCESS.`;
+          }
+        }
+
+        if (!activeRun.checkpointAccepted) {
+          return `REJECTED: You must call \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with durable evidence before signaling completion.`;
         }
 
         Logger.info(Component.ORR_ELSE, 'Teammate signaled turn completion', { beadId: activeRun.beadId, outcome, summary });
@@ -1866,7 +2903,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           usedTools: runtimeObservability.getCalledTools()
         });
 
-        await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, event);
+        await postWorkerSignal(services, event);
         
         if (ctx.hasUI) {
           ctx.ui.notify(`Turn completed with ${outcome}`, 'info');
@@ -1901,7 +2938,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           handover: summary
         });
         
-        await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, event);
+        await postWorkerSignal(services, event);
         
         setTimeout(() => ctx.shutdown(), WorkerDefaults.SHUTDOWN_AFTER_SIGNAL_MS);
         return 'Context restart requested. Session will shutdown.';
@@ -1928,7 +2965,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           handover: summary
         });
 
-        await apiRequest(ApiPath.SIGNAL, HttpMethod.POST, event);
+        await postWorkerSignal(services, event);
 
         setTimeout(() => ctx.shutdown(), WorkerDefaults.SHUTDOWN_AFTER_SIGNAL_MS);
         return 'Harness restart requested. Session will shutdown.';

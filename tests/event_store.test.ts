@@ -5,7 +5,8 @@ import * as path from 'path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
-import { DomainEventName, PluginToolName } from '../src/constants/index.js';
+import { Logger } from '../src/core/Logger.js';
+import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
 
 describe('EventStore projections', () => {
   let tempRoot: string;
@@ -21,6 +22,7 @@ describe('EventStore projections', () => {
     eventStore = new EventStore(configLoader);
     eventStore.setSessionId(`test-${process.pid}`);
     fs.mkdirSync(path.join(tempRoot, '.pi/events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi/logs'), { recursive: true });
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
@@ -38,11 +40,107 @@ states:
 `);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     setProjectRoot(previousRoot);
     configLoader.reset();
     eventStore.setSessionId(`test-${process.pid}-reset`);
+    Logger.close();
+    await new Promise(resolve => setTimeout(resolve, 25));
     fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('fans out recorded bead events without an existing ready marker', async () => {
+    await eventStore.record(DomainEventName.BEAD_CLAIMED, {
+      beadId: 'bd-new',
+      stateId: 'Planning'
+    });
+
+    const indexPath = path.join(
+      tempRoot,
+      '.pi/events',
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-new${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+    );
+
+    expect(fs.existsSync(indexPath)).toBe(true);
+    const indexed = fs.readFileSync(indexPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+
+    expect(indexed).toHaveLength(1);
+    expect(indexed[0]).toMatchObject({
+      type: DomainEventName.BEAD_CLAIMED,
+      data: {
+        beadId: 'bd-new',
+        stateId: 'Planning'
+      }
+    });
+  });
+
+  it('keeps events recorded before and after ready marker publication in the by-bead file', async () => {
+    await eventStore.record(DomainEventName.BEAD_CLAIMED, {
+      beadId: 'bd-1',
+      stateId: 'Planning'
+    });
+
+    const indexPath = path.join(
+      tempRoot,
+      '.pi/events',
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+    );
+    fs.writeFileSync(`${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`, JSON.stringify({
+      sources: {
+        'project.jsonl': 0
+      }
+    }));
+
+    await eventStore.record(DomainEventName.CHECKLIST_ITEM_TICKED, {
+      beadId: 'bd-1',
+      text: 'Record evidence',
+      evidence: 'done'
+    });
+
+    const indexed = fs.readFileSync(indexPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+
+    expect(indexed.map(event => event.type)).toEqual([
+      DomainEventName.BEAD_CLAIMED,
+      DomainEventName.CHECKLIST_ITEM_TICKED
+    ]);
+  });
+
+  it('keeps writing to the resolved event path after a temporary config validation failure', async () => {
+    await eventStore.record(DomainEventName.BEAD_CLAIMED, {
+      beadId: 'bd-stable',
+      stateId: 'Planning'
+    });
+
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  maxConcurrentSlots: "invalid"
+`);
+    configLoader.reset();
+
+    await eventStore.record(DomainEventName.CHECKLIST_ITEM_TICKED, {
+      beadId: 'bd-stable',
+      text: 'Record evidence',
+      evidence: 'done'
+    });
+
+    const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
+    const events = fs.readFileSync(eventsPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line));
+
+    expect(events.map(event => event.type)).toEqual([
+      DomainEventName.BEAD_CLAIMED,
+      DomainEventName.CHECKLIST_ITEM_TICKED
+    ]);
   });
 
   it('streams once into per-bead projections for batch reads', async () => {
@@ -124,6 +222,49 @@ states:
     expect(summaries.get('bd-1')?.checklists).toBeUndefined();
   });
 
+  it('reads complete per-bead event indexes for single-bead projections', async () => {
+    const stalePrimary = `${JSON.stringify({
+      id: 'stale-shared-event',
+      type: DomainEventName.BEAD_CLAIMED,
+      timestamp: '2026-01-01T00:00:02.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Implementation'
+      }
+    })}\n`;
+    fs.writeFileSync(path.join(tempRoot, '.pi/events/project.jsonl'), stalePrimary);
+
+    const indexPath = path.join(
+      tempRoot,
+      '.pi/events',
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+    );
+    fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+    fs.writeFileSync(indexPath, `${JSON.stringify({
+      id: 'indexed-event',
+      type: DomainEventName.BEAD_CLAIMED,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning'
+      }
+    })}\n`);
+    fs.writeFileSync(`${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`, JSON.stringify({
+      sources: {
+        'project.jsonl': Buffer.byteLength(stalePrimary)
+      }
+    }));
+
+    expect(fs.existsSync(indexPath)).toBe(true);
+
+    const projection = await eventStore.projectBead('bd-1');
+
+    expect(projection.status).toBe('Planning');
+  });
+
   it('can exclude heartbeat tool wrapper events from latest progress reads', async () => {
     const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
     const records = [
@@ -151,6 +292,343 @@ states:
 
     expect(latestWithoutFilter.get('bd-1')?.id).toBe('e2');
     expect(latestWithFilter.get('bd-1')?.id).toBe('e1');
+  });
+
+  it('uses complete per-bead event indexes for latest progress reads', async () => {
+    const stalePrimary = `${JSON.stringify({
+      id: 'stale-shared-event',
+      type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
+      timestamp: '2026-01-01T00:00:03.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        tool: 'read'
+      }
+    })}\n`;
+    fs.writeFileSync(path.join(tempRoot, '.pi/events/project.jsonl'), stalePrimary);
+
+    const indexPath = path.join(
+      tempRoot,
+      '.pi/events',
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+    );
+    fs.mkdirSync(path.dirname(indexPath), { recursive: true });
+    fs.writeFileSync(indexPath, `${JSON.stringify({
+      id: 'indexed-event',
+      type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning'
+      }
+    })}\n`);
+    fs.writeFileSync(`${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`, JSON.stringify({
+      sources: {
+        'project.jsonl': Buffer.byteLength(stalePrimary)
+      }
+    }));
+
+    const latest = await eventStore.latestEventsForBeads(['bd-1']);
+
+    expect(latest.get('bd-1')?.id).toBe('indexed-event');
+  });
+
+  it('streams the latest project event by type', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: { pauseUntil: '2026-01-01T00:10:00.000Z' }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.BEAD_CLAIMED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: { beadId: 'bd-1' }
+      },
+      {
+        id: 'e3',
+        type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
+        timestamp: '2026-01-01T00:00:03.000Z',
+        sessionId: 's2',
+        data: { pauseUntil: '2026-01-01T00:20:00.000Z' }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+
+    const latest = await eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED);
+
+    expect(latest?.id).toBe('e3');
+    expect(latest?.sessionId).toBe('s2');
+  });
+
+  it('streams the latest terminal project-tool failure-limit event for a bead state action', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Implementation',
+          actionId: 'surgical-execution',
+          tool: 'pytest',
+          result: {
+            failureLimit: {
+              terminal: false,
+              suggestedOutcome: 'BLOCKED'
+            }
+          }
+        }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Implementation',
+          actionId: 'surgical-execution',
+          tool: 'semgrep',
+          result: {
+            failureLimit: {
+              terminal: true,
+              suggestedOutcome: 'QUALITY_GATE_FAILURE'
+            }
+          }
+        }
+      },
+      {
+        id: 'e3',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:03.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'formulate-plan',
+          tool: 'semgrep',
+          result: {
+            failureLimit: {
+              terminal: true,
+              suggestedOutcome: 'BLOCKED'
+            }
+          }
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+
+    const latest = await eventStore.latestProjectToolFailureLimitEvent('bd-1', {
+      stateId: 'Implementation',
+      actionId: 'surgical-execution',
+      terminalOnly: true
+    });
+
+    expect(latest?.id).toBe('e2');
+    expect(latest?.data.tool).toBe('semgrep');
+  });
+
+  it('ignores legacy unscoped terminal project-tool failure-limit events for scoped lookups', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          tool: 'artifact_validator',
+          result: {
+            failureLimit: {
+              terminal: true,
+              suggestedOutcome: EventName.FAILURE
+            }
+          }
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+
+    const latest = await eventStore.latestProjectToolFailureLimitEvent('bd-1', {
+      stateId: 'AdversarialPostReview',
+      actionId: 'adversarial-code-review',
+      terminalOnly: true
+    });
+
+    expect(latest).toBeUndefined();
+  });
+
+  it('ignores terminal project-tool failure-limit events before a non-restart transition boundary', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'planning-workflow-parity',
+          tool: 'artifact_validator',
+          result: {
+            failureLimit: {
+              terminal: true,
+              suggestedOutcome: EventName.FAILURE
+            }
+          }
+        }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          fromState: 'Planning',
+          nextState: 'Planning',
+          transitionEvent: EventName.FAILURE,
+          actionId: 'planning-workflow-parity'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+
+    const latest = await eventStore.latestProjectToolFailureLimitEvent('bd-1', {
+      stateId: 'Planning',
+      actionId: 'planning-workflow-parity',
+      terminalOnly: true
+    });
+
+    expect(latest).toBeUndefined();
+  });
+
+  it('applies terminal project-tool failure-limit boundaries in timestamp order across event files', async () => {
+    const eventDir = path.join(tempRoot, '.pi/events');
+    const projectEventsPath = path.join(eventDir, 'project.jsonl');
+    const sessionEventsPath = path.join(eventDir, 'session-late-name.jsonl');
+    const terminalFailure = {
+      id: 'e1',
+      type: DomainEventName.PROJECT_TOOL_FAILED,
+      timestamp: '2026-01-01T00:00:01.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        tool: 'artifact_validator',
+        result: {
+          failureLimit: {
+            terminal: true,
+            suggestedOutcome: EventName.FAILURE
+          }
+        }
+      }
+    };
+    const boundary = {
+      id: 'e2',
+      type: DomainEventName.STATE_TRANSITION_APPLIED,
+      timestamp: '2026-01-01T00:00:02.000Z',
+      sessionId: 's2',
+      data: {
+        beadId: 'bd-1',
+        fromState: 'Planning',
+        nextState: 'Planning',
+        transitionEvent: EventName.FAILURE,
+        actionId: 'formulate-plan'
+      }
+    };
+    fs.writeFileSync(projectEventsPath, `${JSON.stringify(boundary)}\n`);
+    fs.writeFileSync(sessionEventsPath, `${JSON.stringify(terminalFailure)}\n`);
+
+    const latest = await eventStore.latestProjectToolFailureLimitEvent('bd-1', {
+      stateId: 'Planning',
+      actionId: 'formulate-plan',
+      terminalOnly: true
+    });
+
+    expect(latest).toBeUndefined();
+  });
+
+  it('resets terminal project-tool failure-limit lookups when a fresh run follows an acknowledged terminal outcome', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.STATE_RUN_INITIALIZED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'formulate-plan'
+        }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.PROJECT_TOOL_FAILED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'formulate-plan',
+          tool: 'artifact_validator',
+          result: {
+            failureLimit: {
+              terminal: true,
+              suggestedOutcome: EventName.FAILURE
+            }
+          }
+        }
+      },
+      {
+        id: 'e3',
+        type: DomainEventName.SIGNAL_ACKNOWLEDGED,
+        timestamp: '2026-01-01T00:00:03.000Z',
+        sessionId: 's1',
+        data: {
+          type: TeammateEventType.STATE_FAILED,
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'formulate-plan',
+          transitionEvent: EventName.FAILURE
+        }
+      },
+      {
+        id: 'e4',
+        type: DomainEventName.STATE_RUN_INITIALIZED,
+        timestamp: '2026-01-01T00:00:04.000Z',
+        sessionId: 's2',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          actionId: 'formulate-plan'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
+
+    const latest = await eventStore.latestProjectToolFailureLimitEvent('bd-1', {
+      stateId: 'Planning',
+      actionId: 'formulate-plan',
+      terminalOnly: true
+    });
+
+    expect(latest).toBeUndefined();
   });
 
   it('projects the session that created an active lease', async () => {

@@ -1,2 +1,2 @@
-import orr-else from '../../dist/extension.js';
-export default orr-else;
+import orrElse from '../../dist/extension.js';
+export default orrElse;

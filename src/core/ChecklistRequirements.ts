@@ -1,7 +1,26 @@
+import { CHECKLIST_PROMPT_SUFFIXES } from '../constants/index.js';
 import type { ChecklistItem } from './ProtocolParser.js';
 import type { HarnessConfig, SDLCState, TeammateAction, ValidationGateConfig } from './domain/StateModels.js';
 
 export type RecordedChecklist = Record<string, { checked?: boolean; evidence?: string }>;
+
+const LEADING_MARKER_PATTERN = /^\s*[-*]\s+/;
+
+export function normalizeChecklistTickText(text: string): string {
+  let normalized = text.trim().replace(LEADING_MARKER_PATTERN, '').trim();
+  for (const suffix of CHECKLIST_PROMPT_SUFFIXES) {
+    if (normalized.endsWith(` ${suffix}`)) {
+      normalized = normalized.slice(0, -suffix.length).trimEnd();
+      break;
+    }
+  }
+  return normalized;
+}
+
+export function resolveChecklistTickText(requiredItems: ChecklistItem[], text: string): string | undefined {
+  const normalized = normalizeChecklistTickText(text);
+  return requiredItems.find(item => item.text === normalized || item.text === text.trim())?.text;
+}
 
 function normalizeChecklistItem(item: ChecklistItem): ChecklistItem {
   return {

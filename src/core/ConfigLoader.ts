@@ -6,6 +6,7 @@ import addFormatsModule from 'ajv-formats';
 import { ResolvedLLMConfig, HarnessConfig } from './domain/StateModels.js';
 import { resolveInstall, resolveProject } from './Paths.js';
 import { Logger } from './Logger.js';
+import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import {
   Component,
   DEFAULT_OBSERVED_PI_TOOLS,
@@ -15,6 +16,8 @@ import {
   EventName,
   LLMProviderName,
   ModelProviderKey,
+  SchedulerDefaults,
+  SubscriptionProviderToken,
   ThinkingLevel
 } from '../constants/index.js';
 
@@ -23,6 +26,25 @@ const addFormats = addFormatsModule.default || addFormatsModule;
 
 const DEFAULT_CONFIG_FILE = 'harness.yaml';
 const CONFIG_ENV_VAR = EnvVars.CONFIG_PATH;
+
+/**
+ * Map a configured provider string to the Pi provider name passed to
+ * `pi --provider`. When the configured string contains the `codex` or
+ * `claude` subscription token (case-insensitive), route to the matching Pi
+ * subscription (OAuth) provider so teammates run on a ChatGPT/Codex or
+ * Claude Pro/Max subscription. Any other value passes through unchanged, so
+ * explicit API-key providers such as `openai` and `anthropic` keep working.
+ */
+export function resolveProviderName(provider: string): string {
+  const normalized = provider.toLowerCase();
+  if (normalized.includes(SubscriptionProviderToken.CODEX)) {
+    return LLMProviderName.OPENAI_CODEX;
+  }
+  if (normalized.includes(SubscriptionProviderToken.CLAUDE)) {
+    return LLMProviderName.ANTHROPIC;
+  }
+  return provider;
+}
 
 const DEFAULTS: Partial<HarnessConfig> = {
   settings: {
@@ -69,18 +91,15 @@ const DEFAULTS: Partial<HarnessConfig> = {
     }
   },
   scheduler: {
-    weights: {
-      waitTime: 1.0,
-      executionTime: 0.5,
-      progress: 2.0,
-      penalty: 1.0
-    }
+    weights: SchedulerDefaults.DEFAULT_WEIGHTS
   }
 };
 
 export class ConfigLoader {
   private cached: HarnessConfig | null = null;
   private configPath: string | null = null;
+  private cachedPath: string | null = null;
+  private cachedSignature: { mtimeMs: number; ctimeMs: number; size: number } | null = null;
 
   private normalizeConfigPath(filePath: string): string {
     return path.isAbsolute(filePath) ? filePath : resolveProject(filePath);
@@ -91,6 +110,8 @@ export class ConfigLoader {
     if (this.configPath === nextPath) return;
     this.configPath = nextPath;
     this.cached = null;
+    this.cachedPath = null;
+    this.cachedSignature = null;
   }
 
   public getConfigPath(): string {
@@ -100,11 +121,12 @@ export class ConfigLoader {
   public reset(): void {
     this.cached = null;
     this.configPath = null;
+    this.cachedPath = null;
+    this.cachedSignature = null;
   }
 
   public load(filePath?: string): HarnessConfig {
     if (filePath) this.setConfigPath(filePath);
-    if (this.cached) return this.cached;
 
     const configPath = this.getConfigPath();
     let config: HarnessConfig;
@@ -114,13 +136,34 @@ export class ConfigLoader {
         throw new Error(`Configuration file not found: ${configPath}`);
       }
 
+      const fileStat = fs.statSync(configPath);
+      const signature = {
+        mtimeMs: fileStat.mtimeMs,
+        ctimeMs: fileStat.ctimeMs,
+        size: fileStat.size
+      };
+      if (
+        this.cached
+        && this.cachedPath === configPath
+        && this.cachedSignature?.mtimeMs === signature.mtimeMs
+        && this.cachedSignature.ctimeMs === signature.ctimeMs
+        && this.cachedSignature.size === signature.size
+      ) {
+        return this.cached;
+      }
+
       const fileContent = fs.readFileSync(configPath, 'utf8');
       const parsed = yaml.parse(fileContent) || {};
-      config = this.deepMerge(DEFAULTS as Record<string, any>, parsed) as HarnessConfig;
+      config = mergeReplacingArrays(
+        DEFAULTS as Record<string, unknown>,
+        parsed as Record<string, unknown>
+      ) as unknown as HarnessConfig;
       this.resolveFileBackedFields(config);
 
       this.validate(config);
       this.cached = config;
+      this.cachedPath = configPath;
+      this.cachedSignature = signature;
       return config;
     } catch (error) {
       Logger.error(Component.CONFIG, 'Failed to load configuration', { error: String(error) });
@@ -150,24 +193,6 @@ export class ConfigLoader {
     }
   }
 
-  private deepMerge(target: Record<string, any>, source: Record<string, any>): Record<string, any> {
-    const output = { ...target };
-    for (const key of Object.keys(source)) {
-      if (Array.isArray(source[key])) {
-        output[key] = source[key];
-      } else if (this.isRecord(source[key]) && this.isRecord(target[key])) {
-        output[key] = this.deepMerge(target[key], source[key]);
-      } else {
-        output[key] = source[key];
-      }
-    }
-    return output;
-  }
-
-  private isRecord(value: unknown): value is Record<string, any> {
-    return !!value && typeof value === 'object' && !Array.isArray(value);
-  }
-
   private resolveConfigPath(reference: string): string {
     return path.isAbsolute(reference) ? reference : resolveProject(reference);
   }
@@ -190,7 +215,7 @@ export class ConfigLoader {
 
     const parsed = yaml.parse(fs.readFileSync(filePath, 'utf8'));
     if (Array.isArray(parsed)) return parsed;
-    if (this.isRecord(parsed) && Array.isArray(parsed.items)) return parsed.items;
+    if (isRecord(parsed) && Array.isArray(parsed.items)) return parsed.items;
     throw new Error(`Checklist file must contain an array or an { items: [...] } object: ${value}`);
   }
 
@@ -224,7 +249,7 @@ export class ConfigLoader {
 
     return {
       providerKey,
-      provider: providerConfig.provider || providerKey,
+      provider: resolveProviderName(providerConfig.provider || providerKey),
       model: state?.model || providerConfig.model || config.settings.defaultModel,
       thinking: state?.thinking || providerConfig.thinking
     };

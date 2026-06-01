@@ -2,28 +2,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { execFile } from 'child_process';
-import { EnvVars, PiCliFlag } from '../src/constants/index.js';
+import { execa } from 'execa';
+import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxOptionValue } from '../src/constants/index.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Observability } from '../src/core/Observability.js';
 import { setProjectRoot } from '../src/core/Paths.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 
-const execFileMock = vi.hoisted(() => {
-  const mock = vi.fn();
-  mock[Symbol.for('nodejs.util.promisify.custom') as any] = vi.fn(async (bin: string, args: string[]) => {
+const { execaMock, defaultTmuxResponse } = vi.hoisted(() => {
+  const defaultTmuxResponse = async (bin: string, args: string[]) => {
     if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
     if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
     if (args.includes('list-panes')) return { stdout: '', stderr: '' };
     if (args.includes('split-window')) return { stdout: '%1\n', stderr: '' };
     return { stdout: '', stderr: '' };
-  });
-  return mock;
+  };
+  return { execaMock: vi.fn(defaultTmuxResponse), defaultTmuxResponse };
 });
 
-vi.mock('child_process', () => ({
-  execFile: execFileMock
+vi.mock('execa', () => ({
+  execa: execaMock
 }));
 
 describe('TeammateFactory', () => {
@@ -77,7 +76,8 @@ states:
     eventStore = new EventStore(configLoader);
     observability = new Observability(configLoader);
     await observability.initialize();
-    vi.mocked(execFile).mockClear();
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(defaultTmuxResponse);
   });
 
   afterEach(() => {
@@ -96,8 +96,7 @@ states:
     const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
 
     expect(result.success).toBe(true);
-    const execFileAsyncMock = (execFile as any)[Symbol.for('nodejs.util.promisify.custom')];
-    const splitCall = vi.mocked(execFileAsyncMock).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+    const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
     expect(splitCall).toBeDefined();
 
     const splitArgs = splitCall![1] as string[];
@@ -118,5 +117,149 @@ states:
     expect(command).not.toContain('.pi/extensions/orr-else.ts');
     expect(command).toContain('--provider');
     expect(command).toContain('--model');
+
+    const setWindowOptionCall = vi.mocked(execa).mock.calls.find(([, args]) => {
+      const tmuxArgs = args as string[];
+      return tmuxArgs.includes('set-window-option');
+    });
+    expect(setWindowOptionCall).toBeDefined();
+    expect(setWindowOptionCall![1]).toContain(TmuxOptionValue.OFF);
+    expect(setWindowOptionCall![1]).not.toContain(TmuxOptionValue.ON);
+  });
+
+  it('removes dead teammate panes while counting active teammates', async () => {
+    const records: Array<{ event: string; data: any }> = [];
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%1\tAgent:bead-dead\tzsh\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-dead pi\t${path.join(root, 'worktrees', 'bead-dead')}\t1`,
+            `%2\tAgent:bead-live\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-live pi\t${path.join(root, 'worktrees', 'bead-live')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
+    expect(vi.mocked(execa)).toHaveBeenCalledWith('tmux', ['kill-pane', '-t', '%1']);
+    expect(records).toContainEqual({
+      event: DomainEventName.TEAMMATE_DEAD_PANES_REMOVED,
+      data: {
+        reason: TeammatePaneCleanupReason.DEAD_TMUX_PANE,
+        paneIds: ['%1'],
+        beadIds: ['bead-dead']
+      }
+    });
+  });
+
+  it('fails closed for slot allocation when tmux pane listing fails', async () => {
+    const records: Array<{ event: string; data: any }> = [];
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: `%1\tAgent:bead-live\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-live pi\t${path.join(root, 'worktrees', 'bead-live')}\t0`,
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) throw new Error('tmux server unavailable');
+      return { stdout: '', stderr: '' };
+    });
+
+    await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['bead-live']));
+    await expect(factory.getAvailableSlots()).resolves.toBe(0);
+    expect(records.some(record =>
+      record.event === DomainEventName.TEAMMATE_PANE_SCAN_FAILED &&
+      record.data.fallbackPaneCount === 1 &&
+      record.data.failClosed === true
+    )).toBe(true);
+  });
+
+  it('recovers bead ids from quoted tmux pane start commands after Pi retitles panes', async () => {
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%1\tπ - cerdiwen-live\tnode\t"PI_ORR_ELSE_WORKER=1 PI_BEAD_ID=cerdiwen-live PI_STATE_ID=Planning pi --no-session"\t${path.join(root, 'worktrees', 'cerdiwen-live')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+
+    await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-live']));
+  });
+
+  it('does not count the coordinator node pane as an active teammate', async () => {
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%1\tπ - cerdiwen\tnode\tpi --provider openai-codex --model gpt-5.5\t${root}\t0`,
+            `%2\tpi:c\tnode\t"PI_ORR_ELSE_WORKER=1 PI_BEAD_ID=cerdiwen-live PI_STATE_ID=Planning pi --no-session"\t${path.join(root, 'worktrees', 'cerdiwen-live')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+
+    await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
+    await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-live']));
+  });
+
+  it('recognizes retitled teammate panes from their mandatory worktree path', async () => {
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%1\tpi:c\tnode\tpi --provider openai-codex --model gpt-5.5\t${root}\t0`,
+            `%2\tpi:c\tnode\tpi --no-session\t${path.join(root, 'worktrees', 'cerdiwen-path', 'packages')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+
+    await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
+    await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-path']));
   });
 });

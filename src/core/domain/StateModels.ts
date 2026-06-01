@@ -40,6 +40,28 @@ export interface BaseProjectToolConfig {
   optional?: boolean;
   inlineResultBytes?: number;
   usageNotes?: string[];
+  // Hard wall-clock timeout enforced by the harness wrapper around every
+  // invocation. Distinct from tool-specific request/process timeouts.
+  wrapperTimeoutMs?: number;
+  // Open the per-(bead, tool) circuit breaker after this many consecutive
+  // failures within the session. The wrapper then short-circuits further
+  // invocations with a REJECTED result until the bead transitions.
+  maxConsecutiveFailures?: number;
+  // When true, the harness memoises this tool's results within a single
+  // worker session keyed by `(toolName, JSON.stringify(params))`. Cache is
+  // invalidated whenever any non-cacheable tool runs (assumed to potentially
+  // mutate state). Intended for stable read-only structural queries
+  // (e.g. bd_get_bead, codemap, get_artifact_paths) that the LLM otherwise
+  // re-issues on every turn.
+  cacheable?: boolean;
+  failureLimit?: {
+    maxFailuresPerState?: number;
+    suggestedOutcome?: string;
+    suggestedOutcomeByState?: Record<string, string>;
+    suggestedOutcomeByAction?: Record<string, string>;
+    message?: string;
+    terminal?: boolean;
+  };
 }
 
 export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
@@ -48,6 +70,7 @@ export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   defaultArgs?: string[];
   argsMode?: 'replace' | 'append';
   allowArgs?: boolean;
+  argumentPathScope?: ProjectCommandArgumentPathConfig;
   cwd?: CwdMode | string;
   allowCwdOverride?: boolean;
   timeoutMs?: number;
@@ -55,6 +78,11 @@ export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   successExitCodes?: number[];
   acceptMaxBuffer?: boolean;
   env?: Record<string, string>;
+}
+
+export interface ProjectCommandArgumentPathConfig extends ProjectToolPathArgumentConfig {
+  positionals?: boolean;
+  flags?: string[];
 }
 
 export interface ToolValidationRule {
@@ -66,10 +94,21 @@ export interface ToolValidationRule {
 export interface ProjectMcpToolConfig extends BaseProjectToolConfig {
   type: ProjectToolType.MCP;
   server: string;
+  // Client-side MCP request timeout for the remote tools/call operation.
+  timeoutMs?: number;
   operations?: Record<string, string> | string[];
   configPath?: string;
   argumentDefaults?: Record<string, Record<string, unknown>>;
   argumentAllowlist?: Record<string, string[]>;
+  pathArguments?: Record<string, Record<string, ProjectToolPathArgumentConfig>>;
+}
+
+export interface ProjectToolPathArgumentConfig {
+  rootKind?: 'worktree' | 'project' | 'framework' | 'workspace';
+  root?: CwdMode | string;
+  workspaceRoot?: string;
+  virtualRoots?: string[];
+  mustStayInsideRoot?: boolean;
 }
 
 export interface ProjectExtensionToolConfig extends BaseProjectToolConfig {
@@ -79,6 +118,18 @@ export interface ProjectExtensionToolConfig extends BaseProjectToolConfig {
 export type ProjectToolConfig = (ProjectCommandToolConfig | ProjectMcpToolConfig | ProjectExtensionToolConfig) & {
   validationRules?: ToolValidationRule[];
 };
+
+export interface RequiredToolCondition {
+  writeSetIncludesAny?: string[];
+  writeSetIncludesAll?: string[];
+}
+
+export interface ConditionalRequiredTool {
+  name: string;
+  when?: RequiredToolCondition;
+}
+
+export type RequiredTool = string | ConditionalRequiredTool;
 
 export interface CompatibilityDiscoveryConfig {
   masterRules?: string[];
@@ -98,6 +149,11 @@ export interface PiShellPolicyConfig {
   blockedCommandPatterns?: string[];
 }
 
+export interface PiMcpPolicyConfig {
+  allowToolCalls?: boolean;
+  blockedToolPatterns?: string[];
+}
+
 export interface PiIntegrationConfig {
   tools?: string[];
   observedTools?: string[];
@@ -105,6 +161,7 @@ export interface PiIntegrationConfig {
   workerArgs?: string[];
   workerExtensions?: string[];
   shell?: PiShellPolicyConfig;
+  mcp?: PiMcpPolicyConfig;
 }
 
 export interface ValidationGateConfig {
@@ -126,7 +183,7 @@ export interface TeammateAction {
   tool?: string;
   arguments?: Record<string, unknown>;
   command?: string;
-  requiredTools?: string[];
+  requiredTools?: RequiredTool[];
   requiredSkills?: string[];
   contextMode?: ConfiguredActionContextMode;
   maxContextTokens?: number;
@@ -154,7 +211,7 @@ export interface SDLCState {
   contextRotThreshold?: number;
   on?: Record<string, string>;
   transitions: Record<string, string>;
-  requiredTools?: string[];
+  requiredTools?: RequiredTool[];
   requiredSkills?: string[];
 }
 
@@ -184,6 +241,7 @@ export interface HarnessConfig {
       enabled?: boolean;
       requireReadSet?: boolean;
       requireWriteSet?: boolean;
+      autoRestoreUnapprovedPaths?: string[];
       requireAssumptions?: boolean;
       requireVersionDependencies?: boolean;
       requireVerifierObligations?: boolean;
@@ -218,6 +276,9 @@ export interface HarnessConfig {
       executionTime: number;
       progress: number;
       penalty: number;
+      priority?: number;
+      restart?: number;
+      resume?: number;
     }
   };
   validationGates?: ValidationGateConfig[];

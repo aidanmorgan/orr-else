@@ -8,6 +8,8 @@ import { SignalingServer } from '../src/core/SignalingServer.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
 import { setProjectRoot } from '../src/core/Paths.js';
+import { EnvVars } from '../src/constants/index.js';
+import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 
 function eventBody(overrides: Record<string, unknown> = {}) {
   const base = {
@@ -26,6 +28,25 @@ function eventBody(overrides: Record<string, unknown> = {}) {
     ...base,
     idempotencyKey: createTeammateEventIdempotencyKey(base),
     ...overrides
+  };
+}
+
+async function waitFor(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  assertion();
+}
+
+function runtimeEnvironment(vars: Record<string, string | undefined>): RuntimeEnvironment {
+  return {
+    env: (name: string): string | undefined => vars[name]
   };
 }
 
@@ -85,7 +106,7 @@ states:
         body: JSON.stringify(eventBody())
       });
       expect(signalResponse.ok).toBe(true);
-      expect(events).toHaveLength(1);
+      await waitFor(() => expect(events).toHaveLength(1));
       expect(events[0].beadId).toBe('pi-experiment-proof');
       expect(events[0].idempotencyKey).toContain('STATE_TRANSITIONED');
 
@@ -99,6 +120,71 @@ states:
       const heartbeats = await fetch(`http://127.0.0.1:${port}/heartbeats`).then(res => res.json());
       expect(heartbeats['worker-heartbeat']).toBeTypeOf('number');
     } finally {
+      server.stop();
+    }
+  });
+
+  it('uses injected runtime API_PORT when no explicit port is provided', async () => {
+    const expectedPort = 39400 + (process.pid % 1000);
+    const server = new SignalingServer(() => {}, observability, eventStore, {
+      runtimeEnvironment: runtimeEnvironment({ [EnvVars.API_PORT]: String(expectedPort) })
+    });
+    const port = await server.start();
+
+    try {
+      expect(port).toBe(expectedPort);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('uses explicit port over injected runtime API_PORT', async () => {
+    const explicitPort = 39500 + (process.pid % 1000);
+    const runtimePort = explicitPort + 100;
+    const server = new SignalingServer(() => {}, observability, eventStore, {
+      port: explicitPort,
+      runtimeEnvironment: runtimeEnvironment({ [EnvVars.API_PORT]: String(runtimePort) })
+    });
+    const port = await server.start();
+
+    try {
+      expect(port).toBe(explicitPort);
+    } finally {
+      server.stop();
+    }
+  });
+
+  it('responds to valid non-heartbeat signals before slow coordinator side effects finish', async () => {
+    const events: any[] = [];
+    let markHandlerEntered: () => void = () => {};
+    let releaseHandler: () => void = () => {};
+    const handlerEntered = new Promise<void>(resolve => {
+      markHandlerEntered = resolve;
+    });
+    const server = new SignalingServer(async event => {
+      events.push(event);
+      markHandlerEntered();
+      await new Promise<void>(release => {
+        releaseHandler = release;
+      });
+    }, observability, eventStore, 39300 + (process.pid % 1000));
+    const port = await server.start();
+
+    try {
+      const responsePromise = fetch(`http://127.0.0.1:${port}/signals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(eventBody())
+      });
+      await handlerEntered;
+      const first = await Promise.race([
+        responsePromise.then(response => response.ok ? 'response' : `status:${response.status}`),
+        new Promise(resolve => setTimeout(() => resolve('timeout'), 500))
+      ]);
+      expect(first).toBe('response');
+      expect(events).toHaveLength(1);
+    } finally {
+      releaseHandler();
       server.stop();
     }
   });

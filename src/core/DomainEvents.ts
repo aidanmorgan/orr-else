@@ -8,7 +8,7 @@ export const DomainEvent = {
 } as const;
 
 export type DomainEvent = typeof DomainEvent[keyof typeof DomainEvent] | string;
-export type DomainEventHook = (data: any) => Promise<void> | void;
+export type DomainEventHook = (data: unknown) => Promise<void> | void;
 
 export class DomainEventEmitter {
   private readonly handlers = new Map<string, DomainEventHook[]>();
@@ -25,7 +25,7 @@ export class DomainEventEmitter {
     this.handlers.clear();
   }
 
-  public async emitEvent(event: DomainEvent, data: any): Promise<void> {
+  public async emitEvent(event: DomainEvent, data: unknown): Promise<void> {
     Logger.debug(Component.CORE, `Emitting event: ${event}`, { data });
     await this.eventStore.record(event, data);
     await Promise.all((this.handlers.get(event) || []).map(handler => handler(data)));
@@ -35,7 +35,7 @@ export class DomainEventEmitter {
 export class DomainEvents {
   constructor(private readonly emitter: DomainEventEmitter) {}
 
-  public async emit(event: DomainEvent, data: any): Promise<void> {
+  public async emit(event: DomainEvent, data: unknown): Promise<void> {
     await this.emitter.emitEvent(event, data);
   }
 }

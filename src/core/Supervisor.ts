@@ -4,14 +4,25 @@ import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
 import { TeammateFactory } from '../plugins/teammates.js';
-import { AgentFailureSummary, Component, Defaults, DomainEventName, EventName, PluginToolName, SupervisorDefaults, TeammateEventType } from '../constants/index.js';
+import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { DomainEvent } from './EventStore.js';
 import type { RuntimeServices } from './RuntimeServices.js';
+import { systemClock } from './Clock.js';
+import type { Clock } from './Clock.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
   requestedBeadId?: string;
+  clock?: Clock;
+}
+
+interface MissingStartedRestartDetails {
+  restartKind?: string;
+  restartEvent?: string;
+  restartFromState?: string;
+  restartTargetState?: string;
+  sourceEventType?: string;
 }
 
 export class Supervisor {
@@ -26,6 +37,15 @@ export class Supervisor {
   private lastSlotHealthEventMs = 0;
   private schedulingPausedUntilMs = 0;
   private schedulingPausedReason = '';
+  // Throttle "scheduling paused" warns: only emit when pauseUntil changes,
+  // otherwise the supervisor poll spams the log every POLL_INTERVAL_MS.
+  private lastLoggedPausedUntilMs = 0;
+  // Throttle "underfilled or stale" slot warns: only emit when the digest
+  // (expected/working counts + stale bead set) changes.
+  private lastLoggedSlotHealthDigest = '';
+  private lastCapacityUnderfillDigest = '';
+  private lastMissingStartedBeadIds = new Set<string>();
+  private readonly clock: Clock;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -35,9 +55,13 @@ export class Supervisor {
     private readonly observability: Observability,
     private readonly services: RuntimeServices,
     private readonly options: SupervisorOptions
-  ) {}
+  ) {
+    this.clock = options.clock || systemClock;
+  }
 
   public async start() {
+    await this.restoreCapacityPauseFromEventStore();
+
     this.interval = setInterval(() => {
       this.step().catch(error => Logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
     }, Defaults.POLL_INTERVAL_MS);
@@ -62,11 +86,11 @@ export class Supervisor {
     return this.startedBeads.has(id);
   }
 
-  public markBeadExited(id: string) {
+  public markBeadExited(id: string, options: { preserveInactiveRestartBackoff?: boolean } = {}) {
     this.startedBeads.delete(id);
     this.startedBeadAtMs.delete(id);
     this.missingStartedBeadChecks.delete(id);
-    this.inactiveRestartedAtMs.delete(id);
+    if (!options.preserveInactiveRestartBackoff) this.inactiveRestartedAtMs.delete(id);
   }
 
   public isSignalProcessed(key: string): boolean {
@@ -78,17 +102,72 @@ export class Supervisor {
   }
 
   public pauseSchedulingUntil(pauseUntilMs: number, reason: string): void {
-    if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= Date.now()) return;
+    if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= this.clock.now()) return;
     if (pauseUntilMs <= this.schedulingPausedUntilMs) return;
     this.schedulingPausedUntilMs = pauseUntilMs;
     this.schedulingPausedReason = reason;
     void this.services.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
-      pauseUntil: new Date(pauseUntilMs).toISOString(),
+      pauseUntil: this.clock.date(pauseUntilMs).toISOString(),
       reason
     }).catch(() => {});
     Logger.warn(Component.SUPERVISOR, 'Scheduling paused after harness capacity limit', {
-      pauseUntil: new Date(pauseUntilMs).toISOString(),
+      pauseUntil: this.clock.date(pauseUntilMs).toISOString(),
       reason
+    });
+  }
+
+  private async restoreCapacityPauseFromEventStore(): Promise<void> {
+    const latestCapacityEvent = await this.services.eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED).catch((error: unknown) => {
+      Logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
+      return undefined;
+    });
+    const pauseUntilMs = Date.parse(String(latestCapacityEvent?.data?.pauseUntil || ''));
+    if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= this.clock.now()) return;
+
+    this.schedulingPausedUntilMs = pauseUntilMs;
+    this.schedulingPausedReason = String(latestCapacityEvent?.data?.reason || latestCapacityEvent?.data?.summary || 'Harness capacity limit reached');
+    Logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
+      pauseUntil: this.pausedUntilIso(),
+      reason: this.schedulingPausedReason
+    });
+  }
+
+  private isSchedulingPaused(): boolean {
+    return this.schedulingPausedUntilMs > this.clock.now();
+  }
+
+  private pausedUntilIso(): string {
+    return this.clock.date(this.schedulingPausedUntilMs).toISOString();
+  }
+
+  private reportPausedScheduling(): void {
+    const pauseUntil = this.pausedUntilIso();
+    if (this.ctx.hasUI) {
+      this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Paused until ${pauseUntil}`);
+    }
+    if (this.schedulingPausedUntilMs === this.lastLoggedPausedUntilMs) return;
+    this.lastLoggedPausedUntilMs = this.schedulingPausedUntilMs;
+    Logger.warn(Component.SUPERVISOR, 'Skipping spawn while scheduling is paused', {
+      pauseUntil,
+      reason: this.schedulingPausedReason
+    });
+  }
+
+  private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
+    const releaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
+    await Promise.resolve(releaseTool.execute({ id: claimed.id })).catch((error: unknown) => {
+      Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
+        beadId: claimed.id,
+        error: String(error)
+      });
+    });
+    this.startedBeads.delete(claimed.id);
+    this.startedBeadAtMs.delete(claimed.id);
+    this.missingStartedBeadChecks.delete(claimed.id);
+    Logger.warn(Component.SUPERVISOR, 'Stopped assignment dispatch after scheduling pause', {
+      beadId: claimed.id,
+      pauseUntil: this.pausedUntilIso(),
+      reason: this.schedulingPausedReason
     });
   }
 
@@ -98,6 +177,7 @@ export class Supervisor {
     try {
       await this.observability.tracedAsync('supervisor_step', {}, async () => {
         await this.reconcileStartedBeads();
+        await this.reconcileTerminalLiveBeads();
         await this.scanAndSpawn();
         await this.recordSlotHealth('after_scan');
       })();
@@ -116,30 +196,150 @@ export class Supervisor {
       }
       const missingChecks = (this.missingStartedBeadChecks.get(beadId) || 0) + 1;
       this.missingStartedBeadChecks.set(beadId, missingChecks);
-      if (missingChecks < Defaults.TEAMMATE_MISSING_REAP_THRESHOLD) continue;
+      const restartDetails = await this.restartDetailsForMissingStartedBead(beadId);
+      if (!restartDetails && missingChecks < Defaults.TEAMMATE_MISSING_REAP_THRESHOLD) continue;
 
       this.startedBeads.delete(beadId);
       this.startedBeadAtMs.delete(beadId);
       this.missingStartedBeadChecks.delete(beadId);
-      Logger.warn(Component.SUPERVISOR, 'Teammate process is no longer active; releasing scheduler slot', { beadId });
-      await this.services.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, { beadId }).catch(() => {});
+      const eventData = restartDetails
+        ? {
+          beadId,
+          reason: 'restart_requested_missing_pane',
+          missingChecks,
+          ...restartDetails
+        }
+        : { beadId };
+      Logger.warn(Component.SUPERVISOR, 'Teammate process is no longer active; releasing scheduler slot', eventData);
+      await this.services.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, eventData).catch(() => {});
+      const releaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE);
+      if (!releaseTool) {
+        Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease for exited teammate; bd_release tool is unavailable', { beadId });
+        continue;
+      }
+      await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+        Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease for exited teammate', {
+          beadId,
+          error: String(error)
+        });
+      });
+    }
+  }
+
+  private async restartDetailsForMissingStartedBead(beadId: string): Promise<MissingStartedRestartDetails | undefined> {
+    const eventStore = this.services.eventStore as any;
+
+    if (typeof eventStore.projectBead === 'function') {
+      try {
+        const projection = await eventStore.projectBead(beadId, { includeDetails: false });
+        if (projection?.restartRequested === true) {
+          return {
+            restartKind: projection.restartKind,
+            restartEvent: projection.restartEvent,
+            restartFromState: projection.restartFromState,
+            restartTargetState: projection.restartTargetState,
+            sourceEventType: 'projection'
+          };
+        }
+      } catch (error) {
+        Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart projection', {
+          beadId,
+          error: String(error)
+        });
+      }
+    }
+
+    if (typeof eventStore.eventsForBead !== 'function') return undefined;
+
+    try {
+      const events = await eventStore.eventsForBead(beadId);
+      for (const event of [...events].reverse()) {
+        const data = event.data || {};
+        if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED || event.type === DomainEventName.CONTEXT_RESTART_REQUESTED) {
+          return {
+            restartKind: event.type === DomainEventName.HARNESS_RESTART_REQUESTED ? 'harness' : 'context',
+            restartEvent: data.transitionEvent,
+            restartFromState: data.stateId,
+            restartTargetState: data.targetState || data.stateId,
+            sourceEventType: String(event.type)
+          };
+        }
+        if (
+          event.type === DomainEventName.TEAMMATE_EVENT &&
+          (data.type === TeammateEventType.HARNESS_RESTART_REQUESTED || data.type === TeammateEventType.CONTEXT_RESTART_REQUESTED) &&
+          data.processingDecision === TeammateEventDecisionAction.ACCEPT
+        ) {
+          return {
+            restartKind: data.type === TeammateEventType.HARNESS_RESTART_REQUESTED ? 'harness' : 'context',
+            restartEvent: data.transitionEvent,
+            restartFromState: data.stateId,
+            restartTargetState: data.targetState || data.stateId,
+            sourceEventType: String(data.type)
+          };
+        }
+      }
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart events', {
+        beadId,
+        error: String(error)
+      });
+    }
+
+    return undefined;
+  }
+
+  private async reconcileTerminalLiveBeads(): Promise<void> {
+    const liveBeadIds = await this.factory.getLiveTeammateBeadIds();
+    if (liveBeadIds.size === 0) return;
+
+    const getBeadTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_GET_BEAD);
+    const releaseTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE);
+    if (!getBeadTool) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to reconcile terminal live teammates; bd_get_bead tool is unavailable');
+      return;
+    }
+
+    for (const beadId of liveBeadIds) {
+      let bead: Bead;
+      try {
+        bead = await getBeadTool.execute({ id: beadId }) as Bead;
+      } catch (error) {
+        Logger.warn(Component.SUPERVISOR, 'Unable to inspect live teammate Bead status', { beadId, error: String(error) });
+        continue;
+      }
+      if (!TERMINAL_BEAD_STATUSES.has(bead.status)) continue;
+
+      const summary = `Live teammate is running for terminal Bead status ${bead.status}; terminating.`;
+      Logger.warn(Component.SUPERVISOR, 'Terminating live teammate for terminal Bead status', {
+        beadId,
+        status: bead.status
+      });
+      await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
+        Logger.warn(Component.SUPERVISOR, 'Unable to terminate terminal teammate panes', { beadId, error: String(error) });
+      });
+      if (releaseTool) {
+        await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+          Logger.warn(Component.SUPERVISOR, 'Unable to release terminal Bead after teammate termination', { beadId, error: String(error) });
+        });
+      }
+      this.markBeadExited(beadId);
     }
   }
 
   private async scanAndSpawn() {
-    if (this.schedulingPausedUntilMs > Date.now()) {
-      const pauseUntil = new Date(this.schedulingPausedUntilMs).toISOString();
-      if (this.ctx.hasUI) {
-        this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Paused until ${pauseUntil}`);
-      }
-      Logger.warn(Component.SUPERVISOR, 'Skipping spawn while scheduling is paused', {
-        pauseUntil,
-        reason: this.schedulingPausedReason
-      });
+    if (this.isSchedulingPaused()) {
+      this.reportPausedScheduling();
       return;
     }
 
-    const trackedSlots = Math.max(0, this.options.maxSlots - this.startedBeads.size);
+    const config = await this.services.configLoader.load();
+    const noProgressTimeoutMs = config.settings.teammateNoProgressTimeoutMs || SupervisorDefaults.NO_PROGRESS_TIMEOUT_MS;
+    const activeStartedBeads = await this.activeStartedBeadIds();
+    const excludedBeadIds = new Set(activeStartedBeads);
+    for (const beadId of this.backoffBlockedBeadIds(noProgressTimeoutMs)) {
+      excludedBeadIds.add(beadId);
+    }
+    const trackedSlots = Math.max(0, this.options.maxSlots - activeStartedBeads.size);
     const slots = Math.min(trackedSlots, await this.factory.getAvailableSlots());
     if (slots <= 0) {
       if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), 'All slots full');
@@ -148,7 +348,6 @@ export class Supervisor {
 
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Scanning backlog (${slots} slots free)`);
 
-    const config = await this.services.configLoader.load();
     const orchestrator = new Orchestrator(
       this.observability,
       this.services.configLoader,
@@ -157,7 +356,7 @@ export class Supervisor {
       this.services.plugins.bd,
       this.options.maxSlots
     );
-    const assignments = await orchestrator.selectAssignments(slots, this.options.requestedBeadId, this.startedBeads);
+    const assignments = await orchestrator.selectAssignments(slots, this.options.requestedBeadId, excludedBeadIds);
 
     if (assignments.length === 0) {
       if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), 'Idle (Backlog empty)');
@@ -165,23 +364,32 @@ export class Supervisor {
 
     for (const bead of assignments) {
       if (this.stopping) break;
+      if (this.isSchedulingPaused()) {
+        this.reportPausedScheduling();
+        break;
+      }
       const currentSlots = Math.min(
-        Math.max(0, this.options.maxSlots - this.startedBeads.size),
+        Math.max(0, this.options.maxSlots - (await this.activeStartedBeadIds()).size),
         await this.factory.getAvailableSlots()
       );
       if (currentSlots <= 0) break;
       this.startedBeads.add(bead.id);
-      this.startedBeadAtMs.set(bead.id, Date.now());
+      this.startedBeadAtMs.set(bead.id, this.clock.now());
       try {
         if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
         
         const claimTool = this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_CLAIM)!;
         const claimed = await claimTool.execute({
           id: bead.id,
-          owner: 'Orr Else',
+          owner: App.DISPLAY_NAME,
           stateId: bead.stateId,
           leaseTtlMs: config.settings?.agentTurnTimeoutMs || Defaults.LEASE_TTL_MS
         }, this.ctx) as Bead;
+
+        if (this.isSchedulingPaused()) {
+          await this.releaseClaimedAfterPause(claimed);
+          break;
+        }
 
         if (this.stopping) {
           await Promise.resolve(this.services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!.execute({ id: claimed.id })).catch(() => {});
@@ -198,6 +406,11 @@ export class Supervisor {
           throw new Error((result as any)?.error || `Failed to provision mandatory worktree for ${claimed.id}`);
         }
         await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
+
+        if (this.isSchedulingPaused()) {
+          await this.releaseClaimedAfterPause(claimed);
+          break;
+        }
 
         if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
         
@@ -226,12 +439,105 @@ export class Supervisor {
     }
   }
 
+  private async activeStartedBeadIds(): Promise<Set<string>> {
+    const liveBeadIds = await this.factory.getLiveTeammateBeadIds();
+    await this.pruneDurablyInactiveStartedBeads(liveBeadIds);
+    const missingStarted = [...this.startedBeads].filter(beadId => !liveBeadIds.has(beadId));
+    this.lastMissingStartedBeadIds = new Set(missingStarted);
+    if (missingStarted.length > 0) {
+      Logger.warn(Component.SUPERVISOR, 'Ignoring tracked Beads without live teammate panes for capacity calculation', {
+        missingStartedBeadIds: missingStarted.sort(),
+        liveBeadIds: [...liveBeadIds].sort()
+      });
+    }
+    return liveBeadIds;
+  }
+
+  private async pruneDurablyInactiveStartedBeads(liveBeadIds: Set<string>): Promise<void> {
+    const candidates = [...this.startedBeads].filter(beadId => !liveBeadIds.has(beadId));
+    if (candidates.length === 0) return;
+
+    const eventStore = this.services.eventStore as any;
+    if (typeof eventStore.eventsForBeads !== 'function') return;
+
+    let groupedEvents: Map<string, DomainEvent[]>;
+    try {
+      groupedEvents = await eventStore.eventsForBeads(candidates);
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
+        beadIds: candidates.sort(),
+        error: String(error)
+      });
+      return;
+    }
+
+    const prunedBeadIds: string[] = [];
+    for (const beadId of candidates) {
+      if (!this.hasDurableInactiveEvent(beadId, groupedEvents.get(beadId) || [])) continue;
+      this.markBeadExited(beadId);
+      prunedBeadIds.push(beadId);
+    }
+
+    if (prunedBeadIds.length > 0) {
+      Logger.info(Component.SUPERVISOR, 'Pruned released or exited Beads from slot health tracking', {
+        beadIds: prunedBeadIds.sort()
+      });
+    }
+  }
+
+  private hasDurableInactiveEvent(beadId: string, events: DomainEvent[]): boolean {
+    const startedAtMs = this.startedBeadAtMs.get(beadId) || 0;
+    const relevantEvents = events
+      .filter(event => {
+        if (startedAtMs <= 0) return true;
+        const timestampMs = Date.parse(event.timestamp);
+        return Number.isFinite(timestampMs) && timestampMs >= startedAtMs;
+      })
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp));
+    let latestTrackedState: 'active' | 'inactive' | undefined;
+
+    for (const event of relevantEvents) {
+      switch (event.type) {
+        case DomainEventName.BEAD_CLAIMED:
+        case DomainEventName.TEAMMATE_SPAWNED:
+          latestTrackedState = 'active';
+          break;
+        case DomainEventName.BEAD_RELEASED:
+        case DomainEventName.BEAD_CLOSED:
+        case DomainEventName.TEAMMATE_PROCESS_EXITED:
+          latestTrackedState = 'inactive';
+          break;
+        case DomainEventName.BEAD_STATUS_UPDATED:
+          if (TERMINAL_BEAD_STATUSES.has(String(event.data?.status || ''))) {
+            latestTrackedState = 'inactive';
+          }
+          break;
+      }
+    }
+
+    return latestTrackedState === 'inactive';
+  }
+
+  private backoffBlockedBeadIds(noProgressTimeoutMs: number): string[] {
+    const now = this.clock.now();
+    const blocked: string[] = [];
+    for (const [beadId, restartedAtMs] of this.inactiveRestartedAtMs.entries()) {
+      if (now - restartedAtMs >= noProgressTimeoutMs) {
+        this.inactiveRestartedAtMs.delete(beadId);
+      } else {
+        blocked.push(beadId);
+      }
+    }
+    return blocked.sort();
+  }
+
   private async recordSlotHealth(stage: string): Promise<void> {
-    const now = Date.now();
+    const now = this.clock.now();
     if (now - this.lastSlotHealthEventMs < SupervisorDefaults.SLOT_HEALTH_EVENT_INTERVAL_MS) return;
     this.lastSlotHealthEventMs = now;
 
     const liveBeadIds = [...await this.factory.getLiveTeammateBeadIds()].sort();
+    await this.pruneDurablyInactiveStartedBeads(new Set(liveBeadIds));
     const config = await this.services.configLoader.load();
     const noProgressTimeoutMs = config.settings.teammateNoProgressTimeoutMs || SupervisorDefaults.NO_PROGRESS_TIMEOUT_MS;
     const heartbeatByBead = new Map<string, number>();
@@ -260,31 +566,113 @@ export class Supervisor {
       const latestProgressMs = latestProgress ? Date.parse(latestProgress.timestamp) : this.startedBeadAtMs.get(beadId) || 0;
       return Number.isFinite(latestProgressMs) && latestProgressMs > 0 && now - latestProgressMs > noProgressTimeoutMs;
     });
-    const staleBeadIds = [...new Set([...staleHeartbeatBeadIds, ...inactiveBeadIds])].sort();
-    const activeCount = liveBeadIds.length;
-    const workingCount = activeCount - staleBeadIds.length;
+    const staleBeadIds = [...new Set(inactiveBeadIds)].sort();
+    const heartbeatOnlyStaleBeadIds = staleHeartbeatBeadIds
+      .filter(beadId => !staleBeadIds.includes(beadId))
+      .sort();
     const expectedCount = this.options.maxSlots;
+    const trackedBeadIds = [...this.startedBeads].sort();
+    const missingTrackedBeadIds = trackedBeadIds
+      .filter(beadId => !liveBeadIds.includes(beadId) || this.lastMissingStartedBeadIds.has(beadId));
+    const effectiveLiveBeadIds = liveBeadIds.filter(beadId => !missingTrackedBeadIds.includes(beadId));
+    const activeCount = effectiveLiveBeadIds.length;
+    const workingCount = activeCount - staleBeadIds.filter(beadId => effectiveLiveBeadIds.includes(beadId)).length;
+    const heartbeatOnlyLiveGaps = [...heartbeatByBead.keys()]
+      .filter(beadId => !liveBeadIds.includes(beadId))
+      .sort();
 
     await this.services.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
       stage,
       expectedCount,
       activeCount,
       workingCount,
-      liveBeadIds,
+      liveBeadIds: effectiveLiveBeadIds,
+      observedLiveBeadIds: liveBeadIds,
       staleBeadIds,
       staleHeartbeatBeadIds,
+      heartbeatOnlyStaleBeadIds,
       inactiveBeadIds,
-      trackedBeadIds: [...this.startedBeads].sort()
+      trackedBeadIds,
+      missingTrackedBeadIds,
+      heartbeatOnlyLiveGaps
     }).catch(() => {});
 
-    const details = { expectedCount, activeCount, workingCount, liveBeadIds, staleBeadIds };
-    if (activeCount < expectedCount || staleBeadIds.length > 0) {
-      Logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
-    } else {
-      Logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
+    const details = { expectedCount, activeCount, workingCount, liveBeadIds: effectiveLiveBeadIds, missingTrackedBeadIds, staleBeadIds, heartbeatOnlyStaleBeadIds };
+    const digest = `${expectedCount}/${workingCount}/${activeCount}|${missingTrackedBeadIds.join(',')}|${staleBeadIds.join(',')}|${heartbeatOnlyStaleBeadIds.join(',')}`;
+    if (digest !== this.lastLoggedSlotHealthDigest) {
+      this.lastLoggedSlotHealthDigest = digest;
+      if (activeCount < expectedCount || staleBeadIds.length > 0 || heartbeatOnlyStaleBeadIds.length > 0) {
+        Logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
+      } else {
+        Logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
+      }
     }
 
+    await this.recordCapacityUnderfill({
+      stage,
+      expectedCount,
+      activeCount,
+      workingCount,
+      liveBeadIds: effectiveLiveBeadIds,
+      trackedBeadIds,
+      missingTrackedBeadIds,
+      heartbeatOnlyLiveGaps,
+      heartbeatByBead,
+      staleBeadIds,
+      heartbeatOnlyStaleBeadIds
+    });
+
     await this.recoverInactiveBeads(inactiveBeadIds, latestProgressEvents, heartbeatDetails, noProgressTimeoutMs);
+  }
+
+  private async recordCapacityUnderfill(details: {
+    stage: string;
+    expectedCount: number;
+    activeCount: number;
+    workingCount: number;
+    liveBeadIds: string[];
+    trackedBeadIds: string[];
+    missingTrackedBeadIds: string[];
+    heartbeatOnlyLiveGaps: string[];
+    heartbeatByBead: Map<string, number>;
+    staleBeadIds: string[];
+    heartbeatOnlyStaleBeadIds: string[];
+  }): Promise<void> {
+    if (details.activeCount >= details.expectedCount) return;
+
+    const missingSlotCount = details.expectedCount - details.activeCount;
+    const lastHeartbeatByBead = Object.fromEntries(
+      [...details.heartbeatByBead.entries()]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([beadId, timestampMs]) => [beadId, this.clock.date(timestampMs).toISOString()])
+    );
+    const digest = [
+      `${details.expectedCount}/${details.activeCount}`,
+      details.liveBeadIds.join(','),
+      details.trackedBeadIds.join(','),
+      details.missingTrackedBeadIds.join(','),
+      details.heartbeatOnlyLiveGaps.join(',')
+    ].join('|');
+    if (digest === this.lastCapacityUnderfillDigest) return;
+    this.lastCapacityUnderfillDigest = digest;
+
+    const eventData = {
+      stage: details.stage,
+      expectedCount: details.expectedCount,
+      activeCount: details.activeCount,
+      workingCount: details.workingCount,
+      missingSlotCount,
+      liveBeadIds: details.liveBeadIds,
+      trackedBeadIds: details.trackedBeadIds,
+      missingTrackedBeadIds: details.missingTrackedBeadIds,
+      heartbeatOnlyLiveGaps: details.heartbeatOnlyLiveGaps,
+      staleBeadIds: details.staleBeadIds,
+      heartbeatOnlyStaleBeadIds: details.heartbeatOnlyStaleBeadIds,
+      lastHeartbeatByBead
+    };
+
+    await this.services.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
+    Logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
   }
 
   private latestStateForBead(beadId: string, heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>): string | undefined {
@@ -305,8 +693,9 @@ export class Supervisor {
 
     for (const beadId of inactiveBeadIds) {
       const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;
-      if (Date.now() - lastRestartAtMs < noProgressTimeoutMs) continue;
-      this.inactiveRestartedAtMs.set(beadId, Date.now());
+      const now = this.clock.now();
+      if (now - lastRestartAtMs < noProgressTimeoutMs) continue;
+      this.inactiveRestartedAtMs.set(beadId, now);
 
       const latestProgressEvent = latestProgressEvents.get(beadId);
       const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
@@ -339,7 +728,7 @@ export class Supervisor {
       await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
         Logger.warn(Component.SUPERVISOR, 'Unable to release inactive Bead after teammate termination', { beadId, error: String(error) });
       });
-      this.markBeadExited(beadId);
+      this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
     }
   }
 }

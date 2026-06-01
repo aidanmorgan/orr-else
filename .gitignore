@@ -9,3 +9,28 @@ __pycache__/
 .dolt/
 *.db
 .beads-credential-key
+
+# IDE / editor
+.idea/
+.antigravitycli/
+
+# Harness runtime artifacts (generated during operation)
+.git-harness.lock
+.pi/events/
+.pi/logs/
+.pi/otel/
+.pi/tool-output/
+.pi/mailbox/
+state/
+worklogs/
+temp_prompt_parse.md
+
+# Stray TypeScript build outputs (real build goes to dist/)
+src/**/*.js
+src/**/*.js.map
+src/**/*.d.ts.map
+src/main.d.ts
+scripts/*.js
+scripts/*.js.map
+scripts/*.d.ts
+scripts/*.d.ts.map

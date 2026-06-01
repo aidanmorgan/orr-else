@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import orrElseExtension from '../src/extension.js';
+import orrElseExtension, { isHarnessTransientFailure, shouldPersistBlockedBeadStatus } from '../src/extension.js';
 import { FlowManager } from '../src/core/FlowManager.js';
-import { EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/index.js';
+import { BuiltInToolName, EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/index.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 
 function fakePi() {
@@ -36,7 +38,43 @@ function fakePi() {
   };
 }
 
+const HEADLESS_TOOL_CONTEXT = { hasUI: false, shutdown: () => {} } as any;
+
+async function closeServer(server: Server | undefined): Promise<void> {
+  if (!server?.listening) return;
+  await new Promise<void>((resolve, reject) => {
+    server.close(error => error ? reject(error) : resolve());
+  });
+}
+
+async function startSignalAckServer(receivedEvents: unknown[], status = 200): Promise<Server> {
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+    request.on('end', () => {
+      const body = Buffer.concat(chunks).toString('utf8');
+      if (body) receivedEvents.push(JSON.parse(body));
+      response.writeHead(status, { 'content-type': 'application/json' });
+      response.end(JSON.stringify(status >= 200 && status < 300 ? { ok: true } : { error: 'rejected' }));
+    });
+  });
+  await new Promise<void>(resolve => server.listen(0, resolve));
+  const address = server.address() as AddressInfo;
+  process.env[EnvVars.API_BASE] = `http://127.0.0.1:${address.port}`;
+  return server;
+}
+
 describe('Pi-native extension surface', () => {
+  it('persists blocked Beads for blocked teammate outcomes', () => {
+    expect(shouldPersistBlockedBeadStatus('STATE_BLOCKED', 'Planning')).toBe(true);
+    expect(shouldPersistBlockedBeadStatus('STATE_FAILED', 'blocked')).toBe(true);
+    expect(shouldPersistBlockedBeadStatus('STATE_FAILED', 'Planning')).toBe(false);
+  });
+
+  it('classifies Codex SSE response-header timeouts as transient harness failures', () => {
+    expect(isHarnessTransientFailure('Codex SSE response headers timed out after 10000ms')).toBe(true);
+  });
+
   it('routes failed teammate events through the configured failure edge before retrying', () => {
     const retry = new FlowManager().resolveFailedTeammateEventRetry(
       'Implementation',
@@ -104,13 +142,21 @@ describe('Pi-native extension surface', () => {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
       stateId: process.env[EnvVars.STATE_ID],
-      projectRoot: process.env[EnvVars.PROJECT_ROOT]
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
     };
     const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-read-policy-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
     fs.writeFileSync(path.join(tempRoot, 'source.py'), 'print("ok")\n');
+    fs.writeFileSync(path.join(worktreePath, 'source.py'), 'print("ok")\n');
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  artifacts:
+    baseDir: .pi/artifacts
+    templates:
+      planContract: .pi/artifacts/{{beadId}}/plan-contract.json
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -130,6 +176,8 @@ states:
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-1';
       process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      process.chdir(worktreePath);
 
       const result = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.READ,
@@ -149,6 +197,33 @@ states:
       expect(stateLog).toMatchObject({ block: true });
       expect(stateLog.reason).toContain('framework runtime artifacts');
 
+      const readArtifact = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.READ,
+        toolCallId: 'read-artifact',
+        input: { path: path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), limit: 80 }
+      });
+
+      expect(readArtifact).toMatchObject({ block: true });
+      expect(readArtifact.reason).toContain('get_artifact_paths');
+
+      const readProjectToolOutput = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.READ,
+        toolCallId: 'read-project-tool-output',
+        input: { path: path.join(tempRoot, '.tmp/tool-calls/bd-1/Planning/tool/result.json'), limit: 80 }
+      });
+
+      expect(readProjectToolOutput).toMatchObject({ block: true });
+      expect(readProjectToolOutput.reason).toContain('may not read project-tool output archives directly');
+
+      const readOutside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.READ,
+        toolCallId: 'read-outside',
+        input: { path: path.join(tempRoot, 'source.py'), limit: 10 }
+      });
+
+      expect(readOutside).toMatchObject({ block: true });
+      expect(readOutside.reason).toContain('may only read files inside this Bead worktree');
+
       const writeRuntime = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.WRITE,
         toolCallId: 'write-runtime',
@@ -167,6 +242,67 @@ states:
       expect(editTemp).toMatchObject({ block: true });
       expect(editTemp.reason).toContain('may not modify framework runtime artifacts');
 
+      const writeOutside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.WRITE,
+        toolCallId: 'write-outside',
+        input: { path: path.join(tempRoot, 'outside.txt'), content: 'nope' }
+      });
+
+      expect(writeOutside).toMatchObject({ block: true });
+      expect(writeOutside.reason).toContain('may only mutate files inside this Bead worktree');
+
+      const writeArtifact = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.WRITE,
+        toolCallId: 'write-artifact',
+        input: {
+          path: path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'),
+          content: '{}'
+        }
+      });
+
+      expect(writeArtifact).toBeUndefined();
+
+      const editPlanContract = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.EDIT,
+        toolCallId: 'edit-plan-contract',
+        input: {
+          filePath: path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'),
+          oldString: '{}',
+          newString: '{"writeSet":[]}'
+        }
+      });
+
+      expect(editPlanContract).toMatchObject({
+        block: true,
+        nextAction: 'replace_plan_contract_with_full_write'
+      });
+      expect(editPlanContract.reason).toContain('full `write` payload');
+      expect(editPlanContract.recovery).toEqual(expect.arrayContaining([
+        expect.stringContaining('complete plan-contract JSON'),
+        expect.stringContaining('validate the full write set'),
+        expect.stringContaining('Do not retry a partial edit or patch')
+      ]));
+
+      const writeInside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.WRITE,
+        toolCallId: 'write-inside',
+        input: { path: path.join(worktreePath, 'inside.txt'), content: 'ok' }
+      });
+
+      expect(writeInside).toBeUndefined();
+
+      const editInside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.EDIT,
+        toolCallId: 'edit-inside',
+        input: {
+          filePath: path.join(worktreePath, 'source.py'),
+          oldString: 'print("ok")',
+          newString: 'print("still ok")'
+        }
+      });
+
+      expect(editInside).toBeUndefined();
+
       const removeState = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.BASH,
         toolCallId: 'remove-state',
@@ -174,12 +310,41 @@ states:
       });
 
       expect(removeState).toMatchObject({ block: true });
-      expect(removeState.reason).toContain('may not mutate framework runtime artifact path');
+      expect(removeState.reason).toContain('may not modify framework runtime artifacts');
+
+      const deleteEvent = {
+        toolName: NativePiToolName.BASH,
+        toolCallId: 'delete-file',
+        input: { command: 'rm delete-me.txt' }
+      };
+      const deleteConversion = await harness.callbacks[PiEventName.TOOL_CALL]?.(deleteEvent);
+
+      expect(deleteConversion).toBeUndefined();
+      expect(deleteEvent.input.command).toContain('trash_cli.js');
+      expect(deleteEvent.input).toMatchObject({ __orrElseDeleteConverted: true });
+
+      const deleteOutside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.BASH,
+        toolCallId: 'delete-outside',
+        input: { command: `rm ${path.join(tempRoot, 'outside-delete.txt')}` }
+      });
+
+      expect(deleteOutside).toMatchObject({ block: true });
+      expect(deleteOutside.reason).toContain('may only mutate files inside this Bead worktree');
+
+      const redirectOutside = await harness.callbacks[PiEventName.TOOL_CALL]?.({
+        toolName: NativePiToolName.BASH,
+        toolCallId: 'redirect-outside',
+        input: { command: `printf ok > ${path.join(tempRoot, 'outside-output.txt')}` }
+      });
+
+      expect(redirectOutside).toMatchObject({ block: true });
+      expect(redirectOutside.reason).toContain('may only mutate files inside this Bead worktree');
 
       const oversized = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.READ,
         toolCallId: 'read-huge-source',
-        input: { path: path.join(tempRoot, 'source.py'), limit: 2000 }
+        input: { path: path.join(worktreePath, 'source.py'), limit: 2000 }
       });
 
       expect(oversized).toMatchObject({ block: true });
@@ -197,6 +362,8 @@ states:
       else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
       if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
       else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
@@ -204,7 +371,7 @@ states:
   it('registers /orr-else, coordinator tools, and teammate signaling tools', async () => {
     const harness = fakePi();
     await orrElseExtension(harness.pi);
-    await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false });
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
 
     const toolNames = harness.tools.map(tool => tool.name);
     expect(harness.commands['orr-else']).toBeDefined();
@@ -217,6 +384,623 @@ states:
     expect(toolNames).toContain(`spawn_${'teammate'}`);
     expect(toolNames).toContain(`signal_${'completion'}`);
     expect(harness.commands['orr-else'].description).toContain('--config');
+  });
+
+  it('requires a durable checkpoint before completion can be signaled', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-checkpoint-gate-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: codemap
+    type: mcp
+    server: codemap
+    operations: [get_structure]
+  - name: reference_docs
+    type: mcp
+    server: chroma
+    operations:
+      query: chroma_query_documents
+  - name: ast_grep
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ tool: 'ast_grep', status: 'PASSED' }))"]
+  - name: native_symbol_index
+    type: extension
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-checkpoint-gate';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+      const harnessStatus = harness.tools.find(tool => tool.name === BuiltInToolName.HARNESS_STATUS);
+
+      const status = await harnessStatus.execute('status', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(status.details).toMatchObject({
+        mode: 'teammate',
+        beadId: 'bd-checkpoint-gate',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        checkpoint: { accepted: false }
+      });
+      expect(status.details.configuredProjectTools).toMatchObject({
+        total: 4,
+        mcpBacked: 2,
+        command: 1,
+        nativeExtension: 1,
+        nativeMcpFooterMeaning: expect.stringContaining('does not report Orr Else configured MCP-backed project tools')
+      });
+      expect(status.details.nextHarnessAction).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
+
+      const earlyCompletion = await signalCompletion.execute('signal-before-checkpoint', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(earlyCompletion.details).toContain('REJECTED: You must call `submit_checkpoint`');
+
+      const checkpoint = await submitCheckpoint.execute('checkpoint', {
+        summary: 'checkpoint summary',
+        evidence: 'checkpoint evidence'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const completion = await signalCompletion.execute('signal-after-checkpoint', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(checkpoint.details).toBe('Checkpoint accepted and recorded.');
+      expect(completion.details).toContain('Completion signaled with outcome: SUCCESS');
+      expect(receivedEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'CHECKPOINT_ACCEPTED' }),
+        expect.objectContaining({ type: 'STATE_TRANSITIONED' })
+      ]));
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps completion blocked when checkpoint signal delivery fails', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-checkpoint-reject-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents, 400);
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-checkpoint-reject';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+      const harnessStatus = harness.tools.find(tool => tool.name === BuiltInToolName.HARNESS_STATUS);
+
+      const checkpoint = await submitCheckpoint.execute('checkpoint', {
+        summary: 'checkpoint summary',
+        evidence: 'checkpoint evidence'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const status = await harnessStatus.execute('status', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const completion = await signalCompletion.execute('signal-after-rejected-checkpoint', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(checkpoint.details).toContain('Error:');
+      expect(status.details.checkpoint).toMatchObject({ accepted: false });
+      expect(completion.details).toContain('REJECTED: You must call `submit_checkpoint`');
+      expect(receivedEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'CHECKPOINT_ACCEPTED' })
+      ]));
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects SUCCESS when an action-level required tool was not invoked', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-action-required-tool-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: action_gate
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'action_gate', status: 'PASSED' }));"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+        requiredTools: [action_gate]
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-action-required-tool';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      delete process.env[EnvVars.API_BASE];
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      const completion = await signalCompletion.execute('signal-success', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(completion.details).toContain('REJECTED: Protocol Violation');
+      expect(completion.details).toContain('Tool `action_gate` was NEVER invoked.');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects SUCCESS when the latest required tool result failed after an earlier pass', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-required-tool-latest-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: evidence_gate
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "const mode = process.argv[1]; console.log(JSON.stringify({ tool: 'evidence_gate', status: mode === 'pass' ? 'PASSED' : 'REJECTED' })); process.exit(mode === 'pass' ? 0 : 1);"
+    argsMode: append
+    allowArgs: true
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: [evidence_gate]
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-latest-required-tool';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const evidenceGate = harness.tools.find(tool => tool.name === 'evidence_gate');
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      const passResult = await evidenceGate.execute('gate-pass', { arguments: { argv: ['pass'] } }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const failResult = await evidenceGate.execute('gate-fail', { arguments: { argv: ['fail'] } }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const completion = await signalCompletion.execute('signal-success', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(passResult.details.status).toBe('PASSED');
+      expect(failResult.details.status).toBe('REJECTED');
+      expect(completion.details).toContain('REJECTED: Protocol Violation');
+      expect(completion.details).toContain('Tool `evidence_gate` did not pass');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('blocks further tool work and SUCCESS after a terminal verifier failure', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-terminal-verifier-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: evidence_gate
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'evidence_gate', status: 'REJECTED' })); process.exit(1);"
+    failureLimit:
+      maxFailuresPerState: 1
+      suggestedOutcome: FAILURE
+      terminal: true
+  - name: followup_probe
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'followup_probe', status: 'PASSED' }));"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-terminal-verifier';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const evidenceGate = harness.tools.find(tool => tool.name === 'evidence_gate');
+      const followupProbe = harness.tools.find(tool => tool.name === 'followup_probe');
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      const verifier = await evidenceGate.execute('gate-fail', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const blockedTool = await followupProbe.execute('followup', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const completion = await signalCompletion.execute('signal-success', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(verifier.details).toMatchObject({
+        status: 'REJECTED',
+        failureLimit: {
+          failureCount: 1,
+          maxFailures: 1,
+          suggestedOutcome: 'FAILURE',
+          terminal: true
+        }
+      });
+      expect(blockedTool.details).toContain('terminal failure limit already reached');
+      expect(blockedTool.details).toContain('outcome `FAILURE`');
+      expect(completion.details).toContain('REJECTED: terminal failure limit already reached');
+      expect(completion.details).toContain('MUST signal outcome `FAILURE`');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces recorded project-tool routing hints before generic failure-limit outcomes', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-terminal-routing-hint-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: artifact_validator
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'artifact_validator', status: 'REJECTED', routingHint: { suggestedOutcome: 'REQUIREMENTS_DEFECT' } })); process.exit(1);"
+    failureLimit:
+      maxFailuresPerState: 1
+      suggestedOutcome: FAILURE
+      terminal: true
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: []
+    on: { REQUIREMENTS_DEFECT: "RequirementsAnalysis" }
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+  RequirementsAnalysis:
+    identity: { role: "Analyst", expertise: "Requirements", constraints: [] }
+    baseInstructions: "Analyze"
+    actions:
+      - id: analyze
+        type: prompt
+        prompt: "Analyze"
+    requiredTools: []
+    transitions: { SUCCESS: "Planning", FAILURE: "RequirementsAnalysis" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-terminal-routing-hint';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const artifactValidator = harness.tools.find(tool => tool.name === 'artifact_validator');
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      const verifier = await artifactValidator.execute('gate-fail', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const completion = await signalCompletion.execute('signal-failure', {
+        outcome: 'FAILURE',
+        summary: 'route failure'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(verifier.details).toMatchObject({
+        status: 'REJECTED',
+        failureLimit: {
+          failureCount: 1,
+          maxFailures: 1,
+          suggestedOutcome: 'REQUIREMENTS_DEFECT',
+          terminal: true
+        }
+      });
+      expect(completion.details).toContain('REJECTED: terminal failure limit already reached');
+      expect(completion.details).toContain('MUST signal outcome `REQUIREMENTS_DEFECT`');
+      expect(completion.details).toContain('outcome `FAILURE` is not permitted');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('lets configured project tools override generic harness tools with the same name', async () => {
@@ -252,7 +1036,8 @@ states:
 
       const matchingTools = harness.tools.filter(tool => tool.name === 'run_quality_checks');
       expect(matchingTools).toHaveLength(1);
-      expect(matchingTools[0].description).toBe('Project-owned quality gate.');
+      expect(matchingTools[0].description).toContain('Project-owned quality gate.');
+      expect(matchingTools[0].description).toContain('artifactRef is an opaque harness handle');
       expect(JSON.stringify(matchingTools[0].parameters)).toContain('arguments');
     } finally {
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
@@ -267,7 +1052,7 @@ states:
     const harness = fakePi();
     await orrElseExtension(harness.pi);
 
-    const resources = await harness.callbacks[PiEventName.RESOURCES_DISCOVER]?.({}, { hasUI: false });
+    const resources = await harness.callbacks[PiEventName.RESOURCES_DISCOVER]?.({}, HEADLESS_TOOL_CONTEXT);
 
     expect(resources).toBeDefined();
   });
@@ -275,7 +1060,7 @@ states:
   it('keeps tmux process orchestration behind the /orr-else plugin surface', async () => {
     const harness = fakePi();
     await orrElseExtension(harness.pi);
-    await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false });
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
     const root = process.cwd();
     const files = fs.readdirSync(path.join(root, 'src'), { recursive: true })
       .filter(file => typeof file === 'string' && file.endsWith('.ts'))
@@ -287,7 +1072,7 @@ states:
     expect(source).toContain('PI_' + 'STATE_ID');
     expect(source).toContain('signal_' + 'completion');
     expect(source).toContain('spawn_' + 'teammate');
-    expect(source).toContain('this.options.maxSlots - this.startedBeads.size');
+    expect(source).toContain('activeStartedBeadIds');
     expect(harness.commands['orr-else'].description).toContain('/orr-else');
   });
 });

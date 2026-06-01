@@ -6,6 +6,7 @@ export interface Bead {
   id: BeadId;
   title: string;
   status: string;
+  priority?: number;
   description?: string;
   notes?: string;
   assigned_to?: string;

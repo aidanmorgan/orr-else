@@ -7,6 +7,8 @@ const TemplateToken = {
   CONFIG_PATH: '{{configPath}}',
   PROJECT_ROOT: '{{projectRoot}}',
   WORKTREE_PATH: '{{worktreePath}}',
+  FRAMEWORK_ROOT: '{{frameworkRoot}}',
+  ORR_ELSE_FRAMEWORK_ROOT: '{{orrElseFrameworkRoot}}',
   BEAD_ID: '{{beadId}}',
   STATE_ID: '{{stateId}}',
   ACTION_ID: '{{actionId}}',
@@ -22,6 +24,7 @@ export interface TemplateContext {
   configPath?: string;
   projectRoot: string;
   worktreePath: string;
+  frameworkRoot?: string;
   beadId?: string;
   stateId?: string;
   actionId?: string;
@@ -47,6 +50,8 @@ export function resolveTemplateString(value: string, context: TemplateContext): 
   const replacements: Array<[string, string | undefined]> = [
     [TemplateToken.PROJECT_ROOT, context.projectRoot],
     [TemplateToken.WORKTREE_PATH, context.worktreePath],
+    [TemplateToken.FRAMEWORK_ROOT, context.frameworkRoot],
+    [TemplateToken.ORR_ELSE_FRAMEWORK_ROOT, context.frameworkRoot],
     [TemplateToken.CONFIG_PATH, context.configPath],
     [TemplateToken.BEAD_ID, context.beadId],
     [TemplateToken.STATE_ID, context.stateId],

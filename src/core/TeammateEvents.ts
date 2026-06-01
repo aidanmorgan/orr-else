@@ -1,5 +1,12 @@
+import { createHash } from 'node:crypto';
 import { BeadId } from '../types/index.js';
-import { EventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/index.js';
+import {
+  DomainEventName,
+  EventName,
+  EventProjectionDefaults,
+  TeammateEventDecisionAction,
+  TeammateEventType
+} from '../constants/index.js';
 
 export { TeammateEventType };
 
@@ -113,8 +120,112 @@ export type TeammateEvent =
   | HeartbeatEvent
   | TeammateExitedEvent;
 
+function hashText(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex').slice(0, 16);
+}
+
+function keyPart(value: unknown, fallback = 'none'): string {
+  const raw = String(value ?? fallback).trim() || fallback;
+  return raw.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || fallback;
+}
+
 export function createTeammateEventIdempotencyKey(event: Partial<TeammateEvent>): string {
-  return `${event.type}-${event.beadId}-${event.workerId}-${event.timestamp}`;
+  const type = keyPart(event.type, 'UNKNOWN_EVENT');
+  const beadId = keyPart(event.beadId, 'unknown-bead');
+  const workerId = keyPart(event.workerId, 'unknown-worker');
+  const stateId = keyPart(event.stateId, 'unknown-state');
+  const anyEvent = event as Record<string, unknown>;
+
+  if (event.type === TeammateEventType.HEARTBEAT) {
+    return [type, beadId, workerId, stateId, 'liveness'].join('-');
+  }
+
+  if (event.type === TeammateEventType.CHECKPOINT_ACCEPTED) {
+    return [
+      type,
+      beadId,
+      workerId,
+      keyPart(event.sessionStateId, 'session'),
+      stateId,
+      keyPart(anyEvent.actionId, 'action')
+    ].join('-');
+  }
+
+  if (event.type && STATUS_MUTATING_EVENT_TYPES.has(event.type as TeammateEventType)) {
+    return [
+      type,
+      beadId,
+      workerId,
+      keyPart(event.sessionStateId, 'session'),
+      stateId,
+      keyPart(anyEvent.actionId, 'action'),
+      keyPart(anyEvent.transitionEvent, 'transition')
+    ].join('-');
+  }
+
+  if (event.type === TeammateEventType.TEAMMATE_EXITED) {
+    return [type, beadId, workerId, stateId, hashText(anyEvent.summary)].join('-');
+  }
+
+  const semanticPayload = { ...anyEvent };
+  delete semanticPayload.timestamp;
+  delete semanticPayload.idempotencyKey;
+  return [type, beadId, workerId, stateId, hashText(semanticPayload)].join('-');
+}
+
+export interface RecordedDomainEventLike {
+  type: string;
+  data?: Record<string, any>;
+}
+
+function eventDataMatches(event: TeammateEvent, data: Record<string, any> | undefined): boolean {
+  if (!data) return false;
+  if (data.idempotencyKey && data.idempotencyKey === event.idempotencyKey) return true;
+
+  const anyEvent = event as Record<string, any>;
+  const stateMatches = (data.fromState || data.stateId) === event.stateId;
+  const actionMatches = !anyEvent.actionId || data.actionId === anyEvent.actionId;
+  const transitionMatches = !anyEvent.transitionEvent || data.transitionEvent === anyEvent.transitionEvent;
+  return stateMatches && actionMatches && transitionMatches;
+}
+
+export function findAppliedTeammateSignal(
+  events: readonly RecordedDomainEventLike[],
+  event: TeammateEvent
+): RecordedDomainEventLike | undefined {
+  for (const recorded of events) {
+    if (event.type === TeammateEventType.CHECKPOINT_ACCEPTED) {
+      if (recorded.type === DomainEventName.CHECKPOINT_SUBMITTED && eventDataMatches(event, recorded.data)) {
+        return recorded;
+      }
+      continue;
+    }
+
+    if (
+      event.type === TeammateEventType.STATE_TRANSITIONED
+      || event.type === TeammateEventType.STATE_FAILED
+      || event.type === TeammateEventType.STATE_BLOCKED
+    ) {
+      if (recorded.type === DomainEventName.STATE_TRANSITION_APPLIED && eventDataMatches(event, recorded.data)) {
+        return recorded;
+      }
+      continue;
+    }
+
+    if (event.type === TeammateEventType.CONTEXT_RESTART_REQUESTED) {
+      if (recorded.type === DomainEventName.CONTEXT_RESTART_REQUESTED && eventDataMatches(event, recorded.data)) {
+        return recorded;
+      }
+      continue;
+    }
+
+    if (event.type === TeammateEventType.HARNESS_RESTART_REQUESTED) {
+      if (recorded.type === DomainEventName.HARNESS_RESTART_REQUESTED && eventDataMatches(event, recorded.data)) {
+        return recorded;
+      }
+    }
+  }
+  return undefined;
 }
 
 export interface TeammateEventDecision {
@@ -187,7 +298,14 @@ export function validateTeammateEvent(value: any): TeammateEventValidationResult
   ) {
     const error = requireStrings(value, ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']);
     if (error) return { ok: false, error };
+    value.handover = truncateHandover(value.handover);
   }
 
   return { ok: true, event: value as TeammateEvent };
+}
+
+function truncateHandover(handover: string): string {
+  if (handover.length <= EventProjectionDefaults.HANDOVER_WRITE_MAX_BYTES) return handover;
+  const head = handover.slice(0, EventProjectionDefaults.HANDOVER_WRITE_MAX_BYTES);
+  return `${head}\n…[handover truncated at ${EventProjectionDefaults.HANDOVER_WRITE_MAX_BYTES} bytes; ${handover.length - EventProjectionDefaults.HANDOVER_WRITE_MAX_BYTES} bytes elided]`;
 }

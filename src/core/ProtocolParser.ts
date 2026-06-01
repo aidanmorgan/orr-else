@@ -1,4 +1,4 @@
-import { BuiltInToolName, ChecklistItemType } from '../constants/index.js';
+import { BuiltInToolName, ChecklistItemType, ChecklistPromptSuffix } from '../constants/index.js';
 
 export type ChecklistType = ChecklistItemType;
 
@@ -17,10 +17,10 @@ export interface ChecklistItem {
 export class ProtocolParser {
   public generatePrompt(requiredItems: ChecklistItem[]): string {
     const items = requiredItems.map(req => {
-      let suffix = '(MANDATORY)';
-      if (!req.mandatory) suffix = '(OPTIONAL)';
-      if (req.type === ChecklistItemType.TOOL) suffix = '(HARNESS TOOL CHECK)';
-      if (req.type === ChecklistItemType.SCRIPT) suffix = '(HARNESS SCRIPT CHECK)';
+      let suffix: string = ChecklistPromptSuffix.MANDATORY;
+      if (!req.mandatory) suffix = ChecklistPromptSuffix.OPTIONAL;
+      if (req.type === ChecklistItemType.TOOL) suffix = ChecklistPromptSuffix.TOOL;
+      if (req.type === ChecklistItemType.SCRIPT) suffix = ChecklistPromptSuffix.SCRIPT;
       
       return `- ${req.text} ${suffix}`;
     }).join('\n');

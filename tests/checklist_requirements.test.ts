@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { BuiltInToolName } from '../src/constants/index.js';
-import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems } from '../src/core/ChecklistRequirements.js';
+import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, normalizeChecklistTickText, resolveChecklistTickText } from '../src/core/ChecklistRequirements.js';
 import { ProtocolInjector } from '../src/core/ProtocolInjector.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
 
@@ -104,6 +104,17 @@ describe('ChecklistRequirements', () => {
     expect(result.upgradedItems.map(item => item.text)).toEqual(['Rule-specific audit']);
   });
 
+  it('resolves displayed protocol suffixes back to configured checklist text', () => {
+    const requiredItems = [
+      { text: 'Load compatibility context', mandatory: true },
+      { text: 'Run optional audit', mandatory: false }
+    ];
+
+    expect(normalizeChecklistTickText('- Load compatibility context (MANDATORY)')).toBe('Load compatibility context');
+    expect(resolveChecklistTickText(requiredItems, 'Run optional audit (OPTIONAL)')).toBe('Run optional audit');
+    expect(resolveChecklistTickText(requiredItems, 'Missing item (MANDATORY)')).toBeUndefined();
+  });
+
   it('enables checklist tool protocol guidance for state-level-only checklists', () => {
     const protocol = new ProtocolInjector().inject(stateWithChecklist([
       { text: 'State-level only review', mandatory: true }
@@ -113,5 +124,7 @@ describe('ChecklistRequirements', () => {
     expect(protocol).toContain(BuiltInToolName.GET_OUTSTANDING_TASKS);
     expect(protocol).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
     expect(protocol).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+    expect(protocol).toContain('outputArchive.artifactRef');
+    expect(protocol).toContain('opaque harness handle, not a filesystem path');
   });
 });

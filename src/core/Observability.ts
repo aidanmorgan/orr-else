@@ -26,7 +26,8 @@ import { v7 as uuidv7 } from 'uuid';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { resolveProject } from './Paths.js';
-import { App, Component, EnvVars, Numeric, ObservabilityDefaults } from '../constants/index.js';
+import { isRecord } from './RecordUtils.js';
+import { App, Component, EnvVars, Numeric, ObservabilityDefaults, ToolResultStatus } from '../constants/index.js';
 
 export interface SpanContext {
   traceId: string;
@@ -48,6 +49,11 @@ export interface SpanCompletion {
   status: SpanStatus;
   message?: string;
 }
+
+type ToolInvocationResult = {
+  success?: unknown;
+  status?: unknown;
+};
 
 class SessionIdGenerator implements IdGenerator {
   private readonly random = new RandomIdGenerator();
@@ -124,9 +130,21 @@ function hrTimeToUnixNano(hrTime: [number, number]): string {
   return (BigInt(hrTime[0]) * Numeric.NANOSECONDS_PER_SECOND + BigInt(hrTime[1])).toString();
 }
 
+function compactSpanString(value: string): string {
+  if (value.length <= ObservabilityDefaults.SPAN_ATTRIBUTE_MAX_CHARS) return value;
+  return `${value.slice(0, ObservabilityDefaults.SPAN_ATTRIBUTE_MAX_CHARS)}... [truncated; chars=${value.length}]`;
+}
+
+function cleanAttributeValue(value: string | number | boolean | undefined): string | number | boolean | undefined {
+  if (typeof value === 'string') return compactSpanString(value);
+  return value;
+}
+
 function cleanAttributes(attributes: SpanAttributes): Attributes {
   return Object.fromEntries(
-    Object.entries(attributes).filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined)
+    Object.entries(attributes)
+      .map(([key, value]) => [key, cleanAttributeValue(value)] as const)
+      .filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined)
   );
 }
 
@@ -141,7 +159,8 @@ export class Observability {
   private readonly contextStorage = new AsyncLocalStorage<SpanContext>();
   private readonly activeSpans: Map<string, OtelSpan> = new Map();
   private readonly calledTools: Set<string> = new Set();
-  private readonly toolResults: Map<string, any> = new Map();
+  private readonly toolResults: Map<string, unknown> = new Map();
+  private readonly passingToolResults: Map<string, unknown> = new Map();
 
   private provider: BasicTracerProvider | null = null;
   private tracer = trace.getTracer(App.TRACER_NAME, App.VERSION);
@@ -155,10 +174,13 @@ export class Observability {
     await this.init();
   }
 
-  public recordToolInvocation(name: string, result?: any) {
+  public recordToolInvocation(name: string, result?: unknown) {
     this.calledTools.add(name);
     if (result !== undefined) {
       this.toolResults.set(name, result);
+      if (this.toolResultPassed(result)) {
+        this.passingToolResults.set(name, result);
+      }
     }
   }
 
@@ -166,8 +188,16 @@ export class Observability {
     return Array.from(this.calledTools);
   }
 
-  public getToolResult(name: string): any {
+  public getToolResult(name: string): unknown {
     return this.toolResults.get(name);
+  }
+
+  public getPassingToolResult(name: string): unknown {
+    return this.passingToolResults.get(name);
+  }
+
+  public hasToolPassed(name: string): boolean {
+    return this.passingToolResults.has(name);
   }
 
   public getJsonlFileName(): string {
@@ -177,6 +207,12 @@ export class Observability {
   public getJsonlFilePath(): string {
     if (this.currentFilePath) return this.currentFilePath;
     return path.join(resolveProject('.pi/otel'), this.getJsonlFileName());
+  }
+
+  private toolResultPassed(result: unknown): boolean {
+    if (!isRecord(result)) return false;
+    const toolResult = result as ToolInvocationResult;
+    return toolResult.success === true || toolResult.status === ToolResultStatus.PASSED;
   }
 
   private async init(): Promise<boolean> {
@@ -196,9 +232,9 @@ export class Observability {
       filePath,
       collector: collector
         ? {
-            endpoint: (collector as any).endpoint,
-            headers: (collector as any).headers || {},
-            timeoutMs: (collector as any).timeoutMs || ObservabilityDefaults.COLLECTOR_TIMEOUT_MS
+            endpoint: collector.endpoint,
+            headers: collector.headers || {},
+            timeoutMs: collector.timeoutMs || ObservabilityDefaults.COLLECTOR_TIMEOUT_MS
           }
         : null
     });
@@ -214,11 +250,11 @@ export class Observability {
       new SimpleSpanProcessor(new JsonlSpanExporter(filePath))
     ];
 
-    if ((collector as any)?.endpoint) {
+    if (collector?.endpoint) {
       spanProcessors.push(new BatchSpanProcessor(new OTLPTraceExporter({
-        url: (collector as any).endpoint,
-        headers: (collector as any).headers || {},
-        timeoutMillis: (collector as any).timeoutMs || ObservabilityDefaults.COLLECTOR_TIMEOUT_MS
+        url: collector.endpoint,
+        headers: collector.headers || {},
+        timeoutMillis: collector.timeoutMs || ObservabilityDefaults.COLLECTOR_TIMEOUT_MS
       })));
     }
 
@@ -234,7 +270,7 @@ export class Observability {
     Logger.debug(Component.OBSERVABILITY, 'Initialized OpenTelemetry observability', {
       sessionId: this.sessionId,
       filePath,
-      collectorEndpoint: (collector as any)?.endpoint
+      collectorEndpoint: collector?.endpoint
     });
 
     return true;
@@ -260,8 +296,10 @@ export class Observability {
           'service.instance.id': this.sessionId,
           'session.id': this.sessionId,
           'session.state_id': this.sessionStateId || undefined,
-          'observability.file.name': this.currentFileName || undefined,
-          'observability.file.path': this.currentFilePath || undefined,
+          'orr_else.bead_id': process.env[EnvVars.BEAD_ID] || undefined,
+          'orr_else.state_id': process.env[EnvVars.STATE_ID] || undefined,
+          'orr_else.action_id': process.env[EnvVars.ACTION_ID] || undefined,
+          'orr_else.worker_id': process.env[EnvVars.WORKER_ID] || undefined,
           'process.pid': process.pid,
           ...attributes
         })
@@ -285,7 +323,7 @@ export class Observability {
 
     span.setStatus({
       code: status === SpanStatusValue.OK ? SpanStatusCode.OK : SpanStatusCode.ERROR,
-      message
+      message: message === undefined ? undefined : compactSpanString(message)
     });
     span.end();
     this.activeSpans.delete(spanId);
@@ -299,8 +337,9 @@ export class Observability {
 
   public setAttribute(spanId: string, key: string, value: string | number | boolean | undefined): void {
     const span = this.activeSpans.get(spanId);
-    if (!span || value === undefined) return;
-    span.setAttribute(key, value);
+    const cleanValue = cleanAttributeValue(value);
+    if (!span || cleanValue === undefined) return;
+    span.setAttribute(key, cleanValue);
   }
 
   public tracedAsync<T>(
