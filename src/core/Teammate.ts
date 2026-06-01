@@ -17,7 +17,7 @@ import {
 } from '../constants/index.js';
 import { setProjectRoot } from './Paths.js';
 import { FlowManager } from './FlowManager.js';
-import { ConfigLoader } from './ConfigLoader.js';
+import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
 import { getConfiguredProjectToolNames } from '../plugins/projectTools.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
@@ -74,9 +74,30 @@ export class Teammate {
       ...getConfiguredPiToolNames(config)
     ]);
 
-    // 1. Context Health Monitoring (Programmatic Compaction Tracking)
+    const stopCompactionMonitor = this.setupCompactionMonitor(beadId, stateId, config);
+    const stopHeartbeat = this.setupHeartbeat(beadId, stateId);
+
+    // Tear down both monitors on abort (fixes SESSION_COMPACT listener accumulation leak)
+    this.ctx.signal?.addEventListener('abort', () => {
+      stopCompactionMonitor();
+      stopHeartbeat();
+    }, { once: true });
+  }
+
+  /** Sets up the SESSION_COMPACT compaction monitor. Returns a cleanup function that
+   *  makes the registered listener a no-op (pi.on has no off(); the guard prevents
+   *  side-effects after the teammate lifecycle ends). */
+  private setupCompactionMonitor(
+    beadId: string,
+    stateId: string,
+    config: HarnessConfig
+  ): () => void {
     let compactionCount = 0;
+    let active = true;
+
     this.pi.on(PiEventName.SESSION_COMPACT, () => {
+      if (!active) return;
+
       compactionCount++;
       Logger.info(Component.TEAMMATE, 'Session auto-compacted by Pi', { beadId, compactionCount });
       void this.eventStore.record(DomainEventName.CONTEXT_COMPACTION_RECORDED, {
@@ -86,14 +107,14 @@ export class Teammate {
       }).catch(error => {
         Logger.warn(Component.TEAMMATE, 'Failed to record compaction event', { beadId, error: String(error) });
       });
-      
+
       const thresholds = config.settings.contextMonitor || {
         autoRestartCompactionCount: WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT
       };
       if (compactionCount >= (thresholds.autoRestartCompactionCount || WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT)) {
-        Logger.info(Component.TEAMMATE, 'Compaction threshold reached. Programmatically triggering auto-restart to prevent implementation rot.', { 
-          beadId, 
-          compactionCount 
+        Logger.info(Component.TEAMMATE, 'Compaction threshold reached. Programmatically triggering auto-restart to prevent implementation rot.', {
+          beadId,
+          compactionCount
         });
 
         if (this.ctx.hasUI) {
@@ -101,18 +122,21 @@ export class Teammate {
         }
 
         // Trigger auto-restart handover logic
-        this.triggerAutoRestart(beadId!, stateId!, compactionCount).catch(error => {
+        this.triggerAutoRestart(beadId, stateId, compactionCount).catch(error => {
           Logger.error(Component.TEAMMATE, 'Failed to trigger programmatic auto-restart', { error: String(error) });
         });
       }
     });
 
-    // 2. Heartbeat logic with consecutive-failure tracking. The signaling
-    // server is a known single-point-of-failure (production telemetry: 210
-    // heartbeat NetworkErrors + 154 transport-error harness restarts). One
-    // failure is logged once at warn; subsequent consecutive failures fall
-    // to debug so they don't flood the log. The first heartbeat to succeed
-    // after a streak emits a recovery message.
+    return () => { active = false; };
+  }
+
+  /** Sets up the heartbeat interval. Returns a cleanup function that clears the interval.
+   *
+   * Consecutive-failure tracking: one failure is logged at warn; subsequent consecutive
+   * failures fall to debug so they don't flood the log. The first heartbeat to succeed
+   * after a streak emits a recovery message. */
+  private setupHeartbeat(beadId: string, stateId: string): () => void {
     let consecutiveHeartbeatFailures = 0;
     const heartbeat = setInterval(() => {
       this.sendHeartbeat(beadId, stateId).then(() => {
@@ -134,8 +158,7 @@ export class Teammate {
       });
     }, WorkerDefaults.HEARTBEAT_INTERVAL_MS);
 
-    // End turn on abort
-    this.ctx.signal?.addEventListener('abort', () => clearInterval(heartbeat), { once: true });
+    return () => clearInterval(heartbeat);
   }
 
   private async sendHeartbeat(beadId: string, stateId: string) {
