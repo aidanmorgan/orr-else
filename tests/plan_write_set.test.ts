@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -10,7 +10,7 @@ import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { ShellCommandParser } from '../src/core/ShellCommandParser.js';
-import { DomainEventName, EnvVars, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
+import { DomainEventName, EnvVars, FileMutationPolicyDefaults, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });
@@ -245,5 +245,104 @@ states:
       if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
       else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
     }
+  });
+});
+
+describe('FileAccessPolicy validateShellTarget — WRITE vs DELETE operation labels', () => {
+  let tempRoot: string;
+  let previousRoot: string;
+  let policy: FileAccessPolicy;
+  let recordedEvents: Array<{ eventName: string; data: unknown }>;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-shell-label-')));
+    setProjectRoot(tempRoot);
+
+    recordedEvents = [];
+    // Use a stub EventStore so no real file I/O occurs during label assertions.
+    const stubEventStore = {
+      record: vi.fn(async (eventName: string, data: unknown) => {
+        recordedEvents.push({ eventName, data });
+      })
+    } as unknown as EventStore;
+
+    // PlanWriteSet requires a real ConfigLoader to resolve the write-set; use a stub that
+    // passes all mutations so the label-assertion path is reached.
+    const stubPlanWriteSet = {
+      validateMutationTarget: vi.fn(async () => ({ passed: true })),
+      isPlanContractPath: vi.fn(async () => false),
+      validateProposedPlanContract: vi.fn(async () => ({ passed: true }))
+    } as unknown as PlanWriteSet;
+
+    policy = new FileAccessPolicy(stubEventStore, new ShellCommandParser(), stubPlanWriteSet);
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function withWorkerEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+    process.env[EnvVars.BEAD_ID] = 'bd-label-test';
+    process.env[EnvVars.STATE_ID] = 'Planning';
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempRoot;
+    return fn().finally(() => {
+      if (saved.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = saved.workerMode;
+      if (saved.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = saved.beadId;
+      if (saved.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = saved.stateId;
+      if (saved.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = saved.projectRoot;
+      if (saved.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = saved.worktreePath;
+    });
+  }
+
+  it('records WRITE operation label for shell mutation targets (applyShellMutationPolicy path)', async () => {
+    const target = path.join(tempRoot, 'src/output.txt');
+    await withWorkerEnv(() =>
+      policy.apply({
+        toolName: NativePiToolName.BASH,
+        toolCallId: 'bash-write-1',
+        input: { command: `tee ${target}` }
+      })
+    );
+
+    const accessAttempts = recordedEvents.filter(e => e.eventName === DomainEventName.FILE_ACCESS_ATTEMPTED);
+    expect(accessAttempts.length).toBeGreaterThan(0);
+    expect(accessAttempts.every(e => (e.data as any).operation === FileMutationPolicyDefaults.WRITE_OPERATION)).toBe(true);
+    expect(accessAttempts.some(e => (e.data as any).operation === FileMutationPolicyDefaults.DELETE_OPERATION)).toBe(false);
+  });
+
+  it('records DELETE operation label for shell deletion targets (convertDeletion path)', async () => {
+    const target = path.join(tempRoot, 'src/old-file.txt');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, 'content');
+
+    await withWorkerEnv(() =>
+      policy.apply({
+        toolName: NativePiToolName.BASH,
+        toolCallId: 'bash-delete-1',
+        input: { command: `rm ${target}` }
+      })
+    );
+
+    const accessAttempts = recordedEvents.filter(e => e.eventName === DomainEventName.FILE_ACCESS_ATTEMPTED);
+    expect(accessAttempts.length).toBeGreaterThan(0);
+    expect(accessAttempts.every(e => (e.data as any).operation === FileMutationPolicyDefaults.DELETE_OPERATION)).toBe(true);
+    expect(accessAttempts.some(e => (e.data as any).operation === FileMutationPolicyDefaults.WRITE_OPERATION)).toBe(false);
   });
 });

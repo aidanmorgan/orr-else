@@ -167,27 +167,8 @@ export class FileAccessPolicy {
 
     const mutationTargets = parsed.commands.flatMap(shellCommand => this.detectShellMutationTargets(shellCommand));
     for (const target of mutationTargets) {
-      await this.recordAccessAttempt(event, context, target.text, FileMutationPolicyDefaults.WRITE_OPERATION);
-      const dynamicRejection = this.dynamicTargetRejection(target, `\`${NativePiToolName.BASH}\``);
-      if (dynamicRejection) {
-        await this.recordRejection(event, context, target.text, dynamicRejection);
-        return { rejection: dynamicRejection };
-      }
-      const operationalRejection = this.operationalMutationRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
-      if (operationalRejection) {
-        await this.recordRejection(event, context, target.text, operationalRejection);
-        return { rejection: operationalRejection };
-      }
-      const scopeRejection = this.worktreeScopeRejection(target.text, context, `\`${NativePiToolName.BASH}\``, 'mutate');
-      if (scopeRejection) {
-        await this.recordRejection(event, context, target.text, scopeRejection);
-        return { rejection: scopeRejection };
-      }
-      const writeSetRejection = await this.writeSetRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
-      if (writeSetRejection) {
-        await this.recordRejection(event, context, target.text, writeSetRejection);
-        return { rejection: writeSetRejection };
-      }
+      const rejection = await this.validateShellTarget(event, context, target, FileMutationPolicyDefaults.WRITE_OPERATION);
+      if (rejection) return rejection;
     }
 
     return null;
@@ -197,6 +178,36 @@ export class FileAccessPolicy {
     const rejection = `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` deletion attempts must be single-command operations so Orr Else can convert them to a managed move into \`${OperationalArtifactPath.PI_TRASH_DIR}\`.`;
     await this.recordRejection(event, context, undefined, rejection);
     return { rejection };
+  }
+
+  private async validateShellTarget(
+    event: any,
+    context: MutationContext,
+    target: ParsedShellWord,
+    operation: string
+  ): Promise<PolicyResult | null> {
+    await this.recordAccessAttempt(event, context, target.text, operation);
+    const dynamicRejection = this.dynamicTargetRejection(target, `\`${NativePiToolName.BASH}\``);
+    if (dynamicRejection) {
+      await this.recordRejection(event, context, target.text, dynamicRejection);
+      return { rejection: dynamicRejection };
+    }
+    const operationalRejection = this.operationalMutationRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
+    if (operationalRejection) {
+      await this.recordRejection(event, context, target.text, operationalRejection);
+      return { rejection: operationalRejection };
+    }
+    const scopeRejection = this.worktreeScopeRejection(target.text, context, `\`${NativePiToolName.BASH}\``, 'mutate');
+    if (scopeRejection) {
+      await this.recordRejection(event, context, target.text, scopeRejection);
+      return { rejection: scopeRejection };
+    }
+    const writeSetRejection = await this.writeSetRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
+    if (writeSetRejection) {
+      await this.recordRejection(event, context, target.text, writeSetRejection);
+      return { rejection: writeSetRejection };
+    }
+    return null;
   }
 
   private async convertDeletion(
@@ -212,27 +223,8 @@ export class FileAccessPolicy {
     }
 
     for (const target of deletion.targets) {
-      await this.recordAccessAttempt(event, context, target.text, FileMutationPolicyDefaults.DELETE_OPERATION);
-      const dynamicRejection = this.dynamicTargetRejection(target, `\`${NativePiToolName.BASH}\``);
-      if (dynamicRejection) {
-        await this.recordRejection(event, context, target.text, dynamicRejection);
-        return { rejection: dynamicRejection };
-      }
-      const operationalRejection = this.operationalMutationRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
-      if (operationalRejection) {
-        await this.recordRejection(event, context, target.text, operationalRejection);
-        return { rejection: operationalRejection };
-      }
-      const scopeRejection = this.worktreeScopeRejection(target.text, context, `\`${NativePiToolName.BASH}\``, 'mutate');
-      if (scopeRejection) {
-        await this.recordRejection(event, context, target.text, scopeRejection);
-        return { rejection: scopeRejection };
-      }
-      const writeSetRejection = await this.writeSetRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
-      if (writeSetRejection) {
-        await this.recordRejection(event, context, target.text, writeSetRejection);
-        return { rejection: writeSetRejection };
-      }
+      const policyRejection = await this.validateShellTarget(event, context, target, FileMutationPolicyDefaults.DELETE_OPERATION);
+      if (policyRejection) return policyRejection;
       if (FileMutationPolicyDefaults.GLOB_PATTERN.test(target.text)) {
         const rejection = `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` deletion target \`${target.text}\` contains a shell glob that cannot be safely converted to a deterministic trash move. Use an explicit path.`;
         await this.recordRejection(event, context, target.text, rejection);
@@ -473,22 +465,23 @@ export class FileAccessPolicy {
     };
   }
 
-  private isOperationalMutationPath(relativePath: string): boolean {
+  private isOperationalLogPath(relativePath: string): { normalizedPath: string; isLog: boolean } {
     const normalizedPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
     const fileName = path.posix.basename(normalizedPath);
     const isProgress = fileName === OperationalLogPath.PROGRESS_FILE;
     const isWorklog = normalizedPath.split('/').includes(OperationalLogPath.WORKLOG_DIR)
       && fileName.endsWith(OperationalLogPath.WORKLOG_FILE_SUFFIX);
-    return isProgress || isWorklog || OPERATIONAL_MUTATION_DIRS.some(directory => this.pathWithin(normalizedPath, directory));
+    return { normalizedPath, isLog: isProgress || isWorklog };
+  }
+
+  private isOperationalMutationPath(relativePath: string): boolean {
+    const { normalizedPath, isLog } = this.isOperationalLogPath(relativePath);
+    return isLog || OPERATIONAL_MUTATION_DIRS.some(directory => this.pathWithin(normalizedPath, directory));
   }
 
   private isOperationalReadPath(relativePath: string): boolean {
-    const normalizedPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
-    const fileName = path.posix.basename(normalizedPath);
-    const isProgress = fileName === OperationalLogPath.PROGRESS_FILE;
-    const isWorklog = normalizedPath.split('/').includes(OperationalLogPath.WORKLOG_DIR)
-      && fileName.endsWith(OperationalLogPath.WORKLOG_FILE_SUFFIX);
-    return isProgress || isWorklog || OPERATIONAL_READ_DIRS.some(directory => this.pathWithin(normalizedPath, directory));
+    const { normalizedPath, isLog } = this.isOperationalLogPath(relativePath);
+    return isLog || OPERATIONAL_READ_DIRS.some(directory => this.pathWithin(normalizedPath, directory));
   }
 
   private isProjectToolCallOutputPath(relativePath: string): boolean {
