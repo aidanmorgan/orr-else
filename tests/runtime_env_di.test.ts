@@ -16,7 +16,7 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
 import { Logger } from '../src/core/Logger.js';
-import { createRuntimeServices } from '../src/core/RuntimeServices.js';
+import { createRuntimeServices } from '../src/composition/createRuntimeServices.js';
 import { EnvVars, ProcessFlag } from '../src/constants/index.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 

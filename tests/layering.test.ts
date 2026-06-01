@@ -28,7 +28,7 @@ const srcDir = path.join(rootDir, 'src');
 const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
   {
     layer: 'composition',
-    pattern: /^src\/(?:extension|main|teammate_entry)\.ts$|^src\/extension\//,
+    pattern: /^src\/(?:extension|main|teammate_entry)\.ts$|^src\/(?:extension|composition)\//,
     intent: 'Process and extension entrypoints (and their extracted controller modules) compose core services, plugins, and external APIs.'
   },
   {
@@ -53,65 +53,9 @@ const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
   }
 ];
 
-const pluginImplementationAllowlist: AllowlistEntry[] = [
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/bd.ts',
-    reason: 'Temporary composition debt: runtime service construction still instantiates built-in plugins.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/git.ts',
-    reason: 'Temporary composition debt: runtime service construction still instantiates built-in plugins.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/mailbox.ts',
-    reason: 'Temporary composition debt: runtime service construction still instantiates built-in plugins.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/meta.ts',
-    reason: 'Temporary composition debt: runtime service construction still instantiates built-in plugins.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/quality.ts',
-    reason: 'Temporary composition debt: runtime service construction still instantiates built-in plugins.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/signaling.ts',
-    reason: 'Runtime service construction is the explicit composition boundary for built-in signaling tools.'
-  },
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/teammates.ts',
-    reason: 'Runtime service construction is the explicit composition boundary for built-in teammate tools.'
-  },
-  {
-    importer: 'src/core/Supervisor.ts',
-    imported: 'src/plugins/teammates.ts',
-    reason: 'Temporary composition debt: supervisor receives the concrete teammate factory from plugin code.'
-  },
-  {
-    importer: 'src/core/Teammate.ts',
-    imported: 'src/plugins/projectTools.ts',
-    reason: 'Temporary composition debt: teammate startup still queries concrete project-tool plugin configuration.'
-  }
-];
+const pluginImplementationAllowlist: AllowlistEntry[] = [];
 
 const cycleAllowlist: AllowlistEntry[] = [
-  {
-    importer: 'src/core/RuntimeServices.ts',
-    imported: 'src/plugins/git.ts',
-    reason: 'Existing plugin composition debt also creates a cycle because git.ts imports RuntimePlugin as its contract.'
-  },
-  {
-    importer: 'src/plugins/git.ts',
-    imported: 'src/core/RuntimeServices.ts',
-    reason: 'Existing plugin composition debt: git.ts currently imports RuntimePlugin from RuntimeServices.'
-  },
   {
     importer: 'src/core/TeammateEvents.ts',
     imported: 'src/types/index.ts',

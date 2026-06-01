@@ -92,7 +92,7 @@ import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
-import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServices.js';
+import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
 import {
@@ -2814,7 +2814,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         services.plugins.git,
         services.plugins.mailbox,
         services.plugins.quality,
-        workerContext
+        workerContext,
+        getConfiguredProjectToolNames
       );
       await teammate.start().catch(async err => {
         Logger.error(Component.ORR_ELSE, 'Teammate start failed', { err: String(err) });

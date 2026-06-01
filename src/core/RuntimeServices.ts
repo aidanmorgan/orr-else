@@ -20,13 +20,6 @@ import { ShellCommandParser } from './ShellCommandParser.js';
 import { TelemetryStore } from './Telemetry.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
 import { TransactionalStateGuard } from './TransactionalStateGuard.js';
-import { createBdPlugin } from '../plugins/bd.js';
-import { createGitPlugin } from '../plugins/git.js';
-import { createMailboxPlugin } from '../plugins/mailbox.js';
-import { createMetaPlugin } from '../plugins/meta.js';
-import { createQualityPlugin } from '../plugins/quality.js';
-import { signalingPlugin } from '../plugins/signaling.js';
-import { teammatePlugin, TeammateFactory } from '../plugins/teammates.js';
 import { EnvVars, PluginToolName } from '../constants/index.js';
 import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
@@ -200,15 +193,70 @@ class WorktreePortAdapter implements WorktreePort {
   }
 }
 
-export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvironment, explicitProjectRoot?: string): RuntimeServices {
+/** Bundle of pre-built plugin instances passed into the core assembler by the
+ * composition layer. Core has no knowledge of how these were constructed. */
+export interface PluginBundle {
+  bd: RuntimePlugin;
+  git: RuntimePlugin;
+  teammates: RuntimePlugin;
+  mailbox: RuntimePlugin;
+  quality: RuntimePlugin;
+  signaling: RuntimePlugin;
+  meta: RuntimePlugin;
+  /** The object that satisfies the TeammateSpawner port (e.g. a TeammateFactory). */
+  teammateSpawner: TeammateSpawner;
+  /**
+   * Shared mutable ApiAddress holder created at composition time.
+   * The composition layer creates this object, passes it to the TeammateFactory,
+   * and includes it here so the assembler can store the same reference in
+   * RuntimeServices.apiAddress. This ensures that extension.ts mutations to
+   * .port/.base after SignalingServer binds are seen by all factory instances
+   * (WI-7).
+   */
+  apiAddress: ApiAddress;
+}
+
+/**
+ * Optional pre-built core services that the composition layer may pass to
+ * assembleRuntimeServices so that plugins and RuntimeServices share the same
+ * EventStore / ConfigLoader / Observability instances (preserving the original
+ * shared-object behaviour of the old createRuntimeServices).
+ */
+export interface CoreServicesOverride {
+  configLoader: ConfigLoader;
+  eventStore: EventStore;
+  observability: Observability;
+}
+
+/**
+ * Core assembler — builds all core services from primitive inputs plus a pre-built
+ * plugin bundle. Core never imports concrete plugin modules; the composition layer
+ * (src/composition/createRuntimeServices.ts) is responsible for constructing plugins
+ * and calling this function.
+ *
+ * Behaviour preserved: WI-1 env/projectRoot precedence, WI-2 explicitProjectRoot,
+ * WI-7 apiAddress holder, WI-20 single factory (enforced at composition layer),
+ * WI-21 backpressure map, p6m ports.
+ *
+ * @param coreOverride - Optional pre-built ConfigLoader/EventStore/Observability.
+ *   When supplied (by the composition layer) the assembler uses these instances
+ *   directly instead of constructing new ones, ensuring plugins and core share the
+ *   same objects (events recorded via a plugin's EventStore appear in services.eventStore).
+ */
+export function assembleRuntimeServices(
+  plugins: PluginBundle,
+  env: RuntimeEnvironment = nodeRuntimeEnvironment,
+  explicitProjectRoot?: string,
+  coreOverride?: CoreServicesOverride
+): RuntimeServices {
   // Resolve projectRoot ONCE at the composition boundary.
   // Precedence: explicitProjectRoot > env PROJECT_ROOT > process.cwd()
   // Use || (not ??) to match WI-1 precedence: empty-string PROJECT_ROOT falls back.
   const projectRoot = explicitProjectRoot || env.env(EnvVars.PROJECT_ROOT) || process.cwd();
 
-  const configLoader = new ConfigLoader(env, projectRoot);
-  const eventStore = new EventStore(configLoader, undefined, env, projectRoot);
-  const observability = new Observability(configLoader, env, projectRoot);
+  const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot);
+  const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot);
+  const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot);
   const flowManager = new FlowManager();
   const domainEventEmitter = new DomainEventEmitter(eventStore);
   const domainEvents = new DomainEvents(domainEventEmitter);
@@ -217,21 +265,15 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
   const artifactPaths = new ArtifactPaths(configLoader, env, projectRoot);
   const planWriteSet = new PlanWriteSet(configLoader, artifactPaths, projectRoot);
 
-  const bdPlugin = createBdPlugin(eventStore, env, projectRoot);
-  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
-  const apiAddress: ApiAddress = {};
-  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, undefined, undefined, undefined, env, projectRoot);
   const projectToolBackpressure: ProjectToolBackpressure = new Map();
   const instructionLoader = new InstructionLoader(projectRoot);
   const requiredToolResolver = new RequiredToolResolver(planWriteSet, projectRoot);
 
   // Typed orchestration ports — adapters resolve their tool handles at construction
-  // time via requireTool, so a missing plugin tool fails here (startup) rather than
-  // mid-supervisor-tick.
-  const beadsPort = new BeadsPortAdapter(bdPlugin);
-  const worktreePort = new WorktreePortAdapter(gitPlugin);
-  // TeammateFactory already satisfies the TeammateSpawner interface; no wrapper needed.
-  const teammateSpawner: TeammateSpawner = teammateFactory;
+  // time via requirePluginTool, so a missing plugin tool fails here (startup) rather
+  // than mid-supervisor-tick.
+  const beadsPort = new BeadsPortAdapter(plugins.bd);
+  const worktreePort = new WorktreePortAdapter(plugins.git);
 
   return {
     projectRoot,
@@ -256,18 +298,18 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),
     projectToolBackpressure,
-    apiAddress,
+    apiAddress: plugins.apiAddress,
     plugins: {
-      bd: bdPlugin,
-      git: gitPlugin,
-      teammates: teammatePlugin(teammateFactory),
-      mailbox: createMailboxPlugin(eventStore, projectRoot),
-      quality: createQualityPlugin(),
-      signaling: signalingPlugin,
-      meta: createMetaPlugin(eventStore)
+      bd: plugins.bd,
+      git: plugins.git,
+      teammates: plugins.teammates,
+      mailbox: plugins.mailbox,
+      quality: plugins.quality,
+      signaling: plugins.signaling,
+      meta: plugins.meta
     },
     beadsPort,
     worktreePort,
-    teammateSpawner
+    teammateSpawner: plugins.teammateSpawner
   };
 }

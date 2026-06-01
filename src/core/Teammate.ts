@@ -17,8 +17,14 @@ import {
 import { FlowManager } from './FlowManager.js';
 import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
-import { getConfiguredProjectToolNames } from '../plugins/projectTools.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
+
+/**
+ * Port for resolving the names of configured project tools to activate in a
+ * teammate session. Injected at construction time so Teammate.ts has no
+ * dependency on concrete plugin implementations (WI-5).
+ */
+export type ProjectToolNameResolver = (config: HarnessConfig) => string[];
 import type { RuntimePlugin } from './RuntimeServices.js';
 
 /**
@@ -47,7 +53,8 @@ export class Teammate {
     private readonly gitPlugin: RuntimePlugin,
     private readonly mailboxPlugin: RuntimePlugin,
     private readonly qualityPlugin: RuntimePlugin,
-    private readonly workerContext: WorkerContext
+    private readonly workerContext: WorkerContext,
+    private readonly projectToolNameResolver: ProjectToolNameResolver = () => []
   ) {}
 
   public async start() {
@@ -83,7 +90,7 @@ export class Teammate {
       ...this.gitPlugin.tools.map(t => t.name).filter(name => name !== PluginToolName.MERGE_AND_COMMIT),
       ...this.mailboxPlugin.tools.map(t => t.name),
       ...this.qualityPlugin.tools.map(t => t.name),
-      ...getConfiguredProjectToolNames(config),
+      ...this.projectToolNameResolver(config),
       ...getConfiguredPiToolNames(config)
     ]);
 
