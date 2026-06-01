@@ -2997,7 +2997,40 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         services.plugins.mailbox,
         services.plugins.quality
       );
-      await teammate.start().catch(err => Logger.error(Component.ORR_ELSE, 'Teammate start failed', { err: String(err) }));
+      await teammate.start().catch(async err => {
+        Logger.error(Component.ORR_ELSE, 'Teammate start failed', { err: String(err) });
+        if (!activeRun) return;
+        agentFailureSignaled = true;
+        const summary = `Teammate bootstrap failed: ${String(err)}`;
+        await services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
+          beadId: activeRun.beadId,
+          stateId: activeRun.stateId,
+          actionId: activeRun.action.id,
+          source: 'teammate-bootstrap',
+          summary,
+          error: String(err)
+        }).catch(recordError => {
+          Logger.warn(Component.ORR_ELSE, 'Failed to record teammate bootstrap failure', {
+            beadId: activeRun?.beadId,
+            error: String(recordError)
+          });
+        });
+        const blockedEvent = buildWorkerEvent(TeammateEventType.STATE_BLOCKED, {
+          beadId: activeRun.beadId,
+          stateId: activeRun.stateId,
+          actionId: activeRun.action.id,
+          transitionEvent: EventName.BLOCKED,
+          summary,
+          evidence: summary,
+          handover: summary
+        });
+        await postWorkerSignal(services, blockedEvent).catch(signalError => {
+          Logger.error(Component.ORR_ELSE, 'Failed to signal teammate bootstrap failure', {
+            beadId: activeRun?.beadId,
+            error: String(signalError)
+          });
+        });
+      });
       return;
     }
 

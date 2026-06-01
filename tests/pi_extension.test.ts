@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as fs from 'fs';
@@ -6,6 +6,7 @@ import * as os from 'os';
 import * as path from 'path';
 import orrElseExtension, { isHarnessTransientFailure, shouldPersistBlockedBeadStatus } from '../src/extension.js';
 import { FlowManager } from '../src/core/FlowManager.js';
+import { Teammate } from '../src/core/Teammate.js';
 import { BuiltInToolName, EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/index.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 
@@ -1055,6 +1056,85 @@ states:
     const resources = await harness.callbacks[PiEventName.RESOURCES_DISCOVER]?.({}, HEADLESS_TOOL_CONTEXT);
 
     expect(resources).toBeDefined();
+  });
+
+  it('records AGENT_TURN_FAILED and posts STATE_BLOCKED when worker-mode teammate.start() rejects', async () => {
+    const previousCwd = process.cwd();
+    const previousProjectRoot = getProjectRoot();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-bootstrap-fail-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+    const startSpy = vi.spyOn(Teammate.prototype, 'start').mockRejectedValue(new Error('bootstrap exploded'));
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      setProjectRoot(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-bootstrap-fail';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      // SESSION_START triggers initializeWorkerRun then teammate.start() in worker mode
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot, shutdown: () => {} });
+
+      // A STATE_BLOCKED signal must have been posted to the coordinator before SESSION_START resolved
+      expect(receivedEvents).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'STATE_BLOCKED', beadId: 'bd-bootstrap-fail' })
+      ]));
+    } finally {
+      startSpy.mockRestore();
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      setProjectRoot(previousProjectRoot);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it('keeps tmux process orchestration behind the /orr-else plugin surface', async () => {
