@@ -35,19 +35,14 @@ const ALLOWLIST: AllowlistEntry[] = [
     deferredWI: 'WI-2'
   },
   {
-    file: 'src/core/Teammate.ts',
-    reason: 'Worker-process bootstrap reads BEAD_ID/STATE_ID/PROJECT_ROOT/WORKTREE_PATH at start. Requires WorkerContext injection (WI-6).',
-    deferredWI: 'WI-6'
-  },
-  {
     file: 'src/core/ArtifactQuery.ts',
     reason: 'Not in WI-1 scope; reads PROJECT_ROOT/WORKTREE_PATH for artifact query context. Will be addressed in a follow-up.',
     deferredWI: undefined
   },
   {
     file: 'src/extension.ts',
-    reason: 'Composition-root entrypoint. Multiple deferred items: WI-4 (session state), WI-6 (WorkerContext), WI-7 (API port write-back), WI-20 (TeammateFactory construction). Also holds the legitimate process.env write-back at :2496-2497 for WI-7.',
-    deferredWI: 'WI-4,WI-6,WI-7,WI-20'
+    reason: 'Composition-root entrypoint. Multiple deferred items: WI-4 (session state), WI-7 (API port write-back), WI-20 (TeammateFactory construction). Also holds the legitimate process.env write-back at :2496-2497 for WI-7. WorkerContext resolution (WI-6) is intentionally kept here as the boundary.',
+    deferredWI: 'WI-4,WI-7,WI-20'
   },
   {
     file: 'src/plugins/mailbox.ts',

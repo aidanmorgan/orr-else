@@ -90,7 +90,8 @@ import {
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { requireTool } from './core/ToolRegistry.js';
-import { Teammate } from './core/Teammate.js';
+import { Teammate, type WorkerContext } from './core/Teammate.js';
+import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
 import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -3092,6 +3093,15 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     if (isWorkerMode()) {
       await initializeWorkerRun(runtimeObservability, services, session);
       await runParentSequenceActionsBeforeActive(config, ctx, runtimeObservability, services, session);
+      const env = nodeRuntimeEnvironment;
+      const workerContext: WorkerContext = {
+        beadId: env.env(EnvVars.BEAD_ID) as BeadId | undefined,
+        stateId: env.env(EnvVars.STATE_ID),
+        projectRoot: env.env(EnvVars.PROJECT_ROOT) || process.cwd(),
+        worktreePath: env.env(EnvVars.WORKTREE_PATH) || undefined,
+        workerId: env.env(EnvVars.WORKER_ID) || `worker-${process.pid}`,
+        actionId: env.env(EnvVars.ACTION_ID) || WorkerDefaults.AUTO_CONTEXT_RESTART_ACTION_ID
+      };
       const teammate = new Teammate(
         pi,
         ctx,
@@ -3102,7 +3112,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         services.plugins.bd,
         services.plugins.git,
         services.plugins.mailbox,
-        services.plugins.quality
+        services.plugins.quality,
+        workerContext
       );
       await teammate.start().catch(async err => {
         Logger.error(Component.ORR_ELSE, 'Teammate start failed', { err: String(err) });

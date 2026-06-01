@@ -5,7 +5,6 @@ import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { postHarnessSignal } from './HarnessApiClient.js';
 import {
-  EnvVars,
   TeammateEventType,
   Component,
   BuiltInToolName,
@@ -23,6 +22,20 @@ import { getConfiguredProjectToolNames } from '../plugins/projectTools.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
 import type { RuntimePlugin } from './RuntimeServices.js';
 
+/**
+ * Resolved worker-process identity and environment context, built once at the
+ * composition root (extension.ts) and injected into Teammate so the class
+ * itself contains zero direct process.env reads.
+ */
+export interface WorkerContext {
+  beadId: BeadId | undefined;
+  stateId: string | undefined;
+  projectRoot: string;
+  worktreePath: string | undefined;
+  workerId: string;
+  actionId: string;
+}
+
 export class Teammate {
   constructor(
     private readonly pi: ExtensionAPI,
@@ -34,7 +47,8 @@ export class Teammate {
     private readonly bdPlugin: RuntimePlugin,
     private readonly gitPlugin: RuntimePlugin,
     private readonly mailboxPlugin: RuntimePlugin,
-    private readonly qualityPlugin: RuntimePlugin
+    private readonly qualityPlugin: RuntimePlugin,
+    private readonly workerContext: WorkerContext
   ) {}
 
   public async start() {
@@ -42,11 +56,8 @@ export class Teammate {
   }
 
   private async startInner() {
-    const beadId = process.env[EnvVars.BEAD_ID] as BeadId | undefined;
-    const stateId = process.env[EnvVars.STATE_ID];
-    const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
-    const worktreePath = process.env[EnvVars.WORKTREE_PATH] || undefined;
-    
+    const { beadId, stateId, projectRoot, worktreePath } = this.workerContext;
+
     if (!beadId || !stateId) {
       Logger.error(Component.TEAMMATE, 'Teammate mode started without required environment variables', { beadId, stateId });
       return;
@@ -164,7 +175,7 @@ export class Teammate {
   private async sendHeartbeat(beadId: string, stateId: string) {
     const heartbeatTool = this.bdPlugin.tools.find(t => t.name === PluginToolName.BD_HEARTBEAT)!;
     await heartbeatTool.execute({
-      workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
+      workerId: this.workerContext.workerId,
       beadId,
       stateId,
       pid: process.pid
@@ -177,10 +188,10 @@ export class Teammate {
     const event = {
       type: TeammateEventType.CONTEXT_RESTART_REQUESTED,
       beadId: beadId as BeadId,
-      workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
+      workerId: this.workerContext.workerId,
       stateId,
       timestamp: Date.now(),
-      actionId: process.env[EnvVars.ACTION_ID] || WorkerDefaults.AUTO_CONTEXT_RESTART_ACTION_ID,
+      actionId: this.workerContext.actionId,
       transitionEvent: config.settings.contextRestartEvent || EventName.CONTEXT_RESTART,
       summary,
       evidence: summary,
