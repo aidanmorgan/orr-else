@@ -24,6 +24,7 @@ function fakeBeadsPort(overrides: Partial<BeadsPort> = {}): BeadsPort {
     getBead: vi.fn(async (id) => ({ id } as any)),
     claim: vi.fn(async ({ id }) => ({ id } as any)),
     release: vi.fn(async () => {}),
+    invalidateCache: vi.fn(),
     ...overrides
   };
 }
@@ -641,5 +642,101 @@ describe('Supervisor', () => {
     expect(restartEvent).toBeDefined();
     expect(restartEvent!.data.evidence).not.toContain('Pane snapshot');
     expect(restartEvent!.data.evidence).toContain('without non-heartbeat progress');
+  });
+
+  // ---------------------------------------------------------------------------
+  // FIX-1 regression: Supervisor.step() must invalidate the BeadsPort cache
+  // at tick-start so worker-process mutations are visible to the coordinator.
+  // ---------------------------------------------------------------------------
+
+  it('(FIX-1) step() calls beadsPort.invalidateCache() before reconcile/scan reads', async () => {
+    // Build a supervisor with a beadsPort whose invalidateCache is a spy.
+    // We verify it is called by step() and that it is called before any reads
+    // (ready/list/getBead) that happen inside reconcile/scan.
+    const callOrder: string[] = [];
+    const invalidateCache = vi.fn(() => { callOrder.push('invalidateCache'); });
+    const ready = vi.fn(async () => { callOrder.push('ready'); return []; });
+    const list = vi.fn(async () => { callOrder.push('list'); return { items: [] }; });
+    const getBead = vi.fn(async (id: string) => { callOrder.push('getBead'); return { id } as any; });
+    const beadsPort: BeadsPort = {
+      ready,
+      list,
+      getBead,
+      claim: vi.fn(async ({ id }) => ({ id } as any)),
+      release: vi.fn(async () => {}),
+      invalidateCache
+    };
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set(['bead-live'])),
+        getActiveTeammateCount: vi.fn(async () => 1),
+        getAvailableSlots: vi.fn(async () => 0),
+        terminateTeammatesForBead: vi.fn(async () => ({ terminatedPaneIds: [] })),
+        captureBeadPaneText: vi.fn(async () => ''),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: true }))
+      } as any,
+      { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: { teammateNoProgressTimeoutMs: 1 } }) },
+        eventStore: {
+          record: vi.fn(async () => {}),
+          eventsForBeads: vi.fn(async () => new Map()),
+          latestEventsForBeads: vi.fn(async () => new Map()),
+          latestEventByType: vi.fn(async () => undefined)
+        },
+        beadsPort,
+        worktreePort: { createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/wt' })) },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+
+    // Mark 'bead-live' as tracked so reconcileTerminalLiveBeads calls getBead.
+    (supervisor as any).startedBeads.add('bead-live');
+    (supervisor as any).startedBeadAtMs.set('bead-live', createFakeClock().now());
+
+    await (supervisor as any).step();
+
+    // invalidateCache MUST have been called.
+    expect(invalidateCache).toHaveBeenCalledTimes(1);
+    // It MUST appear before any read operations in the call order.
+    const invalidateIndex = callOrder.indexOf('invalidateCache');
+    expect(invalidateIndex).toBe(0);
+    // At least one read (getBead for reconcileTerminalLiveBeads) must follow it.
+    const firstReadIndex = callOrder.findIndex(op => op === 'getBead' || op === 'ready' || op === 'list');
+    expect(firstReadIndex).toBeGreaterThan(invalidateIndex);
+  });
+
+  it('(FIX-1) step() does NOT call invalidateCache when already stopping', async () => {
+    // Guard: a stopping supervisor returns early before invalidateCache, so
+    // we confirm there is no crash (invalidateCache exists on the fake port).
+    const invalidateCache = vi.fn();
+    const beadsPort: BeadsPort = fakeBeadsPort({ invalidateCache });
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), getActiveTeammateCount: vi.fn(async () => 0), getAvailableSlots: vi.fn(async () => 1), terminateTeammatesForBead: vi.fn(), captureBeadPaneText: vi.fn() } as any,
+      { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: { record: vi.fn(async () => {}), eventsForBeads: vi.fn(async () => new Map()), latestEventsForBeads: vi.fn(async () => new Map()), latestEventByType: vi.fn(async () => undefined) },
+        beadsPort,
+        worktreePort: { createWorktree: vi.fn() },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+    (supervisor as any).stopping = true;
+
+    await (supervisor as any).step();
+
+    expect(invalidateCache).not.toHaveBeenCalled();
   });
 });

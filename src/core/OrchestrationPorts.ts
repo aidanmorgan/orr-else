@@ -63,6 +63,14 @@ export interface BeadsPort {
   claim(options: BeadClaimOptions, ctx?: unknown): Promise<Bead>;
   /** BD_RELEASE — release the lease on a bead. */
   release(id: string): Promise<void>;
+  /**
+   * Invalidate the read cache so the next read fetches fresh data from bd.
+   * Call at the start of each supervisor tick so that mutations made by worker
+   * processes (separate bd instances, separate caches) are visible to the
+   * coordinator's next scan — restoring per-tick freshness while keeping
+   * intra-tick deduplication.
+   */
+  invalidateCache(): void;
 }
 
 // ---------------------------------------------------------------------------

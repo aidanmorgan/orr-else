@@ -33,6 +33,7 @@ function fakeBeadsPort(overrides: Partial<BeadsPort> = {}): BeadsPort {
     getBead: vi.fn(async (id) => ({ id } as any)),
     claim: vi.fn(async ({ id }) => ({ id } as any)),
     release: vi.fn(async () => {}),
+    invalidateCache: vi.fn(),
     ...overrides
   };
 }

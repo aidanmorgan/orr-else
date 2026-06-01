@@ -505,6 +505,59 @@ describe('Beads JSONL compatibility tools', () => {
     vi.mocked(execa).mockClear();
   });
 
+  // ---------------------------------------------------------------------------
+  // FIX-2 regression: BD_EXPORT_JSONL must NEVER be served from the read cache
+  // — each invocation must run bd export (writing the file each time).
+  // ---------------------------------------------------------------------------
+
+  it('(FIX-2) BD_EXPORT_JSONL with outputPath runs bd export both times (not cached)', async () => {
+    // The bug: bd_export_jsonl previously used runBd() which routes 'export'
+    // through client.read() because 'export' is not in MUTATING_BEADS_COMMANDS.
+    // A second call with the same args would be a cache hit → bd is NOT invoked
+    // and the file is NOT (re)written.
+    // The fix: route through client.mutate() so every invocation always runs bd.
+    let exportCallCount = 0;
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('export')) {
+        exportCallCount++;
+        return { stdout: `{"id":"bd-1","count":${exportCallCount}}`, stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    });
+
+    const outputPath = '/tmp/test-export.jsonl';
+
+    const result1 = await tool('bd_export_jsonl').execute({ outputPath }) as any;
+    const result2 = await tool('bd_export_jsonl').execute({ outputPath }) as any;
+
+    // Both calls must have triggered bd export (no caching).
+    expect(exportCallCount).toBe(2);
+    // Results must differ (fresh from bd each time), proving no stale cache hit.
+    expect(result1.outputPath).toBe(outputPath);
+    expect(result2.outputPath).toBe(outputPath);
+  });
+
+  it('(FIX-2) BD_EXPORT_JSONL inline (no outputPath) always runs bd export', async () => {
+    let exportCallCount = 0;
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('export')) {
+        exportCallCount++;
+        return { stdout: `{"id":"bd-${exportCallCount}"}`, stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    });
+
+    const result1 = await tool('bd_export_jsonl').execute({}) as any;
+    const result2 = await tool('bd_export_jsonl').execute({}) as any;
+
+    // Both calls must have triggered bd export.
+    expect(exportCallCount).toBe(2);
+    // The two inline results must differ (fresh bd output each time).
+    expect(result1).not.toBe(result2);
+  });
+
   it('parses compact ready and list output without loading full JSON records', () => {
     expect(parseReadyPlainOutput(`
 📋 Ready work (1 issues with no active blockers):

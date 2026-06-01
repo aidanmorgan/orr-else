@@ -99,7 +99,10 @@ export function createRuntimeServices(
       signaling: signalingPlugin,
       meta: createMetaPlugin(eventStore),
       teammateSpawner: teammateFactory as TeammateSpawner,
-      apiAddress
+      apiAddress,
+      // FIX-1: thread BeadsClient.invalidate() into the adapter so the Supervisor
+      // can call beadsPort.invalidateCache() at tick-start without a core→plugin import.
+      beadsClientInvalidateCache: bdPlugin.invalidateCache
     },
     env,
     explicitProjectRoot,

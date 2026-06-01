@@ -277,6 +277,11 @@ export class Supervisor {
     if (this.stopping || this.stepInProgress) return;
     this.stepInProgress = true;
     try {
+      // FIX-1: invalidate the BeadsClient read cache at tick-start so that
+      // mutations made by worker processes (separate bd instances, separate caches)
+      // are visible to the coordinator's reads this tick.  Intra-tick dedup is
+      // preserved — mutate() already invalidates after each mutation.
+      this.services.beadsPort.invalidateCache();
       await this.observability.tracedAsync('supervisor_step', {}, async () => {
         await this.reconcileStartedBeads();
         await this.reconcileTerminalLiveBeads();

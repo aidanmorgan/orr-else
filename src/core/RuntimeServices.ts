@@ -147,13 +147,15 @@ class BeadsPortAdapter implements BeadsPort {
   private readonly getBeadTool;
   private readonly claimTool;
   private readonly releaseTool;
+  private readonly _invalidateCache: () => void;
 
-  constructor(bdPlugin: RuntimePlugin) {
+  constructor(bdPlugin: RuntimePlugin, invalidateCache: () => void) {
     this.readyTool = requirePluginTool(bdPlugin, PluginToolName.BD_READY);
     this.listTool = requirePluginTool(bdPlugin, PluginToolName.BD_LIST);
     this.getBeadTool = requirePluginTool(bdPlugin, PluginToolName.BD_GET_BEAD);
     this.claimTool = requirePluginTool(bdPlugin, PluginToolName.BD_CLAIM);
     this.releaseTool = requirePluginTool(bdPlugin, PluginToolName.BD_RELEASE);
+    this._invalidateCache = invalidateCache;
   }
 
   async ready(options: BeadReadyOptions): Promise<Bead[]> {
@@ -174,6 +176,10 @@ class BeadsPortAdapter implements BeadsPort {
 
   async release(id: string): Promise<void> {
     await this.releaseTool.execute({ id });
+  }
+
+  invalidateCache(): void {
+    this._invalidateCache();
   }
 }
 
@@ -205,6 +211,13 @@ export interface PluginBundle {
   meta: RuntimePlugin;
   /** The object that satisfies the TeammateSpawner port (e.g. a TeammateFactory). */
   teammateSpawner: TeammateSpawner;
+  /**
+   * Delegate to BeadsClient.invalidate() — provided by the bd plugin so the
+   * composition layer can thread it into the BeadsPortAdapter without a
+   * core → plugin import.  Called by the adapter's invalidateCache() which the
+   * Supervisor invokes at the start of every tick (FIX-1 cross-tick freshness).
+   */
+  beadsClientInvalidateCache: () => void;
   /**
    * Shared mutable ApiAddress holder created at composition time.
    * The composition layer creates this object, passes it to the TeammateFactory,
@@ -272,7 +285,7 @@ export function assembleRuntimeServices(
   // Typed orchestration ports — adapters resolve their tool handles at construction
   // time via requirePluginTool, so a missing plugin tool fails here (startup) rather
   // than mid-supervisor-tick.
-  const beadsPort = new BeadsPortAdapter(plugins.bd);
+  const beadsPort = new BeadsPortAdapter(plugins.bd, plugins.beadsClientInvalidateCache);
   const worktreePort = new WorktreePortAdapter(plugins.git);
 
   return {

@@ -1,10 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
-import { createHash } from 'node:crypto';
-import { mkdir, open } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { execa } from 'execa';
-import lockfile from 'proper-lockfile';
 import { Bead, BeadId, BeadsIssueRecord, HarnessBeadMetadata } from '../types/index.js';
 import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
@@ -29,6 +24,7 @@ import {
 } from '../constants/index.js';
 import type { BeadStateChartProjection } from '../core/EventStore.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
+import { BeadsClient } from './BeadsClient.js';
 
 function resolveProjectRoot(env: RuntimeEnvironment, injectedRoot: string): string {
   // WI-1 precedence: env PROJECT_ROOT wins, then the injected root.
@@ -39,11 +35,6 @@ function issuesJsonlPath(root: string): string {
   return path.join(root, '.beads', 'issues.jsonl');
 }
 
-function bdLockPath(root: string): string {
-  const digest = createHash('sha256').update(root).digest('hex').slice(0, 16);
-  return path.join(tmpdir(), 'orr-else-bd-locks', digest, 'bd-cli.lock');
-}
-
 interface HarnessHeartbeatParams {
   workerId: string;
   beadId: string;
@@ -52,58 +43,7 @@ interface HarnessHeartbeatParams {
   sessionStateId?: string;
 }
 
-async function ensureBdLockFile(root: string): Promise<string> {
-  const lockPath = bdLockPath(root);
-  await mkdir(path.dirname(lockPath), { recursive: true });
-  const handle = await open(lockPath, 'a');
-  await handle.close();
-  return lockPath;
-}
-
-async function withBdCliLock<T>(fn: () => Promise<T>, root: string): Promise<T> {
-  const lockPath = await ensureBdLockFile(root);
-  const startedAtMs = Date.now();
-  let release: (() => Promise<void>) | undefined;
-  try {
-    release = await lockfile.lock(lockPath, {
-      stale: BeadsDefaults.CLI_LOCK_STALE_MS,
-      retries: {
-        retries: BeadsDefaults.CLI_LOCK_RETRIES,
-        factor: 1.1,
-        minTimeout: BeadsDefaults.CLI_LOCK_RETRY_MIN_MS,
-        maxTimeout: BeadsDefaults.CLI_LOCK_RETRY_MAX_MS
-      }
-    });
-  } catch (error) {
-    throw new Error(`Timed out acquiring bd CLI lock after ${Date.now() - startedAtMs}ms: ${String(error)}`);
-  }
-
-  const waitedMs = Date.now() - startedAtMs;
-  if (waitedMs > BeadsDefaults.CLI_LOCK_RETRY_MAX_MS) {
-    Logger.warn(Component.BEADS_CLI, 'Waited for bd CLI lock', { waitedMs, lockPath });
-  }
-
-  try {
-    return await fn();
-  } finally {
-    await release?.().catch((error: unknown) => {
-      Logger.warn(Component.BEADS_CLI, 'Unable to release bd CLI lock', { lockPath, error: String(error) });
-    });
-  }
-}
-
-async function execBd(finalArgs: string[], options: { input?: string; root: string } = { root: process.cwd() }): Promise<{ stdout: string; stderr: string }> {
-  const result = await withBdCliLock(async () => {
-    return await execa('bd', finalArgs, {
-      input: options.input,
-      maxBuffer: BeadsDefaults.MAX_BUFFER_BYTES,
-      timeout: BeadsDefaults.CLI_TIMEOUT_MS
-    });
-  }, options.root);
-  return { stdout: result.stdout, stderr: result.stderr };
-}
-
-async function exportJsonlAfterMutation(eventStore: EventStore, beadId: string | undefined, sourceCommand: string, root: string): Promise<void> {
+async function exportJsonlAfterMutation(client: BeadsClient, eventStore: EventStore, beadId: string | undefined, sourceCommand: string, root: string): Promise<void> {
   const outputPath = issuesJsonlPath(root);
   const args = ['-C', root, 'export', '--output', outputPath];
   const eventArgs = ['export', '--output', outputPath];
@@ -115,7 +55,8 @@ async function exportJsonlAfterMutation(eventStore: EventStore, beadId: string |
   }).catch(() => {});
 
   try {
-    const { stdout } = await execBd(args, { root });
+    // export writes a file — treated as a mutation so it serializes and invalidates cache.
+    const { stdout } = await client.mutate(args, { root });
     await eventStore.record(DomainEventName.BEADS_COMMAND_SUCCEEDED, {
       beadId,
       command: 'export',
@@ -142,7 +83,7 @@ async function exportJsonlAfterMutation(eventStore: EventStore, beadId: string |
   }
 }
 
-async function runBd(eventStore: EventStore, args: string[], options: { json?: boolean; input?: string; logErrors?: boolean; env?: RuntimeEnvironment; root: string } = { root: process.cwd() }): Promise<unknown> {
+async function runBd(client: BeadsClient, eventStore: EventStore, args: string[], options: { json?: boolean; input?: string; logErrors?: boolean; env?: RuntimeEnvironment; root: string } = { root: process.cwd() }): Promise<unknown> {
   const finalArgs = ['-C', options.root, ...args];
   if (options.json !== false) finalArgs.push('--json');
 
@@ -159,7 +100,10 @@ async function runBd(eventStore: EventStore, args: string[], options: { json?: b
   }
 
   try {
-    const { stdout } = await execBd(finalArgs, { input: options.input, root: options.root });
+    // Mutations serialize through the client's queue; reads use the cache.
+    const { stdout } = isMutation
+      ? await client.mutate(finalArgs, { input: options.input, root: options.root })
+      : await client.read(finalArgs, { input: options.input, root: options.root });
 
     const output = stdout.trim();
     if (isMutation) {
@@ -169,7 +113,7 @@ async function runBd(eventStore: EventStore, args: string[], options: { json?: b
         args,
         outputBytes: output.length
       });
-      await exportJsonlAfterMutation(eventStore, beadId, command, options.root);
+      await exportJsonlAfterMutation(client, eventStore, beadId, command, options.root);
     }
     if (options.json === false) return output;
     if (!output) return null;
@@ -555,21 +499,21 @@ async function normalizeIssues(
   return issues.map(issue => normalizeIssueWithProjection(issue, projections.get(issue.id) || {}, includeDetails));
 }
 
-async function getIssue(eventStore: EventStore, id: string, env: RuntimeEnvironment, root: string): Promise<BeadsIssueRecord> {
-  const result = await runBd(eventStore, ['show', id, '--long'], { env, root });
+async function getIssue(client: BeadsClient, eventStore: EventStore, id: string, env: RuntimeEnvironment, root: string): Promise<BeadsIssueRecord> {
+  const result = await runBd(client, eventStore, ['show', id, '--long'], { env, root });
   const issue = Array.isArray(result) ? result[0] : result;
   if (!issue || typeof issue !== 'object' || !(issue as Record<string, unknown>).id) throw new Error(`Bead ${id} not found`);
   return issue as BeadsIssueRecord;
 }
 
-async function updateIssueStatus(eventStore: EventStore, id: string, status?: BeadStatus, notes?: string, env?: RuntimeEnvironment, root: string = process.cwd()): Promise<Bead | null> {
+async function updateIssueStatus(client: BeadsClient, eventStore: EventStore, id: string, status?: BeadStatus, notes?: string, env?: RuntimeEnvironment, root: string = process.cwd()): Promise<Bead | null> {
   Logger.info(Component.BEADS_CLI, 'Updating issue status', { id, status, notes });
   if (status === BeadStatus.COMPLETED) {
     const args = ['close', id];
     if (notes) args.push('--reason', notes);
-    await runBd(eventStore, args, { env, root });
+    await runBd(client, eventStore, args, { env, root });
     await eventStore.record(DomainEventName.BEAD_CLOSED, { beadId: id, status, notes });
-    return normalizeIssue(eventStore, await getIssue(eventStore, id, env ?? nodeRuntimeEnvironment, root));
+    return normalizeIssue(eventStore, await getIssue(client, eventStore, id, env ?? nodeRuntimeEnvironment, root));
   }
 
   const args = ['update', id];
@@ -579,15 +523,18 @@ async function updateIssueStatus(eventStore: EventStore, id: string, status?: Be
     args.push('--status', BeadsIssueStatus.OPEN);
   }
   if (notes) args.push('--append-notes', notes);
-  await runBd(eventStore, args, { env, root });
+  await runBd(client, eventStore, args, { env, root });
   await eventStore.record(DomainEventName.BEAD_STATUS_UPDATED, { beadId: id, status, notes });
-  return normalizeIssue(eventStore, await getIssue(eventStore, id, env ?? nodeRuntimeEnvironment, root));
+  return normalizeIssue(eventStore, await getIssue(client, eventStore, id, env ?? nodeRuntimeEnvironment, root));
 }
 
 export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedProjectRoot: string = process.cwd()) {
   // Resolve root once at factory time. WI-1 precedence: env PROJECT_ROOT wins,
   // then the injected root resolved from the composition boundary.
   const root = resolveProjectRoot(env, injectedProjectRoot);
+  // One BeadsClient per coordinator process — owns the bd subprocess, read cache,
+  // mutation serializer, and lock-wait telemetry for this plugin instance.
+  const client = new BeadsClient();
   const plugin: RuntimePlugin = {
   name: 'beads-orchestration',
   tools: [
@@ -601,7 +548,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         const { limit } = (params && typeof params === 'object' ? params : {}) as { limit?: number };
         if (ctx && typeof ctx === 'object' && (ctx as Record<string, unknown>).hasUI) (ctx as { ui: { setWorkingMessage(m: string | undefined): void } }).ui.setWorkingMessage('Fetching ready Beads...');
         const safeLimit = safePositiveInteger(limit, BeadsDefaults.READY_DEFAULT_LIMIT);
-        const readyOutput = String(await runBd(eventStore, ['ready', '--limit', String(safeLimit), '--plain'], { json: false, env, root }) ?? '');
+        const readyOutput = String(await runBd(client, eventStore, ['ready', '--limit', String(safeLimit), '--plain'], { json: false, env, root }) ?? '');
         const readyLookups = parseReadyPlainOutput(readyOutput);
         const beads = await normalizeIssues(eventStore, readyLookups, false);
         if (ctx && typeof ctx === 'object' && (ctx as Record<string, unknown>).hasUI) (ctx as { ui: { setWorkingMessage(m: string | undefined): void } }).ui.setWorkingMessage(undefined);
@@ -626,7 +573,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         const cliLimit = stateFilter ? safeLimit * BeadsDefaults.READY_SCAN_MULTIPLIER : safeLimit;
         const args = ['list', '--limit', String(cliLimit), '--flat', '--no-pager'];
         if (beadsStatus) args.push('--status', beadsStatus);
-        const issues = parseFlatListOutput(String(await runBd(eventStore, args, { json: false, env, root }) ?? ''), beadsStatus);
+        const issues = parseFlatListOutput(String(await runBd(client, eventStore, args, { json: false, env, root }) ?? ''), beadsStatus);
         const needsProjection = includeProjection === true || Boolean(stateFilter);
         const beads = await normalizeIssues(eventStore, issues, false, needsProjection);
         const filtered = stateFilter ? beads.filter(bead => bead.status === stateFilter) : beads;
@@ -680,7 +627,14 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         if (includeMemories) args.push('--include-memories');
         if (scrub) args.push('--scrub');
 
-        const output = String(await runBd(eventStore, args, { json: false, env, root }) ?? '');
+        // FIX-2: bd export writes a file (when --output is given) and must ALWAYS
+        // run — route through client.mutate() so it is never served from the read
+        // cache and so it serializes with other mutations.  The internal
+        // exportJsonlAfterMutation already uses mutate(); this aligns the
+        // user-facing export tool with the same guarantee.
+        const finalArgs = ['-C', root, ...args];
+        const { stdout } = await client.mutate(finalArgs, { root });
+        const output = stdout.trim();
         return outputPath
           ? { outputPath, message: output || `Exported Beads JSONL to ${outputPath}.` }
           : output.length > BeadsDefaults.INLINE_JSONL_EXPORT_PREVIEW_BYTES
@@ -713,7 +667,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         if (dryRun) args.push('--dry-run');
         if (dedup) args.push('--dedup');
 
-        return await runBd(eventStore, args, { input: jsonl, env, root });
+        return await runBd(client, eventStore, args, { input: jsonl, env, root });
       }
     },
     {
@@ -735,7 +689,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         if (notes) args.push('--notes', notes);
         if (type) args.push('--type', type);
         if (priority) args.push('--priority', priority);
-        const bead = await normalizeIssue(eventStore, await runBd(eventStore, args, { env, root }) as BeadsIssueRecord);
+        const bead = await normalizeIssue(eventStore, await runBd(client, eventStore, args, { env, root }) as BeadsIssueRecord);
         await eventStore.record(DomainEventName.BEAD_CREATED, {
           beadId: bead.id,
           title,
@@ -754,7 +708,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       }),
       execute: async (params: unknown) => {
         const { id, includeDetails } = (params && typeof params === 'object' ? params : {}) as { id: string; includeDetails?: boolean };
-        return normalizeIssue(eventStore, await getIssue(eventStore, id, env, root), includeDetails === true, includeDetails === true);
+        return normalizeIssue(eventStore, await getIssue(client, eventStore, id, env, root), includeDetails === true, includeDetails === true);
       }
     },
     {
@@ -774,55 +728,55 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       name: PluginToolName.BD_CLAIM,
       description: 'Atomically claim a Bead via `bd update --claim`.',
       parameters: Type.Object({
-	        id: Type.String({ description: 'The ID of the Bead' }),
-	        owner: Type.Optional(Type.String({ description: 'Claiming actor' })),
-	        stateId: Type.Optional(Type.String({ description: 'Statechart state selected by the orchestrator' })),
-	        leaseTtlMs: Type.Optional(Type.Number({ description: 'Lease TTL in milliseconds' }))
-	      }),
-	      execute: async (params: unknown, ctx?: unknown) => {
-	        const { id, owner, stateId, leaseTtlMs } = (params && typeof params === 'object' ? params : {}) as { id: string; owner?: string; stateId?: string; leaseTtlMs?: number };
-	        const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;
-	        if (ui?.hasUI) ui.ui?.setWorkingMessage(`Claiming Bead ${id}...`);
-	        let bead: Bead;
-	        let restartRequested = false;
+        id: Type.String({ description: 'The ID of the Bead' }),
+        owner: Type.Optional(Type.String({ description: 'Claiming actor' })),
+        stateId: Type.Optional(Type.String({ description: 'Statechart state selected by the orchestrator' })),
+        leaseTtlMs: Type.Optional(Type.Number({ description: 'Lease TTL in milliseconds' }))
+      }),
+      execute: async (params: unknown, ctx?: unknown) => {
+        const { id, owner, stateId, leaseTtlMs } = (params && typeof params === 'object' ? params : {}) as { id: string; owner?: string; stateId?: string; leaseTtlMs?: number };
+        const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;
+        if (ui?.hasUI) ui.ui?.setWorkingMessage(`Claiming Bead ${id}...`);
+        let bead: Bead;
+        let restartRequested = false;
         try {
-          const claimed = await runBd(eventStore, ['update', id, '--claim'], { logErrors: false, env, root });
+          const claimed = await runBd(client, eventStore, ['update', id, '--claim'], { logErrors: false, env, root });
           bead = await normalizeIssue(eventStore, (Array.isArray(claimed) ? claimed[0] : claimed) as BeadsIssueRecord);
           restartRequested = bead.restartRequested || false;
         } catch (error) {
           let issue: BeadsIssueRecord;
           try {
-            issue = await getIssue(eventStore, id, env, root);
+            issue = await getIssue(client, eventStore, id, env, root);
           } catch {
             if (ui?.hasUI) ui.ui?.setWorkingMessage(undefined);
             throw error;
           }
-	          if (issue.status !== BeadsIssueStatus.IN_PROGRESS) {
+          if (issue.status !== BeadsIssueStatus.IN_PROGRESS) {
             if (ui?.hasUI) ui.ui?.setWorkingMessage(undefined);
             throw error;
-	          }
-	          bead = await normalizeIssue(eventStore, issue);
-	          restartRequested = bead.restartRequested || false;
-	        }
+          }
+          bead = await normalizeIssue(eventStore, issue);
+          restartRequested = bead.restartRequested || false;
+        }
 
-	        const selectedStateId = stateId || bead.status;
-	        const lease = {
-	          owner: owner || bead.assigned_to || App.DISPLAY_NAME,
-	          expiresAt: new Date(Date.now() + (leaseTtlMs || Defaults.LEASE_TTL_MS)).toISOString()
-	        };
+        const selectedStateId = stateId || bead.status;
+        const lease = {
+          owner: owner || bead.assigned_to || App.DISPLAY_NAME,
+          expiresAt: new Date(Date.now() + (leaseTtlMs || Defaults.LEASE_TTL_MS)).toISOString()
+        };
 
-	        await eventStore.record(DomainEventName.BEAD_CLAIMED, {
-	          beadId: id,
-	          owner: owner || bead.assigned_to,
-	          stateId: selectedStateId,
-	          lease,
-	          restartRequested,
-	          restartKind: restartRequested ? bead.restartKind : undefined,
-	          restartEvent: restartRequested ? bead.restartEvent : undefined,
-	          restartFromState: restartRequested ? bead.restartFromState : undefined,
-	          restartTargetState: restartRequested ? bead.restartTargetState : undefined
-	        });
-	        const result = await normalizeIssue(eventStore, await getIssue(eventStore, id, env, root));
+        await eventStore.record(DomainEventName.BEAD_CLAIMED, {
+          beadId: id,
+          owner: owner || bead.assigned_to,
+          stateId: selectedStateId,
+          lease,
+          restartRequested,
+          restartKind: restartRequested ? bead.restartKind : undefined,
+          restartEvent: restartRequested ? bead.restartEvent : undefined,
+          restartFromState: restartRequested ? bead.restartFromState : undefined,
+          restartTargetState: restartRequested ? bead.restartTargetState : undefined
+        });
+        const result = await normalizeIssue(eventStore, await getIssue(client, eventStore, id, env, root));
 
         if (ui?.hasUI) {
           ui.ui?.notify(`Claimed Bead ${id}`, 'info');
@@ -841,7 +795,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         const { id } = (params && typeof params === 'object' ? params : {}) as { id: string };
         let issue: BeadsIssueRecord | undefined;
         try {
-          issue = await getIssue(eventStore, id, env, root);
+          issue = await getIssue(client, eventStore, id, env, root);
         } catch {
           // Bead no longer exists in the task store (deleted/purged). Record a
           // tombstone so slot-health pruning can clean up the tracked entry and
@@ -852,10 +806,10 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
           return { id, tombstoned: true };
         }
         if (issue.status === BeadsIssueStatus.IN_PROGRESS) {
-          await runBd(eventStore, ['update', id, '--status', BeadsIssueStatus.OPEN], { env, root });
+          await runBd(client, eventStore, ['update', id, '--status', BeadsIssueStatus.OPEN], { env, root });
         }
         await eventStore.record(DomainEventName.BEAD_RELEASED, { beadId: id });
-        const result = await normalizeIssue(eventStore, await getIssue(eventStore, id, env, root));
+        const result = await normalizeIssue(eventStore, await getIssue(client, eventStore, id, env, root));
         return result;
       }
     },
@@ -869,7 +823,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       }),
       execute: async (params: unknown) => {
         const { id, status, notes } = (params && typeof params === 'object' ? params : {}) as { id: string; status: BeadStatus; notes?: string };
-        return updateIssueStatus(eventStore, id, status, notes, env, root);
+        return updateIssueStatus(client, eventStore, id, status, notes, env, root);
       }
     },
     {
@@ -908,5 +862,14 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
     }
   ] satisfies RuntimeTool[]
 };
-  return plugin;
+  return {
+    ...plugin,
+    /**
+     * Expose the BeadsClient's invalidate() so the composition layer can thread
+     * it into the BeadsPortAdapter without a core → plugin import.
+     * Called by BeadsPortAdapter.invalidateCache(), which the Supervisor invokes
+     * at the start of every tick to restore per-tick freshness (FIX-1).
+     */
+    invalidateCache: () => client.invalidate()
+  };
 }
