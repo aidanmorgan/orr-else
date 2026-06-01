@@ -879,20 +879,9 @@ export class EventStore {
               ];
             }
           }
-          projection.restartRequested = false;
-          delete projection.restartKind;
-          delete projection.restartEvent;
-          delete projection.restartFromState;
-          delete projection.restartTargetState;
           break;
         case DomainEventName.CONTEXT_RESTART_REQUESTED:
         case DomainEventName.HARNESS_RESTART_REQUESTED:
-          projection.restartRequested = true;
-          projection.restartKind = event.type === DomainEventName.CONTEXT_RESTART_REQUESTED ? RestartKind.CONTEXT : RestartKind.HARNESS;
-          projection.restartEvent = data.transitionEvent;
-          projection.restartFromState = data.stateId;
-          projection.restartTargetState = data.targetState || data.stateId;
-          if (data.targetState) projection.status = data.targetState;
           break;
         case DomainEventName.BEAD_RELEASED:
           delete projection.lease;

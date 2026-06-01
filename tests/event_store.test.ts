@@ -753,4 +753,102 @@ settings:
     expect(projection.transitions[0].evidence).toContain('transient harness transport error');
     expect(projection.transitions[0].evidence).not.toContain('WebSocket closed 1000');
   });
+
+  it('derives restart fields exclusively from stateChart projection (single source of truth)', async () => {
+    // Verifies WI-24: restart fields on projectBead output come only from
+    // projectBeadStateChartFromEvents; the dead switch-arm writes have been removed.
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.BEAD_CLAIMED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: { beadId: 'bd-1', stateId: 'Planning' }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          fromState: 'Planning',
+          nextState: 'Implementation',
+          transitionEvent: 'SUCCESS',
+          actionId: 'formulate-plan'
+        }
+      },
+      {
+        id: 'e3',
+        type: DomainEventName.CONTEXT_RESTART_REQUESTED,
+        timestamp: '2026-01-01T00:00:03.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Implementation',
+          targetState: 'Implementation',
+          transitionEvent: 'CONTEXT_RESTART',
+          actionId: 'surgical-execution'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);
+
+    const projections = await eventStore.projectBeads(['bd-1'], { includeDetails: true });
+    const bead = projections.get('bd-1');
+
+    // restart fields come from stateChart — single source of truth
+    expect(bead?.restartRequested).toBe(true);
+    expect(bead?.restartKind).toBe('context');
+    expect(bead?.restartEvent).toBe('CONTEXT_RESTART');
+    expect(bead?.restartFromState).toBe('Implementation');
+    expect(bead?.restartTargetState).toBe('Implementation');
+
+    // STATE_TRANSITION_APPLIED before the restart must not leave stale clears
+    // (the earlier STATE_TRANSITION_APPLIED clears in the old code were dead too)
+    expect(bead?.restartRequested).not.toBe(false);
+  });
+
+  it('clears restart fields after a STATE_TRANSITION_APPLIED following a restart event', async () => {
+    // Companion to the above: confirm that a transition after a restart correctly
+    // clears restart state via stateChart (not the now-deleted switch-arm clears).
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.HARNESS_RESTART_REQUESTED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          stateId: 'Planning',
+          targetState: 'Planning',
+          transitionEvent: 'HARNESS_RESTART'
+        }
+      },
+      {
+        id: 'e2',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:02.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-1',
+          fromState: 'Planning',
+          nextState: 'Planning',
+          transitionEvent: 'HARNESS_RESTART'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);
+
+    const projections = await eventStore.projectBeads(['bd-1']);
+    const bead = projections.get('bd-1');
+
+    expect(bead?.restartRequested).toBe(false);
+    expect(bead?.restartKind).toBeUndefined();
+    expect(bead?.restartEvent).toBeUndefined();
+    expect(bead?.restartFromState).toBeUndefined();
+    expect(bead?.restartTargetState).toBeUndefined();
+  });
 });
