@@ -1,4 +1,5 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { Type } from "@earendil-works/pi-ai";
 import { v7 as uuidv7 } from 'uuid';
 import { execa } from 'execa';
@@ -9,6 +10,8 @@ import { ConfigLoader } from '../core/ConfigLoader.js';
 import { Logger } from '../core/Logger.js';
 import { Observability } from '../core/Observability.js';
 import { redactPaneText } from '../core/PaneTextRedactor.js';
+import { scanPaneTranscript, hasScanFindings, formatScanSummary, type PaneTranscriptScanResult } from '../core/PaneTranscriptScanner.js';
+import { resolveProjectFrom } from '../core/Paths.js';
 import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
@@ -30,8 +33,16 @@ import {
   TmuxOption,
   TmuxOptionValue,
   TeammatePaneCleanupReason,
-  WorktreeDefaults
+  WorktreeDefaults,
+  OperationalArtifactPath,
+  PaneTranscriptDefaults
 } from '../constants/index.js';
+
+/**
+ * Sanitise a tmux pane ID (e.g. "%42") to a safe filename component.
+ * Replaces any character that is not alphanumeric, dot, dash, or underscore.
+ */
+const PANE_ID_UNSAFE_CHARS = /[^A-Za-z0-9._-]/g;
 
 const SAFE_REF = /^[A-Za-z0-9._-]+$/;
 
@@ -230,16 +241,86 @@ export class TeammateFactory {
    * Capture the visible text of a tmux pane for operator-facing monitoring,
    * with model-thinking / reasoning blocks redacted before returning.
    *
+   * ANSI/control-escape sequences are stripped inside redactPaneText before
+   * any pattern matching occurs.
+   *
    * This is the ONLY path through which pane content should reach operator
    * artifacts or monitoring summaries.  It never touches model inputs and
    * requires no agent self-policing.
+   *
+   * As a best-effort side-effect the cleaned text is written to a per-pane
+   * transcript file under .pi/logs/tmux/ and a pointer file is updated to
+   * record the current transcript path.  Failures are silently swallowed.
    *
    * @param paneId - tmux pane target (e.g. "%42" or "session:window.pane")
    * @returns Redacted pane text (reasoning blocks replaced with a placeholder).
    */
   public async capturePaneText(paneId: string): Promise<string> {
     const raw = await tmux([TmuxCommand.CAPTURE_PANE, '-p', '-t', paneId]);
-    return redactPaneText(raw);
+    const cleaned = redactPaneText(raw);
+    // Best-effort: write transcript + pointer; never blocks on failure.
+    this.writeCurrentTranscript(paneId, cleaned).catch(() => {});
+    return cleaned;
+  }
+
+  /**
+   * Write the cleaned+redacted pane transcript to a current file under the
+   * harness log area (.pi/logs/tmux/<safePaneId>.log) and update the pointer
+   * file (.pi/logs/tmux/current.path) to the current transcript path.
+   *
+   * The transcript is capped at PaneTranscriptDefaults.MAX_TRANSCRIPT_BYTES;
+   * content beyond the cap is silently dropped.  All I/O is synchronous so
+   * that no extra async chains are created in the monitoring hot path.
+   *
+   * Always best-effort: this method never throws.
+   */
+  private async writeCurrentTranscript(paneId: string, text: string): Promise<void> {
+    try {
+      const transcriptDir = resolveProjectFrom(
+        this.projectRoot,
+        OperationalArtifactPath.PI_TMUX_TRANSCRIPTS_DIR
+      );
+      fs.mkdirSync(transcriptDir, { recursive: true });
+
+      const safeId = paneId.replace(PANE_ID_UNSAFE_CHARS, '_');
+      const transcriptPath = path.join(
+        transcriptDir,
+        `${safeId}${PaneTranscriptDefaults.FILE_SUFFIX}`
+      );
+      const pointerPath = path.join(transcriptDir, PaneTranscriptDefaults.POINTER_FILENAME);
+
+      // Enforce cap: only write if content fits within the byte budget.
+      const encoded = Buffer.from(text, 'utf8');
+      if (encoded.byteLength <= PaneTranscriptDefaults.MAX_TRANSCRIPT_BYTES) {
+        fs.writeFileSync(transcriptPath, encoded);
+        fs.writeFileSync(pointerPath, transcriptPath, 'utf8');
+      } else {
+        // Write only the capped portion (tail end is most recent output).
+        const tail = encoded.subarray(encoded.byteLength - PaneTranscriptDefaults.MAX_TRANSCRIPT_BYTES);
+        fs.writeFileSync(transcriptPath, tail);
+        fs.writeFileSync(pointerPath, transcriptPath, 'utf8');
+      }
+    } catch {
+      // Best-effort: swallow all errors — transcript write failures must
+      // never propagate to the monitoring or recovery path.
+    }
+  }
+
+  /**
+   * Capture and scan the pane transcript for operator-facing issue categories.
+   *
+   * Returns the cleaned text and a structured scan result for each category.
+   * Best-effort: capture failures return an empty text and zero-count result.
+   *
+   * @param paneId - tmux pane target (e.g. "%42" or "session:window.pane")
+   */
+  public async capturePaneTextWithScan(paneId: string): Promise<{
+    text: string;
+    scan: PaneTranscriptScanResult;
+  }> {
+    const text = await this.capturePaneText(paneId).catch(() => '');
+    const scan = scanPaneTranscript(text);
+    return { text, scan };
   }
 
   /**
@@ -251,6 +332,12 @@ export class TeammateFactory {
    * Reasoning blocks are stripped by capturePaneText before the text is returned;
    * actionable lines (commands, errors, tool names, bead/state IDs) are preserved,
    * so stuck-prompt and error detection remain operational on the redacted text.
+   *
+   * As a best-effort side-effect the transcript is scanned for operator-facing
+   * issue categories (PROVIDER_ERROR, PROTOCOL_VIOLATION, ENOENT, STUCK_PROMPT,
+   * PANIC_FATAL).  When findings are detected a compact summary is appended to
+   * the returned text so that callers (e.g. Supervisor.recoverInactiveBeads)
+   * include the scan results in their evidence payloads without additional code.
    *
    * Never touches model inputs; requires no agent self-policing.
    *
@@ -267,7 +354,16 @@ export class TeammateFactory {
           this.capturePaneText(pane.paneId).catch(() => '')
         )
       );
-      return snapshots.filter(Boolean).join('\n---\n');
+      const combined = snapshots.filter(Boolean).join('\n---\n');
+
+      // Run the transcript scan on the combined output and append findings to
+      // the evidence string so the Supervisor sees the structured summary.
+      const scan = scanPaneTranscript(combined);
+      if (hasScanFindings(scan)) {
+        const scanSummary = formatScanSummary(scan);
+        return `${combined}\n\n[Transcript scan findings]\n${scanSummary}`;
+      }
+      return combined;
     } catch {
       return '';
     }

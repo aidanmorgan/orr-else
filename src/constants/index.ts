@@ -776,7 +776,26 @@ export const OperationalArtifactPath = {
   PI_OTEL_DIR: '.pi/otel',
   PI_TRASH_DIR: '.pi/.trash',
   PI_ARTIFACTS_DIR: '.pi/artifacts',
-  PI_TOOL_OUTPUT_DIR: '.pi/tool-output'
+  PI_TOOL_OUTPUT_DIR: '.pi/tool-output',
+  /** Per-pane transcript capture directory (under PI_LOGS_DIR). */
+  PI_TMUX_TRANSCRIPTS_DIR: '.pi/logs/tmux'
+} as const;
+
+/**
+ * Constraints for per-pane tmux transcript capture.
+ * All writes are best-effort — these caps are enforced to bound disk usage.
+ */
+export const PaneTranscriptDefaults = {
+  /**
+   * Maximum bytes written to a per-pane transcript file.
+   * Writes beyond this cap are silently dropped (the file is not truncated
+   * retroactively — only new writes that would exceed this limit are skipped).
+   */
+  MAX_TRANSCRIPT_BYTES: 512 * 1024, // 512 KiB
+  /** Suffix appended to pane-id to form the transcript filename. */
+  FILE_SUFFIX: '.log',
+  /** Pointer filename written alongside the transcript files. */
+  POINTER_FILENAME: 'current.path',
 } as const;
 
 export const EventStoreDefaults = {

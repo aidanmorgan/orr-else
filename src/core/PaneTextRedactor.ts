@@ -16,6 +16,37 @@
  */
 
 // ---------------------------------------------------------------------------
+// ANSI / control-escape stripping
+// ---------------------------------------------------------------------------
+
+/**
+ * Matches ANSI CSI sequences (ESC [ … m/K/J/H/A/B/C/D/…), OSC sequences
+ * (ESC ] … BEL/ST), lone ESC characters, and other common terminal control
+ * sequences emitted by tmux pane output.  Conservative: does NOT strip
+ * printable characters — only the escape payload.
+ *
+ * Covers:
+ *   - CSI:  ESC [ <param bytes> <intermediate bytes> <final byte>
+ *   - OSC:  ESC ] <text> BEL  or  ESC ] <text> ESC \
+ *   - SGR:  ESC [ … m  (subset of CSI, already covered)
+ *   - bare ESC followed by a single non-[ character (e.g. ESC c, ESC 7/8)
+ */
+export const ANSI_ESCAPE_PATTERN =
+  // eslint-disable-next-line no-control-regex
+  /\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[^[\]])/g;
+
+/**
+ * Strip ANSI and terminal control-escape sequences from a raw string.
+ * Returns plain text suitable for pattern matching and log storage.
+ *
+ * This is applied BEFORE reasoning redaction so that escape codes in pane
+ * output never cause reasoning-block patterns to miss their targets.
+ */
+export function stripAnsiEscapes(raw: string): string {
+  return raw.replace(ANSI_ESCAPE_PATTERN, '');
+}
+
+// ---------------------------------------------------------------------------
 // Named pattern constants (single source of truth)
 // ---------------------------------------------------------------------------
 
@@ -106,6 +137,7 @@ function isStandaloneReasoningLine(line: string): boolean {
  * Redact model-thinking/reasoning blocks from a raw tmux capture-pane string.
  *
  * Algorithm:
+ * 0. Strip ANSI/control-escape sequences so that patterns match clean text.
  * 1. Split into lines.
  * 2. Track whether we are inside an open reasoning block.
  * 3. A block opens on a REASONING_BLOCK_OPEN_PATTERNS match (if the line is
@@ -123,6 +155,9 @@ function isStandaloneReasoningLine(line: string): boolean {
  */
 export function redactPaneText(raw: string): string {
   if (!raw) return raw;
+
+  // Strip ANSI escape sequences before any pattern matching.
+  raw = stripAnsiEscapes(raw);
 
   const trailingNewline = raw.endsWith('\n');
   const lines = raw.split('\n');
