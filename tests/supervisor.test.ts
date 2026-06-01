@@ -307,4 +307,40 @@ describe('Supervisor', () => {
     // The bd_release tool must have been called to drop the lease
     expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
   });
+
+  it('collectSlotHealthSnapshot returns snapshot with correctly measured fields for seeded state', async () => {
+    const staleProgressAtMs = NOW_MS - STALE_PROGRESS_AGE_MS;
+    const { supervisor, clock } = supervisorHarness(staleProgressAtMs, undefined, new Set(['bead-1', 'bead-2']), 3);
+
+    // Seed: bead-1 started; bead-2 started but was previously flagged as missing
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-2');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.MINUTE);
+    (supervisor as any).startedBeadAtMs.set('bead-2', clock.now() - TimeMs.MINUTE);
+    (supervisor as any).lastMissingStartedBeadIds.add('bead-2');
+
+    const snapshot = await (supervisor as any).collectSlotHealthSnapshot();
+
+    // Raw observed set includes bead-2; effective set excludes it (missing)
+    expect(snapshot.observedLiveBeadIds).toContain('bead-2');
+    expect(snapshot.effectiveLiveBeadIds).not.toContain('bead-2');
+    expect(snapshot.effectiveLiveBeadIds).toContain('bead-1');
+
+    // expectedCount reflects maxSlots
+    expect(snapshot.expectedCount).toBe(3);
+
+    // bead-2 counted as missing
+    expect(snapshot.missingTrackedBeadIds).toContain('bead-2');
+
+    // bead-1 has stale progress (staleProgressAtMs is STALE_PROGRESS_AGE_MS ago) →
+    // IMMEDIATE_NO_PROGRESS_TIMEOUT_MS=1 means it is inactive
+    expect(snapshot.inactiveBeadIds).toContain('bead-1');
+    expect(snapshot.staleBeadIds).toContain('bead-1');
+
+    // heartbeatByBead populated from harness default heartbeat
+    expect(snapshot.heartbeatByBead.get('bead-1')).toBe(clock.now());
+
+    // noProgressTimeoutMs resolved from config
+    expect(snapshot.noProgressTimeoutMs).toBe(IMMEDIATE_NO_PROGRESS_TIMEOUT_MS);
+  });
 });

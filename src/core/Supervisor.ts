@@ -25,6 +25,44 @@ interface MissingStartedRestartDetails {
   sourceEventType?: string;
 }
 
+/** Typed value object returned by `collectSlotHealthSnapshot`. Contains all
+ * measured slot-health fields so that `recordSlotHealth` can record/log and
+ * forward them to the remediation helpers without recomputing inline. */
+interface SlotHealthSnapshot {
+  /** Raw live bead IDs as returned by the factory (pre-exclusion). */
+  observedLiveBeadIds: string[];
+  /** Live bead IDs after missing-tracked beads are excluded. */
+  effectiveLiveBeadIds: string[];
+  /** Resolved no-progress timeout (config or default). */
+  noProgressTimeoutMs: number;
+  /** Latest heartbeat timestamp per bead, keyed by beadId. */
+  heartbeatByBead: Map<string, number>;
+  /** Full heartbeat detail records from the signaling server snapshot. */
+  heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>;
+  /** Latest non-heartbeat/non-slot-health event per live bead. */
+  latestProgressEvents: Map<string, DomainEvent>;
+  /** Live beads whose heartbeat timestamp is stale (or absent past grace period). */
+  staleHeartbeatBeadIds: string[];
+  /** Live beads that have exceeded the no-progress timeout. */
+  inactiveBeadIds: string[];
+  /** Deduplicated, sorted stale-by-inactivity bead IDs (== inactiveBeadIds deduped). */
+  staleBeadIds: string[];
+  /** Beads stale only by heartbeat, not yet by progress timeout. */
+  heartbeatOnlyStaleBeadIds: string[];
+  /** Configured maximum number of teammate slots. */
+  expectedCount: number;
+  /** All beads ever started this session, sorted. */
+  trackedBeadIds: string[];
+  /** Tracked beads not present in the live set (or flagged as persistently missing). */
+  missingTrackedBeadIds: string[];
+  /** Number of effective live teammates. */
+  activeCount: number;
+  /** Number of active teammates that are not stale-by-inactivity. */
+  workingCount: number;
+  /** Heartbeating bead IDs that are not in the live-pane set. */
+  heartbeatOnlyLiveGaps: string[];
+}
+
 export class Supervisor {
   private interval?: NodeJS.Timeout;
   private startedBeads = new Set<string>();
@@ -520,11 +558,7 @@ export class Supervisor {
     return blocked.sort();
   }
 
-  private async recordSlotHealth(stage: string): Promise<void> {
-    const now = this.clock.now();
-    if (now - this.lastSlotHealthEventMs < SupervisorDefaults.SLOT_HEALTH_EVENT_INTERVAL_MS) return;
-    this.lastSlotHealthEventMs = now;
-
+  private async collectSlotHealthSnapshot(): Promise<SlotHealthSnapshot> {
     const liveBeadIds = [...await this.factory.getLiveTeammateBeadIds()].sort();
     await this.pruneDurablyInactiveStartedBeads(new Set(liveBeadIds));
     const config = await this.services.configLoader.load();
@@ -542,6 +576,7 @@ export class Supervisor {
       excludeToolNames: [PluginToolName.BD_HEARTBEAT]
     });
 
+    const now = this.clock.now();
     const staleHeartbeatBeadIds = liveBeadIds.filter(beadId => {
       const lastHeartbeatMs = heartbeatByBead.get(beadId) || 0;
       if (!lastHeartbeatMs) {
@@ -570,13 +605,58 @@ export class Supervisor {
       .filter(beadId => !liveBeadIds.includes(beadId))
       .sort();
 
+    return {
+      observedLiveBeadIds: liveBeadIds,
+      effectiveLiveBeadIds,
+      noProgressTimeoutMs,
+      heartbeatByBead,
+      heartbeatDetails,
+      latestProgressEvents,
+      staleHeartbeatBeadIds,
+      inactiveBeadIds,
+      staleBeadIds,
+      heartbeatOnlyStaleBeadIds,
+      expectedCount,
+      trackedBeadIds,
+      missingTrackedBeadIds,
+      activeCount,
+      workingCount,
+      heartbeatOnlyLiveGaps
+    };
+  }
+
+  private async recordSlotHealth(stage: string): Promise<void> {
+    const now = this.clock.now();
+    if (now - this.lastSlotHealthEventMs < SupervisorDefaults.SLOT_HEALTH_EVENT_INTERVAL_MS) return;
+    this.lastSlotHealthEventMs = now;
+
+    const snapshot = await this.collectSlotHealthSnapshot();
+    const {
+      observedLiveBeadIds,
+      effectiveLiveBeadIds,
+      noProgressTimeoutMs,
+      heartbeatByBead,
+      heartbeatDetails,
+      latestProgressEvents,
+      staleHeartbeatBeadIds,
+      inactiveBeadIds,
+      staleBeadIds,
+      heartbeatOnlyStaleBeadIds,
+      expectedCount,
+      trackedBeadIds,
+      missingTrackedBeadIds,
+      activeCount,
+      workingCount,
+      heartbeatOnlyLiveGaps
+    } = snapshot;
+
     await this.services.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
       stage,
       expectedCount,
       activeCount,
       workingCount,
       liveBeadIds: effectiveLiveBeadIds,
-      observedLiveBeadIds: liveBeadIds,
+      observedLiveBeadIds,
       staleBeadIds,
       staleHeartbeatBeadIds,
       heartbeatOnlyStaleBeadIds,
