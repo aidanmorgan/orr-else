@@ -1,4 +1,3 @@
-import { getProjectRoot } from './Paths.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
 import type { HarnessConfig, RequiredTool, RequiredToolCondition } from './domain/StateModels.js';
 
@@ -31,7 +30,10 @@ const CONDITION_REASON = {
 } as const;
 
 export class RequiredToolResolver {
-  constructor(private readonly planWriteSet: PlanWriteSet) {}
+  constructor(
+    private readonly planWriteSet: PlanWriteSet,
+    private readonly projectRoot: string = process.cwd()
+  ) {}
 
   public async resolve(
     requiredTools: RequiredTool[] | undefined,
@@ -100,7 +102,7 @@ export class RequiredToolResolver {
       beadId: context.beadId,
       stateId: context.stateId,
       worktreePath: context.worktreePath,
-      projectRoot: context.projectRoot || getProjectRoot()
+      projectRoot: context.projectRoot || this.projectRoot
     });
 
     return resolution.allowedWriteSet.map(filePath => this.normalizePath(filePath));
@@ -110,7 +112,7 @@ export class RequiredToolResolver {
     values: string[] | undefined,
     context: RequiredToolResolverContext
   ): string[] {
-    const roots = [context.worktreePath, context.projectRoot || getProjectRoot()].filter(Boolean) as string[];
+    const roots = [context.worktreePath, context.projectRoot || this.projectRoot].filter(Boolean) as string[];
     const paths = (values || []).flatMap(value => {
       const expanded = this.expandTemplate(value, context);
       return [
@@ -135,7 +137,7 @@ export class RequiredToolResolver {
     const trimmedKey = key.trim();
     const templates = context.config.settings.artifacts?.templates || {};
     const directValues: Record<string, string | undefined> = {
-      projectRoot: context.projectRoot || getProjectRoot(),
+      projectRoot: context.projectRoot || this.projectRoot,
       worktreePath: context.worktreePath,
       beadId: context.beadId,
       stateId: context.stateId,

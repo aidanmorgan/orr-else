@@ -7,7 +7,6 @@ import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { TransactionalStateGuard } from '../src/core/TransactionalStateGuard.js';
 import { DomainEventName } from '../src/constants/index.js';
@@ -19,16 +18,13 @@ function git(cwd: string, args: string[]): void {
 describe('TransactionalStateGuard', () => {
   let tempRoot: string;
   let worktreePath: string;
-  let previousRoot: string;
   let configLoader: ConfigLoader;
   let eventStore: EventStore;
   let guard: TransactionalStateGuard;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-transactional-'));
     worktreePath = path.join(tempRoot, 'worktrees', 'bd-1');
-    setProjectRoot(tempRoot);
 
     fs.mkdirSync(path.join(tempRoot, '.pi/artifacts/bd-1'), { recursive: true });
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
@@ -60,16 +56,15 @@ states:
     git(tempRoot, ['-c', 'user.name=Orr Else', '-c', 'user.email=orr-else@example.invalid', 'commit', '-m', 'initial']);
     git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-1', worktreePath]);
 
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     eventStore.setSessionId(`test-${process.pid}`);
-    const artifactPaths = new ArtifactPaths(configLoader);
-    guard = new TransactionalStateGuard(configLoader, artifactPaths, eventStore, new PlanWriteSet(configLoader, artifactPaths));
+    const artifactPaths = new ArtifactPaths(configLoader, undefined, tempRoot);
+    guard = new TransactionalStateGuard(configLoader, artifactPaths, eventStore, new PlanWriteSet(configLoader, artifactPaths, tempRoot));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
-    setProjectRoot(previousRoot);
     configLoader.reset();
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

@@ -5,7 +5,6 @@ import * as path from 'path';
 import { BuiltInToolName, NativePiToolName, NativeReadPolicyDefaults, PluginToolName } from '../src/constants/index.js';
 import { ProtocolInjector } from '../src/core/ProtocolInjector.js';
 import { InstructionLoader } from '../src/core/InstructionLoader.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 import type { HarnessConfig, SDLCState } from '../src/core/domain/StateModels.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-instruction-loader-test');
@@ -55,10 +54,9 @@ describe('InstructionLoader compatibility context', () => {
   let protocolInjector: ProtocolInjector;
 
   beforeEach(() => {
-    instructionLoader = new InstructionLoader();
+    instructionLoader = new InstructionLoader(root);
     protocolInjector = new ProtocolInjector();
     fs.rmSync(root, { recursive: true, force: true });
-    setProjectRoot(root);
     writeFile('CLAUDE.md', '# Claude rules\n');
     writeFile('.claude/rules/tooling.md', '# Tooling\n');
     writeFile('.claude/hooks/enforce-tools.py', 'print("ok")\n');
@@ -68,7 +66,6 @@ describe('InstructionLoader compatibility context', () => {
 
   afterEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    setProjectRoot(process.cwd());
   });
 
   it('returns typed compatibility paths without asking agents to read directories', () => {

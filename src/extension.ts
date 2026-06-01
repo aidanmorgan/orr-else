@@ -29,7 +29,6 @@ import {
   findAppliedTeammateSignal,
   isStatusMutatingTeammateEvent
 } from './core/TeammateEvents.js';
-import { getProjectRoot, setProjectRoot } from './core/Paths.js';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens } from './core/ProviderRequestCap.js';
 import { buildTurnUsageRecord } from './core/TokenUsage.js';
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
@@ -1892,7 +1891,7 @@ async function runParentSequenceActionsBeforeActive(
       stateId: run.stateId,
       actionId: action.id,
       arguments: action.arguments || {}
-    }, ctx, undefined, services.projectToolBackpressure);
+    }, ctx, undefined, services.projectToolBackpressure, services.projectRoot);
     runtimeObservability.recordToolInvocation(action.tool, result);
 
     for (const toolCall of extractFrameworkToolCalls(result)) {
@@ -2032,7 +2031,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
     [stateInstructions, protocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),
     {
       beadId: activeRun.beadId,
-      projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
+      projectRoot: process.env[EnvVars.PROJECT_ROOT] || services.projectRoot,
       workdir: activeRun.worktreePath || process.cwd(),
       configPath: services.configLoader.getConfigPath(),
       actionId: activeRun.action.id,
@@ -2410,7 +2409,7 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
       beadId: activeRun.beadId,
       stateId: activeRun.stateId,
       actionId: activeRun.action.id,
-      projectRoot: process.env[EnvVars.PROJECT_ROOT] || getProjectRoot(),
+      projectRoot: process.env[EnvVars.PROJECT_ROOT] || services.projectRoot,
       configPath: process.env[EnvVars.CONFIG_PATH] || services.configLoader.getConfigPath(),
       worktreePath: activeRun.worktreePath || process.cwd(),
       elapsedSeconds,
@@ -2596,12 +2595,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   // orrElseExtension(pi2, services) re-registers tools on the new pi instance.
   const session = createExtensionSession();
 
-  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
-  setProjectRoot(projectRoot);
+  const services = providedServices || createRuntimeServices();
+  // Point the Logger's rotating-file transport at the injected project root so
+  // log files land under the correct directory regardless of process.cwd().
+  Logger.configureProjectRoot(services.projectRoot);
   registerProcessLifecycleObservers();
   Logger.info(Component.ORR_ELSE, 'Orr Else extension loading', { version: App.VERSION });
-
-  const services = providedServices || createRuntimeServices();
 
   const seenTools = new Set<string>();
 
@@ -2663,7 +2662,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
   pi.on(PiEventName.RESOURCES_DISCOVER, async () => {
     const config = await services.configLoader.load();
-    const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot();
+    const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
     const skillPaths = resolvePiSkillPaths(config, projectRoot);
     return skillPaths.length > 0 ? { skillPaths } : {};
   });
@@ -2789,7 +2788,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         stateId: session.activeRun.stateId,
         actionId: session.activeRun.action.id
       }
-      : undefined, undefined, services.projectToolBackpressure);
+      : undefined, undefined, services.projectToolBackpressure, services.projectRoot);
     validateNativePiExtensionProjectTools(pi, config);
 
     pi.registerTool(wrapRuntimeTool({
@@ -2983,7 +2982,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             beadId: activeRun.beadId,
             stateId: activeRun.stateId,
             worktreePath: activeRun.worktreePath,
-            projectRoot: getProjectRoot(),
+            projectRoot: services.projectRoot,
             config
           });
           const requiredTools = requiredToolResolution.toolNames;
@@ -3010,7 +3009,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             beadId: activeRun.beadId,
             stateId: activeRun.stateId,
             worktreePath: activeRun.worktreePath || process.cwd(),
-            projectRoot: getProjectRoot()
+            projectRoot: services.projectRoot
           });
           if (!planWriteSetPreflight.passed) {
             return `REJECTED: Plan write-set preflight failed.\n${planWriteSetPreflight.reason}\nRevise the plan contract before signaling SUCCESS.`;

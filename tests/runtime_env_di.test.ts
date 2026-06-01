@@ -15,8 +15,8 @@ import { Observability } from '../src/core/Observability.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 import { Logger } from '../src/core/Logger.js';
+import { createRuntimeServices } from '../src/core/RuntimeServices.js';
 import { EnvVars, ProcessFlag } from '../src/constants/index.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 
@@ -58,7 +58,6 @@ describe('Observability — injected RuntimeEnvironment', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-di-obs-'));
-    setProjectRoot(tmpDir);
     fs.mkdirSync(path.join(tmpDir, '.pi/otel'), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, '.pi/logs'), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, 'state/logs'), { recursive: true });
@@ -69,7 +68,6 @@ describe('Observability — injected RuntimeEnvironment', () => {
     observability?.shutdown();
     configLoader?.reset();
     Logger.close();
-    setProjectRoot(process.cwd());
     await new Promise(resolve => setTimeout(resolve, 25));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -78,17 +76,17 @@ describe('Observability — injected RuntimeEnvironment', () => {
     const injectedSessionId = 'stub-session-id-from-di';
     const env = stubEnv({ [EnvVars.OBSERVABILITY_SESSION_ID]: injectedSessionId });
 
-    configLoader = new ConfigLoader(env);
+    configLoader = new ConfigLoader(env, tmpDir);
     configLoader.setConfigPath(path.join(tmpDir, 'harness.yaml'));
-    observability = new Observability(configLoader, env);
+    observability = new Observability(configLoader, env, tmpDir);
 
     expect(observability.getSessionId()).toBe(injectedSessionId);
   });
 
   it('generates a fresh UUIDv7 session ID when OBSERVABILITY_SESSION_ID is not injected', () => {
     const env = stubEnv({});   // no session id in env
-    configLoader = new ConfigLoader(env);
-    observability = new Observability(configLoader, env);
+    configLoader = new ConfigLoader(env, tmpDir);
+    observability = new Observability(configLoader, env, tmpDir);
 
     const sessionId = observability.getSessionId();
     // Must be a v7 UUID
@@ -103,9 +101,9 @@ describe('Observability — injected RuntimeEnvironment', () => {
       [EnvVars.OBSERVABILITY_FILE_NAME]: injectedTemplate
     });
 
-    configLoader = new ConfigLoader(env);
+    configLoader = new ConfigLoader(env, tmpDir);
     configLoader.setConfigPath(path.join(tmpDir, 'harness.yaml'));
-    observability = new Observability(configLoader, env);
+    observability = new Observability(configLoader, env, tmpDir);
 
     await observability.initialize();
     expect(observability.getJsonlFileName()).toBe(`custom-${injectedSessionId}.jsonl`);
@@ -121,7 +119,6 @@ describe('EventStore — injected RuntimeEnvironment', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-di-es-'));
-    setProjectRoot(tmpDir);
     fs.mkdirSync(path.join(tmpDir, '.pi/events'), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, '.pi/logs'), { recursive: true });
     fs.mkdirSync(path.join(tmpDir, 'state/logs'), { recursive: true });
@@ -130,7 +127,6 @@ describe('EventStore — injected RuntimeEnvironment', () => {
 
   afterEach(async () => {
     Logger.close();
-    setProjectRoot(process.cwd());
     await new Promise(resolve => setTimeout(resolve, 25));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -139,9 +135,9 @@ describe('EventStore — injected RuntimeEnvironment', () => {
     const injectedSessionId = 'event-store-session-di';
     const env = stubEnv({ [EnvVars.OBSERVABILITY_SESSION_ID]: injectedSessionId });
 
-    configLoader = new ConfigLoader(env);
+    configLoader = new ConfigLoader(env, tmpDir);
     configLoader.setConfigPath(path.join(tmpDir, 'harness.yaml'));
-    eventStore = new EventStore(configLoader, new JsonlEventLog(), env);
+    eventStore = new EventStore(configLoader, new JsonlEventLog(), env, tmpDir);
 
     // The session ID is used when recording events; verify via a recorded event
     // sessionId field. We can inspect by recording and reading the event file.
@@ -167,8 +163,8 @@ describe('EventStore — injected RuntimeEnvironment', () => {
 
   it('generates a fresh UUIDv7 sessionId when env has no OBSERVABILITY_SESSION_ID', () => {
     const env = stubEnv({});
-    configLoader = new ConfigLoader(env);
-    eventStore = new EventStore(configLoader, new JsonlEventLog(), env);
+    configLoader = new ConfigLoader(env, tmpDir);
+    eventStore = new EventStore(configLoader, new JsonlEventLog(), env, tmpDir);
 
     // setSessionId is public and can be used to verify the initial ID was set
     // We can test indirectly: if a UUIDv7 was generated, sessionId would be non-empty
@@ -189,13 +185,11 @@ describe('ConfigLoader — injected RuntimeEnvironment', () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-di-cfg-'));
-    setProjectRoot(tmpDir);
     fs.mkdirSync(path.join(tmpDir, 'state/logs'), { recursive: true });
   });
 
   afterEach(async () => {
     Logger.close();
-    setProjectRoot(process.cwd());
     await new Promise(resolve => setTimeout(resolve, 25));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
@@ -205,15 +199,14 @@ describe('ConfigLoader — injected RuntimeEnvironment', () => {
     fs.writeFileSync(configPath, minimalHarnessYaml('InjectedState').replace('Done', 'InjectedState'));
 
     const env = stubEnv({ [EnvVars.CONFIG_PATH]: configPath });
-    const loader = new ConfigLoader(env);
+    const loader = new ConfigLoader(env, tmpDir);
 
     expect(loader.getConfigPath()).toBe(configPath);
   });
 
   it('falls back to harness.yaml when CONFIG_PATH is not in the injected env', () => {
     const env = stubEnv({});
-    const loader = new ConfigLoader(env);
-    setProjectRoot(tmpDir);
+    const loader = new ConfigLoader(env, tmpDir);
     // getConfigPath returns the resolved project path to harness.yaml
     expect(loader.getConfigPath()).toMatch(/harness\.yaml$/);
   });
@@ -257,5 +250,105 @@ describe('FileAccessPolicy — injected RuntimeEnvironment', () => {
     // from the injected env — confirming beadId = 'bd-gate-test' flowed through.
     expect(recordedEvents.length).toBeGreaterThan(0);
     expect(recordedEvents[0].beadId).toBe('bd-gate-test');
+  });
+});
+
+// ─── No-cross-talk: two RuntimeServices instances in the same process ────────
+
+describe('RuntimeServices — no cross-talk between two instances (WI-2)', () => {
+  let rootA: string;
+  let rootB: string;
+
+  beforeEach(() => {
+    rootA = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-wi2-a-'));
+    rootB = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-wi2-b-'));
+    // Write minimal harness.yaml so ConfigLoader doesn't throw
+    const minimalYaml = `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "h"
+  startState: Done
+  defaultModel: "model"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Done:
+    identity: { role: done, expertise: done, constraints: [] }
+    baseInstructions: done
+    actions: []
+    transitions: {}
+`;
+    fs.writeFileSync(path.join(rootA, 'harness.yaml'), minimalYaml);
+    fs.writeFileSync(path.join(rootB, 'harness.yaml'), minimalYaml);
+  });
+
+  afterEach(async () => {
+    Logger.close();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    fs.rmSync(rootA, { recursive: true, force: true });
+    fs.rmSync(rootB, { recursive: true, force: true });
+  });
+
+  it('two services instances built with different projectRoots never share path state', () => {
+    // Build two independent RuntimeServices in the same process, each with a
+    // distinct projectRoot. Neither should observe the other's root.
+    const envA = stubEnv({ [EnvVars.PROJECT_ROOT]: rootA });
+    const envB = stubEnv({ [EnvVars.PROJECT_ROOT]: rootB });
+
+    const servicesA = createRuntimeServices(envA);
+    const servicesB = createRuntimeServices(envB);
+
+    expect(servicesA.projectRoot).toBe(rootA);
+    expect(servicesB.projectRoot).toBe(rootB);
+    expect(servicesA.projectRoot).not.toBe(servicesB.projectRoot);
+  });
+
+  it('ConfigLoader built with rootA resolves harness.yaml under rootA, not rootB', () => {
+    const loaderA = new ConfigLoader(undefined, rootA);
+    const loaderB = new ConfigLoader(undefined, rootB);
+
+    expect(loaderA.getConfigPath()).toContain(rootA);
+    expect(loaderB.getConfigPath()).toContain(rootB);
+    expect(loaderA.getConfigPath()).not.toContain(rootB);
+    expect(loaderB.getConfigPath()).not.toContain(rootA);
+  });
+
+  it('ArtifactPaths built with rootA uses rootA for path resolution', async () => {
+    // Write an artifact so we can verify the resolved path.
+    const artifactDir = path.join(rootA, '.pi', 'artifacts', 'bd-test');
+    fs.mkdirSync(artifactDir, { recursive: true });
+    fs.writeFileSync(path.join(artifactDir, 'plan.json'), '{}');
+
+    const configA = new ConfigLoader(undefined, rootA);
+    configA.setConfigPath(path.join(rootA, 'harness.yaml'));
+
+    // Add artifact template to the harness yaml
+    fs.writeFileSync(path.join(rootA, 'harness.yaml'), `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "h"
+  startState: Done
+  defaultModel: "model"
+  artifacts:
+    baseDir: .pi/artifacts
+    templates:
+      plan: .pi/artifacts/{{beadId}}/plan.json
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Done:
+    identity: { role: done, expertise: done, constraints: [] }
+    baseInstructions: done
+    actions: []
+    transitions: {}
+`);
+    const { ArtifactPaths } = await import('../src/core/ArtifactPaths.js');
+    const apA = new ArtifactPaths(configA, undefined, rootA);
+    const resolution = await apA.resolve({ beadId: 'bd-test' });
+
+    // Path must be under rootA, not rootB
+    expect(resolution.artifactPaths.plan).toContain(rootA);
+    expect(resolution.artifactPaths.plan).not.toContain(rootB);
+    configA.reset();
   });
 });

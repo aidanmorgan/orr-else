@@ -8,7 +8,6 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 import type { ApiAddress } from '../src/core/RuntimeServices.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 
@@ -72,11 +71,10 @@ states:
     actions: []
     transitions: { SUCCESS: completed }
 `);
-    setProjectRoot(root);
-    configLoader = new ConfigLoader();
+    configLoader = new ConfigLoader(undefined, root);
     configLoader.setConfigPath(configPath);
-    eventStore = new EventStore(configLoader);
-    observability = new Observability(configLoader);
+    eventStore = new EventStore(configLoader, undefined, undefined, root);
+    observability = new Observability(configLoader, undefined, root);
     await observability.initialize();
     vi.mocked(execa).mockReset();
     vi.mocked(execa).mockImplementation(defaultTmuxResponse);
@@ -90,7 +88,6 @@ states:
     } else {
       process.env[EnvVars.PROJECT_ROOT] = previousProjectRoot;
     }
-    setProjectRoot(process.cwd());
     vi.restoreAllMocks();
   });
 

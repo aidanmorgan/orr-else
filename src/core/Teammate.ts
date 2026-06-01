@@ -14,7 +14,6 @@ import {
   WorkerDefaults,
   PiEventName
 } from '../constants/index.js';
-import { setProjectRoot } from './Paths.js';
 import { FlowManager } from './FlowManager.js';
 import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
@@ -63,7 +62,10 @@ export class Teammate {
       return;
     }
 
-    setProjectRoot(projectRoot);
+    // Direct the Logger's rotating-file transport to the correct project root
+    // for this worker process. The root comes from WorkerContext (WI-6), not
+    // from the mutable module global.
+    Logger.configureProjectRoot(projectRoot);
     Logger.info(Component.TEAMMATE, 'Teammate mode activated', { beadId, stateId, worktreePath });
     const config = await this.configLoader.load();
 

@@ -7,7 +7,6 @@ import { Observability } from '../src/core/Observability.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 import { EnvVars } from '../src/constants/index.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 
@@ -78,18 +77,16 @@ states:
     actions: []
     transitions: {}
 `);
-    setProjectRoot(root);
-    configLoader = new ConfigLoader();
+    configLoader = new ConfigLoader(undefined, root);
     configLoader.setConfigPath(configPath);
-    eventStore = new EventStore(configLoader);
-    observability = new Observability(configLoader);
+    eventStore = new EventStore(configLoader, undefined, undefined, root);
+    observability = new Observability(configLoader, undefined, root);
     await observability.initialize();
   });
 
   afterEach(() => {
     observability.shutdown();
     configLoader.reset();
-    setProjectRoot(process.cwd());
   });
 
   it('accepts typed teammate events and heartbeats', async () => {

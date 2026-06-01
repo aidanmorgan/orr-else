@@ -21,7 +21,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/index.js';
-import { getProjectRoot } from './Paths.js';
 
 // ─── Path-safety helpers ──────────────────────────────────────────────────────
 
@@ -71,16 +70,16 @@ function isPathInside(childPath: string, rootPath: string): boolean {
  * Build the list of allowed roots for an explicit artifactPath:
  *   1. The bead-scoped artifact directory:
  *      <projectRoot>/.pi/artifacts/<beadId>
- *   2. The active worktree path (PI_WORKTREE_PATH → PI_PROJECT_ROOT → getProjectRoot()).
+ *   2. The active worktree path (PI_WORKTREE_PATH → PI_PROJECT_ROOT → process.cwd()).
  *
  * Both roots are canonicalized so symlinks in the config/env cannot widen scope.
  */
 function allowedArtifactRoots(beadId: string): string[] {
-  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || getProjectRoot();
+  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
   const worktreePath =
     process.env[EnvVars.WORKTREE_PATH] ||
     process.env[EnvVars.PROJECT_ROOT] ||
-    getProjectRoot();
+    process.cwd();
 
   const beadArtifactDir = path.join(projectRoot, OperationalArtifactPath.PI_ARTIFACTS_DIR, beadId);
 

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
-import { getProjectRoot, resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
@@ -148,7 +148,8 @@ export class EventStore {
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly eventLog: JsonlEventLog = new JsonlEventLog(),
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
   ) {
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
   }
@@ -229,7 +230,7 @@ export class EventStore {
   }
 
   private projectName(): string {
-    const basename = path.basename(getProjectRoot());
+    const basename = path.basename(this.projectRoot);
     const sanitized = basename.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^-+|-+$/g, '');
     return sanitized || 'project';
   }
@@ -338,7 +339,7 @@ export class EventStore {
 
     const expandedDir = this.expandProjectName(configuredDir, projectName);
     const expandedFileName = this.expandProjectName(configuredFileName, projectName);
-    const logDir = path.isAbsolute(expandedDir) ? expandedDir : resolveProject(expandedDir);
+    const logDir = path.isAbsolute(expandedDir) ? expandedDir : resolveProjectFrom(this.projectRoot, expandedDir);
     const fileName = path.basename(expandedFileName);
     this.currentLocation = { dir: logDir, path: path.join(logDir, fileName) };
     return this.currentLocation;

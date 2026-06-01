@@ -7,7 +7,6 @@ import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { ShellCommandParser } from '../src/core/ShellCommandParser.js';
 import { DomainEventName, EnvVars, FileMutationPolicyDefaults, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
@@ -18,7 +17,6 @@ function git(cwd: string, args: string[]): void {
 
 describe('PlanWriteSet preflight validation', () => {
   let tempRoot: string;
-  let previousRoot: string;
   let configLoader: ConfigLoader;
   let artifactPaths: ArtifactPaths;
   let planWriteSet: PlanWriteSet;
@@ -39,9 +37,7 @@ describe('PlanWriteSet preflight validation', () => {
   }
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-plan-write-set-')));
-    setProjectRoot(tempRoot);
     fs.mkdirSync(path.join(tempRoot, '.pi/artifacts/bd-1'), { recursive: true });
     writeFile('harness.yaml', `
 settings:
@@ -66,14 +62,13 @@ states:
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
     git(tempRoot, ['init', '--initial-branch=main']);
-    configLoader = new ConfigLoader();
-    artifactPaths = new ArtifactPaths(configLoader);
-    planWriteSet = new PlanWriteSet(configLoader, artifactPaths);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, tempRoot);
+    planWriteSet = new PlanWriteSet(configLoader, artifactPaths, tempRoot);
   });
 
   afterEach(() => {
     configLoader.reset();
-    setProjectRoot(previousRoot);
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
@@ -250,14 +245,11 @@ states:
 
 describe('FileAccessPolicy validateShellTarget — WRITE vs DELETE operation labels', () => {
   let tempRoot: string;
-  let previousRoot: string;
   let policy: FileAccessPolicy;
   let recordedEvents: Array<{ eventName: string; data: unknown }>;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-shell-label-')));
-    setProjectRoot(tempRoot);
 
     recordedEvents = [];
     // Use a stub EventStore so no real file I/O occurs during label assertions.
@@ -275,11 +267,10 @@ describe('FileAccessPolicy validateShellTarget — WRITE vs DELETE operation lab
       validateProposedPlanContract: vi.fn(async () => ({ passed: true }))
     } as unknown as PlanWriteSet;
 
-    policy = new FileAccessPolicy(stubEventStore, new ShellCommandParser(), stubPlanWriteSet);
+    policy = new FileAccessPolicy(stubEventStore, new ShellCommandParser(), stubPlanWriteSet, undefined, tempRoot);
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     fs.rmSync(tempRoot, { recursive: true, force: true });
     vi.restoreAllMocks();
   });

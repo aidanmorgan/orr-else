@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
-import { resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
 import { EventStore } from './EventStore.js';
 import { Component, DomainEventName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
@@ -27,9 +27,10 @@ export class NativeMailbox {
 
   constructor(
     private readonly eventStore: EventStore,
-    baseDir: string = MailboxDefaults.DIR
+    baseDir: string = MailboxDefaults.DIR,
+    projectRoot: string = process.cwd()
   ) {
-    this.baseDir = path.isAbsolute(baseDir) ? baseDir : resolveProject(baseDir);
+    this.baseDir = path.isAbsolute(baseDir) ? baseDir : resolveProjectFrom(projectRoot, baseDir);
     if (!existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
     }

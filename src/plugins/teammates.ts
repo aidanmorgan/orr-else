@@ -5,7 +5,6 @@ import { execa } from 'execa';
 import { parse as parseShellCommand, quote as quoteShellArgs } from 'shell-quote';
 import type { ApiAddress, BeadId } from '../types/index.js';
 
-import { getProjectRoot } from '../core/Paths.js';
 import { ConfigLoader } from '../core/ConfigLoader.js';
 import { Logger } from '../core/Logger.js';
 import { Observability } from '../core/Observability.js';
@@ -74,7 +73,8 @@ export class TeammateFactory {
     private maxSlots: number = Defaults.MAX_SLOTS,
     private readonly sessionName: string = Defaults.TMUX_SESSION,
     private readonly extensionPath?: string,
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
   ) {}
 
   public async getActiveTeammateCount(): Promise<number> {
@@ -198,7 +198,7 @@ export class TeammateFactory {
 
   private beadIdFromCurrentPath(currentPath: string): string | undefined {
     if (!currentPath) return undefined;
-    const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot() || process.cwd();
+    const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot;
     const worktreesRoot = path.resolve(projectRoot, WorktreeDefaults.ROOT_DIR);
     const absoluteCurrentPath = path.resolve(currentPath);
     const relativePath = path.relative(worktreesRoot, absoluteCurrentPath);
@@ -291,7 +291,7 @@ export class TeammateFactory {
 
       if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Spawning teammate for ${beadId}...`);
 
-      const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot() || process.cwd();
+      const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot;
       const runDir = worktreePath;
       const extensionPath = this.extensionPath || path.join(projectRoot, Defaults.PROJECT_EXTENSION_PATH);
       const config = await this.configLoader.load();

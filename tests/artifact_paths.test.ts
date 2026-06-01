@@ -5,7 +5,6 @@ import * as path from 'path';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { ArtifactPathDefaults } from '../src/constants/index.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-artifact-paths-test');
 
@@ -21,9 +20,8 @@ describe('ArtifactPaths', () => {
 
   beforeEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    setProjectRoot(root);
-    configLoader = new ConfigLoader();
-    artifactPaths = new ArtifactPaths(configLoader);
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
     writeFile('harness.yaml', `
 settings:
   maxConcurrentSlots: 1
@@ -57,7 +55,6 @@ states:
 
   afterEach(() => {
     configLoader.reset();
-    setProjectRoot(process.cwd());
     fs.rmSync(root, { recursive: true, force: true });
   });
 

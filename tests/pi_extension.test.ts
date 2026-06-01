@@ -9,7 +9,6 @@ import { FlowManager } from '../src/core/FlowManager.js';
 import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 import { BuiltInToolName, EnvVars, NativePiToolName, PiEventName, PluginToolName, ProcessFlag } from '../src/constants/index.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 
 function fakePi() {
   const tools: any[] = [];
@@ -139,7 +138,6 @@ describe('Pi-native extension surface', () => {
 
   it('blocks teammate access to framework runtime artifacts', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -170,7 +168,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.PROJECT_ROOT] = tempRoot;
 
       await orrElseExtension(harness.pi);
@@ -355,7 +352,6 @@ states:
       await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -390,7 +386,6 @@ states:
 
   it('requires a durable checkpoint before completion can be signaled', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -440,7 +435,6 @@ states:
     try {
       server = await startSignalAckServer(receivedEvents);
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-checkpoint-gate';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -502,7 +496,6 @@ states:
       await closeServer(server);
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -523,7 +516,6 @@ states:
 
   it('keeps completion blocked when checkpoint signal delivery fails', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -557,7 +549,6 @@ states:
     try {
       server = await startSignalAckServer(receivedEvents, 400);
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-checkpoint-reject';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -595,7 +586,6 @@ states:
       await closeServer(server);
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -616,7 +606,6 @@ states:
 
   it('rejects SUCCESS when an action-level required tool was not invoked', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -655,7 +644,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-action-required-tool';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -682,7 +670,6 @@ states:
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -703,7 +690,6 @@ states:
 
   it('rejects SUCCESS when the latest required tool result failed after an earlier pass', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -742,7 +728,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-latest-required-tool';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -773,7 +758,6 @@ states:
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -792,7 +776,6 @@ states:
 
   it('blocks further tool work and SUCCESS after a terminal verifier failure', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -839,7 +822,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-terminal-verifier';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -880,7 +862,6 @@ states:
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -899,7 +880,6 @@ states:
 
   it('enforces recorded project-tool routing hints before generic failure-limit outcomes', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -950,7 +930,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-terminal-routing-hint';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -988,7 +967,6 @@ states:
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
@@ -1007,7 +985,6 @@ states:
 
   it('lets configured project tools override generic harness tools with the same name', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-project-tool-override-')));
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
@@ -1031,7 +1008,6 @@ states:
 
     try {
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       harness = fakePi();
       await orrElseExtension(harness.pi);
       await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
@@ -1045,7 +1021,6 @@ states:
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
@@ -1061,7 +1036,6 @@ states:
 
   it('records AGENT_TURN_FAILED and posts STATE_BLOCKED when worker-mode teammate.start() rejects', async () => {
     const previousCwd = process.cwd();
-    const previousProjectRoot = getProjectRoot();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
       beadId: process.env[EnvVars.BEAD_ID],
@@ -1096,7 +1070,6 @@ states:
     try {
       server = await startSignalAckServer(receivedEvents);
       process.chdir(tempRoot);
-      setProjectRoot(tempRoot);
       process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
       process.env[EnvVars.BEAD_ID] = 'bd-bootstrap-fail';
       process.env[EnvVars.STATE_ID] = 'Planning';
@@ -1119,7 +1092,6 @@ states:
       await closeServer(server);
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);
-      setProjectRoot(previousProjectRoot);
       if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
       else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
       if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];

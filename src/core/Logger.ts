@@ -1,6 +1,6 @@
 import * as winston from 'winston';
 import 'winston-daily-rotate-file';
-import { resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { App, EnvVars, LoggingDefaults } from '../constants/index.js';
 
@@ -25,11 +25,29 @@ export class LoggerService {
   private logger: winston.Logger | null = null;
   private logDir: string | null = null;
   private configuredLevel: string | null = null;
+  private configuredProjectRoot: string | null = null;
 
   constructor(
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
     private readonly transports: winston.transport[] | null = null
   ) {}
+
+  /**
+   * Point the rotating-file transport at a specific project root.
+   * Must be called before the first log line if you need the log dir to
+   * reflect the injected root rather than process.cwd().
+   * Takes effect immediately — if the logger is already open and the new
+   * logDir differs it will be re-initialised on the next log call.
+   */
+  public configureProjectRoot(root: string): void {
+    this.configuredProjectRoot = root;
+    // Force re-init on next log call so the new dir takes effect.
+    if (this.logger && this.logDir !== resolveProjectFrom(root, LoggingDefaults.DIR)) {
+      this.logger.close();
+      this.logger = null;
+      this.logDir = null;
+    }
+  }
 
   private resolveLevel(): string {
     // Use `||` (not `??`) so an empty-string LOG_LEVEL falls back to the default,
@@ -77,7 +95,8 @@ export class LoggerService {
       return this.logger;
     }
 
-    const logDir = resolveProject(LoggingDefaults.DIR);
+    const rootForLog = this.configuredProjectRoot || process.cwd();
+    const logDir = resolveProjectFrom(rootForLog, LoggingDefaults.DIR);
     if (this.logger && this.logDir === logDir) return this.logger;
     if (this.logger) {
       this.logger.close();

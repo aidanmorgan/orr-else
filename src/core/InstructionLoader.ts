@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import fg from 'fast-glob';
 import { SDLCState } from './domain/StateModels.js';
-import { resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { CompatibilityContextDefaults } from '../constants/index.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 
@@ -43,6 +43,8 @@ export interface CompatibilityContextOptions {
 }
 
 export class InstructionLoader {
+  constructor(private readonly projectRoot: string = process.cwd()) {}
+
   public loadBaseInstructions(state: SDLCState): string {
     return state.baseInstructions;
   }
@@ -70,12 +72,12 @@ export class InstructionLoader {
   }
 
   private existingFile(file: string): string | undefined {
-    const fullPath = path.isAbsolute(file) ? file : resolveProject(file);
+    const fullPath = path.isAbsolute(file) ? file : resolveProjectFrom(this.projectRoot, file);
     return fs.existsSync(fullPath) && fs.statSync(fullPath).isFile() ? fullPath : undefined;
   }
 
   private existingDirectory(dir: string): string | undefined {
-    const fullPath = path.isAbsolute(dir) ? dir : resolveProject(dir);
+    const fullPath = path.isAbsolute(dir) ? dir : resolveProjectFrom(this.projectRoot, dir);
     return fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory() ? fullPath : undefined;
   }
 
@@ -86,7 +88,7 @@ export class InstructionLoader {
 
   public loadRuleCategories(categories: string[]): string[] {
     const rules: string[] = [];
-    const projectDir = resolveProject('.pi', 'rules');
+    const projectDir = resolveProjectFrom(this.projectRoot, '.pi', 'rules');
     const installDir = path.join(process.cwd(), '.pi', 'rules');
 
     const searchDirs = [];
@@ -137,7 +139,7 @@ export class InstructionLoader {
     if (!discovery) return empty;
 
     const recordMissing = (group: CompatibilityPathGroup, configuredPath: string) => {
-      empty.missing.push({ group, path: path.isAbsolute(configuredPath) ? configuredPath : resolveProject(configuredPath) });
+      empty.missing.push({ group, path: path.isAbsolute(configuredPath) ? configuredPath : resolveProjectFrom(this.projectRoot, configuredPath) });
     };
     const limitFiles = (group: CompatibilityPathGroup, files: string[], limit: number): string[] => {
       const sorted = files.sort();
@@ -202,13 +204,13 @@ export class InstructionLoader {
 
   public loadCompatibilityDocuments(config?: HarnessConfig): string[] {
     return this.compatibilityPaths(config).map(filePath => {
-      return `# ${path.relative(resolveProject(), filePath)}\n${fs.readFileSync(filePath, 'utf8')}`;
+      return `# ${path.relative(this.projectRoot, filePath)}\n${fs.readFileSync(filePath, 'utf8')}`;
     });
   }
 
   public assemble(state: SDLCState, config?: HarnessConfig): string {
     let rules = '';
-    const harnessRulesPath = resolveProject('.pi', 'harness_rules.md');
+    const harnessRulesPath = resolveProjectFrom(this.projectRoot, '.pi', 'harness_rules.md');
     if (fs.existsSync(harnessRulesPath)) {
       rules += `### HARNESS OPERATIONAL RULES\n${fs.readFileSync(harnessRulesPath, 'utf8')}\n\n`;
     }

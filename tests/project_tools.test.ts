@@ -6,7 +6,6 @@ import lockfile from 'proper-lockfile';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
@@ -74,7 +73,6 @@ console.log(JSON.stringify(payload));
 describe('project tool command arguments', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let previousFrameworkRootEnv: string | undefined;
@@ -83,7 +81,6 @@ describe('project tool command arguments', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     previousFrameworkRootEnv = process.env[EnvVars.FRAMEWORK_ROOT];
@@ -91,9 +88,8 @@ describe('project tool command arguments', () => {
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -101,7 +97,6 @@ describe('project tool command arguments', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     eventStore.setSessionId(`test-${process.pid}-reset`);
@@ -2416,7 +2411,6 @@ describe('resolveContextField', () => {
 describe('buildCommandResult field completeness', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let configLoader: ConfigLoader;
@@ -2424,16 +2418,14 @@ describe('buildCommandResult field completeness', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-cmd-result-')));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-shape');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-shape-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -2441,7 +2433,6 @@ describe('buildCommandResult field completeness', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
@@ -2525,7 +2516,6 @@ describe('buildCommandResult field completeness', () => {
 describe('per-tool structured summarizer registry', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let configLoader: ConfigLoader;
@@ -2533,16 +2523,14 @@ describe('per-tool structured summarizer registry', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-summarizer-')));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-summarizer-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -2550,7 +2538,6 @@ describe('per-tool structured summarizer registry', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
@@ -2912,7 +2899,6 @@ describe('per-tool structured summarizer registry', () => {
 describe('generalized structuredModelSummary suppression (b77h)', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let configLoader: ConfigLoader;
@@ -2920,16 +2906,14 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-b77h-')));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-b77h-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -2937,7 +2921,6 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
@@ -3474,7 +3457,6 @@ describe('structuredResultHasDecisionEvidence — counts guard (defensive harden
 describe('commandFailureSummarizer', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let configLoader: ConfigLoader;
@@ -3482,16 +3464,14 @@ describe('commandFailureSummarizer', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-cmd-fail-')));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-cmd-fail-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -3499,7 +3479,6 @@ describe('commandFailureSummarizer', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
@@ -4037,7 +4016,6 @@ describe('commandFailureSummarizer', () => {
 describe('tool-call scratch cleanup (bounded-storage)', () => {
   let tempRoot: string;
   let tempWorktree: string;
-  let previousRoot: string;
   let previousProjectRootEnv: string | undefined;
   let previousWorktreeEnv: string | undefined;
   let configLoader: ConfigLoader;
@@ -4045,16 +4023,14 @@ describe('tool-call scratch cleanup (bounded-storage)', () => {
   let toolCallPathFactory: ToolCallPathFactory;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
     previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
     tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-scratch-cleanup-')));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-scratch');
     fs.mkdirSync(tempWorktree, { recursive: true });
     writeMinimalHarnessConfig(tempRoot);
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     toolCallPathFactory = new ToolCallPathFactory();
     eventStore.setSessionId(`test-scratch-${process.pid}`);
     process.env[EnvVars.PROJECT_ROOT] = tempRoot;
@@ -4062,7 +4038,6 @@ describe('tool-call scratch cleanup (bounded-storage)', () => {
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     vi.restoreAllMocks();
     eventStore.setSessionId(`test-scratch-${process.pid}-reset`);

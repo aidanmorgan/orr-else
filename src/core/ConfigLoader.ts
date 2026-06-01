@@ -5,7 +5,7 @@ import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
 import { ResolvedLLMConfig, HarnessConfig } from './domain/StateModels.js';
 import { ChecklistItem } from './ProtocolParser.js';
-import { resolveInstall, resolveProject } from './Paths.js';
+import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
@@ -103,10 +103,13 @@ export class ConfigLoader {
   private cachedPath: string | null = null;
   private cachedSignature: { mtimeMs: number; ctimeMs: number; size: number } | null = null;
 
-  constructor(private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment) {}
+  constructor(
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
+  ) {}
 
   private normalizeConfigPath(filePath: string): string {
-    return path.isAbsolute(filePath) ? filePath : resolveProject(filePath);
+    return path.isAbsolute(filePath) ? filePath : resolveProjectFrom(this.projectRoot, filePath);
   }
 
   public setConfigPath(filePath: string) {
@@ -179,7 +182,7 @@ export class ConfigLoader {
     const ajv = new Ajv({ allErrors: true, useDefaults: true });
     addFormats(ajv);
 
-    const projectSchemaPath = resolveProject('harness.schema.json');
+    const projectSchemaPath = resolveProjectFrom(this.projectRoot, 'harness.schema.json');
     const installSchemaPath = resolveInstall('harness.schema.json');
     const schemaPath = fs.existsSync(installSchemaPath) ? installSchemaPath : projectSchemaPath;
     if (!fs.existsSync(schemaPath)) {
@@ -198,7 +201,7 @@ export class ConfigLoader {
   }
 
   private resolveConfigPath(reference: string): string {
-    return path.isAbsolute(reference) ? reference : resolveProject(reference);
+    return path.isAbsolute(reference) ? reference : resolveProjectFrom(this.projectRoot, reference);
   }
 
   private resolveTextReference(value: unknown): unknown {

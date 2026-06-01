@@ -6,25 +6,21 @@ import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { RequiredToolResolver } from '../src/core/RequiredToolResolver.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 
 describe('RequiredToolResolver', () => {
   let tempRoot: string;
   let tempWorktree: string;
   let frameworkRoot: string;
-  let previousRoot: string;
   let configLoader: ConfigLoader;
   let resolver: RequiredToolResolver;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-required-tools-'));
     tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
     frameworkRoot = path.join(tempRoot, 'pi-experiment');
     fs.mkdirSync(path.join(tempRoot, '.pi', 'artifacts', 'bd-1'), { recursive: true });
     fs.mkdirSync(tempWorktree, { recursive: true });
     fs.mkdirSync(frameworkRoot, { recursive: true });
-    setProjectRoot(tempRoot);
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Implementation
@@ -48,12 +44,11 @@ states:
     actions: []
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
-    configLoader = new ConfigLoader();
-    resolver = new RequiredToolResolver(new PlanWriteSet(configLoader, new ArtifactPaths(configLoader)));
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    resolver = new RequiredToolResolver(new PlanWriteSet(configLoader, new ArtifactPaths(configLoader, undefined, tempRoot), tempRoot), tempRoot);
   });
 
   afterEach(() => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });

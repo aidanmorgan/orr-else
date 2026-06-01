@@ -27,6 +27,7 @@ import { createMetaPlugin } from '../plugins/meta.js';
 import { createQualityPlugin } from '../plugins/quality.js';
 import { signalingPlugin } from '../plugins/signaling.js';
 import { teammatePlugin, TeammateFactory } from '../plugins/teammates.js';
+import { EnvVars } from '../constants/index.js';
 
 /** Shape of a single in-flight project-tool call entry tracked by the backpressure map.
  * Defined here in core so the map type can live in RuntimeServices without a core→plugin import. */
@@ -69,6 +70,10 @@ export interface MergeResult {
 }
 
 export interface RuntimeServices {
+  /** The project root resolved once at composition time from the injected env
+   * (PROJECT_ROOT env var) or process.cwd(). All path resolution in the coordinator
+   * process flows from this single value — no mutable module global needed. */
+  projectRoot: string;
   configLoader: ConfigLoader;
   contextInjector: ContextInjector;
   eventStore: EventStore;
@@ -105,42 +110,50 @@ export interface RuntimeServices {
   };
 }
 
-export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvironment): RuntimeServices {
-  const configLoader = new ConfigLoader(env);
-  const eventStore = new EventStore(configLoader, undefined, env);
-  const observability = new Observability(configLoader, env);
+export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvironment, explicitProjectRoot?: string): RuntimeServices {
+  // Resolve projectRoot ONCE at the composition boundary.
+  // Precedence: explicitProjectRoot > env PROJECT_ROOT > process.cwd()
+  // Use || (not ??) to match WI-1 precedence: empty-string PROJECT_ROOT falls back.
+  const projectRoot = explicitProjectRoot || env.env(EnvVars.PROJECT_ROOT) || process.cwd();
+
+  const configLoader = new ConfigLoader(env, projectRoot);
+  const eventStore = new EventStore(configLoader, undefined, env, projectRoot);
+  const observability = new Observability(configLoader, env, projectRoot);
   const flowManager = new FlowManager();
   const domainEventEmitter = new DomainEventEmitter(eventStore);
   const domainEvents = new DomainEvents(domainEventEmitter);
   const shellCommandParser = new ShellCommandParser();
 
-  const artifactPaths = new ArtifactPaths(configLoader, env);
-  const planWriteSet = new PlanWriteSet(configLoader, artifactPaths);
+  const artifactPaths = new ArtifactPaths(configLoader, env, projectRoot);
+  const planWriteSet = new PlanWriteSet(configLoader, artifactPaths, projectRoot);
 
-  const bdPlugin = createBdPlugin(eventStore, env);
+  const bdPlugin = createBdPlugin(eventStore, env, projectRoot);
   const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
   const apiAddress: ApiAddress = {};
-  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, undefined, undefined, undefined, env);
+  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, undefined, undefined, undefined, env, projectRoot);
   const projectToolBackpressure: ProjectToolBackpressure = new Map();
+  const instructionLoader = new InstructionLoader(projectRoot);
+  const requiredToolResolver = new RequiredToolResolver(planWriteSet, projectRoot);
 
   return {
+    projectRoot,
     configLoader,
     contextInjector: new ContextInjector(),
     eventStore,
     domainEventEmitter,
     domainEvents,
     flowManager,
-    instructionLoader: new InstructionLoader(),
+    instructionLoader,
     observability,
     protocolInjector: new ProtocolInjector(),
     protocolParser: new ProtocolParser(),
-    requiredToolResolver: new RequiredToolResolver(planWriteSet),
+    requiredToolResolver,
     scheduler: new Scheduler(configLoader, flowManager),
     mediator: new Mediator(domainEvents),
     telemetryStore: new TelemetryStore(),
     artifactPaths,
     planWriteSet,
-    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env),
+    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot),
     shellCommandParser,
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),
@@ -150,7 +163,7 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
       bd: bdPlugin,
       git: gitPlugin,
       teammates: teammatePlugin(teammateFactory),
-      mailbox: createMailboxPlugin(eventStore),
+      mailbox: createMailboxPlugin(eventStore, projectRoot),
       quality: createQualityPlugin(),
       signaling: signalingPlugin,
       meta: createMetaPlugin(eventStore)

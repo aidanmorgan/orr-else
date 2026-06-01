@@ -13,7 +13,6 @@ import {
   ProcessFlag
 } from '../constants/index.js';
 import { Logger } from './Logger.js';
-import { getProjectRoot } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';
 import type { EventStore } from './EventStore.js';
@@ -76,7 +75,8 @@ export class FileAccessPolicy {
     private readonly eventStore: EventStore,
     private readonly shellCommandParser: ShellCommandParser,
     private readonly planWriteSet: PlanWriteSet,
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
   ) {}
 
   public async apply(event: any): Promise<PolicyResult | null> {
@@ -259,7 +259,7 @@ export class FileAccessPolicy {
     return {
       beadId: this.env.env(EnvVars.BEAD_ID),
       stateId: this.env.env(EnvVars.STATE_ID),
-      projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot(),
+      projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot,
       worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || '',
       cwd: process.cwd()
     };

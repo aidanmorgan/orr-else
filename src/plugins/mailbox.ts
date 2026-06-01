@@ -3,8 +3,8 @@ import { NativeMailbox } from '../core/Mailbox.js';
 import { EventStore } from '../core/EventStore.js';
 import { EnvVars, Defaults, PluginToolName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
 
-export function createMailboxPlugin(eventStore: EventStore) {
-  const mailbox = new NativeMailbox(eventStore);
+export function createMailboxPlugin(eventStore: EventStore, projectRoot: string = process.cwd()) {
+  const mailbox = new NativeMailbox(eventStore, undefined, projectRoot);
   return {
   name: 'mailbox-communication',
   tools: [

@@ -18,8 +18,7 @@ import * as path from 'path';
 import { ArtifactQuery, safeSelectPath } from '../src/core/ArtifactQuery.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { ArtifactQueryDefaults } from '../src/constants/index.js';
-import { setProjectRoot } from '../src/core/Paths.js';
+import { ArtifactQueryDefaults, EnvVars } from '../src/constants/index.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-query-artifact-test');
 
@@ -86,12 +85,16 @@ describe('ArtifactQuery', () => {
   let configLoader: ConfigLoader;
   let artifactPaths: ArtifactPaths;
   let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
 
   beforeEach(() => {
     fs.rmSync(root, { recursive: true, force: true });
-    setProjectRoot(root);
-    configLoader = new ConfigLoader();
-    artifactPaths = new ArtifactPaths(configLoader);
+    // ArtifactQuery.ts reads process.env[PROJECT_ROOT] for security scoping
+    // (it is deferred out of WI-2 scope; set the env var to match the root).
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
     query = new ArtifactQuery(artifactPaths);
 
     writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
@@ -100,8 +103,9 @@ describe('ArtifactQuery', () => {
   });
 
   afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
     configLoader.reset();
-    setProjectRoot(process.cwd());
     fs.rmSync(root, { recursive: true, force: true });
   });
 

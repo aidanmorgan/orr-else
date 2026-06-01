@@ -4,7 +4,6 @@ import * as os from 'os';
 import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Observability, SpanStatusValue } from '../src/core/Observability.js';
-import { setProjectRoot } from '../src/core/Paths.js';
 import { EnvVars, ObservabilityDefaults, ToolResultStatus } from '../src/constants/index.js';
 
 describe('Observability', () => {
@@ -36,15 +35,13 @@ states:
 
   beforeEach(() => {
     fs.mkdirSync(path.join(root, 'state', 'logs'), { recursive: true });
-    setProjectRoot(root);
-    configLoader = new ConfigLoader();
-    observability = new Observability(configLoader);
+    configLoader = new ConfigLoader(undefined, root);
+    observability = new Observability(configLoader, undefined, root);
   });
 
   afterEach(() => {
     observability.shutdown();
     configLoader.reset();
-    setProjectRoot(process.cwd());
   });
 
   it('writes spans to the default session-named JSONL file with a UUIDv7 session id', async () => {

@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { ConfigLoader } from './ConfigLoader.js';
-import { getProjectRoot, resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { ArtifactPathDefaults, EnvVars } from '../constants/index.js';
 
@@ -49,7 +49,8 @@ export interface ArtifactPathResolution {
 export class ArtifactPaths {
   constructor(
     private readonly configLoader: ConfigLoader,
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
   ) {}
 
   public async resolve(context: ArtifactPathContext): Promise<ArtifactPathResolution> {
@@ -77,16 +78,17 @@ export class ArtifactPaths {
       : templateEntries;
 
     for (const [name, template] of selectedTemplateEntries) {
+      const effectiveRoot = this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot;
       const rendered = this.render(template, {
         baseDir,
         beadId: context.beadId,
         stateId: context.stateId || '',
         actionId: context.actionId || '',
         artifactId: context.artifactId || name,
-        projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot(),
-        worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || this.env.env(EnvVars.PROJECT_ROOT) || getProjectRoot()
+        projectRoot: effectiveRoot,
+        worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || effectiveRoot
       });
-      const resolved = path.isAbsolute(rendered) ? rendered : resolveProject(rendered);
+      const resolved = path.isAbsolute(rendered) ? rendered : resolveProjectFrom(effectiveRoot, rendered);
       paths[name] = resolved;
       existence[name] = fs.existsSync(resolved);
       if (!existence[name]) missing.push(name);

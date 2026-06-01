@@ -4,7 +4,6 @@ import { execa } from 'execa';
 import { CommandExitCode, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
-import { getProjectRoot } from './Paths.js';
 
 interface PlanContractWriteSetEntry {
   path?: string;
@@ -59,7 +58,8 @@ const readFileAsync = fs.promises.readFile;
 export class PlanWriteSet {
   constructor(
     private readonly configLoader: ConfigLoader,
-    private readonly artifactPaths: ArtifactPaths
+    private readonly artifactPaths: ArtifactPaths,
+    private readonly projectRoot: string = process.cwd()
   ) {}
 
   public async resolve(context: PlanWriteSetContext): Promise<PlanWriteSetResolution> {
@@ -230,7 +230,7 @@ export class PlanWriteSet {
     projectRoot: string | undefined
   ): string[] {
     const writeSet = parsed.writeSet || [];
-    const roots = [worktreePath, projectRoot || getProjectRoot()];
+    const roots = [worktreePath, projectRoot || this.projectRoot];
     return writeSet
       .map(entry => typeof entry === 'string' ? entry : entry.path || '')
       .filter(Boolean)

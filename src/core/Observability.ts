@@ -25,7 +25,7 @@ import {
 import { v7 as uuidv7 } from 'uuid';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
-import { resolveProject } from './Paths.js';
+import { resolveProjectFrom } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OtelAttr, ToolResultStatus } from '../constants/index.js';
@@ -171,7 +171,8 @@ export class Observability {
 
   constructor(
     private readonly configLoader: ConfigLoader,
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly projectRoot: string = process.cwd()
   ) {
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
     this.sessionStateId = this.env.env(EnvVars.SESSION_STATE_ID) || null;
@@ -214,7 +215,7 @@ export class Observability {
 
   public getJsonlFilePath(): string {
     if (this.currentFilePath) return this.currentFilePath;
-    return path.join(resolveProject('.pi/otel'), this.getJsonlFileName());
+    return path.join(resolveProjectFrom(this.projectRoot, '.pi/otel'), this.getJsonlFileName());
   }
 
   private toolResultPassed(result: unknown): boolean {
@@ -232,7 +233,7 @@ export class Observability {
     }
 
     const obsDir = observability?.dir || '.pi/otel';
-    const absoluteDir = path.isAbsolute(obsDir) ? obsDir : resolveProject(obsDir);
+    const absoluteDir = path.isAbsolute(obsDir) ? obsDir : resolveProjectFrom(this.projectRoot, obsDir);
     const fileName = this.resolveFileName(observability?.fileName);
     const filePath = path.join(absoluteDir, fileName);
     const collector = observability?.collector;

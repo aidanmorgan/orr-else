@@ -13,7 +13,6 @@ import path from 'path';
 import lockfile from 'proper-lockfile';
 import { v7 as uuidv7 } from 'uuid';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
-import { getProjectRoot } from '../core/Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { resolveTemplateString, type TemplateContext } from '../core/PiIntegration.js';
 import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
@@ -422,7 +421,7 @@ function mcpToolRequestOptions(definition: ProjectMcpToolConfig): RequestOptions
 }
 
 function serializedMcpLockMetadata(context: ProjectToolExecutionContext): SerializedMcpLockMetadata {
-  const root = context.templateContext.projectRoot || getProjectRoot() || process.cwd();
+  const root = context.templateContext.projectRoot || process.cwd();
   return {
     scope: SERIAL_MCP_LOCK_SCOPE,
     projectRoot: root,
@@ -1072,8 +1071,8 @@ function pathSegment(value: string | undefined, fallback: string): string {
   return sanitized || fallback;
 }
 
-function baseTemplateContext(definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment): TemplateContext {
-  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || getProjectRoot();
+function baseTemplateContext(definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): TemplateContext {
+  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || injectedRoot;
   const worktreeRoot = env.env(EnvVars.WORKTREE_PATH) || projectRoot;
   return {
     configPath: env.env(EnvVars.CONFIG_PATH),
@@ -1095,10 +1094,10 @@ function frameworkRootFromArgs(args: any, fallbackRoot?: string, env: RuntimeEnv
   return path.resolve(value);
 }
 
-function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment): string | undefined {
+function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): string | undefined {
   const value = config.settings.artifacts?.templates?.orrElseFrameworkRoot;
   if (typeof value !== 'string' || !value.trim()) return undefined;
-  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || getProjectRoot();
+  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || injectedRoot;
   const context: TemplateContext = {
     projectRoot,
     worktreePath: env.env(EnvVars.WORKTREE_PATH) || projectRoot
@@ -1136,8 +1135,8 @@ function resolveToolCwd(definition: ProjectToolConfig, templateContext: Template
   return resolveCwdValue(configuredCwd, templateContext);
 }
 
-function executionContext(pathFactory: ToolCallPathFactory, definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment): ProjectToolExecutionContext {
-  const initialContext = baseTemplateContext(definition, args, env);
+function executionContext(pathFactory: ToolCallPathFactory, definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): ProjectToolExecutionContext {
+  const initialContext = baseTemplateContext(definition, args, env, injectedRoot);
   const cwd = resolveToolCwd(definition, initialContext, args);
   const invocationContext = {
     ...initialContext,
@@ -4189,10 +4188,11 @@ export async function executeConfiguredProjectTool(
   args: Record<string, unknown>,
   ctx: ExtensionContext,
   env: RuntimeEnvironment | undefined,
-  backpressure: ProjectToolBackpressure
+  backpressure: ProjectToolBackpressure,
+  injectedRoot: string = process.cwd()
 ): Promise<unknown> {
   const beadId = beadIdFromArgs(args, env);
-  const context = executionContext(pathFactory, definition, args, env);
+  const context = executionContext(pathFactory, definition, args, env, injectedRoot);
   const stateId = context.templateContext.stateId;
   const actionId = context.templateContext.actionId;
   if (definition.type === ProjectToolType.EXTENSION) {
@@ -4421,7 +4421,8 @@ export function registerConfiguredProjectTools(
   wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
   runtimeContext: (() => ProjectToolRuntimeContext | undefined) | undefined,
   env: RuntimeEnvironment | undefined,
-  backpressure: ProjectToolBackpressure
+  backpressure: ProjectToolBackpressure,
+  injectedRoot: string = process.cwd()
 ) {
   const tools = config.tools || [];
   for (const definition of tools) {
@@ -4451,12 +4452,12 @@ export function registerConfiguredProjectTools(
           }),
       execute: async (params: any, ctx: ExtensionContext) => {
         const hiddenContext = runtimeContext?.() || {};
-        const configuredFrameworkRoot = frameworkRootFromConfig(config, env);
+        const configuredFrameworkRoot = frameworkRootFromConfig(config, env, injectedRoot);
         return await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
           ...(params || {}),
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {})
-        }, ctx, env, backpressure);
+        }, ctx, env, backpressure, injectedRoot);
       }
     }));
   }

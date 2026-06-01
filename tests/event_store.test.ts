@@ -4,22 +4,18 @@ import * as os from 'os';
 import * as path from 'path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
 
 describe('EventStore projections', () => {
   let tempRoot: string;
-  let previousRoot: string;
   let configLoader: ConfigLoader;
   let eventStore: EventStore;
 
   beforeEach(() => {
-    previousRoot = getProjectRoot();
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-event-store-'));
-    setProjectRoot(tempRoot);
-    configLoader = new ConfigLoader();
-    eventStore = new EventStore(configLoader);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     eventStore.setSessionId(`test-${process.pid}`);
     fs.mkdirSync(path.join(tempRoot, '.pi/events'), { recursive: true });
     fs.mkdirSync(path.join(tempRoot, '.pi/logs'), { recursive: true });
@@ -41,7 +37,6 @@ states:
   });
 
   afterEach(async () => {
-    setProjectRoot(previousRoot);
     configLoader.reset();
     eventStore.setSessionId(`test-${process.pid}-reset`);
     Logger.close();

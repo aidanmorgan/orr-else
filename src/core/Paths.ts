@@ -11,21 +11,10 @@ const __dirname = path.dirname(__filename);
 export const PATH_INSTALL_ROOT = path.resolve(__dirname, '../../');
 
 /**
- * PATH_PROJECT_ROOT: The directory where the user's project resides.
- * Defaults to process.cwd(), but can be overridden by the Orchestrator.
+ * Pure helper: resolve path segments relative to an explicit root.
+ * Prefer this over resolveProject() in any code that has an injected projectRoot.
  */
-let projectRoot = process.cwd();
-
-export const setProjectRoot = (root: string) => {
-  projectRoot = path.resolve(root);
-};
-
-export const getProjectRoot = () => projectRoot;
-
-/**
- * Resolves a path relative to the project root.
- */
-export const resolveProject = (...args: string[]) => path.join(getProjectRoot(), ...args);
+export const resolveProjectFrom = (root: string, ...args: string[]) => path.join(root, ...args);
 
 /**
  * Resolves a path relative to the installation root.

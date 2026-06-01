@@ -30,11 +30,6 @@ const ALLOWLIST: AllowlistEntry[] = [
     deferredWI: undefined
   },
   {
-    file: 'src/core/Paths.ts',
-    reason: 'Module-level projectRoot initialisation reads process.cwd(); removal requires threading projectRoot through RuntimeServices (WI-2).',
-    deferredWI: 'WI-2'
-  },
-  {
     file: 'src/core/ArtifactQuery.ts',
     reason: 'Not in WI-1 scope; reads PROJECT_ROOT/WORKTREE_PATH for artifact query context. Will be addressed in a follow-up.',
     deferredWI: undefined
