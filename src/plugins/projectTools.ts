@@ -963,16 +963,33 @@ async function boundedCommandFile(filePath: string, limitBytes: number): Promise
   }
 }
 
+/**
+ * Resolves a context field from args with fixed precedence:
+ * 1. args.[key]            — top-level keys (legacy shims, checked first for backward compat)
+ * 2. args.arguments.[key]  — nested arguments.* form (canonical; prefer this in new callers)
+ * 3. process.env[envVar]   — environment fallback (optional)
+ * Keys are [canonical, ...aliases] and are tried in that order within each tier.
+ */
+export function resolveContextField(args: any, keys: [string, ...string[]], envVar?: string): string | undefined {
+  for (const key of keys) {
+    if (args?.[key]) return args[key];
+  }
+  for (const key of keys) {
+    if (args?.arguments?.[key]) return args.arguments[key];
+  }
+  return envVar ? process.env[envVar] : undefined;
+}
+
 function beadIdFromArgs(args: any): string | undefined {
-  return args?.beadId || args?.id || args?.arguments?.beadId || args?.arguments?.id || process.env[EnvVars.BEAD_ID];
+  return resolveContextField(args, ['beadId', 'id'], EnvVars.BEAD_ID);
 }
 
 function stateIdFromArgs(args: any): string | undefined {
-  return args?.stateId || args?.state || args?.arguments?.stateId || args?.arguments?.state || process.env[EnvVars.STATE_ID];
+  return resolveContextField(args, ['stateId', 'state'], EnvVars.STATE_ID);
 }
 
 function actionIdFromArgs(args: any): string | undefined {
-  return args?.actionId || args?.action || args?.arguments?.actionId || args?.arguments?.action || process.env[EnvVars.ACTION_ID];
+  return resolveContextField(args, ['actionId', 'action'], EnvVars.ACTION_ID);
 }
 
 function cwdOverrideFromArgs(args: any): string | undefined {
@@ -2711,6 +2728,53 @@ async function persistAndBoundResult(
   return modelFacingTruncatedResult(definition, record, context, serialized, maxInlineBytes);
 }
 
+interface CommandResultInput {
+  definition: ProjectCommandToolConfig;
+  status: ToolResultStatus;
+  exitCode: number | undefined;
+  maxBufferExceeded: boolean;
+  timedOut?: boolean;
+  signal?: string | undefined;
+  stdoutFile: string;
+  stderrFile: string;
+  boundedStdout: { text: string; bytes: number; truncated: boolean };
+  boundedStderr: { text: string; bytes: number; truncated: boolean };
+  stdoutTruncated: boolean;
+  structuredStdout: Record<string, unknown> | undefined;
+  structuredSummary: unknown;
+  toolCalls: unknown;
+  normalizedPathArguments: string[];
+}
+
+function buildCommandResult(input: CommandResultInput): object {
+  const {
+    definition, status, exitCode, maxBufferExceeded, timedOut, signal,
+    stdoutFile, stderrFile, boundedStdout, boundedStderr, stdoutTruncated,
+    structuredStdout, structuredSummary, toolCalls, normalizedPathArguments
+  } = input;
+  return {
+    tool: definition.name,
+    status,
+    exitCode,
+    ...(timedOut !== undefined ? { timedOut } : {}),
+    ...(signal !== undefined ? { signal } : {}),
+    maxBufferExceeded,
+    stdoutFile,
+    stderrFile,
+    stdout: boundedStdout.text,
+    stderr: boundedStderr.text,
+    stdoutBytes: boundedStdout.bytes,
+    stderrBytes: boundedStderr.bytes,
+    stdoutTruncated,
+    stderrTruncated: boundedStderr.truncated,
+    ...commandResultAnnotations(definition, exitCode, boundedStdout.text, boundedStderr.text, structuredStdout),
+    ...(normalizedPathArguments.length > 0 ? { normalizedPathArguments } : {}),
+    ...(structuredCommandResultPreview(structuredStdout) ? { [ProjectToolResultKey.RESULT_PREVIEW]: structuredCommandResultPreview(structuredStdout) } : {}),
+    ...(structuredSummary ? { [ProjectToolResultKey.STRUCTURED_RESULT]: structuredSummary } : {}),
+    ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {})
+  };
+}
+
 async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
   const templateContext = context.templateContext;
   const command = resolveTemplateString(definition.command, templateContext);
@@ -2765,27 +2829,23 @@ async function executeCommandTool(definition: ProjectCommandToolConfig, args: an
       && boundedStderr.text.trim().length === 0;
     const passed = !result.timedOut && (exitCode === CommandExitCode.SUCCESS || acceptedNonZeroExitCode);
 
-    return {
-      tool: definition.name,
+    return buildCommandResult({
+      definition,
       status: passed ? ToolResultStatus.PASSED : ToolResultStatus.REJECTED,
       exitCode,
+      maxBufferExceeded: false,
       timedOut: result.timedOut,
       signal: result.signal,
       stdoutFile,
       stderrFile,
-      stdout: boundedStdout.text,
-      stderr: boundedStderr.text,
-      stdoutBytes: boundedStdout.bytes,
-      stderrBytes: boundedStderr.bytes,
+      boundedStdout,
+      boundedStderr,
       stdoutTruncated: boundedStdout.truncated,
-      stderrTruncated: boundedStderr.truncated,
-      maxBufferExceeded: false,
-      ...commandResultAnnotations(definition, exitCode, boundedStdout.text, boundedStderr.text, structuredStdout),
-      ...(scopedArgs.normalizedPathArguments.length > 0 ? { normalizedPathArguments: scopedArgs.normalizedPathArguments } : {}),
-      ...(structuredCommandResultPreview(structuredStdout) ? { [ProjectToolResultKey.RESULT_PREVIEW]: structuredCommandResultPreview(structuredStdout) } : {}),
-      ...(structuredSummary ? { [ProjectToolResultKey.STRUCTURED_RESULT]: structuredSummary } : {}),
-      ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {})
-    };
+      structuredStdout,
+      structuredSummary,
+      toolCalls,
+      normalizedPathArguments: scopedArgs.normalizedPathArguments
+    });
   } catch (error: any) {
     const fileStdout = await boundedCommandFile(stdoutFile, returnBytes);
     const fileStderr = await boundedCommandFile(stderrFile, returnBytes);
@@ -2802,25 +2862,22 @@ async function executeCommandTool(definition: ProjectCommandToolConfig, args: an
     const structuredSummary = structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined;
     const toolCalls = structuredStdout ? toolCallsFromRecord(structuredStdout) : undefined;
     const exitCode = typeof error.code === 'number' ? error.code : undefined;
-    return {
-      tool: definition.name,
+
+    return buildCommandResult({
+      definition,
       status,
       exitCode,
       maxBufferExceeded,
       stdoutFile,
       stderrFile,
-      stdout: boundedStdout.text,
-      stderr: boundedStderr.text,
-      stdoutBytes: boundedStdout.bytes,
-      stderrBytes: boundedStderr.bytes,
+      boundedStdout,
+      boundedStderr,
       stdoutTruncated: boundedStdout.truncated || maxBufferExceeded,
-      stderrTruncated: boundedStderr.truncated,
-      ...commandResultAnnotations(definition, exitCode, boundedStdout.text, boundedStderr.text, structuredStdout),
-      ...(scopedArgs.normalizedPathArguments.length > 0 ? { normalizedPathArguments: scopedArgs.normalizedPathArguments } : {}),
-      ...(structuredCommandResultPreview(structuredStdout) ? { [ProjectToolResultKey.RESULT_PREVIEW]: structuredCommandResultPreview(structuredStdout) } : {}),
-      ...(structuredSummary ? { [ProjectToolResultKey.STRUCTURED_RESULT]: structuredSummary } : {}),
-      ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {})
-    };
+      structuredStdout,
+      structuredSummary,
+      toolCalls,
+      normalizedPathArguments: scopedArgs.normalizedPathArguments
+    });
   }
 }
 

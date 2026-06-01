@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -2253,5 +2253,185 @@ describe('project tool command arguments', () => {
     expect(firstPayload[EnvProbeField.OUTPUT_FILE]).not.toBe(secondPayload[EnvProbeField.OUTPUT_FILE]);
     expect(firstPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.tmp/tool-calls/bd-3/Planning/repeat/env_probe'));
     expect(secondPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.tmp/tool-calls/bd-3/Planning/repeat/env_probe'));
+  });
+});
+
+// WI-28: resolveContextField precedence tests
+describe('resolveContextField', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    savedEnv['PI_BEAD_ID'] = process.env['PI_BEAD_ID'];
+    savedEnv['PI_STATE_ID'] = process.env['PI_STATE_ID'];
+    savedEnv['PI_ACTION_ID'] = process.env['PI_ACTION_ID'];
+    delete process.env['PI_BEAD_ID'];
+    delete process.env['PI_STATE_ID'];
+    delete process.env['PI_ACTION_ID'];
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  });
+
+  it('resolves bead ID from top-level canonical key', () => {
+    expect(resolveContextField({ beadId: 'bd-top' }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('bd-top');
+  });
+
+  it('resolves bead ID from top-level alias key', () => {
+    expect(resolveContextField({ id: 'bd-alias' }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('bd-alias');
+  });
+
+  it('resolves bead ID from nested arguments.* canonical key', () => {
+    expect(resolveContextField({ arguments: { beadId: 'bd-nested' } }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('bd-nested');
+  });
+
+  it('resolves bead ID from nested arguments.* alias key', () => {
+    expect(resolveContextField({ arguments: { id: 'bd-nested-alias' } }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('bd-nested-alias');
+  });
+
+  it('resolves bead ID from env when no args present', () => {
+    process.env['PI_BEAD_ID'] = 'bd-env';
+    expect(resolveContextField({}, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('bd-env');
+  });
+
+  it('top-level key takes precedence over nested arguments.*', () => {
+    expect(resolveContextField({ beadId: 'top', arguments: { beadId: 'nested' } }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('top');
+  });
+
+  it('nested arguments.* takes precedence over env', () => {
+    process.env['PI_BEAD_ID'] = 'bd-env';
+    expect(resolveContextField({ arguments: { beadId: 'nested' } }, ['beadId', 'id'], 'PI_BEAD_ID')).toBe('nested');
+  });
+
+  it('resolves state ID with its key pair', () => {
+    expect(resolveContextField({ stateId: 'Planning' }, ['stateId', 'state'], 'PI_STATE_ID')).toBe('Planning');
+    expect(resolveContextField({ state: 'Review' }, ['stateId', 'state'], 'PI_STATE_ID')).toBe('Review');
+    expect(resolveContextField({ arguments: { stateId: 'CodeGen' } }, ['stateId', 'state'], 'PI_STATE_ID')).toBe('CodeGen');
+  });
+
+  it('resolves action ID with its key pair', () => {
+    expect(resolveContextField({ actionId: 'quality' }, ['actionId', 'action'], 'PI_ACTION_ID')).toBe('quality');
+    expect(resolveContextField({ action: 'plan' }, ['actionId', 'action'], 'PI_ACTION_ID')).toBe('plan');
+    expect(resolveContextField({ arguments: { actionId: 'review' } }, ['actionId', 'action'], 'PI_ACTION_ID')).toBe('review');
+  });
+
+  it('returns undefined when args and env are all absent', () => {
+    expect(resolveContextField({}, ['beadId', 'id'], 'PI_BEAD_ID')).toBeUndefined();
+  });
+
+  it('returns undefined when envVar is not provided and args are absent', () => {
+    expect(resolveContextField({}, ['beadId', 'id'])).toBeUndefined();
+  });
+});
+
+// WI-28: buildCommandResult shape tests via executeConfiguredProjectTool
+describe('buildCommandResult field completeness', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousRoot: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-cmd-result-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-shape');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    setProjectRoot(tempRoot);
+    configLoader = new ConfigLoader();
+    eventStore = new EventStore(configLoader);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-shape-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  const minimalCommandTool = (script: string): ProjectCommandToolConfig => ({
+    name: 'shape_probe',
+    type: ProjectToolType.COMMAND,
+    command: process.execPath,
+    defaultArgs: ['-e', script],
+    cwd: CwdMode.WORKTREE,
+    maxOutputBytes: 10_000
+  });
+
+  it('success branch carries all expected fields', async () => {
+    // Process exits 0 — goes through the try success path of executeCommandTool.
+    // The final result is model-facing: stdoutFile/stderrFile are hidden, signal is
+    // filtered (undefined on normal exit), timedOut is present as false.
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory,
+      minimalCommandTool('process.stdout.write(JSON.stringify({ok:true}))'),
+      { beadId: 'bd-shape', stateId: 'Planning', actionId: 'test' },
+      {} as any
+    ) as any;
+
+    expect(result.tool).toBe('shape_probe');
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect(result.exitCode).toBe(0);
+    expect(result.maxBufferExceeded).toBe(false);
+    expect(result.timedOut).toBe(false);
+    expect(typeof result.stdout).toBe('string');
+    expect(typeof result.stderr).toBe('string');
+    expect(typeof result.stdoutBytes).toBe('number');
+    expect(typeof result.stderrBytes).toBe('number');
+    expect(typeof result.stdoutTruncated).toBe('boolean');
+    expect(typeof result.stderrTruncated).toBe('boolean');
+    expect(result.stdoutTruncated).toBe(false);
+    // stdoutFile/stderrFile are stripped by model-facing filter (MODEL_HIDDEN_RESULT_KEYS)
+    expect(result).not.toHaveProperty('stdoutFile');
+    expect(result).not.toHaveProperty('stderrFile');
+  });
+
+  it('error branch (non-zero exit) carries all expected fields', async () => {
+    // Process exits 1 — goes through the try success path with REJECTED status.
+    // stdoutTruncated remains false (no maxBufferExceeded on normal non-zero exit).
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory,
+      {
+        name: 'shape_probe_fail',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        cwd: CwdMode.WORKTREE,
+        maxOutputBytes: 10_000
+      },
+      { beadId: 'bd-shape', stateId: 'Planning', actionId: 'test' },
+      {} as any
+    ) as any;
+
+    expect(result.tool).toBe('shape_probe_fail');
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    expect(result.exitCode).toBe(1);
+    expect(result.maxBufferExceeded).toBe(false);
+    expect(typeof result.stdout).toBe('string');
+    expect(typeof result.stderr).toBe('string');
+    expect(typeof result.stdoutBytes).toBe('number');
+    expect(typeof result.stderrBytes).toBe('number');
+    expect(typeof result.stdoutTruncated).toBe('boolean');
+    expect(typeof result.stderrTruncated).toBe('boolean');
+    // stdoutFile/stderrFile are stripped by model-facing filter (MODEL_HIDDEN_RESULT_KEYS)
+    expect(result).not.toHaveProperty('stdoutFile');
+    expect(result).not.toHaveProperty('stderrFile');
   });
 });
