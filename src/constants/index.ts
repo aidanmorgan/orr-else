@@ -920,7 +920,18 @@ export const ProjectToolDefaults = {
   // Maximum number of affected paths surfaced in a StructuredResult.
   SUMMARIZER_MAX_AFFECTED_PATHS: 10,
   // Maximum number of representative samples surfaced in a StructuredResult.
-  SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES: 5
+  SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES: 5,
+  // Command failure summarizer caps.
+  // Maximum number of distinct test-failure groups surfaced per run.
+  COMMAND_FAILURE_MAX_TEST_GROUPS: 8,
+  // Maximum number of distinct linter/scanner-failure groups surfaced per run.
+  COMMAND_FAILURE_MAX_LINT_GROUPS: 8,
+  // Maximum number of representative location strings per group.
+  COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP: 3,
+  // Char limit applied to individual message/rule strings before they are stored.
+  COMMAND_FAILURE_MESSAGE_CHARS: 200,
+  // Char limit applied to a single representative traceback/context line.
+  COMMAND_FAILURE_CONTEXT_LINE_CHARS: 160
 } as const;
 
 export const LoggingDefaults = {

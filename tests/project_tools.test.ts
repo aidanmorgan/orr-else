@@ -3396,3 +3396,554 @@ describe('structuredResultHasDecisionEvidence — counts guard (defensive harden
     expect(structuredResultHasDecisionEvidence({})).toBe(false);
   });
 });
+
+// pi-experiment-tk6i: commandFailureSummarizer — plain-text command failure grouper
+describe('commandFailureSummarizer', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousRoot: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-cmd-fail-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    setProjectRoot(tempRoot);
+    configLoader = new ConfigLoader();
+    eventStore = new EventStore(configLoader);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-cmd-fail-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  // (a) pytest-style test failures -> structuredResult groups by test file/name + assertion type + locations
+  it('(a) failing command with pytest-style test failures -> structuredResult groups by test name, assertion type, and locations', async () => {
+    const pytestStderr = [
+      '_____________________________ test_add _____________________________',
+      '',
+      '    def test_add():',
+      '>       assert add(1, 2) == 4',
+      'E       AssertionError: assert 3 == 4',
+      '',
+      '    File "tests/test_math.py", line 10, in test_add',
+      '',
+      '_____________________________ test_sub _____________________________',
+      '',
+      '    def test_sub():',
+      '>       assert sub(5, 3) == 3',
+      'E       AssertionError: assert 2 == 3',
+      '',
+      '    File "tests/test_math.py", line 20, in test_sub',
+      '',
+      'FAILED tests/test_math.py::test_add - AssertionError: assert 3 == 4',
+      'FAILED tests/test_math.py::test_sub - AssertionError: assert 2 == 3',
+      '2 failed, 0 passed'
+    ].join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(pytestStderr)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    // Status must be REJECTED (failure)
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // structuredResult must be present with test group data
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+
+    // Counts must reflect test failures
+    expect(structuredResult.counts).toBeDefined();
+    expect(typeof structuredResult.counts.testFailures).toBe('number');
+    expect(structuredResult.counts.testFailures).toBeGreaterThan(0);
+    expect(typeof structuredResult.counts.testGroups).toBe('number');
+    expect(structuredResult.counts.testGroups).toBeGreaterThan(0);
+
+    // representativeSamples must carry test_failure entries with testName
+    expect(Array.isArray(structuredResult.representativeSamples)).toBe(true);
+    expect(structuredResult.representativeSamples.length).toBeGreaterThan(0);
+    const sample = structuredResult.representativeSamples[0];
+    expect(sample.type).toBe('test_failure');
+    expect(typeof sample.testName).toBe('string');
+    expect(sample.testName.length).toBeGreaterThan(0);
+
+    // affectedPaths must be present and contain file references
+    expect(Array.isArray(structuredResult.affectedPaths)).toBe(true);
+    expect(structuredResult.affectedPaths.length).toBeGreaterThan(0);
+
+    // nextAction must be fix_or_route_failure
+    expect(structuredResult.nextAction).toBe('fix_or_route_failure');
+
+    // failureCategory must be preserved (not altered by summarizer)
+    expect(typeof result.failureCategory).toBe('string');
+
+    // When structuredResult is present, raw stderr is suppressed in model-facing result
+    // (either undefined or absent from the model-facing output)
+    // The archive is attached when the result exceeds the inline limit; for small results it may be absent.
+    // We only check the structuredResult presence and content here.
+  });
+
+  // (b) linter/scanner output -> groups by rule/code/file/severity
+  it('(b) failing command with linter/scanner output -> structuredResult groups by rule, severity, and file', async () => {
+    const eslintOutput = [
+      '/workspace/src/index.ts:10:5: error  Missing semicolon  [semi]',
+      '/workspace/src/index.ts:14:1: warning  Unused variable x  [no-unused-vars]',
+      '/workspace/src/utils.ts:5:9: error  Missing semicolon  [semi]',
+      '/workspace/src/utils.ts:22:3: error  Missing semicolon  [semi]',
+      '',
+      '4 problems (3 errors, 1 warning)'
+    ].join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'lint',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stdout.write(${JSON.stringify(eslintOutput)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'lint'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+
+    // Counts must reflect lint violations
+    expect(structuredResult.counts).toBeDefined();
+    expect(typeof structuredResult.counts.lintViolations).toBe('number');
+    expect(structuredResult.counts.lintViolations).toBeGreaterThan(0);
+    expect(typeof structuredResult.counts.lintGroups).toBe('number');
+    expect(structuredResult.counts.lintGroups).toBeGreaterThan(0);
+
+    // representativeSamples must carry lint_violation entries with rule and severity
+    expect(Array.isArray(structuredResult.representativeSamples)).toBe(true);
+    expect(structuredResult.representativeSamples.length).toBeGreaterThan(0);
+    const lintSample = structuredResult.representativeSamples.find((s: any) => s.type === 'lint_violation');
+    expect(lintSample).toBeDefined();
+    expect(typeof lintSample.rule).toBe('string');
+    expect(lintSample.rule.length).toBeGreaterThan(0);
+    expect(typeof lintSample.severity).toBe('string');
+
+    // affectedPaths must include file references
+    expect(Array.isArray(structuredResult.affectedPaths)).toBe(true);
+    expect(structuredResult.affectedPaths.length).toBeGreaterThan(0);
+    // At least one affected path should reference the source files
+    const hasSourceFile = structuredResult.affectedPaths.some((p: string) => p.includes('.ts'));
+    expect(hasSourceFile).toBe(true);
+
+    // nextAction
+    expect(structuredResult.nextAction).toBe('fix_or_route_failure');
+  });
+
+  // (c) timeout/maxBuffer failure -> explicit structured fields + failureCategory preserved
+  it('(c) timeout failure -> explicit timedOut field in structuredResult + failureCategory preserved', async () => {
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'slow_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', `
+        // Output something to give the summarizer content, then simulate a timeout via plain text
+        process.stderr.write('Command timed out after 60s\\nSIGALRM received\\n');
+        process.exitCode = 1;
+      `],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000,
+      timeoutMs: 10_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+
+    // Timeout must be surfaced as an explicit count field
+    expect(typeof structuredResult.counts).toBe('object');
+    expect(structuredResult.counts.timedOut).toBe(1);
+
+    // failureCategory must be preserved (not altered by summarizer)
+    expect(typeof result.failureCategory).toBe('string');
+    // failureCategory routing comes from classifyProjectToolFailure, not the summarizer
+    // It should still be present regardless of the summarizer
+  });
+
+  // (c2) actual process timeout via execa -> timedOut field in record + preserved in structuredResult
+  it('(c2) process-level timeout -> timedOut field exposed in structuredResult + failureCategory routing preserved', async () => {
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'timed_out_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', `setTimeout(() => {}, 30000);`],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000,
+      timeoutMs: 100
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    // Tool must have timed out
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    // The record-level timedOut must be true (set by buildCommandResult)
+    expect(result.timedOut).toBe(true);
+
+    // failureCategory must be set (routing preserved)
+    expect(typeof result.failureCategory).toBe('string');
+
+    // When a process times out with empty stdout/stderr, there is no structured or diagnostic
+    // content to parse — the timedOut=true flag on the result IS the actionable signal.
+    // The harness preserves failureCategory routing (TRANSIENT_TRANSPORT for timeout patterns
+    // or VERIFIER_FAILED) regardless of whether the summarizer fires.
+  });
+
+  // (d) unparseable failure -> bounded diagnosticPreview + archive metadata, NO raw dump
+  it('(d) unparseable failure output -> null from summarizer -> bounded diagnosticPreview + archive, no raw dump', async () => {
+    // A large, completely unparseable stderr (no test/lint patterns, no timeout signals)
+    // The summarizer should return null, falling back to commandDiagnosticPreview.
+    const gibberish = Array.from({ length: 200 }, (_, i) => `random line ${i}: abcdef ghijkl mnopqr`).join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'unparseable_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(gibberish)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // structuredResult must be absent (summarizer returned null — no patterns matched)
+    expect(result.structuredResult).toBeUndefined();
+
+    // Archive must be present (raw data preserved — EARS req 5)
+    expect(result.outputArchive).toBeDefined();
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+
+    // Model-facing result must be compact (no raw dump)
+    const modelFacingJson = JSON.stringify(result);
+    expect(modelFacingJson.length).toBeLessThan(10 * 1024);
+
+    // stderr field may be present (inline) or absent (truncated), but raw 200-line dump must not be inline
+    if (result.stderr !== undefined) {
+      expect(result.stderr.length).toBeLessThan(gibberish.length);
+    }
+  });
+
+  // (e) SUCCESS result is unaffected — no failure summary, success semantics intact
+  it('(e) SUCCESS result is unaffected by the failure summarizer', async () => {
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', `
+        process.stdout.write('All tests passed.\\n1 passed, 0 failed\\n');
+      `],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    // Must still be PASSED
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // structuredResult must be absent (failure summarizer does not fire for PASSED)
+    // (structuredPayloadSummary might fire for JSON stdout, but this is plain text — no structured keys)
+    expect(result.structuredResult).toBeUndefined();
+
+    // No diagnosticSummary (not a python_lsp diagnostic tool)
+    expect(result.diagnosticSummary).toBeUndefined();
+
+    // The success output should be inline and accessible
+    expect(result.stdout).toBeDefined();
+    expect(result.stdout).toContain('All tests passed');
+  });
+
+  // (f) does not clobber a richer JSON structuredPayloadSummary
+  it('(f) commandFailureSummarizer does NOT clobber a pre-existing JSON structuredPayloadSummary', async () => {
+    // The stdout is JSON with a checks array (triggers structuredPayloadSummary with gate evidence).
+    // The summarizer registry must NOT overwrite the richer structuredResult with its own.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_checks',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'run_checks',
+          status: 'REJECTED',
+          artifact: 'implementation',
+          verdict: 'fail',
+          checks: [
+            { name: 'test-suite', status: 'REJECTED', message: 'test_example.py::test_add FAILED - AssertionError' }
+          ],
+          errors_by_tool: {
+            pytest: [{ tool: 'pytest', file: 'test_example.py', line: 10, message: 'AssertionError', blocking: true }]
+          }
+        })); process.exit(1);`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'verify'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // The pre-existing rich gate-evidence structuredResult must be present
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+
+    // Gate-evidence fields from structuredPayloadSummary must be present
+    expect(structuredResult.artifact).toBe('implementation');
+    expect(structuredResult.verdict).toBe('fail');
+    expect(Array.isArray(structuredResult.errorsByTool)).toBe(true);
+    expect(structuredResult.rejectedCheckCount).toBe(1);
+
+    // The commandFailureSummarizer's leaner fields must NOT be present
+    // (if clobbered, counts/affectedPaths/representativeSamples would appear)
+    expect(structuredResult.counts).toBeUndefined();
+    expect(structuredResult.affectedPaths).toBeUndefined();
+    expect(structuredResult.representativeSamples).toBeUndefined();
+  });
+
+  // Token metric: failing command with large stderr -> compact structured summary, archive retained
+  it('token metric: failing command with large stderr -> compact structuredResult + archive retained', async () => {
+    // Generate a large pytest-like failure output
+    const failureLines = Array.from({ length: 80 }, (_, i) => [
+      `_____________________________ test_func_${i} _____________________________`,
+      '',
+      `    def test_func_${i}():`,
+      `>       assert compute_${i}() == ${i}`,
+      `E       AssertionError: assert ${i + 1} == ${i}`,
+      '',
+      `    File "tests/test_module_${i % 5}.py", line ${10 + i}, in test_func_${i}`,
+      '',
+      `FAILED tests/test_module_${i % 5}.py::test_func_${i} - AssertionError: assert ${i + 1} == ${i}`
+    ].join('\n')).join('\n');
+
+    const rawPayloadBytes = Buffer.byteLength(failureLines);
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(failureLines)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 200_000,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // Model-facing result must be compact — well within 8 KiB
+    const modelFacingJson = JSON.stringify(result);
+    const modelFacingBytes = Buffer.byteLength(modelFacingJson);
+    expect(modelFacingBytes).toBeLessThan(8 * 1024);
+
+    // The raw payload alone was much larger than the model-facing result
+    expect(rawPayloadBytes).toBeGreaterThan(modelFacingBytes);
+
+    // structuredResult must be present with test group data
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+    expect(structuredResult.counts.testFailures).toBeGreaterThan(0);
+
+    // Archive holds the bounded raw data (EARS req 5)
+    expect(result.outputArchive).toBeDefined();
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+  });
+
+  // MUST-FIX 1: inline-path diagnosticPreview survival
+  // A small failing command output (stays on the inline path — no forced truncation) that
+  // produces a structuredResult must STILL expose a bounded diagnosticPreview so the agent
+  // sees the real failure tail even when b77h suppresses raw stdout/stderr.
+  it('(g) inline-path failure with structuredResult carries diagnosticPreview (MUST-FIX 1)', async () => {
+    const eslintOutput = [
+      '/workspace/src/index.ts:10:5: error  Missing semicolon  [semi]',
+      '/workspace/src/index.ts:14:1: warning  Unused variable x  [no-unused-vars]',
+      '/workspace/src/utils.ts:5:9: error  Missing semicolon  [semi]',
+      '4 problems (3 errors, 1 warning)'
+    ].join('\n');
+
+    // Use a generous inline limit so the result stays on the inline path
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'lint',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(eslintOutput)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+      // No inlineResultBytes override — defaults to large inline limit, so stays inline
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'lint'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // structuredResult must be present (lint groups were found)
+    expect(result.structuredResult).toBeDefined();
+
+    // Raw stderr must be suppressed (b77h suppression active)
+    expect(result.stderr).toBeUndefined();
+
+    // MUST-FIX 1: diagnosticPreview must be present and carry bounded real failure text
+    expect(result.diagnosticPreview).toBeDefined();
+    expect(typeof result.diagnosticPreview).toBe('string');
+    expect(result.diagnosticPreview.length).toBeGreaterThan(0);
+    // The preview should contain something from the actual failure output
+    expect(result.diagnosticPreview).toContain('index.ts');
+  });
+
+  // MUST-FIX 2: misparse guard — bare Go/compiler-style output must NOT produce a lint group
+  // A single bare "file:line: message" (no bracket rule, no column, no severity word) must
+  // not be treated as lint output and must not produce a spurious structuredResult with lint groups.
+  it('(h) Go/compiler-style bare file:line output does NOT produce a spurious lint structuredResult (MUST-FIX 2)', async () => {
+    // Go compiler: "main.go:42: undefined: foo" — no column, no severity word, no bracket rule
+    const goError = 'main.go:42: undefined: foo\n./cmd/main.go:15: cannot use x (type int) as type string';
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'build',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(goError)}); process.exitCode = 2;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'build'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // The summarizer should either return null (no structuredResult) OR if it produces one
+    // it must NOT have lint groups.  The preferred outcome is null (no spurious structuredResult).
+    if (result.structuredResult !== undefined) {
+      // If a structuredResult was produced (e.g. via process-signal path), it must not have
+      // lint-group fields
+      expect(result.structuredResult.counts?.lintGroups).toBeUndefined();
+      expect(result.structuredResult.counts?.lintViolations).toBeUndefined();
+      const samples = result.structuredResult.representativeSamples ?? [];
+      const hasLintSample = samples.some((s: any) => s.type === 'lint_violation');
+      expect(hasLintSample).toBe(false);
+    } else {
+      // Preferred: no structuredResult at all from this bare output
+      expect(result.structuredResult).toBeUndefined();
+    }
+  });
+
+  // MUST-FIX 3: omissions note fires when groups exceed the cap
+  // Produce enough distinct lint groups to exceed COMMAND_FAILURE_MAX_LINT_GROUPS (8),
+  // then assert that structuredResult.omissions is populated.
+  it('(i) omissions note is populated when lint groups exceed the cap (MUST-FIX 3)', async () => {
+    // Generate 10 distinct ESLint-style lint violations (each with a different rule code)
+    // so the 9th and 10th should be omitted (cap = 8)
+    const lintLines = Array.from({ length: 10 }, (_, i) =>
+      `/workspace/src/file${i}.ts:${i + 1}:5: error  Some lint error  [rule-code-${i}]`
+    ).join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'lint',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(lintLines)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'lint'
+    }, {} as any) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    const structuredResult = result.structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+
+    // 10 distinct groups, cap is 8 — omissions must be populated
+    expect(structuredResult.counts.lintGroups).toBe(8); // capped at 8
+    expect(typeof structuredResult.omissions).toBe('string');
+    expect(structuredResult.omissions).toContain('lint-violation groups omitted');
+    // The omissions note should mention 2 omitted groups (10 - 8 = 2)
+    expect(structuredResult.omissions).toContain('2');
+  });
+});

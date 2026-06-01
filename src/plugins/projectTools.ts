@@ -1946,6 +1946,20 @@ function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult 
   if (toolCalls && !Array.isArray(modelFacing[ProjectToolResultKey.TOOL_CALLS])) {
     modelFacing[ProjectToolResultKey.TOOL_CALLS] = toolCalls;
   }
+  // MUST-FIX 1 (b77h req 4 / inline-path blind spot): when a structuredResult is present
+  // on a FAILURE record the raw stdout/stderr are suppressed by b77h.  Ensure the agent
+  // always sees a bounded real-failure tail via diagnosticPreview — the same guarantee that
+  // the truncated path already provides (~line 2987).  diagnosticPreview is NOT in
+  // MODEL_RAW_SUPPRESSED_KEYS so it survives the filter above; we only need to compute and
+  // inject it when absent.
+  if (
+    hasStructuredModelSummary
+    && record.status !== ToolResultStatus.PASSED
+    && !modelFacing[ProjectToolResultKey.DIAGNOSTIC_PREVIEW]
+  ) {
+    const dp = commandDiagnosticPreview(record);
+    if (dp) modelFacing[ProjectToolResultKey.DIAGNOSTIC_PREVIEW] = dp;
+  }
   return modelFacing;
 }
 
@@ -2393,13 +2407,475 @@ const diagnosticSummarizer: ProjectToolSummarizer = {
   }
 };
 
+// ---------------------------------------------------------------------------
+// commandFailureSummarizer — plain-text command failure grouper
+// ---------------------------------------------------------------------------
+
+/**
+ * Pattern that detects pytest/vitest/jest-style test failure header lines.
+ * Matches lines like:
+ *   FAILED tests/test_foo.py::test_bar - AssertionError: ...
+ *   ✗ src/foo.test.ts > describe > test name
+ *   × test name (vitest "×" marker)
+ *   FAIL src/foo.test.ts
+ */
+const CMD_FAIL_TEST_FAILURE_PATTERN =
+  /^(?:FAILED|FAIL\s+\S|✗|×|●)\s+(\S+?(?:::\S+)?)\s*(?:-\s*(.+))?$|^(?:FAILED|FAIL)\s+(\S+(?:\s+>\s+\S+)+)/m;
+
+/**
+ * Pattern for individual test-failure lines we want to collect.
+ * Covers pytest (FAILED tests/foo.py::test_x), vitest (✗/×), jest (●).
+ */
+const CMD_FAIL_TEST_LINE_PATTERN =
+  /^(?:FAILED|✗|×|●)\s+(\S+(?:::\S+|\s+>\s+\S+)*)/;
+
+/**
+ * Pytest section header for failures (marks start of a failure block).
+ */
+const CMD_FAIL_PYTEST_SECTION_PATTERN =
+  /^_{3,}\s+(\S.+?)\s+_{3,}$/;
+
+/**
+ * Pattern for assertion/error type lines within a failure block.
+ * Matches lines like: "AssertionError: ...", "TypeError: ...", "E  assert ...".
+ */
+const CMD_FAIL_ASSERTION_PATTERN =
+  /^(?:E\s{2,})?([A-Za-z][A-Za-z0-9_]*Error|[A-Za-z][A-Za-z0-9_]*Exception|AssertionError|assert\b)[\s:](.{0,120})/;
+
+/**
+ * Pattern for file:line traceback references.
+ * Matches: "  File \"path/to/file.py\", line 42, in function_name"
+ * and also compact forms like "path/to/file.ts:42:5".
+ */
+const CMD_FAIL_TRACEBACK_LINE_PATTERN =
+  /(?:File\s+"([^"]+)",\s+line\s+(\d+))|(?:^\s+at\s+\S+\s+\(([^)]+):(\d+):\d+\))|(?:^(\S+\.(py|ts|js|tsx|jsx|rb|go|rs|java|cs|cpp|c|h):\d+))/m;
+
+/**
+ * Pattern for linter/scanner rule violations.
+ * Covers: ESLint (file:line:col  rule/code  message), flake8, pylint, ruff, tsc,
+ * semgrep-text, and generic "file:line:col: severity: message" patterns.
+ *
+ * Group 1: file path
+ * Group 2: line number
+ * Group 3+: severity/code/message (varies by format)
+ */
+const CMD_FAIL_LINT_LINE_PATTERN =
+  /^(\S[^:]*\.[a-zA-Z]{1,8}):(\d+)(?::\d+)?:?\s+(?:(error|warning|note|info|hint)\s*[:—\-]\s*)?(.{0,180})/i;
+
+/**
+ * Pattern for ESLint-style "  rule/code" on a following line (indented rule name).
+ */
+const CMD_FAIL_ESLINT_RULE_PATTERN =
+  /^\s{2,}([a-z][\w/.-]{2,50})\s*$/;
+
+/**
+ * Pattern for a severity word at the start of a message (for classification).
+ */
+const CMD_FAIL_SEVERITY_WORD_PATTERN =
+  /^(error|warning|warn|note|info|hint)\b/i;
+
+/**
+ * Pattern for timeout/maxBuffer/signal/transport indicators in failure output.
+ */
+const CMD_FAIL_TIMEOUT_PATTERN =
+  /\b(?:timed?\s*out|timeout|ETIMEDOUT|SIGALRM)\b/i;
+const CMD_FAIL_MAX_BUFFER_PATTERN =
+  /\b(?:ERR_CHILD_PROCESS_STDIO_MAXBUFFER|maxBuffer|max[_-]?buffer)\b/i;
+const CMD_FAIL_SIGNAL_PATTERN =
+  /\b(?:SIGKILL|SIGTERM|SIGABRT|SIGSEGV|killed|signal\s+\d+)\b/i;
+const CMD_FAIL_TRANSPORT_PATTERN =
+  /\b(?:ECONNRESET|EPIPE|ENOSPC|transport\s+error|connection\s+reset)\b/i;
+
+/** Returns true when the record represents a plain-text command failure with no richer structuredResult. */
+function isPlainTextCommandFailure(record: Record<string, unknown>): boolean {
+  const status = record.status;
+  // Must be a failure/rejection
+  if (status === ToolResultStatus.PASSED) return false;
+  // Must have plain-text stdout or stderr
+  const hasPlainText =
+    (typeof record[ProjectToolResultKey.STDOUT] === 'string' && (record[ProjectToolResultKey.STDOUT] as string).trim().length > 0)
+    || (typeof record[ProjectToolResultKey.STDERR] === 'string' && (record[ProjectToolResultKey.STDERR] as string).trim().length > 0);
+  if (!hasPlainText) return false;
+  // If stdout is JSON-parseable (structuredPayloadSummary territory), skip this summarizer.
+  const stdoutStr = typeof record[ProjectToolResultKey.STDOUT] === 'string' ? record[ProjectToolResultKey.STDOUT] as string : '';
+  if (stdoutStr.trim().startsWith('{') || stdoutStr.trim().startsWith('[')) {
+    const parsed = parseJsonRecord(stdoutStr);
+    if (parsed !== undefined) return false;
+  }
+  return true;
+}
+
+interface CommandFailureTestGroup {
+  testName: string;
+  assertionType?: string;
+  locations: string[];
+  count: number;
+}
+
+interface CommandFailureLintGroup {
+  rule: string;
+  severity: string;
+  locations: string[];
+  count: number;
+}
+
+function truncateString(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit)}...`;
+}
+
+function parseCommandFailureTestGroups(text: string): { groups: CommandFailureTestGroup[]; totalSeen: number } {
+  const groups = new Map<string, CommandFailureTestGroup>();
+  const lines = text.split(/\r?\n/);
+  let currentTestName: string | undefined;
+  let currentAssertion: string | undefined;
+  const currentLocations: string[] = [];
+
+  function flushGroup(): void {
+    if (!currentTestName) return;
+    const key = currentTestName;
+    const existing = groups.get(key);
+    const locations = [...currentLocations];
+    if (existing) {
+      existing.count += 1;
+      for (const loc of locations) {
+        if (existing.locations.length < ProjectToolDefaults.COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP && !existing.locations.includes(loc)) {
+          existing.locations.push(loc);
+        }
+      }
+    } else {
+      groups.set(key, {
+        testName: truncateString(key, ProjectToolDefaults.COMMAND_FAILURE_MESSAGE_CHARS),
+        assertionType: currentAssertion ? truncateString(currentAssertion, ProjectToolDefaults.COMMAND_FAILURE_MESSAGE_CHARS) : undefined,
+        locations: locations.slice(0, ProjectToolDefaults.COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP),
+        count: 1
+      });
+    }
+    currentTestName = undefined;
+    currentAssertion = undefined;
+    currentLocations.length = 0;
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd();
+
+    // Pytest section header: ___ test_name ___
+    const sectionMatch = CMD_FAIL_PYTEST_SECTION_PATTERN.exec(line);
+    if (sectionMatch) {
+      flushGroup();
+      currentTestName = sectionMatch[1].trim();
+      continue;
+    }
+
+    // Direct failure marker: FAILED tests/foo.py::test_bar or ✗ / × / ●
+    const testLineMatch = CMD_FAIL_TEST_LINE_PATTERN.exec(line.trim());
+    if (testLineMatch) {
+      flushGroup();
+      currentTestName = testLineMatch[1].trim();
+      continue;
+    }
+
+    if (!currentTestName) continue;
+
+    // Assertion/error type
+    const assertionMatch = CMD_FAIL_ASSERTION_PATTERN.exec(line);
+    if (assertionMatch && !currentAssertion) {
+      currentAssertion = `${assertionMatch[1]}: ${assertionMatch[2].trim()}`;
+      continue;
+    }
+
+    // Traceback locations
+    const traceMatch = CMD_FAIL_TRACEBACK_LINE_PATTERN.exec(line);
+    if (traceMatch) {
+      const loc = traceMatch[1]
+        ? `${traceMatch[1]}:${traceMatch[2]}`
+        : traceMatch[3]
+          ? `${traceMatch[3]}:${traceMatch[4]}`
+          : traceMatch[5] || '';
+      if (loc && currentLocations.length < ProjectToolDefaults.COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP) {
+        currentLocations.push(truncateString(loc, ProjectToolDefaults.COMMAND_FAILURE_CONTEXT_LINE_CHARS));
+      }
+    }
+  }
+  flushGroup();
+
+  // MUST-FIX 3: return all groups and the total-seen count so the caller can compute
+  // omissions without a second parse.  The caller is responsible for applying the cap.
+  const all = [...groups.values()];
+  return { groups: all.slice(0, ProjectToolDefaults.COMMAND_FAILURE_MAX_TEST_GROUPS), totalSeen: all.length };
+}
+
+function parseCommandFailureLintGroups(text: string): { groups: CommandFailureLintGroup[]; totalSeen: number } {
+  const groups = new Map<string, CommandFailureLintGroup>();
+  let totalSeen = 0; // MUST-FIX 3: track distinct rule/severity groups seen (including those beyond cap)
+  const lines = text.split(/\r?\n/);
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index].trimEnd();
+    const lintMatch = CMD_FAIL_LINT_LINE_PATTERN.exec(line);
+    if (!lintMatch) continue;
+
+    const filePath = lintMatch[1].trim();
+    const lineNum = lintMatch[2];
+    const severityWord = lintMatch[3]?.trim().toLowerCase() || '';
+    const rest = lintMatch[4]?.trim() || '';
+
+    // Try to extract a rule/code from the rest:
+    //   "[rule/code]" suffix pattern — e.g., "no-unused-vars" in brackets
+    //   or "rule/code" from the next line (ESLint indented rule)
+    let rule = '';
+    const bracketRule = rest.match(/\[([^\]]{2,50})\]\s*$/);
+    if (bracketRule) {
+      rule = bracketRule[1].trim();
+    } else if (index + 1 < lines.length) {
+      const nextLine = lines[index + 1].trimEnd();
+      const eslintRuleMatch = CMD_FAIL_ESLINT_RULE_PATTERN.exec(nextLine);
+      if (eslintRuleMatch) {
+        rule = eslintRuleMatch[1].trim();
+        index += 1; // consumed
+      }
+    }
+
+    if (!rule) {
+      // MUST-FIX 2: a single bare "file:line: message" with no bracket-rule, no
+      // indented-rule follow-on, and no explicit severity word in group 3 of the
+      // pattern is NOT a lint line — it is Go/compiler/generic output that shares
+      // the same surface syntax.  Only fall through to the 'unknown' rule when
+      // there IS a recognised severity word in the lint position (group 3) OR the
+      // rest already starts with a recognised severity word.  Without at least one
+      // of these signals, skip this line to avoid misparsing compiler errors.
+      const hasSeveritySignal =
+        Boolean(severityWord) // captured in group 3 — e.g. "error" / "warning"
+        || Boolean(CMD_FAIL_SEVERITY_WORD_PATTERN.exec(rest)?.[1]); // first word of rest
+      if (!hasSeveritySignal) continue;
+      // Severity signal present but no structured rule/code — use 'unknown' rule only
+      // when the match also has a column number (3-part file:line:col form), which
+      // distinguishes linters from plain compiler output (most compilers emit
+      // "file:line: message" without a column).  Without a column AND without a rule,
+      // skip to avoid misparse.
+      const hasColumn = /^(\S[^:]*\.[a-zA-Z]{1,8}):(\d+):(\d+):?\s/.test(line);
+      if (!hasColumn) continue;
+      const firstWord = rest.split(/\s+/)[0] || '';
+      rule = /^[a-z][\w/.:-]{2,40}$/i.test(firstWord) ? firstWord : 'unknown';
+    }
+
+    const severity = severityWord || (CMD_FAIL_SEVERITY_WORD_PATTERN.exec(rest)?.[1]?.toLowerCase() || 'error');
+    const location = `${filePath}:${lineNum}`;
+    const key = `${rule}\0${severity}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (existing.locations.length < ProjectToolDefaults.COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP && !existing.locations.includes(location)) {
+        existing.locations.push(location);
+      }
+    } else {
+      totalSeen += 1; // MUST-FIX 3: count every distinct group, even those that won't fit
+      if (groups.size < ProjectToolDefaults.COMMAND_FAILURE_MAX_LINT_GROUPS) {
+        groups.set(key, {
+          rule: truncateString(rule, ProjectToolDefaults.COMMAND_FAILURE_MESSAGE_CHARS),
+          severity,
+          locations: [truncateString(location, ProjectToolDefaults.COMMAND_FAILURE_CONTEXT_LINE_CHARS)],
+          count: 1
+        });
+      }
+    }
+  }
+
+  return { groups: [...groups.values()], totalSeen };
+}
+
+function extractCommandFailureProcessFields(record: Record<string, unknown>): {
+  timedOut?: boolean;
+  maxBufferExceeded?: boolean;
+  signal?: string;
+  transportError?: boolean;
+} {
+  const timedOut = record.timedOut === true;
+  const maxBufferExceeded = record.maxBufferExceeded === true;
+  const signal = typeof record.signal === 'string' && record.signal ? record.signal : undefined;
+  const combinedText = [
+    typeof record[ProjectToolResultKey.STDOUT] === 'string' ? record[ProjectToolResultKey.STDOUT] : '',
+    typeof record[ProjectToolResultKey.STDERR] === 'string' ? record[ProjectToolResultKey.STDERR] : ''
+  ].join('\n');
+  const transportError = CMD_FAIL_TRANSPORT_PATTERN.test(combinedText);
+  return withoutUndefined({ timedOut: timedOut || undefined, maxBufferExceeded: maxBufferExceeded || undefined, signal, transportError: transportError || undefined }) as {
+    timedOut?: boolean;
+    maxBufferExceeded?: boolean;
+    signal?: string;
+    transportError?: boolean;
+  };
+}
+
+/**
+ * Command failure summarizer — registered after the diagnostic summarizer.
+ *
+ * Fires only for plain-text command FAILURES with no pre-existing richer structuredResult.
+ * Parses test-runner and linter/scanner output into grouped structured summaries so agents
+ * get actionable grouped errors instead of large stderr/stdout tails.
+ */
+const commandFailureSummarizer: ProjectToolSummarizer = {
+  name: 'command_failure',
+  appliesTo(definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
+    // EARS req 6: never fires for SUCCESS
+    if (record.status === ToolResultStatus.PASSED) return false;
+    // Only applies to plain-text failures (no JSON structuredPayloadSummary territory)
+    return isPlainTextCommandFailure(record);
+  },
+  summarize(
+    _definition: ProjectToolConfig,
+    record: Record<string, unknown>,
+    _context: ProjectToolExecutionContext
+  ): StructuredResult | null {
+    try {
+      const processFields = extractCommandFailureProcessFields(record);
+      const combinedText = [
+        typeof record[ProjectToolResultKey.STDOUT] === 'string' ? record[ProjectToolResultKey.STDOUT] : '',
+        typeof record[ProjectToolResultKey.STDERR] === 'string' ? record[ProjectToolResultKey.STDERR] : ''
+      ].join('\n');
+
+      // EARS req 4: expose timeout/maxBuffer/signal/transport as explicit structured fields
+      // regardless of whether we can parse the rest
+      const hasProcessSignal =
+        processFields.timedOut
+        || processFields.maxBufferExceeded
+        || processFields.signal !== undefined
+        || processFields.transportError
+        || CMD_FAIL_TIMEOUT_PATTERN.test(combinedText)
+        || CMD_FAIL_MAX_BUFFER_PATTERN.test(combinedText)
+        || CMD_FAIL_SIGNAL_PATTERN.test(combinedText);
+
+      // Try parsing test failures (pytest/vitest/jest pattern)
+      const testParseResult = parseCommandFailureTestGroups(combinedText);
+      const testGroups = testParseResult.groups;
+      const testTotalSeen = testParseResult.totalSeen;
+      // Try parsing linter/scanner failures
+      const lintParseResult = parseCommandFailureLintGroups(combinedText);
+      const lintGroups = lintParseResult.groups;
+      const lintTotalSeen = lintParseResult.totalSeen;
+
+      const hasTestGroups = testGroups.length > 0;
+      const hasLintGroups = lintGroups.length > 0;
+      const hasParsedGroups = hasTestGroups || hasLintGroups;
+
+      // EARS req 5: if parsing is incomplete (no groups found), return bounded diagnosticPreview
+      // + archive metadata note rather than exposing raw streams
+      if (!hasParsedGroups && !hasProcessSignal) {
+        // Nothing actionable to structure — return null so the record falls back to
+        // commandDiagnosticPreview and the existing bounded preview path.
+        return null;
+      }
+
+      const counts: Record<string, number> = {};
+      const affectedPaths: string[] = [];
+      const representativeSamples: unknown[] = [];
+
+      if (hasTestGroups) {
+        const totalTests = testGroups.reduce((sum, group) => sum + group.count, 0);
+        counts.testFailures = totalTests;
+        counts.testGroups = testGroups.length;
+        for (const group of testGroups) {
+          for (const loc of group.locations) {
+            if (affectedPaths.length < ProjectToolDefaults.SUMMARIZER_MAX_AFFECTED_PATHS && !affectedPaths.includes(loc)) {
+              affectedPaths.push(loc);
+            }
+          }
+        }
+        for (const group of testGroups.slice(0, ProjectToolDefaults.SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES)) {
+          representativeSamples.push({
+            type: 'test_failure',
+            testName: group.testName,
+            ...(group.assertionType ? { assertionType: group.assertionType } : {}),
+            locations: group.locations,
+            count: group.count
+          });
+        }
+      }
+
+      if (hasLintGroups) {
+        const totalLint = lintGroups.reduce((sum, group) => sum + group.count, 0);
+        counts.lintViolations = totalLint;
+        counts.lintGroups = lintGroups.length;
+        for (const group of lintGroups) {
+          for (const loc of group.locations) {
+            if (affectedPaths.length < ProjectToolDefaults.SUMMARIZER_MAX_AFFECTED_PATHS && !affectedPaths.includes(loc)) {
+              affectedPaths.push(loc);
+            }
+          }
+        }
+        const lintSamplesLeft = ProjectToolDefaults.SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES - representativeSamples.length;
+        for (const group of lintGroups.slice(0, lintSamplesLeft)) {
+          representativeSamples.push({
+            type: 'lint_violation',
+            rule: group.rule,
+            severity: group.severity,
+            locations: group.locations,
+            count: group.count
+          });
+        }
+      }
+
+      // EARS req 4: add process signal fields when present
+      if (hasProcessSignal) {
+        if (processFields.timedOut || CMD_FAIL_TIMEOUT_PATTERN.test(combinedText)) counts.timedOut = 1;
+        if (processFields.maxBufferExceeded || CMD_FAIL_MAX_BUFFER_PATTERN.test(combinedText)) counts.maxBufferExceeded = 1;
+        if (processFields.signal) counts.signal = 1;
+        if (processFields.transportError || CMD_FAIL_TRANSPORT_PATTERN.test(combinedText)) counts.transportError = 1;
+      }
+
+      // Total for quick overview
+      const totalFailures = (counts.testFailures || 0) + (counts.lintViolations || 0);
+      if (totalFailures > 0) counts.failures = totalFailures;
+
+      const result: StructuredResult = {
+        status: 'ok',
+        counts
+      };
+      if (affectedPaths.length > 0) result.affectedPaths = affectedPaths;
+      if (representativeSamples.length > 0) result.representativeSamples = representativeSamples;
+
+      // EARS req 5: if parsing produced no groups (only process fields), add a note
+      if (!hasParsedGroups) {
+        result.omissions = 'failure output could not be parsed into test/lint groups; diagnosticPreview and archive retain bounded raw context';
+        result.nextAction = 'inspect_diagnosticPreview_then_archive_if_more_context_needed';
+      } else {
+        // MUST-FIX 3: use totalSeen from the first parse — no second re-parse needed.
+        const omittedTestGroups = hasTestGroups ? Math.max(0, testTotalSeen - ProjectToolDefaults.COMMAND_FAILURE_MAX_TEST_GROUPS) : 0;
+        const omittedLintGroups = hasLintGroups ? Math.max(0, lintTotalSeen - ProjectToolDefaults.COMMAND_FAILURE_MAX_LINT_GROUPS) : 0;
+        if (omittedTestGroups > 0 || omittedLintGroups > 0) {
+          result.omissions = [
+            omittedTestGroups > 0 ? `${omittedTestGroups} test-failure groups omitted` : '',
+            omittedLintGroups > 0 ? `${omittedLintGroups} lint-violation groups omitted` : ''
+          ].filter(Boolean).join('; ');
+        }
+        result.nextAction = 'fix_or_route_failure';
+      }
+
+      // Add explicit process signal fields at top level for EARS req 4.
+      // StructuredResult is narrowly typed; extend via Object.assign to preserve
+      // the interface contract while surfacing the extra fields in the JSON output.
+      const extra: Record<string, unknown> = {};
+      if (processFields.timedOut) extra.timedOut = true;
+      if (processFields.maxBufferExceeded) extra.maxBufferExceeded = true;
+      if (processFields.signal) extra.signal = processFields.signal;
+      if (processFields.transportError) extra.transportError = true;
+      if (Object.keys(extra).length > 0) Object.assign(result, extra);
+
+      return result;
+    } catch {
+      // Must not throw — return parse_error with archive guidance (EARS req 5)
+      return { status: 'parse_error', nextAction: 'inspect_diagnosticPreview_then_archive_if_needed' };
+    }
+  }
+};
+
 /**
  * The ordered registry of per-tool summarizers.
  * Resolution: first entry whose appliesTo returns true wins.
  * Add new summarizers here — diagnostic summarizer must remain first.
  */
 const PROJECT_TOOL_SUMMARIZER_REGISTRY: ProjectToolSummarizer[] = [
-  diagnosticSummarizer
+  diagnosticSummarizer,
+  commandFailureSummarizer
 ];
 
 /**
