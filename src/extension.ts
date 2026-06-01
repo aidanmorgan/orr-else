@@ -93,6 +93,7 @@ import { requireTool } from './core/ToolRegistry.js';
 import { Teammate } from './core/Teammate.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
 import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServices.js';
+import { ArtifactQuery } from './core/ArtifactQuery.js';
 
 /**
  * Orr Else Extension
@@ -145,6 +146,7 @@ interface ExtensionSession {
   observedPiToolSpans: Map<string, SpanContext>;
   // ── registration guards (reset each invocation so a second call re-registers) ──
   artifactPathsToolRegistered: boolean;
+  queryArtifactToolRegistered: boolean;
   compatibilityContextToolRegistered: boolean;
   piToolObserverRegistered: boolean;
   providerRequestCapRegistered: boolean;
@@ -172,6 +174,7 @@ function createExtensionSession(): ExtensionSession {
     blockedObservedPiToolCallIds: new Set(),
     observedPiToolSpans: new Map(),
     artifactPathsToolRegistered: false,
+    queryArtifactToolRegistered: false,
     compatibilityContextToolRegistered: false,
     piToolObserverRegistered: false,
     providerRequestCapRegistered: false,
@@ -2678,6 +2681,31 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           maxTotalInlineBytes: Type.Optional(Type.Number({ description: 'Requested aggregate bytes to inline across artifact previews; the framework applies a hard safety cap.' }))
         }),
         execute: async (params: any) => services.artifactPaths.resolve(params)
+      }) as any);
+    }
+
+    if (!session.queryArtifactToolRegistered) {
+      session.queryArtifactToolRegistered = true;
+      const artifactQuery = new ArtifactQuery(services.artifactPaths);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_ARTIFACT,
+        description:
+          'Query a structured JSON artifact and return ONLY the requested subtree or named projection — not the whole blob. ' +
+          'Use "projection" for schema-aware named extractions (planContract: writeSet, verifierObligations, implementationSteps, riskList, evidenceReferences, acceptanceCriteria; ' +
+          'requirementsAnalysis: requirementsInventory, traceabilityReferences, gapFlags, referenceCitations, unresolvedQuestions). ' +
+          'Use "selector" for dot-path ad-hoc access (e.g. "implementationSteps.0"). ' +
+          'If the selected subtree exceeds the byte cap, the tool returns counts + representative samples + a narrower-selector hint instead of dumping the full subtree. ' +
+          'Missing artifacts and invalid projections return structured rejections with validProjections and path/existence metadata.',
+        parameters: Type.Object({
+          beadId: Type.String({ description: 'The Bead ID' }),
+          stateId: Type.Optional(Type.String({ description: 'Optional state ID for artifact template resolution' })),
+          actionId: Type.Optional(Type.String({ description: 'Optional action ID for artifact template resolution' })),
+          artifactId: Type.Optional(Type.String({ description: 'Artifact identifier matching a harness.yaml template key (e.g. "planContract", "requirementsAnalysis"). Mutually exclusive with artifactPath.' })),
+          artifactPath: Type.Optional(Type.String({ description: 'Explicit filesystem path to the artifact JSON. Mutually exclusive with artifactId.' })),
+          projection: Type.Optional(Type.String({ description: 'Named schema-aware projection (e.g. "writeSet", "implementationSteps" for planContract). Mutually exclusive with selector.' })),
+          selector: Type.Optional(Type.String({ description: 'Dot-path selector into the artifact JSON (e.g. "writeSet", "implementationSteps.0.description"). Mutually exclusive with projection. Empty string returns artifact root subject to byte cap.' }))
+        }),
+        execute: async (params: any) => artifactQuery.query(params)
       }) as any);
     }
 

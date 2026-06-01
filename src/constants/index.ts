@@ -562,9 +562,24 @@ export enum BuiltInToolName {
   REQUEST_CONTEXT_RESTART = 'request_context_restart',
   REQUEST_HARNESS_RESTART = 'request_harness_restart',
   GET_ARTIFACT_PATHS = 'get_artifact_paths',
+  QUERY_ARTIFACT = 'query_artifact',
   GET_COMPATIBILITY_CONTEXT = 'get_compatibility_context',
   HARNESS_STATUS = 'harness_status'
 }
+
+/**
+ * Named projection caps for the query_artifact tool.
+ * These are the bounded-result guardrails so agents get counts+samples
+ * instead of raw dumps when a selection is too large.
+ */
+export const ArtifactQueryDefaults = {
+  /** Maximum JSON-serialized byte size of a query result before switching
+   *  to counts + representative samples. */
+  RESULT_MAX_BYTES: 8 * 1024,
+  /** Maximum number of representative array items returned when a result
+   *  exceeds RESULT_MAX_BYTES. */
+  SAMPLE_MAX_ITEMS: 5
+} as const;
 
 export enum ReviewArtifactKind {
   SHIP_POST_REVIEW = 'shipPostReview'
