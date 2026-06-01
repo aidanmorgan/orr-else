@@ -99,45 +99,99 @@ import { createRuntimeServices, type RuntimeServices } from './core/RuntimeServi
  * High-reliability agentic harness with obsessive, rehearsed resilience.
  */
 
-let supervisor: Supervisor | null = null;
-let activeRun: ActiveRun | null = null;
-// Per-(bead, tool) consecutive-failure counter. Only consulted in worker mode
-// (the LLM-driven path); supervisor-internal tool calls bypass the breaker.
-const toolBreakerFailures = new Map<string, number>();
-// In-session result memoisation for tools marked `cacheable: true` in their
-// project-tool config. Key: `${toolName}|${JSON.stringify(params)}`. Cleared
-// when a fresh worker run starts (initializeWorkerRun) and whenever a
-// non-cacheable tool runs (treated as a potential mutation). The LLM sees a
-// note that the result was served from cache.
-const toolResultCache = new Map<string, { result: unknown; recordedAt: number }>();
-// Per-(bead, state, blocker-fingerprint) re-entry counter. 53% of production
-// state transitions were self-loops; the same blocker repeated 52× in one
-// case before any escalation. After CYCLE_CAP same-blocker re-entries the
-// supervisor sends a BLOCKER mailbox message to TeamLead and marks the bead
-// blocked. Resets when the bead transitions to a *different* state.
-const stateCycleCounter = new Map<string, number>();
 const CYCLE_CAP_DEFAULT = 3;
-let artifactPathsToolRegistered = false;
-let compatibilityContextToolRegistered = false;
-let piToolObserverRegistered = false;
-let providerRequestCapRegistered = false;
-let claudeCodeLoginRegistered = false;
-let currentTurnStartMs: number | undefined;
-let agentLifecycleObserverRegistered = false;
-let piToolObservability: Observability | null = null;
-let observedPiTools = new Set<string>();
-let blockedObservedPiToolCallIds = new Set<string>();
-let observedPiToolSpans = new Map<string, SpanContext>();
 
 const FrameworkToolCallSchema = z.object({
   tool: z.string(),
   arguments: z.record(z.string(), z.unknown())
 }).passthrough();
 const FrameworkToolCallListSchema = z.array(FrameworkToolCallSchema);
-let checklistMutationQueue: Promise<unknown> = Promise.resolve();
-let currentFlowOptions: FlowOptions | null = null;
-let agentFailureSignaled = false;
+
+/**
+ * Per-invocation session state for orrElseExtension.
+ *
+ * Each call to orrElseExtension() creates a fresh ExtensionSession so that
+ * registration guards and run state from one invocation never bleed into a
+ * second invocation against a different `pi` instance.
+ */
+interface ExtensionSession {
+  // ── coordinator ──────────────────────────────────────────────────────────
+  supervisor: Supervisor | null;
+  currentFlowOptions: FlowOptions | null;
+  // ── worker run state ─────────────────────────────────────────────────────
+  activeRun: ActiveRun | null;
+  agentFailureSignaled: boolean;
+  checklistMutationQueue: Promise<unknown>;
+  currentTurnStartMs: number | undefined;
+  // ── coordinator cycle-cap ─────────────────────────────────────────────────
+  /** Per-(bead, state, blocker-fingerprint) re-entry counter. */
+  stateCycleCounter: Map<string, number>;
+  // ── tool execution ────────────────────────────────────────────────────────
+  /**
+   * Per-(bead, tool) consecutive-failure counter.  Worker mode only.
+   * Cleared on initializeWorkerRun.
+   */
+  toolBreakerFailures: Map<string, number>;
+  /**
+   * In-session result memoisation for cacheable project tools.
+   * Key: `${toolName}|${JSON.stringify(params)}`.
+   * Cleared on fresh worker run and after any non-cacheable tool call.
+   */
+  toolResultCache: Map<string, { result: unknown; recordedAt: number }>;
+  // ── pi-tool observability ─────────────────────────────────────────────────
+  piToolObservability: Observability | null;
+  observedPiTools: Set<string>;
+  blockedObservedPiToolCallIds: Set<string>;
+  observedPiToolSpans: Map<string, SpanContext>;
+  // ── registration guards (reset each invocation so a second call re-registers) ──
+  artifactPathsToolRegistered: boolean;
+  compatibilityContextToolRegistered: boolean;
+  piToolObserverRegistered: boolean;
+  providerRequestCapRegistered: boolean;
+  claudeCodeLoginRegistered: boolean;
+  agentLifecycleObserverRegistered: boolean;
+  // NOTE: processLifecycleObserversRegistered is intentionally NOT here — it is
+  // a module-level global because it guards process.on() calls on the
+  // process-global object, which must not be registered more than once per
+  // process regardless of how many times orrElseExtension is invoked.
+}
+
+function createExtensionSession(): ExtensionSession {
+  return {
+    supervisor: null,
+    currentFlowOptions: null,
+    activeRun: null,
+    agentFailureSignaled: false,
+    checklistMutationQueue: Promise.resolve(),
+    currentTurnStartMs: undefined,
+    stateCycleCounter: new Map(),
+    toolBreakerFailures: new Map(),
+    toolResultCache: new Map(),
+    piToolObservability: null,
+    observedPiTools: new Set(),
+    blockedObservedPiToolCallIds: new Set(),
+    observedPiToolSpans: new Map(),
+    artifactPathsToolRegistered: false,
+    compatibilityContextToolRegistered: false,
+    piToolObserverRegistered: false,
+    providerRequestCapRegistered: false,
+    claudeCodeLoginRegistered: false,
+    agentLifecycleObserverRegistered: false,
+  };
+}
+
+/**
+ * Process-global guard for registerProcessLifecycleObservers.
+ *
+ * Intentionally NOT part of ExtensionSession: it guards process.on() calls on
+ * the Node.js `process` object, which is shared across all invocations within
+ * the same OS process.  Moving it to ExtensionSession (always false at session
+ * creation) would cause a second orrElseExtension() call to add four duplicate
+ * permanent process listeners, triggering MaxListenersExceededWarning and
+ * leaking listeners on every subsequent re-invocation.
+ */
 let processLifecycleObserversRegistered = false;
+
 const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
   BuiltInToolName.ADD_CHECKLIST_ITEM,
   BuiltInToolName.TICK_ITEM,
@@ -338,25 +392,25 @@ function summarizeForEvent(value: unknown): unknown {
   }
 }
 
-function beadIdFromToolParams(params: any): string | undefined {
-  return params?.beadId || params?.id || params?.arguments?.beadId || params?.arguments?.id || activeRun?.beadId || process.env[EnvVars.BEAD_ID];
+function beadIdFromToolParams(params: any, session: ExtensionSession): string | undefined {
+  return params?.beadId || params?.id || params?.arguments?.beadId || params?.arguments?.id || session.activeRun?.beadId || process.env[EnvVars.BEAD_ID];
 }
 
-function activeSpanAttributes(beadId?: string): SpanAttributes {
+function activeSpanAttributes(beadId: string | undefined, session: ExtensionSession): SpanAttributes {
   return {
-    [OtelAttr.ORR_ELSE_BEAD_ID]: beadId || activeRun?.beadId || process.env[EnvVars.BEAD_ID],
-    [OtelAttr.ORR_ELSE_STATE_ID]: activeRun?.stateId || process.env[EnvVars.STATE_ID],
-    [OtelAttr.ORR_ELSE_ACTION_ID]: activeRun?.action?.id || process.env[EnvVars.ACTION_ID],
+    [OtelAttr.ORR_ELSE_BEAD_ID]: beadId || session.activeRun?.beadId || process.env[EnvVars.BEAD_ID],
+    [OtelAttr.ORR_ELSE_STATE_ID]: session.activeRun?.stateId || process.env[EnvVars.STATE_ID],
+    [OtelAttr.ORR_ELSE_ACTION_ID]: session.activeRun?.action?.id || process.env[EnvVars.ACTION_ID],
     [OtelAttr.ORR_ELSE_WORKER_ID]: process.env[EnvVars.WORKER_ID]
   };
 }
 
-function toolSpanAttributes(toolName: string, params: unknown, beadId?: string, externalPiTool = false): SpanAttributes {
+function toolSpanAttributes(toolName: string, params: unknown, beadId: string | undefined, session: ExtensionSession, externalPiTool = false): SpanAttributes {
   return {
     'tool.name': toolName,
     'tool.params': stringifySpanAttribute(summarizeForEvent(params)),
     'tool.external_pi': externalPiTool || undefined,
-    ...activeSpanAttributes(beadId)
+    ...activeSpanAttributes(beadId, session)
   };
 }
 
@@ -816,9 +870,9 @@ function eventToolCallId(event: any): string | undefined {
   return typeof event.toolCallId === 'string' ? event.toolCallId : undefined;
 }
 
-function registerProviderRequestCap(pi: ExtensionAPI): void {
-  if (providerRequestCapRegistered) return;
-  providerRequestCapRegistered = true;
+function registerProviderRequestCap(pi: ExtensionAPI, session: ExtensionSession): void {
+  if (session.providerRequestCapRegistered) return;
+  session.providerRequestCapRegistered = true;
 
   pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: any) => {
     const cap = resolveMaxOutputTokens(process.env[EnvVars.MAX_OUTPUT_TOKENS]);
@@ -836,19 +890,19 @@ function registerProviderRequestCap(pi: ExtensionAPI): void {
   });
 }
 
-function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): void {
-  if (piToolObserverRegistered) return;
-  piToolObserverRegistered = true;
+function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, session: ExtensionSession): void {
+  if (session.piToolObserverRegistered) return;
+  session.piToolObserverRegistered = true;
 
   pi.on(PiEventName.TOOL_CALL, async (event: any) => {
-    if (!observedPiTools.has(event.toolName)) return;
-    const runtimeObservability = piToolObservability;
+    if (!session.observedPiTools.has(event.toolName)) return;
+    const runtimeObservability = session.piToolObservability;
     const toolCallId = eventToolCallId(event);
     const fileMutationPolicyResult = await services.fileMutationPolicy.apply(event);
-    const beadId = beadIdFromToolParams(event.input);
+    const beadId = beadIdFromToolParams(event.input, session);
     runtimeObservability?.recordToolInvocation(event.toolName);
-    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, event.input, beadId, true));
-    if (span && toolCallId) observedPiToolSpans.set(toolCallId, span);
+    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, event.input, beadId, session, true));
+    if (span && toolCallId) session.observedPiToolSpans.set(toolCallId, span);
 
     await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
       beadId,
@@ -865,7 +919,7 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
 
     const config = await services.configLoader.load();
     const rejection = fileMutationPolicyResult?.rejection
-      || await terminalFailureLimitRejection(event.toolName, services)
+      || await terminalFailureLimitRejection(event.toolName, services, session)
       || shellPolicyRejection(event, config, services)
       || mcpPolicyRejection(event, config)
       || shellOperationalMutationPolicyRejection(event, services)
@@ -875,7 +929,7 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
       || await checkToolValidationRules(event.toolName, config, runtimeObservability || getObservability(services));
     if (!rejection) return;
 
-    if (toolCallId) blockedObservedPiToolCallIds.add(toolCallId);
+    if (toolCallId) session.blockedObservedPiToolCallIds.add(toolCallId);
     runtimeObservability?.recordToolInvocation(event.toolName, {
       status: ToolResultStatus.REJECTED,
       isError: true,
@@ -907,24 +961,24 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
   });
 
   pi.on(PiEventName.TOOL_RESULT, async (event: any) => {
-    if (!observedPiTools.has(event.toolName)) return;
-    const runtimeObservability = piToolObservability;
-    const beadId = beadIdFromToolParams(event.input);
+    if (!session.observedPiTools.has(event.toolName)) return;
+    const runtimeObservability = session.piToolObservability;
+    const beadId = beadIdFromToolParams(event.input, session);
     const toolCallId = eventToolCallId(event);
-    if (toolCallId && blockedObservedPiToolCallIds.delete(toolCallId)) {
-      observedPiToolSpans.delete(toolCallId);
+    if (toolCallId && session.blockedObservedPiToolCallIds.delete(toolCallId)) {
+      session.observedPiToolSpans.delete(toolCallId);
       return;
     }
     const result = externalPiToolResultFromEvent(event);
     runtimeObservability?.recordToolInvocation(event.toolName, result);
-    const span = toolCallId ? observedPiToolSpans.get(toolCallId) : undefined;
+    const span = toolCallId ? session.observedPiToolSpans.get(toolCallId) : undefined;
     if (span) {
       runtimeObservability?.endSpan(
         span.spanId,
         result.isError ? SpanStatusValue.ERROR : SpanStatusValue.OK,
         result.isError ? stringifySpanAttribute(result) : undefined
       );
-      observedPiToolSpans.delete(toolCallId!);
+      session.observedPiToolSpans.delete(toolCallId!);
     }
     await services.eventStore.record(
       result.isError ? DomainEventName.TOOL_INVOCATION_FAILED : DomainEventName.TOOL_INVOCATION_SUCCEEDED,
@@ -944,10 +998,10 @@ function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices): v
   });
 }
 
-async function recordTurnUsage(event: any, services: RuntimeServices): Promise<void> {
+async function recordTurnUsage(event: any, services: RuntimeServices, session: ExtensionSession): Promise<void> {
   const endTimeMs = Date.now();
-  const startTimeMs = currentTurnStartMs ?? endTimeMs;
-  currentTurnStartMs = undefined;
+  const startTimeMs = session.currentTurnStartMs ?? endTimeMs;
+  session.currentTurnStartMs = undefined;
 
   const record = buildTurnUsageRecord(event?.message?.usage, {
     beadId: process.env[EnvVars.BEAD_ID] || App.COORDINATOR_ID,
@@ -984,31 +1038,32 @@ async function recordTurnUsage(event: any, services: RuntimeServices): Promise<v
   }
 }
 
-function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServices): void {
-  if (agentLifecycleObserverRegistered) return;
-  agentLifecycleObserverRegistered = true;
+function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServices, session: ExtensionSession): void {
+  if (session.agentLifecycleObserverRegistered) return;
+  session.agentLifecycleObserverRegistered = true;
 
   pi.on(PiEventName.TURN_START, async (event: any) => {
-    currentTurnStartMs = typeof event?.timestamp === 'number' ? event.timestamp : Date.now();
+    session.currentTurnStartMs = typeof event?.timestamp === 'number' ? event.timestamp : Date.now();
   });
 
   pi.on(PiEventName.TURN_END, async (event: any, ctx: ExtensionContext) => {
-    await handleAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services);
-    await recordTurnUsage(event, services);
+    await handleAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services, session);
+    await recordTurnUsage(event, services, session);
   });
 
   pi.on(PiEventName.AGENT_END, async (event: any, ctx: ExtensionContext) => {
-    await handleAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services);
+    await handleAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services, session);
     Logger.info(Component.OBSERVABILITY, 'Session token usage summary', services.telemetryStore.getSummary());
   });
 }
 
-async function handleAgentLifecycleFailure(event: any, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices): Promise<void> {
-  if (!isWorkerMode() || !activeRun || agentFailureSignaled) return;
+async function handleAgentLifecycleFailure(event: any, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
+  if (!isWorkerMode() || !session.activeRun || session.agentFailureSignaled) return;
   const error = agentEventError(event);
   if (!error) return;
 
-  agentFailureSignaled = true;
+  session.agentFailureSignaled = true;
+  const activeRun = session.activeRun;
   const summary = compactLifecycleFailureSummary(source, error);
   await services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
     beadId: activeRun.beadId,
@@ -1167,8 +1222,8 @@ async function checkToolValidationRules(toolName: string, config: HarnessConfig,
   return null;
 }
 
-async function terminalFailureLimitContext(services: RuntimeServices): Promise<TerminalFailureLimitContext | null> {
-  const run = activeRun;
+async function terminalFailureLimitContext(services: RuntimeServices, session: ExtensionSession): Promise<TerminalFailureLimitContext | null> {
+  const run = session.activeRun;
   if (!isWorkerMode() || !run) return null;
 
   let data = run.terminalFailureLimitEvent?.data || run.terminalFailureLimitResult;
@@ -1210,9 +1265,9 @@ async function terminalFailureLimitContext(services: RuntimeServices): Promise<T
   };
 }
 
-async function terminalFailureLimitRejection(toolName: string, services: RuntimeServices): Promise<string | null> {
+async function terminalFailureLimitRejection(toolName: string, services: RuntimeServices, session: ExtensionSession): Promise<string | null> {
   if (TERMINAL_FAILURE_ALLOWED_TOOLS.has(toolName)) return null;
-  const terminal = await terminalFailureLimitContext(services);
+  const terminal = await terminalFailureLimitContext(services, session);
   if (!terminal) return null;
 
   return `PROTOCOL VIOLATION: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
@@ -1266,7 +1321,8 @@ async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn:
 function wrapPluginTool(
   tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> },
   runtimeObservability: Observability,
-  services: RuntimeServices
+  services: RuntimeServices,
+  session: ExtensionSession
 ) {
   return {
     name: tool.name,
@@ -1289,7 +1345,7 @@ function wrapPluginTool(
         return toolResult(error);
       }
 
-      const beadId = beadIdFromToolParams(params);
+      const beadId = beadIdFromToolParams(params, session);
       const { timeoutMs, maxFailures, cacheable } = lookupToolGuards(tool.name, config);
       const breakerEnabled = isWorkerMode();
       const key = breakerKey(beadId, tool.name);
@@ -1299,7 +1355,7 @@ function wrapPluginTool(
       // to a non-cacheable tool below will clear the memo before executing,
       // because we treat non-cacheable tools as potentially mutating.
       if (cacheable && isWorkerMode()) {
-        const hit = toolResultCache.get(cacheKey);
+        const hit = session.toolResultCache.get(cacheKey);
         if (hit) {
           const ageMs = Date.now() - hit.recordedAt;
           runtimeObservability.recordToolInvocation(tool.name, hit.result);
@@ -1312,14 +1368,14 @@ function wrapPluginTool(
           }).catch(() => {});
           return toolResult(hit.result);
         }
-      } else if (isWorkerMode() && toolResultCache.size > 0) {
-        toolResultCache.clear();
+      } else if (isWorkerMode() && session.toolResultCache.size > 0) {
+        session.toolResultCache.clear();
       }
 
       // Circuit breaker: short-circuit if this tool has failed maxFailures
       // times in a row for this bead within the session.
       if (breakerEnabled) {
-        const failures = toolBreakerFailures.get(key) ?? 0;
+        const failures = session.toolBreakerFailures.get(key) ?? 0;
         if (failures >= maxFailures) {
           const message = `REJECTED: \`${tool.name}\` circuit open after ${failures} consecutive failures. Pick a different approach; the breaker resets when the bead transitions.`;
           runtimeObservability.recordToolInvocation(tool.name, {
@@ -1343,7 +1399,7 @@ function wrapPluginTool(
         params: summarizeForEvent(params)
       });
 
-      const terminalRejection = await terminalFailureLimitRejection(tool.name, services);
+      const terminalRejection = await terminalFailureLimitRejection(tool.name, services, session);
       if (terminalRejection) {
         runtimeObservability.recordToolInvocation(tool.name, {
           status: ToolResultStatus.REJECTED,
@@ -1365,7 +1421,7 @@ function wrapPluginTool(
 
       const tracedExecute = runtimeObservability.tracedAsync(
         `tool:${tool.name}`,
-        toolSpanAttributes(tool.name, params, beadId),
+        toolSpanAttributes(tool.name, params, beadId, session),
         async (p: any, c: ExtensionContext) => {
           if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
           const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c)));
@@ -1374,7 +1430,7 @@ function wrapPluginTool(
           // Record invocation and result for audit
           runtimeObservability.recordToolInvocation(tool.name, result);
           const terminalFailureLimitData = terminalFailureLimitDataFromResult(result);
-          const run = activeRun;
+          const run = session.activeRun;
           if (terminalFailureLimitData && run !== null && run.beadId === beadId) {
             run.terminalFailureLimitResult = terminalFailureLimitData;
             run.terminalFailureLimitScanned = true;
@@ -1382,7 +1438,7 @@ function wrapPluginTool(
 
           if (resultIndicatesFailure(result)) {
             if (breakerEnabled) {
-              toolBreakerFailures.set(key, (toolBreakerFailures.get(key) ?? 0) + 1);
+              session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
             }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
               beadId,
@@ -1395,9 +1451,9 @@ function wrapPluginTool(
               if (c.hasUI) c.ui.notify(result.error || `Tool ${tool.name} failed`, 'error');
             }
           } else {
-            if (breakerEnabled) toolBreakerFailures.delete(key);
+            if (breakerEnabled) session.toolBreakerFailures.delete(key);
             if (cacheable && isWorkerMode()) {
-              toolResultCache.set(cacheKey, { result, recordedAt: Date.now() });
+              session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now() });
             }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
@@ -1415,7 +1471,7 @@ function wrapPluginTool(
         return toolResult(result);
       } catch (error) {
         if (breakerEnabled) {
-          toolBreakerFailures.set(key, (toolBreakerFailures.get(key) ?? 0) + 1);
+          session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
         }
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
@@ -1603,16 +1659,17 @@ function dynamicChecklistItemsForRun(bead: Bead, stateId: string, actionId: stri
   return Array.isArray(dynamicItems) ? dynamicItems as ChecklistItem[] : [];
 }
 
-async function addChecklistItem(rawItem: Record<string, unknown>, source: string, services: RuntimeServices): Promise<Record<string, unknown>> {
-  const operation = checklistMutationQueue.then(
-    () => addChecklistItemInner(rawItem, source, services),
-    () => addChecklistItemInner(rawItem, source, services)
+async function addChecklistItem(rawItem: Record<string, unknown>, source: string, services: RuntimeServices, session: ExtensionSession): Promise<Record<string, unknown>> {
+  const operation = session.checklistMutationQueue.then(
+    () => addChecklistItemInner(rawItem, source, services, session),
+    () => addChecklistItemInner(rawItem, source, services, session)
   );
-  checklistMutationQueue = operation.catch(() => undefined);
+  session.checklistMutationQueue = operation.catch(() => undefined);
   return operation;
 }
 
-async function addChecklistItemInner(rawItem: Record<string, unknown>, source: string, services: RuntimeServices): Promise<Record<string, unknown>> {
+async function addChecklistItemInner(rawItem: Record<string, unknown>, source: string, services: RuntimeServices, session: ExtensionSession): Promise<Record<string, unknown>> {
+  const activeRun = session.activeRun;
   if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
 
   const checklistItem = normalizeChecklistItem(rawItem);
@@ -1664,8 +1721,8 @@ async function addChecklistItemInner(rawItem: Record<string, unknown>, source: s
   };
 }
 
-async function resolveEvidenceFromPath(rawPath: string): Promise<{ ok: true; evidence: string } | { ok: false; error: string }> {
-  const run = activeRun;
+async function resolveEvidenceFromPath(rawPath: string, session: ExtensionSession): Promise<{ ok: true; evidence: string } | { ok: false; error: string }> {
+  const run = session.activeRun;
   if (!run || !run.worktreePath) {
     return { ok: false, error: 'No active worktree to resolve evidencePath against.' };
   }
@@ -1683,9 +1740,9 @@ async function resolveEvidenceFromPath(rawPath: string): Promise<{ ok: true; evi
   }
 }
 
-async function tickChecklistItems(items: ChecklistTickInput[], services: RuntimeServices): Promise<Record<string, unknown>> {
-  if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
-  const run = activeRun;
+async function tickChecklistItems(items: ChecklistTickInput[], services: RuntimeServices, session: ExtensionSession): Promise<Record<string, unknown>> {
+  const run = session.activeRun;
+  if (!run) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
   if (!Array.isArray(items) || items.length === 0) {
     return { status: ToolResultStatus.REJECTED, message: 'At least one checklist item is required.' };
   }
@@ -1693,7 +1750,7 @@ async function tickChecklistItems(items: ChecklistTickInput[], services: Runtime
   const evidenceResolution = await Promise.all(items.map(async item => {
     if (item.evidence && item.evidence.trim().length > 0) return { ok: true, item };
     if (item.evidencePath && item.evidencePath.trim().length > 0) {
-      const resolution = await resolveEvidenceFromPath(item.evidencePath);
+      const resolution = await resolveEvidenceFromPath(item.evidencePath, session);
       if (!resolution.ok) {
         return { ok: false as const, originalText: item.text, error: resolution.error };
       }
@@ -1726,7 +1783,7 @@ async function tickChecklistItems(items: ChecklistTickInput[], services: Runtime
     .filter(item => !run.requiredItems.some(required => required.text === item.text))
     .map(item => item.originalText);
   if (rejected.length > 0) {
-    const validItems = activeRun.requiredItems.map(item => item.text);
+    const validItems = run.requiredItems.map(item => item.text);
     return {
       status: ToolResultStatus.REJECTED,
       message: `Checklist item is not in the current phase checklist: ${rejected.join(', ')}. Retry with exact text from validItems.`,
@@ -1735,27 +1792,27 @@ async function tickChecklistItems(items: ChecklistTickInput[], services: Runtime
     };
   }
 
-  const actionKey = actionCompletionKey(await services.configLoader.load(), activeRun.stateId, activeRun.action.id);
+  const actionKey = actionCompletionKey(await services.configLoader.load(), run.stateId, run.action.id);
   for (const item of uniqueItems) {
     await services.eventStore.record(DomainEventName.CHECKLIST_ITEM_TICKED, {
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
-      actionId: activeRun.action.id,
+      beadId: run.beadId,
+      stateId: run.stateId,
+      actionId: run.action.id,
       actionKey,
       text: item.text,
       evidence: item.evidence
     });
   }
 
-  await activeRun.worklogManager.appendEntry(
-    activeRun.beadId,
-    activeRun.stateId,
+  await run.worklogManager.appendEntry(
+    run.beadId,
+    run.stateId,
     `Ticked ${uniqueItems.length} checklist item${uniqueItems.length === 1 ? '' : 's'}`,
     uniqueItems.map(item => `- ${item.text}: ${item.evidence}`).join('\n')
   );
 
-  if (activeRun.progressManager) {
-    await activeRun.progressManager.appendLog(
+  if (run.progressManager) {
+    await run.progressManager.appendLog(
       `Checked ${uniqueItems.length} checklist item${uniqueItems.length === 1 ? '' : 's'}: ${uniqueItems.map(item => item.text).join(', ')}`
     );
   }
@@ -1771,7 +1828,8 @@ async function executeFrameworkToolCall(
   toolCall: { tool: string; arguments?: Record<string, unknown> },
   source: string,
   runtimeObservability: Observability,
-  services: RuntimeServices
+  services: RuntimeServices,
+  session: ExtensionSession
 ): Promise<Record<string, unknown>> {
   if (toolCall.tool !== BuiltInToolName.ADD_CHECKLIST_ITEM) {
     return {
@@ -1779,7 +1837,7 @@ async function executeFrameworkToolCall(
       message: `Unsupported framework tool call from ${source}: ${toolCall.tool}`
     };
   }
-  const result = await addChecklistItem(toolCall.arguments || {}, source, services);
+  const result = await addChecklistItem(toolCall.arguments || {}, source, services, session);
   runtimeObservability.recordToolInvocation(BuiltInToolName.ADD_CHECKLIST_ITEM, result);
   return result;
 }
@@ -1788,10 +1846,11 @@ async function runParentSequenceActionsBeforeActive(
   config: HarnessConfig,
   ctx: ExtensionContext,
   runtimeObservability: Observability,
-  services: RuntimeServices
+  services: RuntimeServices,
+  session: ExtensionSession
 ): Promise<void> {
-  if (!activeRun || activeRun.parentSequenceCompleted) return;
-  const run = activeRun;
+  const run = session.activeRun;
+  if (!run || run.parentSequenceCompleted) return;
   const activeIndex = run.state.actions.findIndex(action => action.id === run.action.id);
   const precedingActions = activeIndex <= 0 ? [] : run.state.actions.slice(0, activeIndex);
 
@@ -1823,7 +1882,7 @@ async function runParentSequenceActionsBeforeActive(
     runtimeObservability.recordToolInvocation(action.tool, result);
 
     for (const toolCall of extractFrameworkToolCalls(result)) {
-      const toolResult = await executeFrameworkToolCall(toolCall, action.tool, runtimeObservability, services);
+      const toolResult = await executeFrameworkToolCall(toolCall, action.tool, runtimeObservability, services, session);
       if (toolResult.status !== ToolResultStatus.PASSED) {
         throw new Error(`Sequenced action ${action.id} framework tool call failed: ${JSON.stringify(toolResult)}`);
       }
@@ -1883,15 +1942,15 @@ function seedCompletedActionToolEvidence(
   }
 }
 
-async function initializeWorkerRun(runtimeObservability: Observability, services: RuntimeServices): Promise<void> {
+async function initializeWorkerRun(runtimeObservability: Observability, services: RuntimeServices, session: ExtensionSession): Promise<void> {
   const beadId = process.env[EnvVars.BEAD_ID] as BeadId | undefined;
   const stateId = process.env[EnvVars.STATE_ID];
   if (!beadId || !stateId) return;
   // A fresh worker run starts with a clean tool-breaker and tool-cache state.
   // Both are session-scoped; they do not carry across the bead transition
   // that ended the prior run.
-  toolBreakerFailures.clear();
-  toolResultCache.clear();
+  session.toolBreakerFailures.clear();
+  session.toolResultCache.clear();
 
   const config = await services.configLoader.load();
   const state = config.states[stateId];
@@ -1914,7 +1973,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   const worklogManager = new WorklogManager(services.eventStore);
   const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
 
-  activeRun = {
+  session.activeRun = {
     beadId,
     stateId,
     state,
@@ -1928,8 +1987,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     parentSequenceCompleted: false,
     completedActionIds
   };
-  preloadTerminalFailureLimit(activeRun, services);
-  agentFailureSignaled = false;
+  preloadTerminalFailureLimit(session.activeRun, services);
+  session.agentFailureSignaled = false;
   seedCompletedActionToolEvidence(runtimeObservability, state, config, stateId, completedActionIds);
 
   await progressManager?.ensureExists(beadId, `Started ${stateId}/${action.id}.`);
@@ -1945,7 +2004,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   });
 }
 
-function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices): string {
+function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices, session: ExtensionSession): string {
+  const activeRun = session.activeRun;
   if (!activeRun) return '';
   const stateInstructions = services.instructionLoader.assemble(activeRun.state, config);
   const protocol = services.protocolInjector.inject(activeRun.state, config);
@@ -1977,8 +2037,8 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   );
 }
 
-async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices) {
-  const currentSupervisor = supervisor;
+async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices, session: ExtensionSession) {
+  const currentSupervisor = session.supervisor;
   if (!currentSupervisor) return;
 
   const beadId = event.beadId as BeadId;
@@ -2171,13 +2231,13 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       const cycleKey = `${beadId}|${event.stateId}|${fingerprint}`;
       // Sweep counters for OTHER fingerprints in this (bead, state) — once we
       // change blocker reason, any prior streak no longer matches the rule.
-      for (const key of stateCycleCounter.keys()) {
+      for (const key of session.stateCycleCounter.keys()) {
         if (key.startsWith(`${beadId}|${event.stateId}|`) && key !== cycleKey) {
-          stateCycleCounter.delete(key);
+          session.stateCycleCounter.delete(key);
         }
       }
-      const next = (stateCycleCounter.get(cycleKey) ?? 0) + 1;
-      stateCycleCounter.set(cycleKey, next);
+      const next = (session.stateCycleCounter.get(cycleKey) ?? 0) + 1;
+      session.stateCycleCounter.set(cycleKey, next);
       const cap = config.settings.cycleCap ?? CYCLE_CAP_DEFAULT;
       if (next >= cap) {
         Logger.warn(Component.ORR_ELSE, 'Cycle cap reached; escalating bead to TeamLead', {
@@ -2204,12 +2264,12 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             Logger.warn(Component.ORR_ELSE, 'Failed to update bead status after cycle cap', { error: String(error) });
           });
         }
-        stateCycleCounter.delete(cycleKey);
+        session.stateCycleCounter.delete(cycleKey);
       }
     } else {
       // Bead is leaving this state — drop any cycle counters scoped to it.
-      for (const key of stateCycleCounter.keys()) {
-        if (key.startsWith(`${beadId}|${event.stateId}|`)) stateCycleCounter.delete(key);
+      for (const key of session.stateCycleCounter.keys()) {
+        if (key.startsWith(`${beadId}|${event.stateId}|`)) session.stateCycleCounter.delete(key);
       }
     }
   }
@@ -2319,8 +2379,9 @@ async function activeRunOutstandingMandatoryCount(services: RuntimeServices, run
   }
 }
 
-async function flowStatusDetails(services: RuntimeServices): Promise<FlowStatusDetails> {
+async function flowStatusDetails(services: RuntimeServices, session: ExtensionSession): Promise<FlowStatusDetails> {
   const projectToolStatus = await configuredProjectToolStatus(services);
+  const { activeRun, supervisor, currentFlowOptions } = session;
 
   if (activeRun) {
     const elapsedSeconds = Math.round((Date.now() - activeRun.startedAt) / TimeMs.SECOND);
@@ -2407,18 +2468,18 @@ function flowStatusText(details: FlowStatusDetails): string {
   return 'Orr Else is not running.';
 }
 
-async function flowStatus(services: RuntimeServices, format: 'json' | 'text' = 'json'): Promise<FlowStatusDetails | string> {
-  const details = await flowStatusDetails(services);
+async function flowStatus(services: RuntimeServices, session: ExtensionSession, format: 'json' | 'text' = 'json'): Promise<FlowStatusDetails | string> {
+  const details = await flowStatusDetails(services, session);
   return format === 'text' ? flowStatusText(details) : details;
 }
 
-async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: FlowOptions, services: RuntimeServices): Promise<string> {
+async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: FlowOptions, services: RuntimeServices, session: ExtensionSession): Promise<string> {
   if (isWorkerMode()) return 'This Pi process is an Orr Else teammate, not the coordinator.';
-  if (supervisor) return (await flowStatus(services, 'text')) as string;
+  if (session.supervisor) return (await flowStatus(services, session, 'text')) as string;
 
   if (ctx.hasUI) ctx.ui.notify('Starting Orr Else coordinator...', 'info');
   if (options.configPath) services.configLoader.setConfigPath(options.configPath);
-  currentFlowOptions = { ...options };
+  session.currentFlowOptions = { ...options };
   const runtimeObservability = await initializeObservability(services);
   await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
     beadId: options.beadId,
@@ -2426,7 +2487,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     autoContinue: options.autoContinue
   });
 
-  const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services), runtimeObservability, services.eventStore);
+  const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore);
   const apiPort = await server.start();
   const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
   process.env[EnvVars.API_PORT] = String(apiPort);
@@ -2445,15 +2506,15 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     fileURLToPath(import.meta.url)
   );
   await factory.ensureAgentsWindow();
-  
-  supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
+
+  session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
     maxSlots: options.maxSlots,
     requestedBeadId: options.beadId
   });
-  
-  await supervisor.start();
 
-  return `${(await flowStatus(services, 'text')) as string}\nAttach with: tmux attach -t orr-else`;
+  await session.supervisor.start();
+
+  return `${(await flowStatus(services, session, 'text')) as string}\nAttach with: tmux attach -t orr-else`;
 }
 
 type OrrElseParsedArgs = FlowOptions | ExtensionCommandAction.STATUS | ExtensionCommandAction.STOP;
@@ -2501,6 +2562,10 @@ function parseOrrElseArgs(rawArgs: string, config?: HarnessConfig): OrrElseParse
 }
 
 export default async function orrElseExtension(pi: ExtensionAPI, providedServices?: RuntimeServices) {
+  // Fresh per-invocation state — guards reset here so a second call to
+  // orrElseExtension(pi2, services) re-registers tools on the new pi instance.
+  const session = createExtensionSession();
+
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
   setProjectRoot(projectRoot);
   registerProcessLifecycleObservers();
@@ -2515,16 +2580,16 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     handler: async (args: string, ctx: ExtensionCommandContext) => {
       try {
         const preliminary = parseOrrElseArgs(args);
-        
+
         if (preliminary === ExtensionCommandAction.STATUS) {
-          ctx.ui.notify((await flowStatus(services, 'text')) as string, 'info');
+          ctx.ui.notify((await flowStatus(services, session, 'text')) as string, 'info');
           return;
         }
         
         if (preliminary === ExtensionCommandAction.STOP) {
-          if (supervisor) supervisor.stop();
-          supervisor = null;
-          currentFlowOptions = null;
+          if (session.supervisor) session.supervisor.stop();
+          session.supervisor = null;
+          session.currentFlowOptions = null;
           ctx.ui.notify('Orr Else stopped.', 'info');
           return;
         }
@@ -2534,7 +2599,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         const parsed = parseOrrElseArgs(args, config);
 
         if (typeof parsed === 'object') {
-          const result = await startOrrElse(pi, ctx as any, parsed, services);
+          const result = await startOrrElse(pi, ctx as any, parsed, services, session);
           ctx.ui.notify(result, 'info');
         }
       } catch (error) {
@@ -2546,13 +2611,13 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
   pi.on(PiEventName.SESSION_SHUTDOWN, () => {
     Logger.info(Component.ORR_ELSE, 'Pi session shutdown observed', { isWorker: isWorkerMode() });
-    if (supervisor) supervisor.stop();
-    supervisor = null;
-    currentFlowOptions = null;
-    piToolObservability = null;
-    observedPiTools = new Set<string>();
-    blockedObservedPiToolCallIds = new Set<string>();
-    observedPiToolSpans = new Map<string, SpanContext>();
+    if (session.supervisor) session.supervisor.stop();
+    session.supervisor = null;
+    session.currentFlowOptions = null;
+    session.piToolObservability = null;
+    session.observedPiTools = new Set<string>();
+    session.blockedObservedPiToolCallIds = new Set<string>();
+    session.observedPiToolSpans = new Map<string, SpanContext>();
     const runtimeObservability = services.observability;
     void runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
   });
@@ -2560,8 +2625,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   pi.on(PiEventName.BEFORE_AGENT_START, async (event: any) => {
     if (!isWorkerMode()) return;
     const config = await services.configLoader.load();
-    if (!activeRun) await initializeWorkerRun(services.observability, services);
-    const statePrompt = buildStateSystemPrompt(config, services);
+    if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
+    const statePrompt = buildStateSystemPrompt(config, services, session);
     if (!statePrompt) return;
     return { systemPrompt: `${event.systemPrompt}\n\n${statePrompt}` };
   });
@@ -2576,30 +2641,30 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   pi.on(PiEventName.SESSION_START, async (_event: any, ctx: any) => {
     const config = await services.configLoader.load();
     const runtimeObservability = await initializeObservability(services);
-    piToolObservability = runtimeObservability;
+    session.piToolObservability = runtimeObservability;
     const wrappedToolNames = new Set<string>([
       ...Object.values(BuiltInToolName),
       ...Object.values(PluginToolName),
       ...getHarnessRegisteredProjectToolNames(config)
     ]);
-    observedPiTools = new Set([
+    session.observedPiTools = new Set([
       ...getObservedPiToolNames(config),
       ...getNativePiExtensionProjectToolNames(config)
     ].filter(toolName => !wrappedToolNames.has(toolName)));
-    registerPiToolObservers(pi, services);
-    registerProviderRequestCap(pi);
-    registerAgentLifecycleObservers(pi, services);
+    registerPiToolObservers(pi, services, session);
+    registerProviderRequestCap(pi, session);
+    registerAgentLifecycleObservers(pi, services, session);
 
-    if (!claudeCodeLoginRegistered && resolveProviderName(config.settings.defaultProvider) === LLMProviderName.ANTHROPIC) {
-      claudeCodeLoginRegistered = true;
+    if (!session.claudeCodeLoginRegistered && resolveProviderName(config.settings.defaultProvider) === LLMProviderName.ANTHROPIC) {
+      session.claudeCodeLoginRegistered = true;
       registerClaudeCodeLiveLogin(pi);
     }
 
     const wrapRuntimeTool = (tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) =>
-      wrapPluginTool(tool, runtimeObservability, services);
+      wrapPluginTool(tool, runtimeObservability, services, session);
 
-    if (!artifactPathsToolRegistered) {
-      artifactPathsToolRegistered = true;
+    if (!session.artifactPathsToolRegistered) {
+      session.artifactPathsToolRegistered = true;
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.GET_ARTIFACT_PATHS,
         description: 'Resolve configured stable artifact paths and bounded artifact content previews for the current Bead/state/action. Use this instead of native reads for .pi/artifacts files.',
@@ -2616,8 +2681,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }) as any);
     }
 
-    if (!compatibilityContextToolRegistered) {
-      compatibilityContextToolRegistered = true;
+    if (!session.compatibilityContextToolRegistered) {
+      session.compatibilityContextToolRegistered = true;
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.GET_COMPATIBILITY_CONTEXT,
         description: 'Return the configured Claude/Codex compatibility path manifest for this project.',
@@ -2658,11 +2723,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       seenTools.add(tool.name);
       pi.registerTool(wrapRuntimeTool(tool as any) as any);
     }
-    registerConfiguredProjectTools(services.eventStore, services.toolCallPathFactory, pi, config, seenTools, wrapRuntimeTool, () => activeRun
+    registerConfiguredProjectTools(services.eventStore, services.toolCallPathFactory, pi, config, seenTools, wrapRuntimeTool, () => session.activeRun
       ? {
-        beadId: activeRun.beadId,
-        stateId: activeRun.stateId,
-        actionId: activeRun.action.id
+        beadId: session.activeRun.beadId,
+        stateId: session.activeRun.stateId,
+        actionId: session.activeRun.action.id
       }
       : undefined);
     validateNativePiExtensionProjectTools(pi, config);
@@ -2676,7 +2741,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         evidencePath: Type.Optional(Type.String({ description: 'Worktree-relative path to a file containing the evidence. Preferred for long evidence — keeps the prompt cache stable and your subsequent turns cheaper.' }))
       }),
       execute: async ({ text, evidence, evidencePath }: { text: string, evidence?: string, evidencePath?: string }, ctx: ExtensionContext) => {
-        const result = await tickChecklistItems([{ text, evidence, evidencePath }], services);
+        const result = await tickChecklistItems([{ text, evidence, evidencePath }], services, session);
         if (result.status === ToolResultStatus.PASSED) return `Successfully ticked: ${text}`;
         return `Error: ${result.message || 'Checklist item was rejected.'}`;
       }
@@ -2692,7 +2757,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           evidencePath: Type.Optional(Type.String({ description: 'Worktree-relative path to a file containing the evidence. Preferred for long evidence.' }))
         }), { description: 'Checklist items to mark complete.' })
       }),
-      execute: async ({ items }: { items: ChecklistTickInput[] }, ctx: ExtensionContext) => tickChecklistItems(items, services)
+      execute: async ({ items }: { items: ChecklistTickInput[] }, ctx: ExtensionContext) => tickChecklistItems(items, services, session)
     }));
 
     pi.registerTool(wrapRuntimeTool({
@@ -2700,6 +2765,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       description: 'Get the list of mandatory checklist items that still need to be completed.',
       parameters: Type.Object({}),
       execute: async (_params: any, ctx: ExtensionContext) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
         const projection = await services.eventStore.projectBead(activeRun.beadId);
         const missing = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
@@ -2717,7 +2783,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         type: Type.Optional(Type.String({ description: 'Checklist item type. Defaults to manual.' })),
         metadata: Type.Optional(Type.Any({ description: 'Optional project-specific metadata for evidence and traceability.' }))
       }),
-      execute: async (params: Record<string, unknown>) => addChecklistItem(params, BuiltInToolName.ADD_CHECKLIST_ITEM, services)
+      execute: async (params: Record<string, unknown>) => addChecklistItem(params, BuiltInToolName.ADD_CHECKLIST_ITEM, services, session)
     }));
 
     pi.registerTool(wrapRuntimeTool({
@@ -2728,10 +2794,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         evidence: Type.String({ description: 'Detailed evidence (logs, output, etc.)' })
       }),
       execute: async ({ summary, evidence }: { summary: string, evidence: string }, ctx: ExtensionContext) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
-        
+
         await activeRun.worklogManager.appendEntry(activeRun.beadId, activeRun.stateId, summary, evidence);
-        
+
         const event = buildWorkerEvent(TeammateEventType.CHECKPOINT_ACCEPTED, {
           beadId: activeRun.beadId,
           stateId: activeRun.stateId,
@@ -2756,7 +2823,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
         await services.eventStore.record(DomainEventName.CHECKPOINT_SUBMITTED, checkpointData);
         activeRun.checkpointAccepted = true;
-        
+
         if (activeRun.progressManager) {
           await activeRun.progressManager.appendLog(`Checkpoint: ${summary.slice(0, WorkerDefaults.CHECKLIST_EVIDENCE_PREVIEW_CHARS)}...`);
         }
@@ -2778,6 +2845,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         { summary, artifact, verdict, outcome }: { summary: string; artifact: unknown; verdict?: string; outcome?: string },
         _ctx: ExtensionContext
       ) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
         const config = await services.configLoader.load();
         const reviewArtifactConfig = config.settings.reviewArtifacts?.shipPostReview;
@@ -2829,21 +2897,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         summary: Type.String({ description: 'A dense handover summary of what was accomplished' })
       }),
       execute: async ({ outcome, summary }: { outcome: string, summary: string }, ctx: ExtensionContext) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
-	        try {
-	          services.flowManager.nextState(activeRun.state, outcome);
-	        } catch (error) {
-	          return `REJECTED: ${String(error)}`;
-	        }
+        try {
+          services.flowManager.nextState(activeRun.state, outcome);
+        } catch (error) {
+          return `REJECTED: ${String(error)}`;
+        }
 
-        const terminal = await terminalFailureLimitContext(services);
+        const terminal = await terminalFailureLimitContext(services, session);
         if (terminal && outcome !== terminal.suggestedOutcome) {
           return `REJECTED: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
             `in ${terminal.stateId}/${terminal.actionId}. You MUST signal outcome ` +
             `\`${terminal.suggestedOutcome}\`; outcome \`${outcome}\` is not permitted after this terminal verifier failure.`;
         }
 
-	        if (outcome === EventName.SUCCESS) {
+        if (outcome === EventName.SUCCESS) {
           const projection = await services.eventStore.projectBead(activeRun.beadId);
           const missing = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
           if (missing.length > 0) {
@@ -2856,22 +2925,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             worktreePath: activeRun.worktreePath,
             projectRoot: getProjectRoot(),
             config
-	          });
-	          const requiredTools = requiredToolResolution.toolNames;
-	          const auditFailures: string[] = [];
-	          for (const toolName of requiredTools) {
-	            const result = runtimeObservability.getToolResult(toolName);
-	            if (result === undefined) {
-	              auditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
-	            } else if (resultIndicatesSuccess(result)) {
-	              continue;
-	            } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
-	              auditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
-	            } else if (resultIndicatesFailure(result)) {
-	              auditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-	            } else {
-	              auditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-	            }
+          });
+          const requiredTools = requiredToolResolution.toolNames;
+          const auditFailures: string[] = [];
+          for (const toolName of requiredTools) {
+            const result = runtimeObservability.getToolResult(toolName);
+            if (result === undefined) {
+              auditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
+            } else if (resultIndicatesSuccess(result)) {
+              continue;
+            } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
+              auditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
+            } else if (resultIndicatesFailure(result)) {
+              auditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+            } else {
+              auditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+            }
           }
           if (auditFailures.length > 0) {
             return `REJECTED: Protocol Violation. Programmatic audit failed:\n${auditFailures.map(f => `- ${f}`).join('\n')}\nYou MUST satisfy all programmatic gates before signaling completion.`;
@@ -2936,9 +3005,10 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         summary: Type.String({ description: 'Handover summary for the next session' })
       }),
       execute: async ({ summary }: { summary: string }, ctx: ExtensionContext) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
         const config = await services.configLoader.load();
-        
+
         const event = buildWorkerEvent(TeammateEventType.CONTEXT_RESTART_REQUESTED, {
           beadId: activeRun.beadId,
           stateId: activeRun.stateId,
@@ -2948,9 +3018,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           evidence: summary,
           handover: summary
         });
-        
+
         await postWorkerSignal(services, event);
-        
+
         setTimeout(() => ctx.shutdown(), WorkerDefaults.SHUTDOWN_AFTER_SIGNAL_MS);
         return 'Context restart requested. Session will shutdown.';
       }
@@ -2963,6 +3033,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         summary: Type.String({ description: 'Handover summary for the next harness session' })
       }),
       execute: async ({ summary }: { summary: string }, ctx: ExtensionContext) => {
+        const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
         const config = await services.configLoader.load();
 
@@ -2987,12 +3058,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       name: BuiltInToolName.HARNESS_STATUS,
       description: 'Report the active Orr Else flow and state turn.',
       parameters: Type.Object({}),
-      execute: async () => flowStatus(services)
+      execute: async () => flowStatus(services, session)
     }));
 
     if (isWorkerMode()) {
-      await initializeWorkerRun(runtimeObservability, services);
-      await runParentSequenceActionsBeforeActive(config, ctx, runtimeObservability, services);
+      await initializeWorkerRun(runtimeObservability, services, session);
+      await runParentSequenceActionsBeforeActive(config, ctx, runtimeObservability, services, session);
       const teammate = new Teammate(
         pi,
         ctx,
@@ -3007,8 +3078,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       );
       await teammate.start().catch(async err => {
         Logger.error(Component.ORR_ELSE, 'Teammate start failed', { err: String(err) });
+        const activeRun = session.activeRun;
         if (!activeRun) return;
-        agentFailureSignaled = true;
+        session.agentFailureSignaled = true;
         const summary = `Teammate bootstrap failed: ${String(err)}`;
         await services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
           beadId: activeRun.beadId,

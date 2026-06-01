@@ -1155,4 +1155,72 @@ states:
     expect(source).toContain('activeStartedBeadIds');
     expect(harness.commands['orr-else'].description).toContain('/orr-else');
   });
+
+  it('re-registers tools on a second independent invocation (no guard short-circuit)', async () => {
+    // First invocation
+    const harness1 = fakePi();
+    await orrElseExtension(harness1.pi);
+    await harness1.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+    const toolsAfterFirst = harness1.tools.map(t => t.name);
+
+    // Second invocation against a completely separate pi object + session.
+    // Before the fix, the six registration-guard booleans were module-level and
+    // never reset, so SESSION_START on the second pi would call the guard
+    // branches (e.g. `if (!artifactPathsToolRegistered)`) and find them already
+    // true — meaning the artifact-paths tool, compatibility-context tool, and
+    // other guarded tools would NOT be registered on harness2.pi.
+    const harness2 = fakePi();
+    await orrElseExtension(harness2.pi);
+    await harness2.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+    const toolsAfterSecond = harness2.tools.map(t => t.name);
+
+    // Both invocations must register the same guarded tools on their respective pi
+    expect(toolsAfterFirst).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
+    expect(toolsAfterFirst).toContain(BuiltInToolName.GET_COMPATIBILITY_CONTEXT);
+
+    expect(toolsAfterSecond).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
+    expect(toolsAfterSecond).toContain(BuiltInToolName.GET_COMPATIBILITY_CONTEXT);
+
+    // The two invocations must have independent tool arrays (not sharing state)
+    expect(harness1.tools).not.toBe(harness2.tools);
+    expect(harness1.tools.length).toBeGreaterThan(0);
+    expect(harness2.tools.length).toBe(harness1.tools.length);
+
+    // Commands are registered independently too
+    expect(harness1.commands['orr-else']).toBeDefined();
+    expect(harness2.commands['orr-else']).toBeDefined();
+    expect(harness1.commands['orr-else']).not.toBe(harness2.commands['orr-else']);
+  });
+
+  it('does not add duplicate process listeners on a second invocation (process-global guard)', async () => {
+    // Snapshot listener counts BEFORE the second invocation.
+    // processLifecycleObserversRegistered is module-level, so the first
+    // invocation (in the test above, or in previous tests in this file) already
+    // ran registerProcessLifecycleObservers().  We take a baseline here to be
+    // self-contained regardless of test-execution order.
+    const before = {
+      beforeExit: process.listenerCount('beforeExit'),
+      exit: process.listenerCount('exit'),
+      uncaughtExceptionMonitor: process.listenerCount('uncaughtExceptionMonitor'),
+      unhandledRejection: process.listenerCount('unhandledRejection'),
+    };
+
+    // Perform a full second invocation (orrElseExtension + SESSION_START).
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    // Listener counts must be unchanged — the module-global guard must have
+    // prevented registerProcessLifecycleObservers() from adding more process
+    // listeners.  If processLifecycleObserversRegistered were on the per-session
+    // ExtensionSession (always false at creation), this invocation would add 4
+    // more permanent listeners and these assertions would fail.
+    expect(process.listenerCount('beforeExit')).toBe(before.beforeExit);
+    expect(process.listenerCount('exit')).toBe(before.exit);
+    expect(process.listenerCount('uncaughtExceptionMonitor')).toBe(before.uncaughtExceptionMonitor);
+    expect(process.listenerCount('unhandledRejection')).toBe(before.unhandledRejection);
+
+    // Sanity: the second invocation must still have registered the per-pi tools.
+    expect(harness.tools.map(t => t.name)).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
+  });
 });
