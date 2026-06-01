@@ -27,7 +27,19 @@ import { createMetaPlugin } from '../plugins/meta.js';
 import { createQualityPlugin } from '../plugins/quality.js';
 import { signalingPlugin } from '../plugins/signaling.js';
 import { teammatePlugin, TeammateFactory } from '../plugins/teammates.js';
-import { EnvVars } from '../constants/index.js';
+import { EnvVars, PluginToolName } from '../constants/index.js';
+import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
+import type { Bead } from '../types/index.js';
+// WorktreeResult is defined in OrchestrationPorts; re-exported here for
+// backward compatibility with existing callers (git.ts, extension.ts, etc.)
+export type { WorktreeResult } from './OrchestrationPorts.js';
+import type {
+  WorktreeResult,
+  BeadReadyOptions,
+  BeadListOptions,
+  BeadListResult,
+  BeadClaimOptions
+} from './OrchestrationPorts.js';
 
 /** Shape of a single in-flight project-tool call entry tracked by the backpressure map.
  * Defined here in core so the map type can live in RuntimeServices without a core→plugin import. */
@@ -51,15 +63,6 @@ export interface RuntimeTool {
 export interface RuntimePlugin {
   name: string;
   tools: RuntimeTool[];
-}
-
-/** Result contract for git worktree provisioning tools. Defined in core so that
- * both core consumers (Supervisor) and plugin implementations (git plugin) can
- * reference the same shape without a core→plugin import. */
-export interface WorktreeResult {
-  success: boolean;
-  path?: string;
-  error?: string;
 }
 
 /** Result contract for git merge/remove tools. Defined in core so that both
@@ -108,6 +111,93 @@ export interface RuntimeServices {
     signaling: RuntimePlugin;
     meta: RuntimePlugin;
   };
+  /** Typed port for beads operations (BD_READY, BD_LIST, BD_GET_BEAD, BD_CLAIM, BD_RELEASE).
+   * Constructed at composition time; missing tools fail at startup rather than mid-tick. */
+  beadsPort: BeadsPort;
+  /** Typed port for worktree operations (CREATE_WORKTREE).
+   * Constructed at composition time; missing tools fail at startup rather than mid-tick. */
+  worktreePort: WorktreePort;
+  /** Typed spawner interface for teammate lifecycle management.
+   * Satisfies the TeammateSpawner port without additional wrapping. */
+  teammateSpawner: TeammateSpawner;
+}
+
+// ---------------------------------------------------------------------------
+// Private helper — avoids importing requireTool from ToolRegistry (which itself
+// imports from RuntimeServices, creating a circular dependency).
+// ---------------------------------------------------------------------------
+
+function requirePluginTool(plugin: RuntimePlugin, name: string): RuntimeTool {
+  const tool = plugin.tools.find(t => t.name === name);
+  if (!tool) {
+    throw new Error(
+      `Required tool "${name}" is not registered in plugin "${plugin.name}". ` +
+      `Available tools: [${plugin.tools.map(t => t.name).join(', ')}]`
+    );
+  }
+  return tool;
+}
+
+// ---------------------------------------------------------------------------
+// Adapter implementations — inline in the composition layer so that adapter
+// classes do not need to import back from RuntimeServices (which would create
+// a circular dependency). The interfaces they implement live in OrchestrationPorts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps the BD plugin, resolving all tool handles at construction time.
+ * Throws a descriptive error immediately if any required tool is missing (fail-at-construction).
+ */
+class BeadsPortAdapter implements BeadsPort {
+  private readonly readyTool;
+  private readonly listTool;
+  private readonly getBeadTool;
+  private readonly claimTool;
+  private readonly releaseTool;
+
+  constructor(bdPlugin: RuntimePlugin) {
+    this.readyTool = requirePluginTool(bdPlugin, PluginToolName.BD_READY);
+    this.listTool = requirePluginTool(bdPlugin, PluginToolName.BD_LIST);
+    this.getBeadTool = requirePluginTool(bdPlugin, PluginToolName.BD_GET_BEAD);
+    this.claimTool = requirePluginTool(bdPlugin, PluginToolName.BD_CLAIM);
+    this.releaseTool = requirePluginTool(bdPlugin, PluginToolName.BD_RELEASE);
+  }
+
+  async ready(options: BeadReadyOptions): Promise<Bead[]> {
+    return (await this.readyTool.execute(options)) as Bead[];
+  }
+
+  async list(options: BeadListOptions): Promise<BeadListResult> {
+    return (await this.listTool.execute(options)) as BeadListResult;
+  }
+
+  async getBead(id: string): Promise<Bead> {
+    return (await this.getBeadTool.execute({ id })) as Bead;
+  }
+
+  async claim(options: BeadClaimOptions, ctx?: unknown): Promise<Bead> {
+    return (await this.claimTool.execute(options, ctx)) as Bead;
+  }
+
+  async release(id: string): Promise<void> {
+    await this.releaseTool.execute({ id });
+  }
+}
+
+/**
+ * Wraps the Git plugin, resolving the CREATE_WORKTREE tool at construction time.
+ * Throws a descriptive error immediately if the tool is missing (fail-at-construction).
+ */
+class WorktreePortAdapter implements WorktreePort {
+  private readonly createWorktreeTool;
+
+  constructor(gitPlugin: RuntimePlugin) {
+    this.createWorktreeTool = requirePluginTool(gitPlugin, PluginToolName.CREATE_WORKTREE);
+  }
+
+  async createWorktree(beadId: string, ctx?: unknown): Promise<WorktreeResult> {
+    return (await this.createWorktreeTool.execute({ beadId }, ctx)) as WorktreeResult;
+  }
 }
 
 export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvironment, explicitProjectRoot?: string): RuntimeServices {
@@ -134,6 +224,14 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
   const projectToolBackpressure: ProjectToolBackpressure = new Map();
   const instructionLoader = new InstructionLoader(projectRoot);
   const requiredToolResolver = new RequiredToolResolver(planWriteSet, projectRoot);
+
+  // Typed orchestration ports — adapters resolve their tool handles at construction
+  // time via requireTool, so a missing plugin tool fails here (startup) rather than
+  // mid-supervisor-tick.
+  const beadsPort = new BeadsPortAdapter(bdPlugin);
+  const worktreePort = new WorktreePortAdapter(gitPlugin);
+  // TeammateFactory already satisfies the TeammateSpawner interface; no wrapper needed.
+  const teammateSpawner: TeammateSpawner = teammateFactory;
 
   return {
     projectRoot,
@@ -167,6 +265,9 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
       quality: createQualityPlugin(),
       signaling: signalingPlugin,
       meta: createMetaPlugin(eventStore)
-    }
+    },
+    beadsPort,
+    worktreePort,
+    teammateSpawner
   };
 }

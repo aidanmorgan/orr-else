@@ -4,6 +4,7 @@ import { Logger } from '../src/core/Logger.js';
 import { BeadStatus, Defaults, DomainEventName, PluginToolName, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { DomainEvent } from '../src/core/EventStore.js';
+import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
 
 const IMMEDIATE_NO_PROGRESS_TIMEOUT_MS = 1;
 const STALE_PROGRESS_AGE_MS = TimeMs.MINUTE;
@@ -13,6 +14,17 @@ function createFakeClock(nowMs = NOW_MS): Clock {
   return {
     now: () => nowMs,
     date: (timestampMs?: number) => new Date(timestampMs === undefined ? nowMs : timestampMs)
+  };
+}
+
+function fakeBeadsPort(overrides: Partial<BeadsPort> = {}): BeadsPort {
+  return {
+    ready: vi.fn(async () => []),
+    list: vi.fn(async () => ({ items: [] })),
+    getBead: vi.fn(async (id) => ({ id } as any)),
+    claim: vi.fn(async ({ id }) => ({ id } as any)),
+    release: vi.fn(async () => {}),
+    ...overrides
   };
 }
 
@@ -31,7 +43,8 @@ function supervisorHarness(
     timestampMs: clock.now()
   }];
   const records: Array<{ event: string; data: any }> = [];
-  const release = vi.fn(async () => ({ id: 'bead-1' }));
+  const release = vi.fn(async () => {});
+  const beadsPort = fakeBeadsPort({ release });
   const terminateTeammatesForBead = vi.fn(async () => ({ terminatedPaneIds: ['%1'] }));
   const eventStore = {
     record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
@@ -56,7 +69,10 @@ function supervisorHarness(
     } as any,
     {
       getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
-      terminateTeammatesForBead
+      terminateTeammatesForBead,
+      getActiveTeammateCount: vi.fn(async () => liveBeadIds.size),
+      getAvailableSlots: vi.fn(async () => Math.max(0, maxSlots - liveBeadIds.size)),
+      spawnTeammateInTmux: vi.fn(async () => ({ success: true, paneId: '%1' }))
     } as any,
     { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
     {
@@ -69,11 +85,12 @@ function supervisorHarness(
         })
       },
       eventStore,
-      plugins: {
-        bd: {
-          tools: [{ name: 'bd_release', execute: release }]
-        }
-      }
+      beadsPort,
+      worktreePort: {
+        createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/worktree' }))
+      },
+      scheduler: {},
+      flowManager: {}
     } as any,
     { maxSlots, clock }
   );
@@ -106,7 +123,7 @@ describe('Supervisor', () => {
     expect(records.some(record => record.event === DomainEventName.AGENT_TURN_FAILED)).toBe(true);
     expect(records.some(record => record.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(true);
     expect(terminateTeammatesForBead).toHaveBeenCalledWith('bead-1', expect.stringContaining('without non-heartbeat progress'));
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
   });
 
   it('keeps a teammate working when recent non-heartbeat progress exists', async () => {
@@ -158,7 +175,7 @@ describe('Supervisor', () => {
       event: DomainEventName.TEAMMATE_PROCESS_EXITED,
       data: { beadId: 'bead-1' }
     });
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
     expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
   });
 
@@ -305,19 +322,19 @@ describe('Supervisor', () => {
     // Backoff timestamp must NOT be reset — this is the WI-26 invariant
     expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
     // The bd_release tool must have been called to drop the lease
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
   });
 
   it('claimAndSpawnBead releases lease when worktree provisioning fails', async () => {
-    const claim = vi.fn(async () => ({ id: 'bead-1' }));
-    const release = vi.fn(async () => ({}));
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
     const createWorktree = vi.fn(async () => ({ success: false, error: 'disk full' }));
     const records: Array<{ event: string; data: any }> = [];
     const supervisor = new Supervisor(
       {} as any,
       { hasUI: false } as any,
       { getHeartbeatSnapshot: () => [] } as any,
-      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux: vi.fn() } as any,
+      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux: vi.fn(), getActiveTeammateCount: vi.fn(), getAvailableSlots: vi.fn(), terminateTeammatesForBead: vi.fn() } as any,
       { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
       {
         configLoader: { load: async () => ({ settings: {} }) },
@@ -325,13 +342,10 @@ describe('Supervisor', () => {
           record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
           eventsForBeads: vi.fn(async () => new Map())
         },
-        plugins: {
-          bd: { tools: [
-            { name: 'bd_claim', execute: claim },
-            { name: 'bd_release', execute: release }
-          ]},
-          git: { tools: [{ name: 'create_worktree', execute: createWorktree }] }
-        }
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: { createWorktree },
+        scheduler: {},
+        flowManager: {}
       } as any,
       { maxSlots: 1, clock: createFakeClock() }
     );
@@ -339,12 +353,12 @@ describe('Supervisor', () => {
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
     const config = { settings: {} } as any;
     await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('disk full');
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
   });
 
   it('claimAndSpawnBead releases lease when spawn fails', async () => {
-    const claim = vi.fn(async () => ({ id: 'bead-1' }));
-    const release = vi.fn(async () => ({}));
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
     const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/bead-1' }));
     const spawnTeammateInTmux = vi.fn(async () => ({ success: false, error: 'tmux unavailable' }));
     const records: Array<{ event: string; data: any }> = [];
@@ -352,7 +366,7 @@ describe('Supervisor', () => {
       {} as any,
       { hasUI: false } as any,
       { getHeartbeatSnapshot: () => [] } as any,
-      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux } as any,
+      { getLiveTeammateBeadIds: vi.fn(async () => new Set()), spawnTeammateInTmux, getActiveTeammateCount: vi.fn(), getAvailableSlots: vi.fn(), terminateTeammatesForBead: vi.fn() } as any,
       { tracedAsync: (_n: string, _a: any, fn: any) => fn } as any,
       {
         configLoader: { load: async () => ({ settings: {} }) },
@@ -360,13 +374,10 @@ describe('Supervisor', () => {
           record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
           eventsForBeads: vi.fn(async () => new Map())
         },
-        plugins: {
-          bd: { tools: [
-            { name: 'bd_claim', execute: claim },
-            { name: 'bd_release', execute: release }
-          ]},
-          git: { tools: [{ name: 'create_worktree', execute: createWorktree }] }
-        }
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: { createWorktree },
+        scheduler: {},
+        flowManager: {}
       } as any,
       { maxSlots: 1, clock: createFakeClock() }
     );
@@ -374,7 +385,7 @@ describe('Supervisor', () => {
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
     const config = { settings: {} } as any;
     await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('tmux unavailable');
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
     expect(records.some(r => r.event === 'WORKTREE_PROVISIONED')).toBe(true);
   });
 
@@ -462,13 +473,13 @@ describe('Supervisor', () => {
     (supervisor as any).missingStartedBeadChecks.set('bead-missing', Defaults.TEAMMATE_MISSING_REAP_THRESHOLD - 1);
 
     // Wire release to succeed (simulating BD_RELEASE's new no-throw behaviour for missing beads)
-    release.mockResolvedValueOnce({ id: 'bead-missing', tombstoned: true });
+    release.mockResolvedValueOnce(undefined);
 
     await (supervisor as any).reconcileStartedBeads();
 
     // Release must be called exactly once — no retry loop
     expect(release).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledWith({ id: 'bead-missing' });
+    expect(release).toHaveBeenCalledWith('bead-missing');
     // Slot must be freed
     expect((supervisor as any).startedBeads.has('bead-missing')).toBe(false);
     // A TEAMMATE_PROCESS_EXITED event must be recorded (existing behaviour)

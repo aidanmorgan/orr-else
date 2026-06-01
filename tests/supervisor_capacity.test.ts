@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { BeadStatus, DomainEventName, PluginToolName, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
+import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 
 const orchestratorMock = vi.hoisted(() => ({
   selectAssignments: vi.fn()
@@ -25,6 +26,24 @@ function createFakeClock(nowMs = NOW_MS): Clock {
   };
 }
 
+function fakeBeadsPort(overrides: Partial<BeadsPort> = {}): BeadsPort {
+  return {
+    ready: vi.fn(async () => []),
+    list: vi.fn(async () => ({ items: [] })),
+    getBead: vi.fn(async (id) => ({ id } as any)),
+    claim: vi.fn(async ({ id }) => ({ id } as any)),
+    release: vi.fn(async () => {}),
+    ...overrides
+  };
+}
+
+function fakeWorktreePort(overrides: Partial<WorktreePort> = {}): WorktreePort {
+  return {
+    createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/worktree' })),
+    ...overrides
+  };
+}
+
 describe('Supervisor capacity pause handling', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -36,9 +55,9 @@ describe('Supervisor capacity pause handling', () => {
     const records: Array<{ event: string; data: unknown }> = [];
     const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => {
       supervisor.pauseSchedulingUntil(clock.now() + TimeMs.MINUTE, 'subscription capacity exhausted');
-      return { id, status: stateId };
+      return { id, status: stateId } as any;
     });
-    const release = vi.fn(async () => ({ success: true }));
+    const release = vi.fn(async () => {});
     const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
     const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%1' }));
 
@@ -67,19 +86,8 @@ describe('Supervisor capacity pause handling', () => {
         eventStore: {
           record: vi.fn(async (event: string, data: unknown) => records.push({ event, data }))
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim },
-              { name: PluginToolName.BD_RELEASE, execute: release }
-            ]
-          },
-          git: {
-            tools: [
-              { name: PluginToolName.CREATE_WORKTREE, execute: createWorktree }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
       { maxSlots: 2, clock }
     );
@@ -89,7 +97,7 @@ describe('Supervisor capacity pause handling', () => {
     expect(claim).toHaveBeenCalledTimes(1);
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-1' }), expect.anything());
     expect(release).toHaveBeenCalledTimes(1);
-    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+    expect(release).toHaveBeenCalledWith('bead-1');
     expect(createWorktree).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
     expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
@@ -98,8 +106,8 @@ describe('Supervisor capacity pause handling', () => {
 
   it('restores an active capacity pause before scanning the backlog', async () => {
     const clock = createFakeClock();
-    const claim = vi.fn(async () => ({ id: 'bead-1', status: 'Planning' }));
-    const release = vi.fn(async () => ({ success: true }));
+    const claim = vi.fn(async () => ({ id: 'bead-1', status: 'Planning' } as any));
+    const release = vi.fn(async () => {});
     const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%1' }));
     const pauseUntil = clock.date(clock.now() + TimeMs.MINUTE).toISOString();
 
@@ -134,14 +142,8 @@ describe('Supervisor capacity pause handling', () => {
             data: { pauseUntil, reason: 'subscription capacity exhausted' }
           }))
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim },
-              { name: PluginToolName.BD_RELEASE, execute: release }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: fakeWorktreePort()
       } as any,
       { maxSlots: 1, clock }
     );
@@ -157,8 +159,8 @@ describe('Supervisor capacity pause handling', () => {
 
   it('uses live teammate panes, not stale tracked bead ids, when filling capacity', async () => {
     const clock = createFakeClock();
-    const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId }));
-    const release = vi.fn(async () => ({ success: true }));
+    const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId } as any));
+    const release = vi.fn(async () => {});
     const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
     const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%2' }));
 
@@ -186,19 +188,8 @@ describe('Supervisor capacity pause handling', () => {
         eventStore: {
           record: vi.fn(async () => undefined)
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim },
-              { name: PluginToolName.BD_RELEASE, execute: release }
-            ]
-          },
-          git: {
-            tools: [
-              { name: PluginToolName.CREATE_WORKTREE, execute: createWorktree }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
       { maxSlots: 2, clock }
     );
@@ -213,7 +204,7 @@ describe('Supervisor capacity pause handling', () => {
       new Set(['bead-live'])
     );
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-restarted' }), expect.anything());
-    expect(createWorktree).toHaveBeenCalledWith({ beadId: 'bead-restarted' }, expect.anything());
+    expect(createWorktree).toHaveBeenCalledWith('bead-restarted', expect.anything());
     expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restarted', 'Planning', '/tmp/worktree', expect.anything());
     expect(release).not.toHaveBeenCalled();
   });
@@ -223,12 +214,11 @@ describe('Supervisor capacity pause handling', () => {
     const records: Array<{ event: string; data: any }> = [];
     let releasedRestart = false;
     let liveBeadIds = new Set(['bead-live']);
-    const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId }));
-    const release = vi.fn(async ({ id }: { id: string }) => {
+    const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId } as any));
+    const release = vi.fn(async (id: string) => {
       if (id === 'bead-restart') releasedRestart = true;
-      return { success: true };
     });
-    const getBead = vi.fn(async () => ({ id: 'bead-live', status: 'Planning' }));
+    const getBead = vi.fn(async (id: string) => ({ id, status: 'Planning' } as any));
     const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
     const spawnTeammateInTmux = vi.fn(async (beadId: string) => {
       liveBeadIds = new Set([...liveBeadIds, beadId]);
@@ -272,20 +262,8 @@ describe('Supervisor capacity pause handling', () => {
             : { id: beadId, status: 'Planning', restartRequested: false }),
           latestEventsForBeads: vi.fn(async () => new Map())
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim },
-              { name: PluginToolName.BD_RELEASE, execute: release },
-              { name: PluginToolName.BD_GET_BEAD, execute: getBead }
-            ]
-          },
-          git: {
-            tools: [
-              { name: PluginToolName.CREATE_WORKTREE, execute: createWorktree }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim, release: release as any, getBead }),
+        worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
       { maxSlots: 2, clock }
     );
@@ -296,7 +274,7 @@ describe('Supervisor capacity pause handling', () => {
 
     await (supervisor as any).step();
 
-    expect(release).toHaveBeenCalledWith({ id: 'bead-restart' });
+    expect(release).toHaveBeenCalledWith('bead-restart');
     expect(release.mock.invocationCallOrder[0]).toBeLessThan(claim.mock.invocationCallOrder[0]);
     expect(orchestratorMock.selectAssignments).toHaveBeenCalledWith(
       1,
@@ -304,7 +282,7 @@ describe('Supervisor capacity pause handling', () => {
       new Set(['bead-live'])
     );
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-restart' }), expect.anything());
-    expect(createWorktree).toHaveBeenCalledWith({ beadId: 'bead-restart' }, expect.anything());
+    expect(createWorktree).toHaveBeenCalledWith('bead-restart', expect.anything());
     expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restart', 'Planning', '/tmp/worktree', expect.anything());
     expect(records.find(record => record.event === DomainEventName.TEAMMATE_PROCESS_EXITED)?.data).toMatchObject({
       beadId: 'bead-restart',
@@ -319,7 +297,7 @@ describe('Supervisor capacity pause handling', () => {
   it('excludes beads in inactive-restart backoff without consuming open capacity', async () => {
     const clock = createFakeClock();
     orchestratorMock.selectAssignments.mockResolvedValue([]);
-    const claim = vi.fn(async () => ({ id: 'bead-cooling', status: 'Planning' }));
+    const claim = vi.fn(async () => ({ id: 'bead-cooling', status: 'Planning' } as any));
 
     const supervisor = new Supervisor(
       {} as any,
@@ -345,18 +323,8 @@ describe('Supervisor capacity pause handling', () => {
         eventStore: {
           record: vi.fn(async () => undefined)
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim }
-            ]
-          },
-          git: {
-            tools: [
-              { name: PluginToolName.CREATE_WORKTREE, execute: vi.fn() }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim }),
+        worktreePort: fakeWorktreePort()
       } as any,
       { maxSlots: 2, clock }
     );
@@ -374,7 +342,7 @@ describe('Supervisor capacity pause handling', () => {
 
   it('excludes live teammate panes after a coordinator restart even when startedBeads is empty', async () => {
     const clock = createFakeClock();
-    const claim = vi.fn(async () => ({ id: 'bead-live', status: 'Planning' }));
+    const claim = vi.fn(async () => ({ id: 'bead-live', status: 'Planning' } as any));
 
     orchestratorMock.selectAssignments.mockResolvedValue([]);
 
@@ -398,18 +366,8 @@ describe('Supervisor capacity pause handling', () => {
         eventStore: {
           record: vi.fn(async () => undefined)
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_CLAIM, execute: claim }
-            ]
-          },
-          git: {
-            tools: [
-              { name: PluginToolName.CREATE_WORKTREE, execute: vi.fn() }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ claim }),
+        worktreePort: fakeWorktreePort()
       } as any,
       { maxSlots: 2, clock }
     );
@@ -426,8 +384,8 @@ describe('Supervisor capacity pause handling', () => {
 
   it('terminates live teammate panes whose Beads are already terminal', async () => {
     const clock = createFakeClock();
-    const getBead = vi.fn(async () => ({ id: 'bead-closed', status: BeadStatus.COMPLETED }));
-    const release = vi.fn(async () => ({ success: true }));
+    const getBead = vi.fn(async (id: string) => ({ id, status: BeadStatus.COMPLETED } as any));
+    const release = vi.fn(async () => {});
     const terminateTeammatesForBead = vi.fn(async () => ({ terminatedPaneIds: ['%3'] }));
 
     const supervisor = new Supervisor(
@@ -450,14 +408,8 @@ describe('Supervisor capacity pause handling', () => {
         eventStore: {
           record: vi.fn(async () => undefined)
         },
-        plugins: {
-          bd: {
-            tools: [
-              { name: PluginToolName.BD_GET_BEAD, execute: getBead },
-              { name: PluginToolName.BD_RELEASE, execute: release }
-            ]
-          }
-        }
+        beadsPort: fakeBeadsPort({ getBead, release }),
+        worktreePort: fakeWorktreePort()
       } as any,
       { maxSlots: 1, clock }
     );
@@ -465,12 +417,12 @@ describe('Supervisor capacity pause handling', () => {
 
     await (supervisor as any).reconcileTerminalLiveBeads();
 
-    expect(getBead).toHaveBeenCalledWith({ id: 'bead-closed' });
+    expect(getBead).toHaveBeenCalledWith('bead-closed');
     expect(terminateTeammatesForBead).toHaveBeenCalledWith(
       'bead-closed',
       expect.stringContaining('terminal Bead status completed')
     );
-    expect(release).toHaveBeenCalledWith({ id: 'bead-closed' });
+    expect(release).toHaveBeenCalledWith('bead-closed');
     expect((supervisor as any).startedBeads.has('bead-closed')).toBe(false);
   });
 });

@@ -1,86 +1,66 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Orchestrator } from '../src/core/Orchestrator.js';
 import { App, BeadsDefaults, BeadsIssueStatus, PluginToolName } from '../src/constants/index.js';
+import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
+import type { Bead } from '../src/types/index.js';
+
+function fakeBead(id: string, status: string, overrides: Partial<Bead> = {}): Bead {
+  return {
+    id: id as any,
+    title: id,
+    status,
+    assigned_to: undefined,
+    dependencies: [],
+    changed_files: [],
+    logs: [],
+    retryCount: 0,
+    compactionCount: 0,
+    totalExecutionTimeMs: 0,
+    handovers: {},
+    completedActionIds: [],
+    lastActivity: new Date(0).toISOString(),
+    ...overrides
+  };
+}
 
 describe('Orchestrator', () => {
   it('resumes Orr Else-owned in-progress beads without a current-session active lease when ready backlog is short', async () => {
     const calls: Array<{ name: string; args: any }> = [];
-    const bdPlugin = {
-      tools: [
-        {
-          name: PluginToolName.BD_READY,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_READY, args });
-            return [];
-          }
-        },
-        {
-          name: PluginToolName.BD_LIST,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_LIST, args });
-            return {
-              items: [
-                {
-                  id: 'cerdiwen-resume',
-                  title: 'Resume me',
-                  status: 'RequirementsAnalysis',
-                  assigned_to: App.DISPLAY_NAME,
-                  dependencies: [],
-                  changed_files: [],
-                  logs: [],
-                  retryCount: 0,
-                  compactionCount: 0,
-                  totalExecutionTimeMs: 0,
-                  handovers: {},
-                  completedActionIds: [],
-                  lastActivity: new Date(0).toISOString()
-                },
-                {
-                  id: 'cerdiwen-old-session-lease',
-                  title: 'Resume old session lease',
-                  status: 'RequirementsAnalysis',
-                  assigned_to: App.DISPLAY_NAME,
-                  dependencies: [],
-                  changed_files: [],
-                  logs: [],
-                  retryCount: 0,
-                  compactionCount: 0,
-                  totalExecutionTimeMs: 0,
-                  handovers: {},
-                  completedActionIds: [],
-                  lastActivity: new Date(0).toISOString(),
-                  lease: { owner: App.DISPLAY_NAME, expiresAt: new Date(Date.now() + 60_000).toISOString() },
-                  leaseSessionId: 'session-old'
-                },
-                {
-                  id: 'cerdiwen-leased',
-                  title: 'Already leased',
-                  status: 'RequirementsAnalysis',
-                  assigned_to: App.DISPLAY_NAME,
-                  dependencies: [],
-                  changed_files: [],
-                  logs: [],
-                  retryCount: 0,
-                  compactionCount: 0,
-                  totalExecutionTimeMs: 0,
-                  handovers: {},
-                  completedActionIds: [],
-                  lastActivity: new Date(0).toISOString(),
-                  lease: { owner: App.DISPLAY_NAME, expiresAt: new Date(Date.now() + 60_000).toISOString() },
-                  leaseSessionId: 'session-current'
-                }
-              ]
-            };
-          }
-        }
-      ]
+    const beadsPort: BeadsPort = {
+      ready: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_READY, args });
+        return [];
+      }),
+      list: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_LIST, args });
+        return {
+          items: [
+            fakeBead('cerdiwen-resume', 'RequirementsAnalysis', {
+              assigned_to: App.DISPLAY_NAME
+            }),
+            fakeBead('cerdiwen-old-session-lease', 'RequirementsAnalysis', {
+              assigned_to: App.DISPLAY_NAME,
+              lease: { owner: App.DISPLAY_NAME, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+              leaseSessionId: 'session-old'
+            }),
+            fakeBead('cerdiwen-leased', 'RequirementsAnalysis', {
+              assigned_to: App.DISPLAY_NAME,
+              lease: { owner: App.DISPLAY_NAME, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+              leaseSessionId: 'session-current'
+            })
+          ]
+        };
+      }),
+      getBead: vi.fn(async (id) => fakeBead(id, 'RequirementsAnalysis')),
+      claim: vi.fn(async ({ id }) => fakeBead(id, 'RequirementsAnalysis')),
+      release: vi.fn(async () => {})
     };
     const orchestrator = new Orchestrator(
       { tracedAsync: (_name: string, _attrs: any, fn: any) => fn, getSessionId: () => 'session-current' } as any,
       { load: async () => ({ settings: { maxConcurrentSlots: 6 }, states: { RequirementsAnalysis: {} }, scheduler: {} }) } as any,
       { stateForBead: (bead: any) => bead.status } as any,
       { sortBacklog: async (beads: any[]) => beads.map((bead, index) => ({ ...bead, score: index })) } as any,
-      bdPlugin as any,
+      beadsPort,
       6
     );
 
@@ -95,56 +75,24 @@ describe('Orchestrator', () => {
   });
 
   it('keeps resumable in-progress work in the candidate pool when ready backlog is full', async () => {
-    const ready = Array.from({ length: 10 }, (_, index) => ({
-      id: `cerdiwen-ready-${index}`,
-      title: `Ready ${index}`,
-      status: 'ready',
-      dependencies: [],
-      changed_files: [],
-      logs: [],
-      retryCount: 0,
-      compactionCount: 0,
-      totalExecutionTimeMs: 0,
-      handovers: {},
-      completedActionIds: [],
-      lastActivity: new Date(0).toISOString()
-    }));
+    const ready = Array.from({ length: 10 }, (_, index) => fakeBead(`cerdiwen-ready-${index}`, 'ready'));
     const calls: Array<{ name: string; args: any }> = [];
-    const bdPlugin = {
-      tools: [
-        {
-          name: PluginToolName.BD_READY,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_READY, args });
-            return ready;
-          }
-        },
-        {
-          name: PluginToolName.BD_LIST,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_LIST, args });
-            return {
-              items: [
-                {
-                  id: 'cerdiwen-resume',
-                  title: 'Resume me',
-                  status: 'Planning',
-                  assigned_to: App.DISPLAY_NAME,
-                  dependencies: [],
-                  changed_files: [],
-                  logs: [],
-                  retryCount: 0,
-                  compactionCount: 0,
-                  totalExecutionTimeMs: 0,
-                  handovers: {},
-                  completedActionIds: [],
-                  lastActivity: new Date(0).toISOString()
-                }
-              ]
-            };
-          }
-        }
-      ]
+    const beadsPort: BeadsPort = {
+      ready: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_READY, args });
+        return ready;
+      }),
+      list: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_LIST, args });
+        return {
+          items: [
+            fakeBead('cerdiwen-resume', 'Planning', { assigned_to: App.DISPLAY_NAME })
+          ]
+        };
+      }),
+      getBead: vi.fn(async (id) => fakeBead(id, 'ready')),
+      claim: vi.fn(async ({ id }) => fakeBead(id, 'ready')),
+      release: vi.fn(async () => {})
     };
     const orchestrator = new Orchestrator(
       { tracedAsync: (_name: string, _attrs: any, fn: any) => fn, getSessionId: () => 'session-current' } as any,
@@ -153,9 +101,9 @@ describe('Orchestrator', () => {
       {
         sortBacklog: async (beads: any[]) => beads
           .map((bead) => ({ ...bead, score: bead.id === 'cerdiwen-resume' ? 100 : 0 }))
-          .sort((a, b) => b.score - a.score)
+          .sort((a: any, b: any) => b.score - a.score)
       } as any,
-      bdPlugin as any,
+      beadsPort,
       6
     );
 
@@ -166,59 +114,30 @@ describe('Orchestrator', () => {
   });
 
   it('recovers Orr Else-owned open beads whose event projection is already in a statechart phase', async () => {
-    const ready = Array.from({ length: 10 }, (_, index) => ({
-      id: `cerdiwen-ready-${index}`,
-      title: `Ready ${index}`,
-      status: 'ready',
-      dependencies: [],
-      changed_files: [],
-      logs: [],
-      retryCount: 0,
-      compactionCount: 0,
-      totalExecutionTimeMs: 0,
-      handovers: {},
-      completedActionIds: [],
-      lastActivity: new Date(0).toISOString()
-    }));
+    const ready = Array.from({ length: 10 }, (_, index) => fakeBead(`cerdiwen-ready-${index}`, 'ready'));
     const calls: Array<{ name: string; args: any }> = [];
-    const bdPlugin = {
-      tools: [
-        {
-          name: PluginToolName.BD_READY,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_READY, args });
-            return ready;
-          }
-        },
-        {
-          name: PluginToolName.BD_LIST,
-          execute: async (args: any) => {
-            calls.push({ name: PluginToolName.BD_LIST, args });
-            if (args.status === BeadsIssueStatus.OPEN) {
-              return {
-                items: [
-                  {
-                    id: 'cerdiwen-ss9qw',
-                    title: 'Projected implementation work',
-                    status: 'Implementation',
-                    assigned_to: App.DISPLAY_NAME,
-                    dependencies: [],
-                    changed_files: [],
-                    logs: [],
-                    retryCount: 0,
-                    compactionCount: 0,
-                    totalExecutionTimeMs: 0,
-                    handovers: {},
-                    completedActionIds: [],
-                    lastActivity: new Date().toISOString()
-                  }
-                ]
-              };
-            }
-            return { items: [] };
-          }
+    const beadsPort: BeadsPort = {
+      ready: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_READY, args });
+        return ready;
+      }),
+      list: vi.fn(async (args) => {
+        calls.push({ name: PluginToolName.BD_LIST, args });
+        if (args.status === BeadsIssueStatus.OPEN) {
+          return {
+            items: [
+              fakeBead('cerdiwen-ss9qw', 'Implementation', {
+                assigned_to: App.DISPLAY_NAME,
+                lastActivity: new Date().toISOString()
+              })
+            ]
+          };
         }
-      ]
+        return { items: [] };
+      }),
+      getBead: vi.fn(async (id) => fakeBead(id, 'ready')),
+      claim: vi.fn(async ({ id }) => fakeBead(id, 'ready')),
+      release: vi.fn(async () => {})
     };
     const orchestrator = new Orchestrator(
       { tracedAsync: (_name: string, _attrs: any, fn: any) => fn, getSessionId: () => 'session-current' } as any,
@@ -227,9 +146,9 @@ describe('Orchestrator', () => {
       {
         sortBacklog: async (beads: any[]) => beads
           .map((bead) => ({ ...bead, score: bead.id === 'cerdiwen-ss9qw' ? 100 : 0 }))
-          .sort((a, b) => b.score - a.score)
+          .sort((a: any, b: any) => b.score - a.score)
       } as any,
-      bdPlugin as any,
+      beadsPort,
       6
     );
 

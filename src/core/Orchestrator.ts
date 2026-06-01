@@ -5,7 +5,7 @@ import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { App, BeadsDefaults, BeadsIssueStatus, Component, Defaults, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { FlowManager } from './FlowManager.js';
-import type { RuntimePlugin } from './RuntimeServices.js';
+import type { BeadsPort } from './OrchestrationPorts.js';
 
 /**
  * Plugin-native backlog helper.
@@ -16,15 +16,9 @@ export class Orchestrator {
     private readonly configLoader: ConfigLoader,
     private readonly flowManager: FlowManager,
     private readonly scheduler: Scheduler,
-    private readonly bdPlugin: RuntimePlugin,
+    private readonly beadsPort: BeadsPort,
     private readonly maxSlots: number = Defaults.MAX_SLOTS
   ) {}
-
-  private async executeBdTool(name: string, args: any) {
-    const tool = this.bdPlugin.tools.find(t => t.name === name);
-    if (!tool) throw new Error(`Tool ${name} not found`);
-    return await tool.execute(args);
-  }
 
   public async getMaxSlots(): Promise<number> {
     const config = await this.configLoader.load();
@@ -66,12 +60,12 @@ export class Orchestrator {
     status: BeadsIssueStatus,
     limit: number
   ): Promise<void> {
-    const listed = await this.executeBdTool(PluginToolName.BD_LIST, {
+    const listed = await this.beadsPort.list({
       status,
       limit: this.inProgressRecoveryScanLimit(limit),
       includeProjection: true,
       includeNotesPreview: false
-    }) as { items?: Bead[] };
+    });
     for (const bead of listed.items || []) {
       if (byId.has(bead.id)) continue;
       if (!this.isResumableHarnessWork(bead)) continue;
@@ -80,7 +74,7 @@ export class Orchestrator {
   }
 
   private async assignmentBacklog(limit: number): Promise<Bead[]> {
-    const ready = await this.executeBdTool(PluginToolName.BD_READY, { limit }) as Bead[];
+    const ready = await this.beadsPort.ready({ limit });
     const byId = new Map<string, Bead>();
     for (const bead of ready) byId.set(bead.id, bead);
 
@@ -95,7 +89,7 @@ export class Orchestrator {
       const maxSlots = await this.getMaxSlots();
       const backlog = await this.assignmentBacklog(this.backlogScanLimit(maxSlots));
       const active = backlog.filter(bead => !TERMINAL_BEAD_STATUSES.has(bead.status));
-      
+
       const sorted = await this.scheduler.sortBacklog(active);
       return sorted.slice(0, maxSlots);
     })();
@@ -110,7 +104,7 @@ export class Orchestrator {
     if (requestedBeadId && alreadyStarted.has(requestedBeadId)) return [];
 
     const backlog = requestedBeadId
-      ? [await this.executeBdTool(PluginToolName.BD_GET_BEAD, { id: requestedBeadId }) as Bead]
+      ? [await this.beadsPort.getBead(requestedBeadId)]
       : await this.assignmentBacklog(this.backlogScanLimit(availableSlots));
 
     const active = backlog.filter(bead =>
