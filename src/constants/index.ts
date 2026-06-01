@@ -111,6 +111,21 @@ export enum MergeAndCommitStatus {
 }
 
 /**
+ * Structured reason codes for quarantining a bead after a worktree-creation failure.
+ * Quarantined beads are skipped on subsequent scans until their signature changes.
+ */
+export enum QuarantineReason {
+  /** Branch ref is invalid (e.g. detached HEAD, bad ref syntax). */
+  INVALID_BRANCH_REF = 'INVALID_BRANCH_REF',
+  /** Branch is already checked out in another worktree. */
+  ALREADY_CHECKED_OUT = 'ALREADY_CHECKED_OUT',
+  /** Target worktree path already exists on disk. */
+  WORKTREE_PATH_TAKEN = 'WORKTREE_PATH_TAKEN',
+  /** Worktree creation failed for an unclassified reason. */
+  UNKNOWN = 'UNKNOWN'
+}
+
+/**
  * Reason codes for preserving a worktree instead of auto-removing it after merge.
  * Surfaced in WORKTREE_AUTO_REMOVE_PRESERVED domain events.
  */
@@ -203,6 +218,7 @@ export enum DomainEventName {
   WORKTREE_REMOVED = 'WORKTREE_REMOVED',
   WORKTREE_AUTO_REMOVED = 'WORKTREE_AUTO_REMOVED',
   WORKTREE_AUTO_REMOVE_PRESERVED = 'WORKTREE_AUTO_REMOVE_PRESERVED',
+  BEAD_QUARANTINED = 'BEAD_QUARANTINED',
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
   RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE'

@@ -3,7 +3,7 @@ import { Bead, BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
-import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, RestartKind, RetentionDefaults, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, QuarantineReason, RestartKind, RetentionDefaults, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
@@ -18,6 +18,18 @@ export interface SupervisorOptions {
   maxSlots: number;
   requestedBeadId?: string;
   clock?: Clock;
+}
+
+/** Quarantine entry for a bead whose worktree creation repeatedly fails.
+ * The bead is skipped on subsequent scans until its signature changes, preventing
+ * repeated claim/release churn and slot-health thrash. */
+interface QuarantineEntry {
+  /** Structured reason code from the worktree-creation failure. */
+  reason: QuarantineReason;
+  /** State fingerprint that must change for the bead to be re-attempted.
+   * Composed of the bead's status + updatedAt (or similar stable field) at the
+   * time of quarantine so that a bead re-assignment or status change lifts the block. */
+  signature: string;
 }
 
 interface MissingStartedRestartDetails {
@@ -87,6 +99,10 @@ export class Supervisor {
   private lastLoggedSlotHealthDigest = '';
   private lastCapacityUnderfillDigest = '';
   private lastMissingStartedBeadIds = new Set<string>();
+  /** In-memory quarantine map: beadId → QuarantineEntry.
+   * Quarantined beads are skipped during scanAndSpawn unless their signature changes.
+   * Single-process-local; no persistence needed (signatures are re-derived from live state). */
+  private readonly quarantine = new Map<string, QuarantineEntry>();
   private readonly clock: Clock;
 
   constructor(
@@ -203,6 +219,75 @@ export class Supervisor {
     return this.services.worktreePort;
   }
 
+  // ---------------------------------------------------------------------------
+  // Quarantine helpers
+  // ---------------------------------------------------------------------------
+
+  /** Derive a stable signature for the given bead that captures the external
+   * state that must CHANGE before a quarantined re-attempt is warranted.
+   * Uses status + lastActivity so that a bead update, re-assignment, or any
+   * activity timestamp bump by the user lifts the quarantine automatically.
+   * Both fields are typed on Bead — no unsafe cast needed. */
+  private quarantineSignatureFor(bead: Bead): string {
+    return `${bead.status}:${bead.lastActivity || ''}`;
+  }
+
+  /** Classify a worktree-creation error string into a structured QuarantineReason. */
+  private classifyWorktreeError(errorText: string): QuarantineReason {
+    const lower = errorText.toLowerCase();
+    // "already checked out" — git worktree add rejects a branch in use by another worktree
+    if (lower.includes('already checked out') || lower.includes('is already checked out')) {
+      return QuarantineReason.ALREADY_CHECKED_OUT;
+    }
+    // "invalid reference" / "invalid branch ref" / "not a valid object name"
+    if (
+      lower.includes('invalid reference') ||
+      lower.includes('not a valid object name') ||
+      lower.includes('invalid branch') ||
+      lower.includes('bad revision') ||
+      (lower.includes('pathspec') && lower.includes('did not match'))
+    ) {
+      return QuarantineReason.INVALID_BRANCH_REF;
+    }
+    // Worktree path already exists on disk (git worktree add refuses to clobber)
+    if (lower.includes('already exists') || lower.includes('file exists') || lower.includes('path is already')) {
+      return QuarantineReason.WORKTREE_PATH_TAKEN;
+    }
+    return QuarantineReason.UNKNOWN;
+  }
+
+  /** Returns true if the bead is currently quarantined with an UNCHANGED signature.
+   * If the signature changed (bead state evolved externally) the quarantine entry is
+   * cleared and the bead is eligible for a re-attempt. */
+  private isQuarantined(bead: Bead): boolean {
+    const entry = this.quarantine.get(bead.id);
+    if (!entry) return false;
+    const currentSig = this.quarantineSignatureFor(bead);
+    if (currentSig !== entry.signature) {
+      // Signature changed — bead state evolved; clear quarantine and allow retry.
+      this.quarantine.delete(bead.id);
+      return false;
+    }
+    return true;
+  }
+
+  /** Quarantine a bead with a structured reason + its current signature.
+   * Emits a bounded BEAD_QUARANTINED event exactly once per quarantine entry
+   * (subsequent ticks skip silently until the signature changes). */
+  private async quarantineBead(bead: Bead, reason: QuarantineReason): Promise<void> {
+    const signature = this.quarantineSignatureFor(bead);
+    this.quarantine.set(bead.id, { reason, signature });
+    await this.services.eventStore.record(DomainEventName.BEAD_QUARANTINED, {
+      beadId: bead.id,
+      reason,
+      signature
+    }).catch(() => {});
+    Logger.warn(Component.SUPERVISOR, 'Bead quarantined after worktree-creation failure', {
+      beadId: bead.id,
+      reason
+    });
+  }
+
   private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
     await this.beadsPort().release(claimed.id).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
@@ -221,8 +306,18 @@ export class Supervisor {
   /** Claim one bead, provision its worktree, record the event, and spawn a teammate.
    * Owns the full claim → worktree → record → spawn sequence for a single bead,
    * including releasing the lease on every failure path.
-   * Returns true on success; throws on hard failure (caller catches and records). */
-  private async claimAndSpawnBead(bead: ScoredBead & { stateId: string }, config: HarnessConfig): Promise<boolean> {
+   *
+   * Returns:
+   *   'spawned'     — success; continue to the next bead.
+   *   'paused'      — scheduling pause detected mid-flight; caller should break the loop.
+   *   'quarantined' — worktree creation failed and the bead was quarantined; caller skips
+   *                   this bead but continues processing others (no slot consumed).
+   *   throws        — hard failure (spawn failure or unexpected error); caller catches and records.
+   */
+  private async claimAndSpawnBead(
+    bead: ScoredBead & { stateId: string },
+    config: HarnessConfig
+  ): Promise<'spawned' | 'paused' | 'quarantined'> {
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
 
     const beadsPort = this.beadsPort();
@@ -239,21 +334,28 @@ export class Supervisor {
     // Release the lease we just acquired and signal the caller to break.
     if (this.isSchedulingPaused()) {
       await this.releaseClaimedAfterPause(claimed);
-      return false;
+      return 'paused';
     }
 
     if (this.stopping) {
       await beadsPort.release(claimed.id).catch(() => {});
       this.startedBeads.delete(claimed.id);
-      return false;
+      return 'paused';
     }
 
     // Mandatory Worktree Isolation
     const result = await worktreePort.createWorktree(claimed.id, this.ctx);
     const worktreePath = result.path;
     if (result.success !== true || !worktreePath) {
+      // Release the lease before quarantining — preserves WI-11 lease integrity.
       await beadsPort.release(claimed.id).catch(() => {});
-      throw new Error(result.error || `Failed to provision mandatory worktree for ${claimed.id}`);
+      this.startedBeads.delete(claimed.id);
+      this.startedBeadAtMs.delete(claimed.id);
+      // Classify and quarantine — emit once-per-quarantine structured event.
+      const errorText = result.error || `Failed to provision mandatory worktree for ${claimed.id}`;
+      const quarantineReason = this.classifyWorktreeError(errorText);
+      await this.quarantineBead(bead, quarantineReason);
+      return 'quarantined';
     }
     await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
 
@@ -261,7 +363,7 @@ export class Supervisor {
     // Release the lease (worktree already provisioned) and signal the caller to break.
     if (this.isSchedulingPaused()) {
       await this.releaseClaimedAfterPause(claimed);
-      return false;
+      return 'paused';
     }
 
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
@@ -272,7 +374,7 @@ export class Supervisor {
       throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
     }
     Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
-    return true;
+    return 'spawned';
   }
 
   private async step() {
@@ -459,11 +561,36 @@ export class Supervisor {
         await this.factory.getAvailableSlots()
       );
       if (currentSlots <= 0) break;
+
+      // PREFLIGHT: skip terminal/closed beads before claiming a slot.
+      // This prevents claiming/spawning a bead that has already reached a terminal
+      // state externally (e.g. closed via another process between backlog scan and now).
+      // Also skip beads currently quarantined with an unchanged signature (worktree
+      // creation would fail again identically — no slot-health churn).
+      if (TERMINAL_BEAD_STATUSES.has(bead.status)) {
+        Logger.info(Component.SUPERVISOR, 'Preflight: skipping terminal bead', {
+          beadId: bead.id,
+          status: bead.status
+        });
+        continue;
+      }
+      if (this.isQuarantined(bead)) {
+        Logger.info(Component.SUPERVISOR, 'Preflight: skipping quarantined bead (unchanged signature)', {
+          beadId: bead.id,
+          reason: this.quarantine.get(bead.id)?.reason
+        });
+        continue;
+      }
+
       this.startedBeads.add(bead.id);
       this.startedBeadAtMs.set(bead.id, this.clock.now());
       try {
-        const spawned = await this.claimAndSpawnBead(bead, config);
-        if (!spawned) break;
+        const result = await this.claimAndSpawnBead(bead, config);
+        if (result === 'paused') break;
+        // 'quarantined': lease already released inside claimAndSpawnBead; continue
+        // to next bead (slot not consumed, no churn).
+        if (result === 'quarantined') continue;
+        // 'spawned': success.
       } catch (error) {
         this.startedBeads.delete(bead.id);
         this.startedBeadAtMs.delete(bead.id);

@@ -328,7 +328,7 @@ describe('Supervisor', () => {
     expect(release).toHaveBeenCalledWith('bead-1');
   });
 
-  it('claimAndSpawnBead releases lease when worktree provisioning fails', async () => {
+  it('claimAndSpawnBead releases lease and quarantines bead when worktree provisioning fails', async () => {
     const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
     const release = vi.fn(async () => {});
     const createWorktree = vi.fn(async () => ({ success: false, error: 'disk full' }));
@@ -355,8 +355,13 @@ describe('Supervisor', () => {
 
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
     const config = { settings: {} } as any;
-    await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('disk full');
+    // claimAndSpawnBead now returns 'quarantined' (not throws) for worktree failures
+    const result = await (supervisor as any).claimAndSpawnBead(bead, config);
+    expect(result).toBe('quarantined');
+    // Lease must always be released — WI-11 lease integrity preserved
     expect(release).toHaveBeenCalledWith('bead-1');
+    // A structured BEAD_QUARANTINED event must be emitted exactly once
+    expect(records.some(r => r.event === DomainEventName.BEAD_QUARANTINED)).toBe(true);
   });
 
   it('claimAndSpawnBead releases lease when spawn fails', async () => {
@@ -738,5 +743,93 @@ describe('Supervisor', () => {
     await (supervisor as any).step();
 
     expect(invalidateCache).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Spawn PREFLIGHT + worktree QUARANTINE tests
+  // ---------------------------------------------------------------------------
+
+  it('classifyWorktreeError returns ALREADY_CHECKED_OUT for already-checked-out error text', () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const reason = (supervisor as any).classifyWorktreeError(
+      "fatal: 'bead/pi-experiment-abc123' is already checked out at '/path/to/worktrees/pi-experiment-abc123'"
+    );
+    expect(reason).toBe('ALREADY_CHECKED_OUT');
+  });
+
+  it('classifyWorktreeError returns INVALID_BRANCH_REF for invalid-reference error text', () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const reason = (supervisor as any).classifyWorktreeError(
+      "fatal: invalid reference: refs/heads/bead/bad--ref"
+    );
+    expect(reason).toBe('INVALID_BRANCH_REF');
+  });
+
+  it('classifyWorktreeError returns WORKTREE_PATH_TAKEN for already-exists error text', () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const reason = (supervisor as any).classifyWorktreeError(
+      "fatal: '/path/to/worktrees/pi-experiment-abc123' already exists"
+    );
+    expect(reason).toBe('WORKTREE_PATH_TAKEN');
+  });
+
+  it('classifyWorktreeError returns UNKNOWN for unrecognised error text', () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const reason = (supervisor as any).classifyWorktreeError('disk full');
+    expect(reason).toBe('UNKNOWN');
+  });
+
+  it('isQuarantined returns false for a bead not in the quarantine map', () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const bead = { id: 'bead-q', status: 'ready' } as any;
+    expect((supervisor as any).isQuarantined(bead)).toBe(false);
+  });
+
+  it('isQuarantined returns true for a bead with unchanged signature', async () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    await (supervisor as any).quarantineBead(bead, 'ALREADY_CHECKED_OUT');
+    expect((supervisor as any).isQuarantined(bead)).toBe(true);
+  });
+
+  it('isQuarantined returns false and clears entry when bead signature changes (status changed)', async () => {
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const beadAtQuarantine = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
+    // Simulate bead state changing externally (status updated, lastActivity bumped)
+    const beadAfterUpdate = { id: 'bead-q', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
+    expect((supervisor as any).isQuarantined(beadAfterUpdate)).toBe(false);
+    // Entry must be cleared from the map
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+  });
+
+  it('isQuarantined returns false and clears entry when ONLY lastActivity changes (timestamp-only clearing)', async () => {
+    // This is the key regression guard: a bead quarantined at status X + lastActivity T1
+    // must clear when re-scanned at the same status X but a bumped lastActivity T2.
+    // With the old status-only signature this would FAIL — the bead would remain quarantined.
+    const { supervisor } = supervisorHarness(NOW_MS);
+    const beadAtQuarantine = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
+    // Only lastActivity changes — status stays 'ready'
+    const beadAfterActivityBump = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
+    expect((supervisor as any).isQuarantined(beadAfterActivityBump)).toBe(false);
+    // Entry must be cleared from the map
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+  });
+
+  it('quarantineBead emits a structured BEAD_QUARANTINED event with reason and signature', async () => {
+    const records: Array<{ event: string; data: any }> = [];
+    const { supervisor } = supervisorHarness(NOW_MS);
+    // Replace the eventStore.record spy to capture events
+    (supervisor as any).services.eventStore.record = vi.fn(async (event: string, data: any) => {
+      records.push({ event, data });
+    });
+    const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    await (supervisor as any).quarantineBead(bead, 'INVALID_BRANCH_REF');
+    const quarantineEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);
+    expect(quarantineEvent).toBeDefined();
+    expect(quarantineEvent!.data.beadId).toBe('bead-q');
+    expect(quarantineEvent!.data.reason).toBe('INVALID_BRANCH_REF');
+    expect(typeof quarantineEvent!.data.signature).toBe('string');
   });
 });
