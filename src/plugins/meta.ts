@@ -3,8 +3,9 @@ import * as path from 'path';
 import { Type } from "@earendil-works/pi-ai";
 import { EventStore } from '../core/EventStore.js';
 import { DomainEventName, PluginToolName } from '../constants/index.js';
+import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
-export function createMetaPlugin(eventStore: EventStore) {
+export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
   return {
   name: 'meta-plugin-manager',
   tools: [
@@ -15,7 +16,8 @@ export function createMetaPlugin(eventStore: EventStore) {
         name: Type.String({ description: 'The name of the plugin file (e.g., custom-tool.ts)' }),
         content: Type.String({ description: 'The full TypeScript code for the plugin' })
       }),
-      execute: async ({ name, content }: { name: string, content: string }) => {
+      execute: async (params: unknown) => {
+        const { name, content } = (params && typeof params === 'object' ? params : {}) as { name: string; content: string };
         try {
           const safeName = path.basename(name);
           if (!safeName.endsWith('.ts') || safeName !== name) {
@@ -33,6 +35,6 @@ export function createMetaPlugin(eventStore: EventStore) {
         }
       }
     }
-  ]
+  ] satisfies RuntimeTool[]
 };
 }

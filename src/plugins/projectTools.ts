@@ -363,11 +363,12 @@ export function registerConfiguredProjectTools(
             operation: Type.Optional(Type.String({ description: 'The configured MCP operation or alias to perform' })),
             arguments: Type.Optional(Type.Object({}, { additionalProperties: true, description: 'JSON object arguments for the MCP tool operation' }))
           }),
-      execute: async (params: any, ctx: ExtensionContext) => {
+      execute: async (params: unknown, ctx: ExtensionContext) => {
         const hiddenContext = runtimeContext?.() || {};
         const configuredFrameworkRoot = frameworkRootFromConfig(config, env, injectedRoot);
+        const paramsRecord = params && typeof params === 'object' && !Array.isArray(params) ? params as Record<string, unknown> : {};
         return await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
-          ...(params || {}),
+          ...paramsRecord,
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {})
         }, ctx, env, backpressure, injectedRoot);

@@ -7,7 +7,7 @@ import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
 import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults } from '../constants/index.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
-import type { MergeResult, RuntimePlugin, WorktreeResult } from '../core/RuntimeServices.js';
+import type { MergeResult, RuntimePlugin, RuntimeTool, WorktreeResult } from '../core/RuntimeServices.js';
 
 const appendFileAsync = fs.promises.appendFile;
 const mkdirAsync = fs.promises.mkdir;
@@ -245,7 +245,7 @@ async function autoRestoreConfiguredPaths(
 
 export type { WorktreeResult, MergeResult };
 
-export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin) {
+export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin): RuntimePlugin {
   return {
   name: 'git-worktrees',
   tools: [
@@ -440,6 +440,6 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         }
       }
     }
-  ]
+  ] satisfies RuntimeTool[]
   };
 }

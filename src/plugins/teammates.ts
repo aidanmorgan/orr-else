@@ -10,6 +10,7 @@ import { Logger } from '../core/Logger.js';
 import { Observability } from '../core/Observability.js';
 import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
+import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 import { resolvePiSkillPaths, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
 import {
   Component,
@@ -269,14 +270,15 @@ export class TeammateFactory {
     }
   }
 
-  public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: any): Promise<{ success: boolean; paneId?: string; error?: string }> {
+  public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {
     return this.observability.tracedAsync('spawn_teammate', {
       [OtelAttr.AGENT_BEAD_ID]: beadId,
       [OtelAttr.AGENT_STATE_ID]: stateId
     }, async () => this.spawnTeammateInTmuxInner(beadId, stateId, worktreePath, ctx))();
   }
 
-  private async spawnTeammateInTmuxInner(beadId: BeadId, stateId: string, worktreePath: string, ctx?: any): Promise<{ success: boolean; paneId?: string; error?: string }> {
+  private async spawnTeammateInTmuxInner(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {
+    const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;
     try {
       assertSafeBeadId(beadId);
       if (!worktreePath) {
@@ -289,7 +291,7 @@ export class TeammateFactory {
         return { success: false, error: 'No available Orr Else teammate slots.' };
       }
 
-      if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Spawning teammate for ${beadId}...`);
+      if (ui?.hasUI) ui.ui?.setWorkingMessage(`Spawning teammate for ${beadId}...`);
 
       const projectRoot = this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot;
       const runDir = worktreePath;
@@ -382,9 +384,9 @@ export class TeammateFactory {
         paneId
       });
 
-      if (ctx?.hasUI) {
-        ctx.ui.notify(`Teammate spawned for ${beadId} (${stateId})`, 'info');
-        ctx.ui.setWorkingMessage(undefined);
+      if (ui?.hasUI) {
+        ui.ui?.notify(`Teammate spawned for ${beadId} (${stateId})`, 'info');
+        ui.ui?.setWorkingMessage(undefined);
       }
       return { success: true, paneId };
     } catch (error) {
@@ -395,9 +397,9 @@ export class TeammateFactory {
         error: String(error)
       }).catch(() => {});
       Logger.error(Component.FACTORY, 'Failed to spawn Orr Else teammate', { beadId, stateId, error: String(error) });
-      if (ctx?.hasUI) {
-        ctx.ui.notify(`Failed to spawn teammate: ${String(error)}`, 'error');
-        ctx.ui.setWorkingMessage(undefined);
+      if (ui?.hasUI) {
+        ui.ui?.notify(`Failed to spawn teammate: ${String(error)}`, 'error');
+        ui.ui?.setWorkingMessage(undefined);
       }
       return { success: false, error: String(error) };
     }
@@ -436,7 +438,7 @@ export class TeammateFactory {
   }
 }
 
-export const teammatePlugin = (factory: TeammateFactory) => ({
+export const teammatePlugin = (factory: TeammateFactory): RuntimePlugin => ({
   name: 'orr-else-teammates',
   tools: [
     {
@@ -447,7 +449,10 @@ export const teammatePlugin = (factory: TeammateFactory) => ({
         stateId: Type.String({ description: 'The statechart state to execute' }),
         worktreePath: Type.String({ description: 'Mandatory dedicated worktree path for the teammate.' })
       }),
-      execute: async ({ beadId, stateId, worktreePath }: { beadId: string; stateId: string; worktreePath: string }, ctx?: unknown) => await factory.spawnTeammateInTmux(beadId as BeadId, stateId, worktreePath, ctx)
+      execute: async (params: unknown, ctx?: unknown) => {
+        const { beadId, stateId, worktreePath } = (params && typeof params === 'object' ? params : {}) as { beadId: string; stateId: string; worktreePath: string };
+        return factory.spawnTeammateInTmux(beadId as BeadId, stateId, worktreePath, ctx);
+      }
     }
-  ]
+  ] satisfies RuntimeTool[]
 });
