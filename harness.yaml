@@ -151,7 +151,10 @@ states:
   Implementation:
     llmProvider: codex
     model: gpt-5.5
-    thinking: xhigh
+    # Reserve extended/extra-high thinking for Planning and the adversarial reviews.
+    # The coding step executes an already-reviewed plan, so a lower thinking level
+    # cuts reasoning-token usage while keeping enough headroom for the test-fix loop.
+    thinking: medium
     identity:
       role: The Implementer Teammate
       expertise: Surgical code changes, test-driven implementation, and quality verification
