@@ -262,4 +262,47 @@ states:
     await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
     await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-path']));
   });
+
+  it('continues killing remaining panes and always records TEAMMATE_PROCESS_EXITED when first kill-pane fails', async () => {
+    const records: Array<{ event: string; data: any }> = [];
+
+    // Two panes for the same bead. The first kill-pane call rejects (simulates an
+    // already-dead pane that tmux no longer knows about); the second must still execute.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%10\tAgent:bead-term\tzsh\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-term pi\t${path.join(root, 'worktrees', 'bead-term')}\t0`,
+            `%11\tAgent:bead-term\tzsh\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-term pi\t${path.join(root, 'worktrees', 'bead-term')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      if (args.includes('kill-pane') && args.includes('%10')) {
+        throw new Error('no such pane: %10');
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await factory.terminateTeammatesForBead('bead-term' as any, 'test-termination');
+
+    // (a) The second pane (%11) must still be killed despite %10 failing.
+    const killCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('kill-pane'));
+    expect(killCalls.some(([, args]) => (args as string[]).includes('%11'))).toBe(true);
+
+    // (b) TEAMMATE_PROCESS_EXITED is recorded exactly once, regardless of the kill-pane failure.
+    const exitedEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_PROCESS_EXITED);
+    expect(exitedEvents).toHaveLength(1);
+    expect(exitedEvents[0].data.beadId).toBe('bead-term');
+  });
 });

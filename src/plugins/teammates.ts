@@ -384,8 +384,16 @@ export class TeammateFactory {
     const terminatedPaneIds: string[] = [];
 
     for (const pane of matchingPanes) {
-      await tmux([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
-      terminatedPaneIds.push(pane.paneId);
+      try {
+        await tmux([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
+        terminatedPaneIds.push(pane.paneId);
+      } catch (error) {
+        Logger.warn(Component.FACTORY, 'Unable to kill Orr Else teammate pane', {
+          paneId: pane.paneId,
+          beadId,
+          error: String(error)
+        });
+      }
     }
 
     await this.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, {
