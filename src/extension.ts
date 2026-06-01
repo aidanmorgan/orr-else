@@ -120,6 +120,15 @@ interface ExtensionSession {
   // ── coordinator ──────────────────────────────────────────────────────────
   supervisor: Supervisor | null;
   currentFlowOptions: FlowOptions | null;
+  /**
+   * Shared TeammateFactory built once in SESSION_START and reused by
+   * startOrrElse (coordinator) and the spawn_teammate tool (all processes).
+   *
+   * Lifecycle note: SESSION_START always fires before the user can invoke
+   * /orr-else, so this field is populated before startOrrElse ever runs.
+   * In worker processes startOrrElse never runs; the tool still reads it here.
+   */
+  teammateFactory: TeammateFactory | null;
   // ── worker run state ─────────────────────────────────────────────────────
   activeRun: ActiveRun | null;
   agentFailureSignaled: boolean;
@@ -163,6 +172,7 @@ function createExtensionSession(): ExtensionSession {
   return {
     supervisor: null,
     currentFlowOptions: null,
+    teammateFactory: null,
     activeRun: null,
     agentFailureSignaled: false,
     checklistMutationQueue: Promise.resolve(),
@@ -2504,7 +2514,12 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   services.apiAddress.port = String(apiPort);
   services.apiAddress.base = apiBase;
 
-  const factory = new TeammateFactory(
+  // SESSION_START always fires before /orr-else can be invoked, so
+  // session.teammateFactory is already populated by the SESSION_START handler.
+  // Use ??= so that the same instance is shared everywhere (spawn_teammate tool
+  // and Supervisor both operate on one factory).  If SESSION_START somehow did
+  // not run first (should not happen), we construct defensively here.
+  session.teammateFactory ??= new TeammateFactory(
     runtimeObservability,
     services.configLoader,
     services.eventStore,
@@ -2513,6 +2528,13 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     Defaults.TMUX_SESSION,
     fileURLToPath(import.meta.url)
   );
+  // Apply the CLI-resolved maxSlots to the (possibly reused) factory so that
+  // `--max-slots N` overrides the config value baked in at SESSION_START time.
+  // The Supervisor already receives options.maxSlots directly; this call keeps
+  // the factory's internal slot cap (used by getAvailableSlots / spawn guards)
+  // consistent with the operator's explicit CLI intent.
+  session.teammateFactory.setMaxSlots(options.maxSlots || Defaults.MAX_SLOTS);
+  const factory = session.teammateFactory;
   await factory.ensureAgentsWindow();
 
   session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
@@ -2730,7 +2752,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }) as any);
     }
 
-    const teammateToolFactory = new TeammateFactory(
+    // Build the factory once and store it on the session so that startOrrElse
+    // (coordinator path, which always runs AFTER SESSION_START) can reuse the
+    // same instance rather than constructing a second one.  Worker processes
+    // never call startOrrElse, so this is their only construction site.
+    session.teammateFactory = new TeammateFactory(
       runtimeObservability,
       services.configLoader,
       services.eventStore,
@@ -2742,7 +2768,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const harnessPlugins = [
       services.plugins.bd,
       services.plugins.git,
-      teammatePlugin(teammateToolFactory),
+      teammatePlugin(session.teammateFactory),
       services.plugins.mailbox,
       services.plugins.quality,
       services.plugins.meta

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import * as fs from 'fs';
@@ -7,7 +7,8 @@ import * as path from 'path';
 import orrElseExtension, { isHarnessTransientFailure, shouldPersistBlockedBeadStatus } from '../src/extension.js';
 import { FlowManager } from '../src/core/FlowManager.js';
 import { Teammate } from '../src/core/Teammate.js';
-import { BuiltInToolName, EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/index.js';
+import { TeammateFactory } from '../src/plugins/teammates.js';
+import { BuiltInToolName, EnvVars, NativePiToolName, PiEventName, PluginToolName, ProcessFlag } from '../src/constants/index.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 
 function fakePi() {
@@ -1222,5 +1223,186 @@ states:
 
     // Sanity: the second invocation must still have registered the per-pi tools.
     expect(harness.tools.map(t => t.name)).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
+  });
+});
+
+describe('WI-20 — TeammateFactory dedup', () => {
+  /**
+   * SESSION_START always fires before /orr-else can be invoked.  The dedup
+   * guarantee is: SESSION_START constructs one TeammateFactory and stores it on
+   * the session; startOrrElse (coordinator) reuses session.teammateFactory
+   * instead of constructing a second one.  Worker processes never call
+   * startOrrElse, so SESSION_START is their only construction site.
+   *
+   * We verify the invariant via two observable proxies:
+   *   1. The spawn_teammate tool is registered after SESSION_START, proving
+   *      the factory was built and passed to teammatePlugin().
+   *   2. TeammateFactory.prototype.ensureAgentsWindow is spied upon.  It is
+   *      called exactly once inside startOrrElse (on the coordinator factory).
+   *      If startOrrElse were to construct a second TeammateFactory and call
+   *      ensureAgentsWindow on it, the spy would fire on a different instance
+   *      than the one captured during SESSION_START; we assert they are the
+   *      same object.
+   */
+
+  let instancesCaptured: TeammateFactory[] = [];
+  let ensureWindowSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    instancesCaptured = [];
+    // Spy on ensureAgentsWindow (public, called only in startOrrElse).
+    // Capture `this` so we can check instance identity later.
+    ensureWindowSpy = vi.spyOn(TeammateFactory.prototype, 'ensureAgentsWindow').mockImplementation(
+      async function (this: TeammateFactory) {
+        instancesCaptured.push(this);
+      }
+    );
+  });
+
+  afterEach(() => {
+    ensureWindowSpy.mockRestore();
+    instancesCaptured = [];
+  });
+
+  it('SESSION_START registers the spawn_teammate tool (factory was constructed)', async () => {
+    // Non-worker (coordinator) context — isWorkerMode() returns false.
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const toolNames = harness.tools.map((t: any) => t.name);
+    expect(toolNames).toContain(PluginToolName.SPAWN_TEAMMATE);
+  });
+
+  it('worker SESSION_START also registers the spawn_teammate tool (worker gets a factory)', async () => {
+    // Worker processes never call startOrrElse; SESSION_START is their sole
+    // factory construction site.  Confirm the tool is still registered.
+    const previousWorkerMode = process.env[EnvVars.WORKER_MODE];
+    const previousBeadId = process.env[EnvVars.BEAD_ID];
+    const previousStateId = process.env[EnvVars.STATE_ID];
+    try {
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-worker-factory-test';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+
+      const harness = fakePi();
+      await orrElseExtension(harness.pi);
+      // In worker mode SESSION_START triggers initializeWorkerRun + Teammate.start();
+      // mock start() so it doesn't try real tmux/signaling work.
+      const startSpy = vi.spyOn(Teammate.prototype, 'start').mockResolvedValue(undefined as any);
+      try {
+        await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+      } finally {
+        startSpy.mockRestore();
+      }
+
+      const toolNames = harness.tools.map((t: any) => t.name);
+      expect(toolNames).toContain(PluginToolName.SPAWN_TEAMMATE);
+    } finally {
+      if (previousWorkerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousWorkerMode;
+      if (previousBeadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousBeadId;
+      if (previousStateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousStateId;
+    }
+  });
+
+  it('coordinator /orr-else reuses the SESSION_START factory (ensureAgentsWindow fires on the spawn_teammate instance)', async () => {
+    // Lifecycle: SESSION_START fires first → factory stored on session.
+    // /orr-else command → startOrrElse runs → picks up session.teammateFactory
+    // via the `session.teammateFactory ??= new TeammateFactory(...)` guard.
+    // The ensureAgentsWindow spy is called on the reused factory instance, which
+    // must be the SAME OBJECT that backs the spawn_teammate tool.
+    //
+    // We make startOrrElse's SignalingServer and Supervisor no-ops so the
+    // command can complete without real tmux/network infrastructure.
+    const { SignalingServer } = await import('../src/core/SignalingServer.js');
+    const { Supervisor } = await import('../src/core/Supervisor.js');
+
+    const signalingStartSpy = vi.spyOn(SignalingServer.prototype, 'start').mockResolvedValue(19999);
+    const supervisorStartSpy = vi.spyOn(Supervisor.prototype, 'start').mockResolvedValue(undefined as any);
+
+    // Capture the factory instance closed over by the spawn_teammate tool by
+    // intercepting spawnTeammateInTmux (only reachable via the tool's execute).
+    const spawnToolFactories: TeammateFactory[] = [];
+    const spawnSpy = vi.spyOn(TeammateFactory.prototype, 'spawnTeammateInTmux').mockImplementation(
+      async function (this: TeammateFactory) {
+        spawnToolFactories.push(this);
+        return { success: true };
+      }
+    );
+
+    try {
+      const harness = fakePi();
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+      // Invoke /orr-else to trigger startOrrElse.
+      const commandHandler = harness.commands[BuiltInToolName.ORR_ELSE]?.handler;
+      expect(commandHandler).toBeDefined();
+      await commandHandler('--bead bd-coordinator-test', {
+        ui: { notify: () => {} },
+        hasUI: true
+      } as any);
+
+      // ensureAgentsWindow must have been called exactly once (in startOrrElse).
+      expect(ensureWindowSpy).toHaveBeenCalledTimes(1);
+      expect(instancesCaptured).toHaveLength(1);
+
+      // === SAME-INSTANCE ASSERTION ===
+      // Call the spawn_teammate tool's execute so we can capture `this` on the
+      // factory it closed over.  The factory closed over at SESSION_START time
+      // must be the same object that startOrrElse received via ??=.
+      const spawnTool = harness.tools.find((t: any) => t.name === PluginToolName.SPAWN_TEAMMATE);
+      expect(spawnTool).toBeDefined();
+      // The registered tool is wrapped (wrapPluginTool): execute(toolCallId, params, signal, onUpdate, ctx).
+      await spawnTool.execute('probe-call-id', { beadId: 'bd-probe', stateId: 'Planning', worktreePath: '/tmp/probe' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      expect(spawnToolFactories).toHaveLength(1);
+      // The factory that backs spawn_teammate (SESSION_START factory) must be the
+      // identical object on which ensureAgentsWindow was called (startOrrElse factory).
+      expect(spawnToolFactories[0]).toBe(instancesCaptured[0]);
+    } finally {
+      signalingStartSpy.mockRestore();
+      supervisorStartSpy.mockRestore();
+      spawnSpy.mockRestore();
+    }
+  });
+
+  it('--max-slots CLI override is applied to the reused SESSION_START factory', async () => {
+    // Regression test for WI-20 MUST-FIX 1:
+    // SESSION_START builds the factory with config.settings.maxConcurrentSlots (or
+    // Defaults.MAX_SLOTS if absent).  When /orr-else --max-slots 7 is invoked,
+    // startOrrElse must call factory.setMaxSlots(7) so the CLI value wins.
+    // Without the fix, the factory retains the config value and getMaxSlots() != 7.
+    // With the fix, getMaxSlots() returns 7 (PASS).
+    const { SignalingServer } = await import('../src/core/SignalingServer.js');
+    const { Supervisor } = await import('../src/core/Supervisor.js');
+
+    const signalingStartSpy = vi.spyOn(SignalingServer.prototype, 'start').mockResolvedValue(19999);
+    const supervisorStartSpy = vi.spyOn(Supervisor.prototype, 'start').mockResolvedValue(undefined as any);
+    try {
+      const harness = fakePi();
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+      const commandHandler = harness.commands[BuiltInToolName.ORR_ELSE]?.handler;
+      expect(commandHandler).toBeDefined();
+      // Pass --max-slots 7 explicitly.  The config does NOT set maxConcurrentSlots
+      // (defaults to Defaults.MAX_SLOTS), so 7 is always a distinct override value.
+      await commandHandler('--bead bd-slots-test --max-slots 7', {
+        ui: { notify: () => {} },
+        hasUI: true
+      } as any);
+
+      // instancesCaptured[0] is the SESSION_START factory (same object used by
+      // startOrrElse, proved by the prior same-instance test).
+      // After the fix, setMaxSlots(7) has been applied to it.
+      expect(instancesCaptured).toHaveLength(1);
+      expect(instancesCaptured[0].getMaxSlots()).toBe(7);
+    } finally {
+      signalingStartSpy.mockRestore();
+      supervisorStartSpy.mockRestore();
+    }
   });
 });

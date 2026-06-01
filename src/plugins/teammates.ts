@@ -71,7 +71,7 @@ export class TeammateFactory {
      * port at spawn time — no process.env mutation required.
      */
     private readonly apiAddress: ApiAddress = {},
-    private readonly maxSlots: number = Defaults.MAX_SLOTS,
+    private maxSlots: number = Defaults.MAX_SLOTS,
     private readonly sessionName: string = Defaults.TMUX_SESSION,
     private readonly extensionPath?: string,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
@@ -227,6 +227,21 @@ export class TeammateFactory {
     const active = await this.getActiveTeammateCount();
     if (this.paneListFailed) return 0;
     return Math.max(0, this.maxSlots - active);
+  }
+
+  /**
+   * Override the slot limit at runtime.  Called by startOrrElse when the
+   * operator supplies `--max-slots N` on the CLI: the SESSION_START factory is
+   * reused (WI-20 dedup), but the CLI value must win over the config value that
+   * was baked into the factory at construction time.
+   */
+  public setMaxSlots(n: number): void {
+    this.maxSlots = n;
+  }
+
+  /** Returns the current slot limit (useful for testing and diagnostics). */
+  public getMaxSlots(): number {
+    return this.maxSlots;
   }
 
   public async ensureAgentsWindow() {
