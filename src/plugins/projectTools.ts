@@ -355,6 +355,51 @@ interface ProjectDiagnosticSummary {
   nextAction: string;
 }
 
+/**
+ * Stable model-facing structured summary produced by a registered ProjectToolSummarizer.
+ * Fields are intentionally kept stable: consumers may rely on their presence/absence
+ * but must not assume internal shapes beyond what is documented here.
+ *
+ * status        - 'ok' | 'parse_error' — whether the summarizer succeeded or fell back
+ *                 to a compact parse_error without exposing raw payload.
+ * counts        - key/value counts (e.g. { errors: 3, warnings: 1 }).
+ * affectedPaths - up to SUMMARIZER_MAX_AFFECTED_PATHS representative file/path strings.
+ * representativeSamples - up to SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES compact issue objects.
+ * omissions     - description of what was omitted from this summary (non-null when truncated).
+ * nextAction    - terse routing hint for the model.
+ */
+export interface StructuredResult {
+  status: 'ok' | 'parse_error';
+  counts?: Record<string, number>;
+  affectedPaths?: string[];
+  representativeSamples?: unknown[];
+  omissions?: string;
+  nextAction?: string;
+}
+
+/**
+ * A registered per-tool payload summarizer.
+ * Summarizers are resolved in registry order; the first whose appliesTo returns true
+ * is called.  Summarizers MUST NOT throw — return null (no summary) or a parse_error
+ * StructuredResult when they cannot parse.
+ */
+export interface ProjectToolSummarizer {
+  /** Stable display name used in logging and tests. */
+  name: string;
+  /** Returns true when this summarizer should handle the given tool definition + raw result record. */
+  appliesTo(definition: ProjectToolConfig, record: Record<string, unknown>): boolean;
+  /**
+   * Produce a StructuredResult from the raw record, or null if the record does not
+   * contain enough signal to summarize.  Must not throw — catch parse errors and return
+   * a parse_error StructuredResult instead.
+   */
+  summarize(
+    definition: ProjectToolConfig,
+    record: Record<string, unknown>,
+    context: ProjectToolExecutionContext
+  ): StructuredResult | null;
+}
+
 const inFlightProjectToolCalls = new Map<string, InFlightProjectToolCall>();
 
 export function shouldSerializeMcpTool(definition: Pick<ProjectToolConfig, 'name' | 'type'>): boolean {
@@ -2172,6 +2217,102 @@ function applyDiagnosticModelSummary(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Per-tool structured summarizer registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Diagnostic summarizer — wraps the existing applyDiagnosticModelSummary logic
+ * so it participates in the general registry.  This is always the first entry;
+ * it preserves the exact behavior established by bead 7i0.
+ */
+const diagnosticSummarizer: ProjectToolSummarizer = {
+  name: 'diagnostic',
+  appliesTo(definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
+    const text = diagnosticsTextFromRecord(record);
+    if (!text) return false;
+    return shouldSummarizeDiagnostics(definition, record, text);
+  },
+  summarize(
+    definition: ProjectToolConfig,
+    record: Record<string, unknown>,
+    context: ProjectToolExecutionContext
+  ): StructuredResult | null {
+    const text = diagnosticsTextFromRecord(record);
+    if (!text) return null;
+    try {
+      const summary = summarizeParsedDiagnostics(parseProjectDiagnostics(text), context);
+      if (!summary) return null;
+      const affectedPaths = summary.groups
+        .flatMap(group => group.representativeLocations)
+        .slice(0, ProjectToolDefaults.SUMMARIZER_MAX_AFFECTED_PATHS);
+      const counts: Record<string, number> = {
+        total: summary.totalDiagnostics,
+        parsed: summary.parsedDiagnostics,
+        missingImport: summary.missingImportCount,
+        groups: summary.groups.length
+      };
+      if (summary.omittedGroups) counts.omittedGroups = summary.omittedGroups;
+      const structured: StructuredResult = {
+        status: 'ok',
+        counts
+      };
+      if (affectedPaths.length > 0) structured.affectedPaths = affectedPaths;
+      // representativeSamples: one compact object per top-N groups (capped by the registry constant).
+      const representativeSamples = summary.groups
+        .slice(0, ProjectToolDefaults.SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES)
+        .map(group => ({
+          severity: group.severity,
+          source: group.source,
+          code: group.code,
+          count: group.count,
+          messagePrefix: group.messagePrefix,
+          location: group.representativeLocations[0]
+        }));
+      if (representativeSamples.length > 0) structured.representativeSamples = representativeSamples;
+      if (summary.omittedGroups) {
+        structured.omissions = `${summary.omittedGroups} diagnostic groups omitted from summary`;
+      }
+      if (summary.nextAction) structured.nextAction = summary.nextAction;
+      return structured;
+    } catch {
+      // Defensive guard — parseProjectDiagnostics and summarizeParsedDiagnostics do not
+      // currently throw, but we keep this catch to ensure the summarizer contract
+      // (must not propagate exceptions) holds if that ever changes.
+      return { status: 'parse_error', nextAction: 'inspect_raw_archive_if_needed' };
+    }
+  }
+};
+
+/**
+ * The ordered registry of per-tool summarizers.
+ * Resolution: first entry whose appliesTo returns true wins.
+ * Add new summarizers here — diagnostic summarizer must remain first.
+ */
+const PROJECT_TOOL_SUMMARIZER_REGISTRY: ProjectToolSummarizer[] = [
+  diagnosticSummarizer
+];
+
+/**
+ * Attempt to produce a StructuredResult via the registry for the given raw result.
+ * Returns null when no summarizer applies (the common case — existing behavior unchanged).
+ * When a summarizer applies but cannot parse, returns a compact parse_error StructuredResult
+ * (requirement 4: no raw payload exposure, archive preserved).
+ */
+function applyStructuredSummarizerRegistry(
+  definition: ProjectToolConfig,
+  result: unknown,
+  context: ProjectToolExecutionContext
+): StructuredResult | null {
+  const record = resultRecord(result);
+  for (const summarizer of PROJECT_TOOL_SUMMARIZER_REGISTRY) {
+    if (!summarizer.appliesTo(definition, record)) continue;
+    const structured = summarizer.summarize(definition, record, context);
+    return structured;
+  }
+  return null;
+}
+
 function textFromMcpContent(value: unknown): string | undefined {
   if (!isJsonRecord(value)) return undefined;
   const content = value.content;
@@ -2732,10 +2873,31 @@ async function persistAndBoundResult(
   context: ProjectToolExecutionContext
 ): Promise<unknown> {
   const policyResult = applyScanTargetEvidencePolicy(definition, result, context);
+  // Archive is ALWAYS written from the raw (pre-summary) policy result — requirement 5.
   const serialized = serializeProjectToolResult(policyResult);
   await writeFile(context.outputFile, serialized);
   const maxInlineBytes = inlineResultLimit(definition);
-  const modelResult = applyDiagnosticModelSummary(definition, policyResult, context);
+
+  // Run the per-tool structured summarizer registry BEFORE truncation/preview construction.
+  // The registry fires whenever a summarizer's appliesTo() returns true for this tool/record.
+  const structuredResult = applyStructuredSummarizerRegistry(definition, policyResult, context);
+
+  // Attach structuredResult only when the record does not already carry gate-evidence in its
+  // structuredResult.  A pre-existing structuredResult from buildCommandResult / buildMcpResult
+  // (structuredPayloadSummary) may carry richer gate evidence: verdict, rejectedChecks,
+  // errorsByTool, errorsByFile, scan-target counts.  The registry's leaner diagnostic summary
+  // must not clobber that payload.  Basic-field-only summaries (tool/status/operation/stdout*)
+  // do NOT constitute gate evidence and do not block the registry.
+  const existingStructuredResult = resultRecord(policyResult)[ProjectToolResultKey.STRUCTURED_RESULT];
+  const hasGateEvidence = structuredResultHasDecisionEvidence(existingStructuredResult);
+  const enrichedResult = (structuredResult && !hasGateEvidence)
+    ? withoutUndefined({ ...resultRecord(policyResult), [ProjectToolResultKey.STRUCTURED_RESULT]: structuredResult })
+    : policyResult;
+
+  // applyDiagnosticModelSummary adds diagnosticSummary + resultPreview for diagnostic tools
+  // (preserving 7i0 behavior exactly).  It operates on the enriched result so existing
+  // diagnosticSummary consumers remain unaffected.
+  const modelResult = applyDiagnosticModelSummary(definition, enrichedResult, context);
   const record = resultRecord(modelResult);
   if (serialized.length <= maxInlineBytes) {
     return attachArchiveIfNeeded(modelFacingInlineResult(modelResult), context, serialized.length, false);

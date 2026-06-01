@@ -915,7 +915,12 @@ export const ProjectToolDefaults = {
   UNASSIGNED_BEAD_ID: 'unassigned',
   UNSPECIFIED_STATE_ID: 'state',
   UNSPECIFIED_ACTION_ID: 'manual',
-  UNSAFE_PATH_SEGMENT_PATTERN: /[^A-Za-z0-9._-]/g
+  UNSAFE_PATH_SEGMENT_PATTERN: /[^A-Za-z0-9._-]/g,
+  // Per-tool structured summarizer registry caps.
+  // Maximum number of affected paths surfaced in a StructuredResult.
+  SUMMARIZER_MAX_AFFECTED_PATHS: 10,
+  // Maximum number of representative samples surfaced in a StructuredResult.
+  SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES: 5
 } as const;
 
 export const LoggingDefaults = {
