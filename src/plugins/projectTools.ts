@@ -8,7 +8,7 @@ import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.j
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { execa } from 'execa';
-import { mkdir, open, readFile, stat, writeFile } from 'fs/promises';
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from 'fs/promises';
 import path from 'path';
 import lockfile from 'proper-lockfile';
 import { v7 as uuidv7 } from 'uuid';
@@ -3476,6 +3476,91 @@ function applyScanTargetEvidencePolicy(
   return record;
 }
 
+/**
+ * Removes the per-invocation scratch tmpDir after the structured result JSON
+ * has been safely persisted to the output dir.
+ *
+ * PARALLEL SAFETY: context.tmpDir is derived from the unique toolInvocationId
+ * (see ToolCallPathFactory / CALL_DIR_TEMPLATE).  Each invocation gets its own
+ * scratch path.  We only ever remove the current invocation's own tmpDir, so
+ * concurrent teammate invocations are not affected.
+ *
+ * WHAT IS PRESERVED: only the `tmp/` sub-directory is removed.  The `output/`
+ * sub-directory (containing the structured result JSON and any stdout/stderr
+ * log files) is untouched, so agents and the harness can still resolve the
+ * artifactRef opaque handle.
+ *
+ * WHAT IS REMOVED: the bulky transient cache tree that child processes (e.g.
+ * `uv`, pip, npm) wrote into TMPDIR/TMP/TEMP (all pointed at context.tmpDir).
+ * Typical offenders are uv-cache, .venv, package-cache dirs that a single
+ * reference_docs call can leave behind at 100s of MiB per invocation.
+ *
+ * Errors are swallowed (best-effort) so a cleanup failure never propagates to
+ * the agent result.
+ */
+async function cleanupToolCallScratch(context: ProjectToolExecutionContext): Promise<void> {
+  if (!ProjectToolDefaults.SCRATCH_CLEANUP_ENABLED) return;
+  const scratchDir = context.tmpDir;
+  let dirsRemoved = 0;
+  let bytesReclaimed = 0;
+
+  try {
+    // Measure the size before removal so we can emit a bounded summary log.
+    // Best-effort — if stat fails (dir already gone) we proceed silently.
+    try {
+      const { du } = await scratchDirUsage(scratchDir);
+      bytesReclaimed = du;
+    } catch {
+      // size measurement is optional
+    }
+
+    await rm(scratchDir, { recursive: true, force: true });
+    dirsRemoved = 1;
+  } catch {
+    // Cleanup is best-effort; never propagate to caller.
+    return;
+  }
+
+  if (ProjectToolDefaults.SCRATCH_CLEANUP_LOG_SUMMARY && dirsRemoved > 0) {
+    Logger.debug(Component.PROJECT_TOOLS, 'tool-call scratch cleaned up', {
+      toolInvocationId: context.templateContext.toolInvocationId,
+      tool: context.templateContext.toolName,
+      dirsRemoved,
+      bytesReclaimed
+    });
+  }
+}
+
+/**
+ * Recursively estimates disk usage (in bytes) of a directory tree.
+ * Best-effort — any error from a sub-entry is silently ignored so that a
+ * partially-written cache dir does not block cleanup.
+ */
+async function scratchDirUsage(dirPath: string): Promise<{ du: number }> {
+  let total = 0;
+  let entries: import('fs').Dirent[];
+  try {
+    entries = await readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return { du: 0 };
+  }
+  await Promise.all(entries.map(async entry => {
+    const full = path.join(dirPath, entry.name);
+    try {
+      if (entry.isDirectory()) {
+        const sub = await scratchDirUsage(full);
+        total += sub.du;
+      } else {
+        const s = await stat(full);
+        total += s.size;
+      }
+    } catch {
+      // ignore entries that vanish mid-walk
+    }
+  }));
+  return { du: total };
+}
+
 async function persistAndBoundResult(
   definition: ProjectToolConfig,
   result: unknown,
@@ -3485,6 +3570,10 @@ async function persistAndBoundResult(
   // Archive is ALWAYS written from the raw (pre-summary) policy result — requirement 5.
   const serialized = serializeProjectToolResult(policyResult);
   await writeFile(context.outputFile, serialized);
+  // After the structured result is safely on disk, remove the bulky per-invocation
+  // scratch/cache tree from tmpDir.  The output/ dir (containing the JSON artifact)
+  // is preserved intact.  See cleanupToolCallScratch() for parallel-safety reasoning.
+  void cleanupToolCallScratch(context);
   const maxInlineBytes = inlineResultLimit(definition);
 
   // Run the per-tool structured summarizer registry BEFORE truncation/preview construction.

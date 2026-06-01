@@ -3947,3 +3947,194 @@ describe('commandFailureSummarizer', () => {
     expect(structuredResult.omissions).toContain('2');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Bounded-storage / scratch-cleanup tests
+//
+// ROOT CAUSE recap: the per-invocation CALL_DIR_TEMPLATE allocates a unique
+// dir at .tmp/tool-calls/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}.
+// The harness sets TMPDIR/TMP/TEMP → <callDir>/tmp/ so child processes write
+// caches there.  Before this fix, that tmpDir was never cleaned, so repeated
+// reference_docs calls accumulated one full uv-cache tree per invocation.
+//
+// FIX: after persistAndBoundResult() safely writes the output JSON, the harness
+// calls cleanupToolCallScratch() which removes only the tmpDir sub-directory.
+// The output/ dir with the structured result JSON is preserved intact.
+// ---------------------------------------------------------------------------
+describe('tool-call scratch cleanup (bounded-storage)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousRoot: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousRoot = getProjectRoot();
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-scratch-cleanup-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-scratch');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    setProjectRoot(tempRoot);
+    configLoader = new ConfigLoader();
+    eventStore = new EventStore(configLoader);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-scratch-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    setProjectRoot(previousRoot);
+    configLoader.reset();
+    vi.restoreAllMocks();
+    eventStore.setSessionId(`test-scratch-${process.pid}-reset`);
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  /**
+   * Tool that writes a large file into TMPDIR (simulating a uv-cache),
+   * writes the real output to the output file (as any well-behaved tool does),
+   * and prints a simple JSON result.
+   */
+  function cachingTool(): import('../src/core/domain/StateModels.js').ProjectCommandToolConfig {
+    const script = `
+const fs = require('fs');
+const path = require('path');
+const tmpDir = process.env.TMPDIR;
+const outputDir = process.env.${EnvVars.TOOL_OUTPUT_DIR};
+// Simulate a uv-cache written by a child tool (reference_docs, pip, etc.)
+fs.mkdirSync(path.join(tmpDir, 'uv-cache', 'packages'), { recursive: true });
+fs.writeFileSync(path.join(tmpDir, 'uv-cache', 'packages', 'bigfile.whl'), 'x'.repeat(1024));
+// Real structured output
+const result = { status: 'PASSED', tool: 'cache_sim', message: 'ok', cached: true };
+fs.writeFileSync(process.env.${EnvVars.TOOL_OUTPUT_FILE}, JSON.stringify(result));
+process.stdout.write(JSON.stringify(result));
+`;
+    return {
+      name: 'cache_sim',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 10_000
+    };
+  }
+
+  it('removes the tmpDir scratch tree after the output JSON is written', async () => {
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory, cachingTool(),
+      { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'build' },
+      {} as any
+    ) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // Give the async cleanup a moment to complete (it fires with `void`, i.e.
+    // fire-and-forget, so we wait briefly before asserting).
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // The tmpDir (scratch) should have been removed.
+    const toolCallRoot = path.join(tempRoot, '.tmp', 'tool-calls');
+    const callDirs = fs.readdirSync(path.join(toolCallRoot, 'bd-scratch', 'Impl', 'build', 'cache_sim'));
+    // There should be at most one callDir (the one we just ran).
+    expect(callDirs.length).toBeGreaterThanOrEqual(1);
+    for (const callDirName of callDirs) {
+      const callDir = path.join(toolCallRoot, 'bd-scratch', 'Impl', 'build', 'cache_sim', callDirName);
+      // The output/ sub-directory must exist with the JSON artifact inside it.
+      const outputDir = path.join(callDir, 'output');
+      expect(fs.existsSync(outputDir)).toBe(true);
+      const outputFiles = fs.readdirSync(outputDir);
+      expect(outputFiles.some(f => f.endsWith('.json'))).toBe(true);
+
+      // The tmp/ sub-directory (scratch) should be gone.
+      const tmpDir = path.join(callDir, 'tmp');
+      expect(fs.existsSync(tmpDir)).toBe(false);
+    }
+  });
+
+  it('does not accumulate scratch dirs across repeated tool calls', async () => {
+    const tool = cachingTool();
+    const args = { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'build' };
+
+    for (let i = 0; i < 3; i++) {
+      const result = await executeConfiguredProjectTool(
+        eventStore, toolCallPathFactory, tool, args, {} as any
+      ) as any;
+      expect(result.status).toBe(ToolResultStatus.PASSED);
+    }
+
+    // Let cleanup fire for all three calls.
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    const scratchToolDir = path.join(
+      tempRoot, '.tmp', 'tool-calls', 'bd-scratch', 'Impl', 'build', 'cache_sim'
+    );
+    const callDirs = fs.readdirSync(scratchToolDir);
+    // All three invocations ran, each gets its own callDir keyed by toolInvocationId.
+    expect(callDirs.length).toBe(3);
+
+    // None of the callDirs should still have a tmp/ sub-directory.
+    for (const callDirName of callDirs) {
+      const tmpDir = path.join(scratchToolDir, callDirName, 'tmp');
+      expect(fs.existsSync(tmpDir)).toBe(false);
+    }
+
+    // All output JSON artifacts must still exist.
+    for (const callDirName of callDirs) {
+      const outputDir = path.join(scratchToolDir, callDirName, 'output');
+      expect(fs.existsSync(outputDir)).toBe(true);
+      const files = fs.readdirSync(outputDir);
+      expect(files.some(f => f.endsWith('.json'))).toBe(true);
+    }
+  });
+
+  it('parallel invocations only clean their own scratch dir and preserve other output dirs', async () => {
+    const tool = cachingTool();
+
+    // Fire two invocations concurrently (different beadIds to bypass backpressure).
+    const [r1, r2] = await Promise.all([
+      executeConfiguredProjectTool(
+        eventStore, toolCallPathFactory, tool,
+        { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'parallel-a' },
+        {} as any
+      ) as Promise<any>,
+      executeConfiguredProjectTool(
+        eventStore, toolCallPathFactory, tool,
+        { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'parallel-b' },
+        {} as any
+      ) as Promise<any>
+    ]);
+
+    expect(r1.status).toBe(ToolResultStatus.PASSED);
+    expect(r2.status).toBe(ToolResultStatus.PASSED);
+
+    await new Promise(resolve => setTimeout(resolve, 400));
+
+    // Both invocations should have their output/ JSON intact.
+    for (const action of ['parallel-a', 'parallel-b']) {
+      const scratchToolDir = path.join(
+        tempRoot, '.tmp', 'tool-calls', 'bd-scratch', 'Impl', action, 'cache_sim'
+      );
+      const callDirs = fs.readdirSync(scratchToolDir);
+      expect(callDirs.length).toBe(1);
+
+      const outputDir = path.join(scratchToolDir, callDirs[0], 'output');
+      expect(fs.existsSync(outputDir)).toBe(true);
+      const files = fs.readdirSync(outputDir);
+      expect(files.some(f => f.endsWith('.json'))).toBe(true);
+
+      // Scratch tmp/ should be cleaned for both.
+      const tmpDir = path.join(scratchToolDir, callDirs[0], 'tmp');
+      expect(fs.existsSync(tmpDir)).toBe(false);
+    }
+  });
+});
