@@ -781,10 +781,20 @@ export class Supervisor {
         AgentFailureSummary.EVENT_STORE_DETAILS
       ].join(' ');
 
+      // Capture the live pane snapshot (reasoning already redacted) so
+      // operators can see what the agent was doing at the time of inactivity
+      // detection.  Errors are silently ignored — failure to capture pane
+      // text must not block the restart path.
+      const paneSnapshot = await this.factory.captureBeadPaneText(beadId).catch(() => '');
+      const evidence = paneSnapshot
+        ? `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`
+        : summary;
+
       await this.services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
         beadId,
         stateId,
         summary,
+        paneSnapshot: paneSnapshot || undefined,
         error: summary
       }).catch(() => {});
       await this.services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
@@ -793,7 +803,7 @@ export class Supervisor {
         targetState: stateId,
         transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
         summary,
-        evidence: summary,
+        evidence,
         handover: summary
       }).catch(() => {});
 

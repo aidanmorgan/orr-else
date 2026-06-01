@@ -8,6 +8,7 @@ import type { ApiAddress, BeadId } from '../types/index.js';
 import { ConfigLoader } from '../core/ConfigLoader.js';
 import { Logger } from '../core/Logger.js';
 import { Observability } from '../core/Observability.js';
+import { redactPaneText } from '../core/PaneTextRedactor.js';
 import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
@@ -222,6 +223,53 @@ export class TeammateFactory {
       return parseShellCommand(parsed[0]);
     }
     return parsed;
+  }
+
+  /**
+   * Capture the visible text of a tmux pane for operator-facing monitoring,
+   * with model-thinking / reasoning blocks redacted before returning.
+   *
+   * This is the ONLY path through which pane content should reach operator
+   * artifacts or monitoring summaries.  It never touches model inputs and
+   * requires no agent self-policing.
+   *
+   * @param paneId - tmux pane target (e.g. "%42" or "session:window.pane")
+   * @returns Redacted pane text (reasoning blocks replaced with a placeholder).
+   */
+  public async capturePaneText(paneId: string): Promise<string> {
+    const raw = await tmux([TmuxCommand.CAPTURE_PANE, '-p', '-t', paneId]);
+    return redactPaneText(raw);
+  }
+
+  /**
+   * Capture and redact the visible pane text for all live tmux panes belonging
+   * to the given bead.  This is the harness-internal path through which pane
+   * content reaches operator-facing monitoring artifacts (e.g. AGENT_TURN_FAILED
+   * evidence in the slot-health stuck-pane path).
+   *
+   * Reasoning blocks are stripped by capturePaneText before the text is returned;
+   * actionable lines (commands, errors, tool names, bead/state IDs) are preserved,
+   * so stuck-prompt and error detection remain operational on the redacted text.
+   *
+   * Never touches model inputs; requires no agent self-policing.
+   *
+   * Returns an empty string when no live pane is found for the bead or when
+   * capture fails (errors are swallowed so callers always get a safe string).
+   */
+  public async captureBeadPaneText(beadId: string): Promise<string> {
+    try {
+      const panes = await this.getLiveTeammatePanes();
+      const beadPanes = panes.filter(pane => this.beadIdFromPane(pane) === beadId);
+      if (beadPanes.length === 0) return '';
+      const snapshots = await Promise.all(
+        beadPanes.map(pane =>
+          this.capturePaneText(pane.paneId).catch(() => '')
+        )
+      );
+      return snapshots.filter(Boolean).join('\n---\n');
+    } catch {
+      return '';
+    }
   }
 
   public async getAvailableSlots(): Promise<number> {

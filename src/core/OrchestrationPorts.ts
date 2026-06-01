@@ -94,4 +94,18 @@ export interface TeammateSpawner {
   getAvailableSlots(): Promise<number>;
   /** Terminate all teammate panes for a given bead. */
   terminateTeammatesForBead(beadId: string, reason: string): Promise<{ terminatedPaneIds: string[] }>;
+  /**
+   * Capture the visible pane text for all live tmux panes belonging to the
+   * given bead, returning the concatenated, redacted output.  Reasoning blocks
+   * are stripped before the text is returned; actionable lines (commands,
+   * errors, tool names, bead/state IDs) are preserved.
+   *
+   * This is the harness-internal path through which pane content reaches
+   * operator-facing monitoring artifacts (e.g. AGENT_TURN_FAILED evidence).
+   * It never touches model inputs and requires no agent self-policing.
+   *
+   * Returns an empty string when no live pane is found for the bead or when
+   * capture fails (errors are swallowed so callers always get a safe string).
+   */
+  captureBeadPaneText(beadId: string): Promise<string>;
 }

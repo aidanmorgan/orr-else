@@ -245,6 +245,7 @@ export const TmuxFormat = {
 } as const;
 
 export const TmuxCommand = {
+  CAPTURE_PANE: 'capture-pane',
   HAS_SESSION: 'has-session',
   KILL_PANE: 'kill-pane',
   LIST_PANES: 'list-panes',

@@ -10,6 +10,10 @@ import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
 import type { ApiAddress } from '../src/core/RuntimeServices.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
+import {
+  redactPaneText,
+  REDACTED_BLOCK_PLACEHOLDER,
+} from '../src/core/PaneTextRedactor.js';
 
 const { execaMock, defaultTmuxResponse } = vi.hoisted(() => {
   const defaultTmuxResponse = async (bin: string, args: string[]) => {
@@ -398,6 +402,165 @@ states:
   });
 
   // ---------------------------------------------------------------------------
+  // kwrf — capturePaneText: capture-pane + redaction applied before returning
+  // ---------------------------------------------------------------------------
+
+  it('(kwrf) capturePaneText captures pane text and redacts reasoning blocks', async () => {
+    const rawPaneOutput = [
+      'Bead: pi-experiment-kwrf  State: Planning',
+      '<thinking>',
+      'Updating the plan for the next step.',
+      'Considering edge cases...',
+      '</thinking>',
+      'Tool call: bash',
+      'Error: unexpected exit code 1'
+    ].join('\n');
+
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('capture-pane')) return { stdout: rawPaneOutput, stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.capturePaneText('%42');
+
+    // Reasoning block is gone; actionable lines survive.
+    expect(result).not.toContain('<thinking>');
+    expect(result).not.toContain('</thinking>');
+    expect(result).not.toContain('Updating the plan');
+    expect(result).not.toContain('Considering edge cases');
+    expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+    expect(result).toContain('Bead: pi-experiment-kwrf');
+    expect(result).toContain('Tool call: bash');
+    expect(result).toContain('Error: unexpected exit code 1');
+
+    // Confirm capture-pane was called with the correct pane ID.
+    const captureCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('capture-pane'));
+    expect(captureCall).toBeDefined();
+    expect(captureCall![1]).toContain('%42');
+  });
+
+  // ---------------------------------------------------------------------------
+  // kwrf — captureBeadPaneText: cross-bead filter (privacy), no-pane, throw paths
+  // ---------------------------------------------------------------------------
+
+  it('(kwrf) captureBeadPaneText returns only the target bead pane and never captures another bead pane', async () => {
+    // Two live panes: %1 belongs to bead-A, %2 belongs to bead-B.
+    // capture-pane returns distinct content for each pane so a leak is detectable.
+    const paneAContent = 'Bead: bead-A  State: Planning\nTool call: bash';
+    const paneBContent = 'Bead: bead-B  State: Implementing\nSecret data for bead-B';
+
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: [
+            `%1\tAgent:bead-A\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-A pi\t${path.join(root, 'worktrees', 'bead-A')}\t0`,
+            `%2\tAgent:bead-B\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-B pi\t${path.join(root, 'worktrees', 'bead-B')}\t0`
+          ].join('\n'),
+          stderr: ''
+        };
+      }
+      if (args.includes('capture-pane')) {
+        const paneId = args[args.indexOf('-t') + 1];
+        if (paneId === '%1') return { stdout: paneAContent, stderr: '' };
+        if (paneId === '%2') return { stdout: paneBContent, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.captureBeadPaneText('bead-A');
+
+    // Must contain bead-A content.
+    expect(result).toContain('Bead: bead-A');
+    expect(result).toContain('Tool call: bash');
+
+    // Must NOT contain any bead-B content — no cross-bead leak.
+    expect(result).not.toContain('bead-B');
+    expect(result).not.toContain('Secret data for bead-B');
+
+    // capture-pane was invoked for %1 (bead-A pane) but NOT %2 (bead-B pane).
+    const captureCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('capture-pane'));
+    const capturedPaneIds = captureCalls.map(([, args]) => {
+      const a = args as string[];
+      return a[a.indexOf('-t') + 1];
+    });
+    expect(capturedPaneIds).toContain('%1');
+    expect(capturedPaneIds).not.toContain('%2');
+  });
+
+  it('(kwrf) captureBeadPaneText returns empty string when no live pane matches the beadId', async () => {
+    // list-panes returns a pane for a different bead — no match for 'bead-unknown'.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: `%1\tAgent:bead-other\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-other pi\t${path.join(root, 'worktrees', 'bead-other')}\t0`,
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.captureBeadPaneText('bead-unknown');
+
+    expect(result).toBe('');
+    // capture-pane must never have been called.
+    const captureCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('capture-pane'));
+    expect(captureCalls).toHaveLength(0);
+  });
+
+  it('(kwrf) captureBeadPaneText returns empty string when getLiveTeammatePanes throws', async () => {
+    // list-panes throws — the outer try/catch in captureBeadPaneText must swallow the error.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) throw new Error('tmux server not running');
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    // Must resolve, not throw, and return ''.
+    await expect(factory.captureBeadPaneText('bead-any')).resolves.toBe('');
+  });
+
+  it('(kwrf) captureBeadPaneText applies redaction: <thinking> block stripped, actionable line survives', async () => {
+    // Confirms the capturePaneText → redactPaneText path is exercised.
+    const rawWithThinking = [
+      'Bead: bead-C  State: Planning',
+      '<thinking>',
+      'Internal reasoning that must not leak.',
+      '</thinking>',
+      'Tool call: bash { "command": "npm test" }'
+    ].join('\n');
+
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          stdout: `%3\tAgent:bead-C\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-C pi\t${path.join(root, 'worktrees', 'bead-C')}\t0`,
+          stderr: ''
+        };
+      }
+      if (args.includes('capture-pane')) return { stdout: rawWithThinking, stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.captureBeadPaneText('bead-C');
+
+    // Reasoning block redacted.
+    expect(result).not.toContain('<thinking>');
+    expect(result).not.toContain('Internal reasoning that must not leak.');
+    expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+    // Actionable line preserved.
+    expect(result).toContain('Tool call: bash');
+    expect(result).toContain('Bead: bead-C');
+  });
+
+  // ---------------------------------------------------------------------------
   // WI-18 — ensureAgentsWindow catch: warn logged, spawn return value unchanged
   // ---------------------------------------------------------------------------
   it('(WI-18) warns when set-window-option fails but spawn still succeeds', async () => {
@@ -429,5 +592,175 @@ states:
     expect(metadata?.sessionName).toBeDefined();
     expect(typeof metadata?.error).toBe('string');
     expect((metadata?.error as string).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PaneTextRedactor — unit tests (kwrf)
+// ---------------------------------------------------------------------------
+//
+// These tests verify the redaction logic in isolation so that the pattern
+// constants and algorithm are exercised independently of the tmux layer.
+
+describe('PaneTextRedactor', () => {
+  describe('redactPaneText', () => {
+    it('redacts a <thinking> block while preserving surrounding actionable lines', () => {
+      const input = [
+        'Bead: pi-experiment-kwrf  State: Planning',
+        '<thinking>',
+        'Updating the plan for the next step.',
+        'Considering edge cases in the merge logic...',
+        '</thinking>',
+        'Tool call: bash { "command": "npm test" }',
+        'Error: tests failed with exit code 1'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      expect(result).not.toContain('<thinking>');
+      expect(result).not.toContain('</thinking>');
+      expect(result).not.toContain('Updating the plan');
+      expect(result).not.toContain('Considering edge cases');
+      expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+      expect(result).toContain('Bead: pi-experiment-kwrf');
+      expect(result).toContain('Tool call: bash');
+      expect(result).toContain('Error: tests failed');
+    });
+
+    it('redacts a [thinking] label block', () => {
+      const input = [
+        'State: Reviewing',
+        '[thinking]',
+        'Reflecting on the evidence gathered so far.',
+        '```',
+        'Tool call: grep { "pattern": "ERROR" }'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      expect(result).not.toContain('[thinking]');
+      expect(result).not.toContain('Reflecting on the evidence');
+      expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+      expect(result).toContain('State: Reviewing');
+      expect(result).toContain('Tool call: grep');
+    });
+
+    it('redacts a standalone reasoning line outside of a block', () => {
+      const input = [
+        'Bead: pi-experiment-test',
+        'Considering the best approach for this merge.',
+        'Tool call: bash { "command": "git status" }'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      expect(result).not.toContain('Considering the best approach');
+      expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+      expect(result).toContain('Bead: pi-experiment-test');
+      expect(result).toContain('Tool call: bash');
+    });
+
+    it('preserves normal tool output without any redaction', () => {
+      const input = [
+        'Bead: pi-experiment-norm  State: Implementing',
+        'Tool call: bash { "command": "npx tsc --noEmit" }',
+        '> stdout: (no errors)',
+        'Tool result: { "status": "passed" }'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      expect(result).toBe(input);
+      expect(result).not.toContain(REDACTED_BLOCK_PLACEHOLDER);
+    });
+
+    it('preserves stuck-prompt / error lines so monitoring detects them after redaction', () => {
+      const input = [
+        '<thinking>',
+        'Rethinking the plan entirely.',
+        '</thinking>',
+        'Error: process exited with code 127',
+        'Failed to run command: permission denied',
+        'Exception: TypeError at line 42'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      // Reasoning block gone.
+      expect(result).not.toContain('<thinking>');
+      expect(result).not.toContain('Rethinking the plan');
+      expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+
+      // Error/failure lines preserved — detection still works.
+      expect(result).toContain('Error: process exited');
+      expect(result).toContain('Failed to run command');
+      expect(result).toContain('Exception: TypeError');
+    });
+
+    it('preserves bead IDs and state IDs when they appear inside a non-reasoning context', () => {
+      const input = [
+        'beadId: pi-experiment-kwrf',
+        'stateId: Planning',
+        'Considering…',
+        '{"type":"tool_call","name":"bash"}'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      expect(result).toContain('pi-experiment-kwrf');
+      expect(result).toContain('stateId: Planning');
+      expect(result).toContain('"type":"tool_call"');
+      // "Considering…" is a reasoning standalone line and should be redacted.
+      expect(result).not.toContain('Considering…');
+      expect(result).toContain(REDACTED_BLOCK_PLACEHOLDER);
+    });
+
+    it('handles a reasoning block immediately interrupted by an actionable line', () => {
+      const input = [
+        '<thinking>',
+        'Error: unexpected token inside thinking block',
+        'Some more reasoning text',
+        '</thinking>',
+        'Normal status line'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      // The error line inside the block is actionable — it forces block close and is preserved.
+      expect(result).toContain('Error: unexpected token inside thinking block');
+      expect(result).toContain('Normal status line');
+    });
+
+    it('handles empty input gracefully', () => {
+      expect(redactPaneText('')).toBe('');
+    });
+
+    it('preserves a trailing newline when present', () => {
+      const input = 'Tool call: bash\nConsidering things\n';
+      const result = redactPaneText(input);
+      expect(result.endsWith('\n')).toBe(true);
+    });
+
+    it('does not add a trailing newline when input has none', () => {
+      const input = 'Tool call: bash\nConsidering things';
+      const result = redactPaneText(input);
+      expect(result.endsWith('\n')).toBe(false);
+    });
+
+    it('collapses multiple consecutive reasoning lines into a single placeholder', () => {
+      const input = [
+        'Status: active',
+        'Considering the first option.',
+        'Updating the plan based on that.',
+        'Tool call: read { "path": "/tmp/file" }'
+      ].join('\n');
+
+      const result = redactPaneText(input);
+
+      const placeholderCount = (result.match(new RegExp(REDACTED_BLOCK_PLACEHOLDER.replace(/[[\]]/g, '\\$&'), 'g')) || []).length;
+      expect(placeholderCount).toBe(1);
+      expect(result).toContain('Status: active');
+      expect(result).toContain('Tool call: read');
+    });
   });
 });

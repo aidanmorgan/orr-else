@@ -61,6 +61,7 @@ function supervisorHarness(
       }]
     ]))
   };
+  const captureBeadPaneText = vi.fn(async () => '');
   const supervisor = new Supervisor(
     {} as any,
     { hasUI: false } as any,
@@ -70,6 +71,7 @@ function supervisorHarness(
     {
       getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
       terminateTeammatesForBead,
+      captureBeadPaneText,
       getActiveTeammateCount: vi.fn(async () => liveBeadIds.size),
       getAvailableSlots: vi.fn(async () => Math.max(0, maxSlots - liveBeadIds.size)),
       spawnTeammateInTmux: vi.fn(async () => ({ success: true, paneId: '%1' }))
@@ -94,7 +96,7 @@ function supervisorHarness(
     } as any,
     { maxSlots, clock }
   );
-  return { supervisor, records, release, terminateTeammatesForBead, clock };
+  return { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText, clock };
 }
 
 function domainEvent(id: string, type: DomainEventName, beadId: string, timestampMs: number, data: Record<string, unknown> = {}): DomainEvent {
@@ -553,5 +555,91 @@ describe('Supervisor', () => {
     const result = (supervisor as any).hasDurableInactiveEvent('bead-active', events);
 
     expect(result).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
+  // kwrf — pane-content redaction on the live slot-health / stuck-pane path
+  // ---------------------------------------------------------------------------
+
+  it('(kwrf) recoverInactiveBeads emits redacted pane text in AGENT_TURN_FAILED evidence, not raw reasoning', async () => {
+    // Raw pane output as tmux capture-pane would return it.  Contains a
+    // <thinking> block (raw reasoning) plus actionable lines.
+    const rawPaneOutput = [
+      'Bead: pi-experiment-kwrf  State: Planning',
+      '<thinking>',
+      'Let me think through the approach for this merge.',
+      'Considering the edge cases carefully.',
+      '</thinking>',
+      'Tool call: bash { "command": "npm test" }',
+      'Error: tests failed with exit code 1'
+    ].join('\n');
+
+    // Wire captureBeadPaneText to return the raw pane output (the real
+    // TeammateFactory calls tmux + redactPaneText; the harness mock returns
+    // the value we set here so we can control what reaches the Supervisor).
+    // To prove the LIVE PATH redacts we let the harness mock delegate to the
+    // actual redactPaneText call, simulating what TeammateFactory does.
+    const { redactPaneText } = await import('../src/core/PaneTextRedactor.js');
+    const redactedPaneOutput = redactPaneText(rawPaneOutput);
+
+    const { supervisor, records, captureBeadPaneText } = supervisorHarness(NOW_MS - STALE_PROGRESS_AGE_MS);
+    // The mock returns already-redacted text — exactly what TeammateFactory.captureBeadPaneText
+    // returns (it calls tmux then redactPaneText before returning).
+    captureBeadPaneText.mockResolvedValue(redactedPaneOutput);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    // The live path must have called captureBeadPaneText for the inactive bead.
+    expect(captureBeadPaneText).toHaveBeenCalledWith('bead-1');
+
+    // Find the AGENT_TURN_FAILED event that was recorded.
+    const turnFailedEvent = records.find(r => r.event === DomainEventName.AGENT_TURN_FAILED);
+    expect(turnFailedEvent).toBeDefined();
+
+    // The paneSnapshot field on AGENT_TURN_FAILED must contain the redacted text.
+    const paneSnapshot: string = turnFailedEvent!.data.paneSnapshot;
+    expect(typeof paneSnapshot).toBe('string');
+
+    // Reasoning block is gone from the operator-facing artifact.
+    expect(paneSnapshot).not.toContain('<thinking>');
+    expect(paneSnapshot).not.toContain('</thinking>');
+    expect(paneSnapshot).not.toContain('Let me think through the approach');
+    expect(paneSnapshot).not.toContain('Considering the edge cases carefully');
+
+    // Actionable lines are preserved — stuck/error detection works on redacted text.
+    expect(paneSnapshot).toContain('Bead: pi-experiment-kwrf');
+    expect(paneSnapshot).toContain('Tool call: bash');
+    expect(paneSnapshot).toContain('Error: tests failed with exit code 1');
+
+    // The HARNESS_RESTART_REQUESTED evidence also embeds the redacted snapshot.
+    const restartEvent = records.find(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED);
+    expect(restartEvent).toBeDefined();
+    const evidence: string = restartEvent!.data.evidence;
+    expect(evidence).toContain('Pane snapshot (reasoning redacted)');
+    expect(evidence).not.toContain('<thinking>');
+    expect(evidence).not.toContain('Let me think through the approach');
+    expect(evidence).toContain('Tool call: bash');
+  });
+
+  it('(kwrf) recoverInactiveBeads proceeds normally when captureBeadPaneText returns empty (no pane found)', async () => {
+    // When no live pane exists for the bead (e.g. already terminated), the
+    // restart path must not be blocked and must not include a pane snapshot.
+    const { supervisor, records, captureBeadPaneText } = supervisorHarness(NOW_MS - STALE_PROGRESS_AGE_MS);
+    captureBeadPaneText.mockResolvedValue('');
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    expect(captureBeadPaneText).toHaveBeenCalledWith('bead-1');
+
+    const turnFailedEvent = records.find(r => r.event === DomainEventName.AGENT_TURN_FAILED);
+    expect(turnFailedEvent).toBeDefined();
+    // When empty, paneSnapshot is undefined (not stored).
+    expect(turnFailedEvent!.data.paneSnapshot).toBeUndefined();
+
+    // The evidence in HARNESS_RESTART_REQUESTED falls back to the plain summary.
+    const restartEvent = records.find(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED);
+    expect(restartEvent).toBeDefined();
+    expect(restartEvent!.data.evidence).not.toContain('Pane snapshot');
+    expect(restartEvent!.data.evidence).toContain('without non-heartbeat progress');
   });
 });
