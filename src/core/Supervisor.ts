@@ -225,32 +225,26 @@ export class Supervisor {
   }
 
   private async restartDetailsForMissingStartedBead(beadId: string): Promise<MissingStartedRestartDetails | undefined> {
-    const eventStore = this.services.eventStore as any;
-
-    if (typeof eventStore.projectBead === 'function') {
-      try {
-        const projection = await eventStore.projectBead(beadId, { includeDetails: false });
-        if (projection?.restartRequested === true) {
-          return {
-            restartKind: projection.restartKind,
-            restartEvent: projection.restartEvent,
-            restartFromState: projection.restartFromState,
-            restartTargetState: projection.restartTargetState,
-            sourceEventType: 'projection'
-          };
-        }
-      } catch (error) {
-        Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart projection', {
-          beadId,
-          error: String(error)
-        });
+    try {
+      const projection = await this.services.eventStore.projectBead(beadId, { includeDetails: false });
+      if (projection?.restartRequested === true) {
+        return {
+          restartKind: projection.restartKind,
+          restartEvent: projection.restartEvent,
+          restartFromState: projection.restartFromState,
+          restartTargetState: projection.restartTargetState,
+          sourceEventType: 'projection'
+        };
       }
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart projection', {
+        beadId,
+        error: String(error)
+      });
     }
 
-    if (typeof eventStore.eventsForBead !== 'function') return undefined;
-
     try {
-      const events = await eventStore.eventsForBead(beadId);
+      const events = await this.services.eventStore.eventsForBead(beadId);
       for (const event of [...events].reverse()) {
         const data = event.data || {};
         if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED || event.type === DomainEventName.CONTEXT_RESTART_REQUESTED) {
@@ -455,12 +449,9 @@ export class Supervisor {
     const candidates = [...this.startedBeads].filter(beadId => !liveBeadIds.has(beadId));
     if (candidates.length === 0) return;
 
-    const eventStore = this.services.eventStore as any;
-    if (typeof eventStore.eventsForBeads !== 'function') return;
-
     let groupedEvents: Map<string, DomainEvent[]>;
     try {
-      groupedEvents = await eventStore.eventsForBeads(candidates);
+      groupedEvents = await this.services.eventStore.eventsForBeads(candidates);
     } catch (error) {
       Logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
         beadIds: candidates.sort(),
