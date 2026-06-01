@@ -8,7 +8,7 @@ import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventNa
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
-import type { RuntimeServices, RuntimeTool } from './RuntimeServices.js';
+import type { RuntimeServices, RuntimeTool, WorktreeResult } from './RuntimeServices.js';
 import { requireTool } from './ToolRegistry.js';
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
@@ -263,11 +263,11 @@ export class Supervisor {
     }
 
     // Mandatory Worktree Isolation
-    const result = await createWorktreeTool.execute({ beadId: claimed.id }, this.ctx);
-    const worktreePath = (result as any)?.path;
-    if ((result as any)?.success !== true || !worktreePath) {
+    const result = await createWorktreeTool.execute({ beadId: claimed.id }, this.ctx) as WorktreeResult;
+    const worktreePath = result.path;
+    if (result.success !== true || !worktreePath) {
       await Promise.resolve(bdReleaseTool.execute({ id: claimed.id })).catch(() => {});
-      throw new Error((result as any)?.error || `Failed to provision mandatory worktree for ${claimed.id}`);
+      throw new Error(result.error || `Failed to provision mandatory worktree for ${claimed.id}`);
     }
     await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
 

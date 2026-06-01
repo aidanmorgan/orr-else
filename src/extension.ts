@@ -8,6 +8,7 @@ import { parse as parseShellCommand } from 'shell-quote';
 import { z } from 'zod';
 import escapeStringRegexp from 'escape-string-regexp';
 import { teammatePlugin, TeammateFactory } from './plugins/teammates.js';
+import type { MergeResult } from './core/RuntimeServices.js';
 import {
   describeConfiguredProjectTools,
   executeConfiguredProjectTool,
@@ -1263,7 +1264,7 @@ async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn:
 }
 
 function wrapPluginTool(
-  tool: { name: string, description: string, parameters: any, execute: Function },
+  tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> },
   runtimeObservability: Observability,
   services: RuntimeServices
 ) {
@@ -1367,7 +1368,7 @@ function wrapPluginTool(
         toolSpanAttributes(tool.name, params, beadId),
         async (p: any, c: ExtensionContext) => {
           if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
-          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => tool.execute(p || {}, c));
+          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c)));
           if (c.hasUI) c.ui.setWorkingMessage(undefined);
 
           // Record invocation and result for audit
@@ -2107,8 +2108,8 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         beadId,
         closeAfterMerge: true,
         closeReason: event.summary
-      }, ctx);
-      if ((mergeResult as any)?.success !== true) {
+      }, ctx) as MergeResult;
+      if (mergeResult.success !== true) {
         await requireTool(services.plugins.bd, PluginToolName.BD_UPDATE_STATUS).execute({
           id: beadId,
           status: BeadStatus.BLOCKED,
@@ -2594,7 +2595,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       registerClaudeCodeLiveLogin(pi);
     }
 
-    const wrapRuntimeTool = (tool: { name: string, description: string, parameters: any, execute: Function }) =>
+    const wrapRuntimeTool = (tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) =>
       wrapPluginTool(tool, runtimeObservability, services);
 
     if (!artifactPathsToolRegistered) {

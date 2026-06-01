@@ -29,12 +29,28 @@ export interface RuntimeTool {
   name: string;
   description: string;
   parameters?: unknown;
-  execute: (...args: any[]) => unknown;
+  execute(params: unknown, ctx?: unknown): unknown | Promise<unknown>;
 }
 
 export interface RuntimePlugin {
   name: string;
   tools: RuntimeTool[];
+}
+
+/** Result contract for git worktree provisioning tools. Defined in core so that
+ * both core consumers (Supervisor) and plugin implementations (git plugin) can
+ * reference the same shape without a core→plugin import. */
+export interface WorktreeResult {
+  success: boolean;
+  path?: string;
+  error?: string;
+}
+
+/** Result contract for git merge/remove tools. Defined in core so that both
+ * core consumers and plugin implementations share the same shape. */
+export interface MergeResult {
+  success: boolean;
+  error?: string;
 }
 
 export interface RuntimeServices {

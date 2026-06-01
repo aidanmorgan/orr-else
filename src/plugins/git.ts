@@ -7,7 +7,7 @@ import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
 import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults } from '../constants/index.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
-import type { RuntimePlugin } from '../core/RuntimeServices.js';
+import type { MergeResult, RuntimePlugin, WorktreeResult } from '../core/RuntimeServices.js';
 
 const appendFileAsync = fs.promises.appendFile;
 const mkdirAsync = fs.promises.mkdir;
@@ -243,6 +243,8 @@ async function autoRestoreConfiguredPaths(
   }
 }
 
+export type { WorktreeResult, MergeResult };
+
 export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin) {
   return {
   name: 'git-worktrees',
@@ -254,7 +256,9 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         beadId: Type.String({ description: 'The Bead identifier' }),
         baseBranch: Type.Optional(Type.String({ description: 'The branch to fork from' }))
       }),
-      execute: async ({ beadId, baseBranch }: { beadId: string, baseBranch?: string }, ctx?: any) => {
+      execute: async (params: unknown, ctx?: unknown): Promise<WorktreeResult> => {
+        const { beadId, baseBranch } = params as { beadId: string; baseBranch?: string };
+        const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void } } | undefined;
         try {
           assertSafeBeadId(beadId);
           const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
@@ -268,14 +272,14 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
             return { success: true, path: worktreePath };
           }
 
-          if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Creating worktree for ${beadId}...`);
+          if (ui?.hasUI) ui.ui?.setWorkingMessage(`Creating worktree for ${beadId}...`);
 
           const branchName = branchNameFor(beadId);
           await withGitLock(eventStore, PluginToolName.CREATE_WORKTREE, beadId, async () => {
             const repositoryHasHead = await hasHead();
             const resolvedBaseBranch = repositoryHasHead ? (baseBranch || await currentBranch()) : undefined;
             Logger.info(Component.GIT, `Creating worktree for ${beadId}${resolvedBaseBranch ? ` from ${resolvedBaseBranch}` : ' as orphan bootstrap worktree'}`, { branchName });
-            
+
             const branchExists = await localBranchExists(branchName);
 
             const args = !repositoryHasHead
@@ -287,19 +291,19 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
           });
           await configureOperationalExcludes(eventStore, beadId, worktreePath);
           await autoRestoreConfiguredPaths(eventStore, configLoader, beadId, worktreePath);
-          
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Worktree created for ${beadId}`, 'info');
-            ctx.ui.setWorkingMessage(undefined);
+
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Worktree created for ${beadId}`, 'info');
+            ui.ui?.setWorkingMessage(undefined);
           }
           await eventStore.record(DomainEventName.WORKTREE_CREATED, { beadId, path: worktreePath, branchName });
           return { success: true, path: worktreePath };
         } catch (error) {
           await eventStore.record(DomainEventName.WORKTREE_CREATE_FAILED, { beadId, error: String(error) }).catch(() => {});
           Logger.error(Component.GIT, `Failed to create worktree for ${beadId}`, { error: String(error) });
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Failed to create worktree: ${String(error)}`, 'error');
-            ctx.ui.setWorkingMessage(undefined);
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Failed to create worktree: ${String(error)}`, 'error');
+            ui.ui?.setWorkingMessage(undefined);
           }
           return { success: false, error: String(error) };
         }
@@ -312,7 +316,9 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         beadId: Type.String({ description: 'The Bead identifier' }),
         force: Type.Optional(Type.Boolean({ description: 'Skip confirmation' }))
       }),
-      execute: async ({ beadId, force }: { beadId: string, force?: boolean }, ctx?: any) => {
+      execute: async (params: unknown, ctx?: unknown): Promise<MergeResult> => {
+        const { beadId, force } = params as { beadId: string; force?: boolean };
+        const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void; confirm: (title: string, msg: string) => Promise<boolean> } } | undefined;
         try {
           assertSafeBeadId(beadId);
           const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
@@ -321,33 +327,33 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
             return { success: true };
           }
 
-          if (ctx?.hasUI && !force) {
-            const confirmed = await ctx.ui.confirm(
+          if (ui?.hasUI && !force) {
+            const confirmed = await ui.ui?.confirm(
               'Remove Worktree',
               `Are you sure you want to remove the worktree for ${beadId}? Uncommitted changes will be lost.`
             );
             if (!confirmed) return { success: false, error: 'User cancelled worktree removal' };
           }
 
-          if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Removing worktree ${beadId}...`);
+          if (ui?.hasUI) ui.ui?.setWorkingMessage(`Removing worktree ${beadId}...`);
 
           Logger.info(Component.GIT, `Removing worktree for ${beadId}`);
           await withGitLock(eventStore, PluginToolName.REMOVE_WORKTREE, beadId, async () => {
             await git([GitSubcommand.WORKTREE, 'remove', GitFlag.FORCE, worktreePath]);
           });
 
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Worktree removed: ${beadId}`, 'info');
-            ctx.ui.setWorkingMessage(undefined);
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Worktree removed: ${beadId}`, 'info');
+            ui.ui?.setWorkingMessage(undefined);
           }
           await eventStore.record(DomainEventName.WORKTREE_REMOVED, { beadId, path: worktreePath });
           return { success: true };
         } catch (error) {
           await eventStore.record(DomainEventName.WORKTREE_REMOVE_FAILED, { beadId, error: String(error) }).catch(() => {});
           Logger.error(Component.GIT, `Failed to remove worktree for ${beadId}`, { error: String(error) });
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Failed to remove worktree: ${String(error)}`, 'error');
-            ctx.ui.setWorkingMessage(undefined);
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Failed to remove worktree: ${String(error)}`, 'error');
+            ui.ui?.setWorkingMessage(undefined);
           }
           return { success: false, error: String(error) };
         }
@@ -363,26 +369,28 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         closeAfterMerge: Type.Optional(Type.Boolean({ description: 'Harness-owned terminal finalization: close the Bead after a clean staged merge. Bead state is propagated via the embedded Dolt DB; the JSONL export is no longer touched.' })),
         closeReason: Type.Optional(Type.String({ description: 'Close reason to record when closeAfterMerge is true.' }))
       }),
-      execute: async ({
-        beadId,
-        message,
-        targetBranch = WorktreeDefaults.TARGET_BRANCH,
-        closeAfterMerge,
-        closeReason
-      }: {
-        beadId: string;
-        message?: string;
-        targetBranch?: string;
-        closeAfterMerge?: boolean;
-        closeReason?: string;
-      }, ctx?: any) => {
+      execute: async (params: unknown, ctx?: unknown): Promise<MergeResult> => {
+        const {
+          beadId,
+          message,
+          targetBranch = WorktreeDefaults.TARGET_BRANCH,
+          closeAfterMerge,
+          closeReason
+        } = params as {
+          beadId: string;
+          message?: string;
+          targetBranch?: string;
+          closeAfterMerge?: boolean;
+          closeReason?: string;
+        };
+        const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void } } | undefined;
         try {
           assertSafeBeadId(beadId);
           const branchName = branchNameFor(beadId);
           const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
           const commitMessage = message || `Complete ${beadId}`;
 
-          if (ctx?.hasUI) ctx.ui.setWorkingMessage(`Merging ${beadId} into ${targetBranch}...`);
+          if (ui?.hasUI) ui.ui?.setWorkingMessage(`Merging ${beadId} into ${targetBranch}...`);
 
           Logger.info(Component.GIT, `Committing and merging ${branchName} into ${targetBranch}`, { message: commitMessage });
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_STARTED, { beadId, branchName, targetBranch, message: commitMessage });
@@ -409,9 +417,9 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
             }
           });
 
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Merged ${beadId} into ${targetBranch}`, 'info');
-            ctx.ui.setWorkingMessage(undefined);
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Merged ${beadId} into ${targetBranch}`, 'info');
+            ui.ui?.setWorkingMessage(undefined);
           }
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_SUCCEEDED, { beadId, branchName, targetBranch, message: commitMessage });
           return { success: true };
@@ -424,9 +432,9 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
           }
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_FAILED, { beadId, targetBranch, error: String(error), abortError }).catch(() => {});
           Logger.error(Component.GIT, `Failed to merge for ${beadId}`, { error: String(error) });
-          if (ctx?.hasUI) {
-            ctx.ui.notify(`Failed to merge: ${String(error)}`, 'error');
-            ctx.ui.setWorkingMessage(undefined);
+          if (ui?.hasUI) {
+            ui.ui?.notify(`Failed to merge: ${String(error)}`, 'error');
+            ui.ui?.setWorkingMessage(undefined);
           }
           return { success: false, error: String(error) };
         }

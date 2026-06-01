@@ -3329,9 +3329,9 @@ export async function executeConfiguredProjectTool(
   eventStore: EventStore,
   pathFactory: ToolCallPathFactory,
   definition: ProjectToolConfig,
-  args: any,
+  args: Record<string, unknown>,
   ctx: ExtensionContext
-) {
+): Promise<unknown> {
   const beadId = beadIdFromArgs(args);
   const context = executionContext(pathFactory, definition, args);
   const stateId = context.templateContext.stateId;
@@ -3559,7 +3559,7 @@ export function registerConfiguredProjectTools(
   pi: ExtensionAPI,
   config: HarnessConfig,
   seen: Set<string>,
-  wrapper: Function,
+  wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
   runtimeContext?: () => ProjectToolRuntimeContext | undefined
 ) {
   const tools = config.tools || [];
