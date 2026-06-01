@@ -3,7 +3,7 @@ import { Bead, BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
-import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, RestartKind, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, RestartKind, RetentionDefaults, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
@@ -12,6 +12,7 @@ import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPo
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
+import { RetentionCleanup } from './RetentionCleanup.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
@@ -75,6 +76,7 @@ export class Supervisor {
   private stepInProgress = false;
   private stopping = false;
   private lastSlotHealthEventMs = 0;
+  private lastRetentionCleanupMs = 0;
   private schedulingPausedUntilMs = 0;
   private schedulingPausedReason = '';
   // Throttle "scheduling paused" warns: only emit when pauseUntil changes,
@@ -287,6 +289,7 @@ export class Supervisor {
         await this.reconcileTerminalLiveBeads();
         await this.scanAndSpawn();
         await this.recordSlotHealth('after_scan');
+        await this.runRetentionCleanupIfDue();
       })();
     } finally {
       this.stepInProgress = false;
@@ -820,5 +823,32 @@ export class Supervisor {
       });
       this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
     }
+  }
+
+  /**
+   * Runs retention cleanup at most once per RetentionDefaults.CLEANUP_INTERVAL_MS.
+   * Removes files/dirs older than RetentionDefaults.MAX_AGE_MS from harness-owned
+   * log, .tmp, and .trash areas. Errors are logged but never propagate —
+   * cleanup failure must not disrupt the supervisor poll loop.
+   *
+   * Supplies the live bead ID set from the teammate spawner so that the
+   * .tmp/tool-calls per-bead directories of running beads are never deleted.
+   */
+  private async runRetentionCleanupIfDue(): Promise<void> {
+    const now = this.clock.now();
+    if (now - this.lastRetentionCleanupMs < RetentionDefaults.CLEANUP_INTERVAL_MS) return;
+    this.lastRetentionCleanupMs = now;
+
+    const cleanup = new RetentionCleanup(
+      this.services.projectRoot,
+      this.clock,
+      this.services.eventStore,
+      RetentionDefaults.MAX_AGE_MS,
+      () => this.factory.getLiveTeammateBeadIds()
+    );
+
+    await cleanup.run().catch(error => {
+      Logger.warn(Component.SUPERVISOR, 'Retention cleanup failed unexpectedly', { error: String(error) });
+    });
   }
 }

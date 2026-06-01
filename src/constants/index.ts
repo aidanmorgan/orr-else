@@ -203,7 +203,8 @@ export enum DomainEventName {
   WORKTREE_REMOVED = 'WORKTREE_REMOVED',
   WORKTREE_AUTO_REMOVED = 'WORKTREE_AUTO_REMOVED',
   WORKTREE_AUTO_REMOVE_PRESERVED = 'WORKTREE_AUTO_REMOVE_PRESERVED',
-  WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED'
+  WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
+  RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED'
 }
 
 export enum BeadsCliCommand {
@@ -676,7 +677,8 @@ export enum Component {
   CONFIG = 'ConfigLoader',
   WORKLOG = 'WorklogManager',
   PROGRESS = 'ProgressManager',
-  PROJECT_TOOLS = 'ProjectTools'
+  PROJECT_TOOLS = 'ProjectTools',
+  RETENTION = 'RetentionCleanup'
 }
 
 export const WorktreeDefaults = {
@@ -1047,6 +1049,13 @@ export const SupervisorDefaults = {
   NO_PROGRESS_TIMEOUT_MS: 15 * TimeMs.MINUTE,
   STARTUP_HEARTBEAT_GRACE_MS: TimeMs.MINUTE * 2,
   CAPACITY_LIMIT_FALLBACK_PAUSE_MS: TimeMs.MINUTE * 10
+} as const;
+
+export const RetentionDefaults = {
+  /** Files/directories older than this threshold are eligible for removal. */
+  MAX_AGE_MS: 2 * TimeMs.DAY,
+  /** Retention cleanup runs at most once per this interval (coordinator only). */
+  CLEANUP_INTERVAL_MS: TimeMs.HOUR
 } as const;
 
 export const TelemetryDefaults = {
