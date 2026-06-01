@@ -5,7 +5,8 @@ import {
   NativeReadPolicyDefaults,
   OperationalArtifactPath,
   OperationalLogPath,
-  PluginToolName
+  PluginToolName,
+  ProjectToolType
 } from '../constants/index.js';
 
 export class ProtocolInjector {
@@ -15,8 +16,10 @@ export class ProtocolInjector {
    * Behavioral enforcement is handled programmatically by the harness.
    */
   public inject(state: SDLCState, config?: HarnessConfig): string {
-    const mcpPolicy = config?.settings?.pi?.mcp?.allowToolCalls === false
-      ? `\n- **MCP Policy**: Native Pi \`${NativePiToolName.MCP}\` access is disabled for this project. Pi UI \`MCP: 0/N\` counts native adapters only, not Orr Else configured MCP-backed project tools. Use \`${BuiltInToolName.HARNESS_STATUS}\` for configured counts and call the named project tool; route a blocker only when no configured tool exposes the needed capability.`
+    const nativeMcpDisabled = config?.settings?.pi?.mcp?.allowToolCalls === false;
+    const hasMcpBackedTools = (config?.tools ?? []).some(t => t.type === ProjectToolType.MCP);
+    const mcpPolicy = (nativeMcpDisabled || hasMcpBackedTools)
+      ? `\n- **MCP Policy**: ${nativeMcpDisabled ? `Native Pi \`${NativePiToolName.MCP}\` access is disabled for this project. ` : ''}Pi UI \`MCP: 0/N\` counts native adapters only, not Orr Else configured MCP-backed project tools. Use \`${BuiltInToolName.HARNESS_STATUS}\` for configured counts and call the named project tool; route a blocker only when no configured tool exposes the needed capability.`
       : '';
     return `
 ### ORR ELSE PROTOCOL v1.0

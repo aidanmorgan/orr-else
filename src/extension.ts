@@ -2003,6 +2003,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 interface ProjectToolStatusSummary {
   total: number;
   mcpBacked: number;
+  mcpBackedToolNames: string[];
   command: number;
   nativeExtension: number;
   nativeMcpFooterMeaning: string;
@@ -2037,9 +2038,11 @@ async function configuredProjectToolStatus(services: RuntimeServices): Promise<P
     const config = await services.configLoader.load();
     const tools = config.tools || [];
     if (tools.length === 0) return undefined;
+    const mcpTools = tools.filter(tool => tool.type === ProjectToolType.MCP);
     return {
       total: tools.length,
-      mcpBacked: tools.filter(tool => tool.type === ProjectToolType.MCP).length,
+      mcpBacked: mcpTools.length,
+      mcpBackedToolNames: mcpTools.map(t => t.name),
       command: tools.filter(tool => tool.type === ProjectToolType.COMMAND).length,
       nativeExtension: tools.filter(tool => tool.type === ProjectToolType.EXTENSION).length,
       nativeMcpFooterMeaning: 'Pi UI MCP count is native-adapter-only and does not report Orr Else configured MCP-backed project tools.'
@@ -2051,7 +2054,10 @@ async function configuredProjectToolStatus(services: RuntimeServices): Promise<P
 
 function projectToolStatusText(status: ProjectToolStatusSummary | undefined): string | undefined {
   if (!status) return undefined;
-  return `Configured project tools: ${status.total} total (${status.mcpBacked} Orr Else MCP-backed, ${status.command} command, ${status.nativeExtension} native extension). ${status.nativeMcpFooterMeaning}`;
+  const mcpNames = status.mcpBackedToolNames.length > 0
+    ? ` [${status.mcpBackedToolNames.join(', ')}]`
+    : '';
+  return `Configured project tools: ${status.total} total (${status.mcpBacked} Orr Else MCP-backed${mcpNames}, ${status.command} command, ${status.nativeExtension} native extension). ${status.nativeMcpFooterMeaning}`;
 }
 
 async function activeRunOutstandingMandatoryCount(services: RuntimeServices, run: ActiveRun): Promise<number | undefined> {

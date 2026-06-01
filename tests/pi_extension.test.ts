@@ -463,10 +463,12 @@ states:
       expect(status.details.configuredProjectTools).toMatchObject({
         total: 4,
         mcpBacked: 2,
+        mcpBackedToolNames: expect.arrayContaining(['codemap', 'reference_docs']),
         command: 1,
         nativeExtension: 1,
         nativeMcpFooterMeaning: expect.stringContaining('does not report Orr Else configured MCP-backed project tools')
       });
+      expect(status.details.configuredProjectTools.mcpBackedToolNames).toHaveLength(2);
       expect(status.details.nextHarnessAction).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
 
       const earlyCompletion = await signalCompletion.execute('signal-before-checkpoint', {
