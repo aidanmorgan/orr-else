@@ -423,7 +423,7 @@ export const teammatePlugin = (factory: TeammateFactory) => ({
         stateId: Type.String({ description: 'The statechart state to execute' }),
         worktreePath: Type.String({ description: 'Mandatory dedicated worktree path for the teammate.' })
       }),
-      execute: async ({ beadId, stateId, worktreePath }: any, ctx?: any) => await factory.spawnTeammateInTmux(beadId, stateId, worktreePath, ctx)
+      execute: async ({ beadId, stateId, worktreePath }: { beadId: string; stateId: string; worktreePath: string }, ctx?: unknown) => await factory.spawnTeammateInTmux(beadId as BeadId, stateId, worktreePath, ctx)
     }
   ]
 });

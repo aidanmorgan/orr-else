@@ -106,6 +106,8 @@ export interface HeartbeatEvent extends TeammateEventBase {
 export interface TeammateExitedEvent extends TeammateEventBase {
   type: TeammateEventType.TEAMMATE_EXITED;
   summary: string;
+  pauseUntilMs?: number;
+  capacityLimited?: boolean;
 }
 
 export type TeammateEvent = 
@@ -175,14 +177,14 @@ export function createTeammateEventIdempotencyKey(event: Partial<TeammateEvent>)
 
 export interface RecordedDomainEventLike {
   type: string;
-  data?: Record<string, any>;
+  data?: Record<string, unknown>;
 }
 
-function eventDataMatches(event: TeammateEvent, data: Record<string, any> | undefined): boolean {
+function eventDataMatches(event: TeammateEvent, data: Record<string, unknown> | undefined): boolean {
   if (!data) return false;
   if (data.idempotencyKey && data.idempotencyKey === event.idempotencyKey) return true;
 
-  const anyEvent = event as Record<string, any>;
+  const anyEvent = event as unknown as Record<string, unknown>;
   const stateMatches = (data.fromState || data.stateId) === event.stateId;
   const actionMatches = !anyEvent.actionId || data.actionId === anyEvent.actionId;
   const transitionMatches = !anyEvent.transitionEvent || data.transitionEvent === anyEvent.transitionEvent;
@@ -264,7 +266,7 @@ export interface TeammateEventValidationResult {
   event?: TeammateEvent;
 }
 
-function requireStrings(obj: any, keys: string[]): string | undefined {
+function requireStrings(obj: Record<string, unknown>, keys: string[]): string | undefined {
   for (const key of keys) {
     if (typeof obj[key] !== 'string' || !obj[key].trim()) {
       return `Missing required string field: ${key}`;
@@ -273,19 +275,20 @@ function requireStrings(obj: any, keys: string[]): string | undefined {
   return undefined;
 }
 
-export function validateTeammateEvent(value: any): TeammateEventValidationResult {
+export function validateTeammateEvent(value: unknown): TeammateEventValidationResult {
   if (!value || typeof value !== 'object') return { ok: false, error: 'Event must be an object' };
-  
-  const baseError = requireStrings(value, ['beadId', 'workerId', 'stateId', 'idempotencyKey']);
-  if (baseError) return { ok: false, error: baseError };
-  
-  if (typeof value.timestamp !== 'number') return { ok: false, error: 'timestamp must be a number' };
-  if (!Object.values(TeammateEventType).includes(value.type)) return { ok: false, error: `Invalid event type: ${value.type}` };
 
-  const type = value.type as TeammateEventType;
+  const obj = value as Record<string, unknown>;
+  const baseError = requireStrings(obj, ['beadId', 'workerId', 'stateId', 'idempotencyKey']);
+  if (baseError) return { ok: false, error: baseError };
+
+  if (typeof obj.timestamp !== 'number') return { ok: false, error: 'timestamp must be a number' };
+  if (!Object.values(TeammateEventType).includes(obj.type as TeammateEventType)) return { ok: false, error: `Invalid event type: ${obj.type}` };
+
+  const type = obj.type as TeammateEventType;
 
   if (type === TeammateEventType.CHECKPOINT_ACCEPTED) {
-    const error = requireStrings(value, ['actionId']);
+    const error = requireStrings(obj, ['actionId']);
     if (error) return { ok: false, error };
   }
 
@@ -296,12 +299,12 @@ export function validateTeammateEvent(value: any): TeammateEventValidationResult
     || type === TeammateEventType.CONTEXT_RESTART_REQUESTED
     || type === TeammateEventType.HARNESS_RESTART_REQUESTED
   ) {
-    const error = requireStrings(value, ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']);
+    const error = requireStrings(obj, ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']);
     if (error) return { ok: false, error };
-    return { ok: true, event: { ...value, handover: truncateHandover(value.handover) } as TeammateEvent };
+    return { ok: true, event: { ...obj, handover: truncateHandover(obj.handover as string) } as TeammateEvent };
   }
 
-  return { ok: true, event: value as TeammateEvent };
+  return { ok: true, event: obj as unknown as TeammateEvent };
 }
 
 function truncateHandover(handover: string): string {

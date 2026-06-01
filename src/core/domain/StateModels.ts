@@ -255,6 +255,7 @@ export interface HarnessConfig {
     modelProviders: Record<string, LLMProviderConfig>;
     stateContextRotThreshold: number;
     harnessContextRotThreshold: number;
+    cycleCap?: number;
     contextMonitor?: {
       autoRestartCompactionCount?: number;
     };

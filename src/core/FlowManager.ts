@@ -89,10 +89,9 @@ export class FlowManager {
   }
 
   public activateTools(pi: ExtensionAPI, toolNames: string[]) {
-    const api = pi as any;
-    if (typeof api.getActiveTools !== 'function' || typeof api.setActiveTools !== 'function') return;
-    const active = new Set<string>(api.getActiveTools());
+    if (typeof pi.getActiveTools !== 'function' || typeof pi.setActiveTools !== 'function') return;
+    const active = new Set<string>(pi.getActiveTools());
     for (const name of toolNames) active.add(name);
-    api.setActiveTools([...active]);
+    pi.setActiveTools([...active]);
   }
 }

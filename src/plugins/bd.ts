@@ -401,20 +401,20 @@ function normalizeIssueWithProjection(
   };
 
   const acceptanceCriteria = previewText(issue.acceptance_criteria, BeadsDefaults.LONG_TEXT_PREVIEW_CHARS);
-  if (acceptanceCriteria) (bead as any).acceptance_criteria = acceptanceCriteria;
+  if (acceptanceCriteria) bead.acceptance_criteria = acceptanceCriteria;
   bead.description = previewText(issue.description, BeadsDefaults.LONG_TEXT_PREVIEW_CHARS);
   bead.notes = previewText(issue.notes, BeadsDefaults.LONG_TEXT_PREVIEW_CHARS);
 
   if (includeDetails) {
     if (metadata.checklists) {
       bead.checklists = compactChecklistEntries(metadata.checklists, StateChartToolDefaults.DETAIL_CHECKED_ITEMS);
-      (bead as any).checkedItemsTruncated = Object.keys(bead.checklists).length < Object.keys(metadata.checklists).length;
+      bead.checkedItemsTruncated = Object.keys(bead.checklists).length < Object.keys(metadata.checklists).length;
     }
     bead.dynamicChecklists = compactDynamicChecklists(metadata.dynamicChecklists);
     bead.handovers = compactHandovers(metadata.handovers || {}, StateChartToolDefaults.DETAIL_HANDOVERS);
-    (bead as any).handoversTruncated = Object.keys(bead.handovers).length < Object.keys(metadata.handovers || {}).length;
+    bead.handoversTruncated = Object.keys(bead.handovers).length < Object.keys(metadata.handovers || {}).length;
     bead.completedActionIds = (metadata.completedActionIds || []).slice(-StateChartToolDefaults.DETAIL_COMPLETED_ACTIONS);
-    (bead as any).completedActionIdsTruncated = bead.completedActionIds.length < (metadata.completedActionIds || []).length;
+    bead.completedActionIdsTruncated = bead.completedActionIds.length < (metadata.completedActionIds || []).length;
   }
 
   return bead;

@@ -2025,8 +2025,8 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   if (event.type === TeammateEventType.TEAMMATE_EXITED) {
     currentSupervisor.markBeadExited(beadId);
     const releaseTool = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_RELEASE)!;
-    const pauseUntilMs = typeof (event as any).pauseUntilMs === 'number' ? (event as any).pauseUntilMs : undefined;
-    if ((event as any).capacityLimited === true && pauseUntilMs) {
+    const pauseUntilMs = typeof event.pauseUntilMs === 'number' ? event.pauseUntilMs : undefined;
+    if (event.capacityLimited === true && pauseUntilMs) {
       currentSupervisor.pauseSchedulingUntil(pauseUntilMs, event.summary || 'Harness capacity limit reached');
     }
     await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
@@ -2174,7 +2174,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       }
       const next = (stateCycleCounter.get(cycleKey) ?? 0) + 1;
       stateCycleCounter.set(cycleKey, next);
-      const cap = (config.settings as any)?.cycleCap ?? CYCLE_CAP_DEFAULT;
+      const cap = config.settings.cycleCap ?? CYCLE_CAP_DEFAULT;
       if (next >= cap) {
         Logger.warn(Component.ORR_ELSE, 'Cycle cap reached; escalating bead to TeamLead', {
           beadId, stateId: event.stateId, cycle: next, fingerprint

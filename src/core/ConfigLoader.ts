@@ -4,6 +4,7 @@ import * as yaml from 'yaml';
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
 import { ResolvedLLMConfig, HarnessConfig } from './domain/StateModels.js';
+import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProject } from './Paths.js';
 import { Logger } from './Logger.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
@@ -154,13 +155,13 @@ export class ConfigLoader {
 
       const fileContent = fs.readFileSync(configPath, 'utf8');
       const parsed = yaml.parse(fileContent) || {};
-      config = mergeReplacingArrays(
+      const merged: unknown = mergeReplacingArrays(
         DEFAULTS as Record<string, unknown>,
         parsed as Record<string, unknown>
-      ) as unknown as HarnessConfig;
+      );
+      this.validate(merged);
+      config = merged;
       this.resolveFileBackedFields(config);
-
-      this.validate(config);
       this.cached = config;
       this.cachedPath = configPath;
       this.cachedSignature = signature;
@@ -171,7 +172,7 @@ export class ConfigLoader {
     }
   }
 
-  private validate(config: HarnessConfig) {
+  private validate(config: unknown): asserts config is HarnessConfig {
     const ajv = new Ajv({ allErrors: true, useDefaults: true });
     addFormats(ajv);
 
@@ -204,9 +205,10 @@ export class ConfigLoader {
     return fs.readFileSync(filePath, 'utf8');
   }
 
-  private resolveChecklistReference(value: unknown): unknown {
-    if (Array.isArray(value) || value === undefined || value === null) return value;
-    if (typeof value !== 'string' || !value.trim()) return value;
+  private resolveChecklistReference(value: unknown): ChecklistItem[] | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (Array.isArray(value)) return value as ChecklistItem[];
+    if (typeof value !== 'string' || !value.trim()) return undefined;
 
     const filePath = this.resolveConfigPath(value);
     if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
@@ -214,8 +216,8 @@ export class ConfigLoader {
     }
 
     const parsed = yaml.parse(fs.readFileSync(filePath, 'utf8'));
-    if (Array.isArray(parsed)) return parsed;
-    if (isRecord(parsed) && Array.isArray(parsed.items)) return parsed.items;
+    if (Array.isArray(parsed)) return parsed as ChecklistItem[];
+    if (isRecord(parsed) && Array.isArray(parsed.items)) return parsed.items as ChecklistItem[];
     throw new Error(`Checklist file must contain an array or an { items: [...] } object: ${value}`);
   }
 
@@ -224,17 +226,17 @@ export class ConfigLoader {
     config.settings.contextRestartPrompt = this.resolveTextReference(config.settings.contextRestartPrompt) as string | undefined;
 
     for (const gate of config.validationGates || []) {
-      gate.checklist = this.resolveChecklistReference(gate.checklist) as any;
+      gate.checklist = this.resolveChecklistReference(gate.checklist);
     }
 
     for (const state of Object.values(config.states || {})) {
       state.harnessRestartPrompt = this.resolveTextReference(state.harnessRestartPrompt) as string | undefined;
       state.contextRestartPrompt = this.resolveTextReference(state.contextRestartPrompt) as string | undefined;
-      state.checklist = this.resolveChecklistReference(state.checklist) as any;
+      state.checklist = this.resolveChecklistReference(state.checklist);
 
       for (const action of state.actions || []) {
         action.prompt = this.resolveTextReference(action.prompt) as string | undefined;
-        action.checklist = this.resolveChecklistReference(action.checklist) as any;
+        action.checklist = this.resolveChecklistReference(action.checklist);
       }
     }
   }

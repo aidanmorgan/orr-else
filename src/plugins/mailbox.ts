@@ -17,7 +17,7 @@ export function createMailboxPlugin(eventStore: EventStore) {
         type: Type.String({ enum: Object.values(MailboxMessageType) }),
         content: Type.String()
       }),
-      execute: async ({ to, beadId, type, content }: any) => {
+      execute: async ({ to, beadId, type, content }: { to: string; beadId: string; type: MailboxMessageType; content: string }) => {
         await mailbox.sendMessage({ from: MailboxDefaults.TEAMMATE_SENDER, to, beadId, type, content });
         return `Message sent to ${to}.`;
       }
@@ -28,7 +28,7 @@ export function createMailboxPlugin(eventStore: EventStore) {
       parameters: Type.Object({
         recipient: Type.String({ description: "Your name (e.g., 'TeamLead')" })
       }),
-      execute: async ({ recipient }: any) => {
+      execute: async ({ recipient }: { recipient: string }) => {
         const workerId = process.env[EnvVars.WORKER_ID] || Defaults.API_HOST; // Fallback
         const messages = await mailbox.readMessagesFor(workerId);
         if (messages.length === 0) return MailboxDefaults.EMPTY_MESSAGE;

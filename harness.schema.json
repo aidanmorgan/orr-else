@@ -156,6 +156,7 @@
             }
           }
         },
+        "cycleCap": { "type": "integer", "minimum": 1, "description": "Maximum consecutive self-loop cycles before a blocked bead is escalated to the Team Lead." },
         "stateContextRotThreshold": { "type": "integer", "minimum": 1 },
         "harnessContextRotThreshold": { "type": "integer", "minimum": 1 },
         "observability": {

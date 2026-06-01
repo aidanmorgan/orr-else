@@ -9,12 +9,14 @@ export interface Bead {
   priority?: number;
   description?: string;
   notes?: string;
+  acceptance_criteria?: string;
   assigned_to?: string;
   worktree_path?: string;
   changed_files: string[];
   logs: string[];
   dependencies: BeadId[];
   checklists?: Record<string, { checked: boolean; evidence?: string }>;
+  checkedItemsTruncated?: boolean;
   dynamicChecklists?: Record<string, unknown>;
   retryCount: number;
   compactionCount: number;
@@ -22,7 +24,9 @@ export interface Bead {
   subState?: string;
   totalExecutionTimeMs: number;
   handovers: Record<string, string>;
+  handoversTruncated?: boolean;
   completedActionIds: string[];
+  completedActionIdsTruncated?: boolean;
   restartRequested?: boolean;
   restartKind?: RestartKind | string;
   restartEvent?: string;

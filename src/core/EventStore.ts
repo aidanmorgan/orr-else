@@ -121,6 +121,21 @@ export interface BeadStateChartProjection {
   lastUpdatedAt?: string;
 }
 
+/** Shape of each entry inside a dynamicChecklists run-bucket's `items` array. */
+interface DynamicChecklistItem {
+  text: string;
+  mandatory?: boolean;
+  type?: string;
+  metadata?: { source?: string };
+}
+
+/** Shape of a dynamicChecklists run-bucket value. */
+interface DynamicChecklistRun {
+  items?: DynamicChecklistItem[];
+  updatedAt?: string;
+  [key: string]: unknown;
+}
+
 export class EventStore {
   private currentLocation: EventStoreLocation | null | undefined;
   private sessionId = process.env[EnvVars.OBSERVABILITY_SESSION_ID] || uuidv7();
@@ -809,7 +824,7 @@ export class EventStore {
     workflowVersion?: string,
     options: EventProjectionOptions = {}
   ): Partial<HarnessBeadMetadata> {
-    const projection: Record<string, any> = {};
+    const projection: Partial<HarnessBeadMetadata> = {};
     const includeDetails = this.includeProjectionDetails(options);
     for (const event of events) {
       const data = event.data || {};
@@ -857,7 +872,7 @@ export class EventStore {
         case DomainEventName.ACTION_COMPLETED:
           {
             const completedAction = this.completedActionFromData(data, workflowVersion);
-            if (!completedAction) break;
+            if (!completedAction || typeof completedAction !== 'string') break;
             projection.completedActionIds = [
               ...new Set([...(projection.completedActionIds || []), completedAction])
             ];
@@ -873,7 +888,7 @@ export class EventStore {
             }
           if (data.transitionEvent === EventName.SUCCESS) {
             const completedAction = this.completedActionFromData(data, workflowVersion);
-            if (completedAction) {
+            if (completedAction && typeof completedAction === 'string') {
               projection.completedActionIds = [
                 ...new Set([...(projection.completedActionIds || []), completedAction])
               ];
@@ -931,27 +946,31 @@ export class EventStore {
     projection.restartTargetState = stateChart.restartTargetState;
 
     if (includeDetails) {
-      const dynamicChecklists = workflowScoped ? {} : { ...(projection.dynamicChecklists || {}) };
+      const dynamicChecklists: Record<string, DynamicChecklistRun> = workflowScoped
+        ? {}
+        : Object.fromEntries(
+            Object.entries(projection.dynamicChecklists || {}).map(([k, v]) => [k, (v || {}) as DynamicChecklistRun])
+          );
       for (const item of stateChart.addedChecklistItems) {
         if (!item.text || !item.stateId || !item.actionId) continue;
         const runKey = `${item.stateId}/${item.actionId}`;
-        const existingRun = dynamicChecklists[runKey] || {};
-        const existingItems = Array.from(
+        const existingRun: DynamicChecklistRun = dynamicChecklists[runKey] || {};
+        const existingItems: DynamicChecklistItem[] = Array.from(
           new Map(
             (Array.isArray(existingRun.items) ? existingRun.items : [])
-              .filter((candidate: any) => candidate?.text)
-              .map((candidate: any) => [candidate.text, candidate])
+              .filter((candidate: DynamicChecklistItem) => candidate?.text)
+              .map((candidate: DynamicChecklistItem) => [candidate.text, candidate])
           ).values()
         );
-        const existingItem = existingItems.find((candidate: any) => candidate?.text === item.text);
-        const projectedItem = {
+        const existingItem = existingItems.find((candidate: DynamicChecklistItem) => candidate?.text === item.text);
+        const projectedItem: DynamicChecklistItem = {
           text: item.text,
           mandatory: item.mandatory,
           type: item.type,
           metadata: { source: item.source }
         };
-        const items = existingItem
-          ? existingItems.map((candidate: any) => {
+        const items: DynamicChecklistItem[] = existingItem
+          ? existingItems.map((candidate: DynamicChecklistItem) => {
               if (candidate?.text !== item.text) return candidate;
               return {
                 ...candidate,
@@ -975,7 +994,7 @@ export class EventStore {
       }
     }
 
-    return projection as Partial<HarnessBeadMetadata>;
+    return projection;
   }
 
   public async projectBead(
