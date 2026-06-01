@@ -72,7 +72,7 @@ export function createRuntimeServices(
   const apiAddress: ApiAddress = {};
 
   const bdPlugin = createBdPlugin(eventStore, env, projectRoot);
-  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
+  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin, projectRoot);
 
   // WI-20: single factory. Extension.ts uses ??= so SESSION_START-constructed
   // factory is reused for coordinator. This instance is the default for tests

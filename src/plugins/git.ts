@@ -14,7 +14,6 @@ const mkdirAsync = fs.promises.mkdir;
 const readFileAsync = fs.promises.readFile;
 const writeFileAsync = fs.promises.writeFile;
 
-const GIT_LOCK_FILE = path.join(process.cwd(), WorktreeDefaults.GIT_LOCK_FILE);
 const GitSubcommand = {
   ADD: 'add',
   BRANCH: 'branch',
@@ -53,12 +52,13 @@ async function withGitLock<T>(
   eventStore: EventStore,
   operation: PluginToolName,
   beadId: string | undefined,
+  lockFile: string,
   fn: () => Promise<T>
 ): Promise<T> {
-  await mkdirAsync(path.dirname(GIT_LOCK_FILE), { recursive: true });
-  await writeFileAsync(GIT_LOCK_FILE, '', { flag: 'a' });
+  await mkdirAsync(path.dirname(lockFile), { recursive: true });
+  await writeFileAsync(lockFile, '', { flag: 'a' });
 
-  const release = await lockfile.lock(GIT_LOCK_FILE, {
+  const release = await lockfile.lock(lockFile, {
     realpath: false,
     retries: {
       retries: WorktreeDefaults.MAX_LOCK_RETRIES,
@@ -71,7 +71,7 @@ async function withGitLock<T>(
   await eventStore.record(DomainEventName.GIT_LOCK_ACQUIRED, {
     beadId,
     operation,
-    path: GIT_LOCK_FILE
+    path: lockFile
   });
 
   try {
@@ -81,7 +81,7 @@ async function withGitLock<T>(
     await eventStore.record(DomainEventName.GIT_LOCK_RELEASED, {
       beadId,
       operation,
-      path: GIT_LOCK_FILE
+      path: lockFile
     });
   }
 }
@@ -90,23 +90,23 @@ function branchNameFor(beadId: string): string {
   return `${WorktreeDefaults.BRANCH_PREFIX}${beadId}`;
 }
 
-async function currentBranch(): Promise<string> {
-  const out = await git([GitSubcommand.BRANCH, GitFlag.SHOW_CURRENT]);
+async function currentBranch(repoRoot: string): Promise<string> {
+  const out = await git([GitSubcommand.BRANCH, GitFlag.SHOW_CURRENT], repoRoot);
   return out.trim();
 }
 
-async function hasHead(): Promise<boolean> {
+async function hasHead(repoRoot: string): Promise<boolean> {
   try {
-    await git([GitSubcommand.REV_PARSE, 'HEAD']);
+    await git([GitSubcommand.REV_PARSE, 'HEAD'], repoRoot);
     return true;
   } catch {
     return false;
   }
 }
 
-async function localBranchExists(branchName: string): Promise<boolean> {
+async function localBranchExists(branchName: string, repoRoot: string): Promise<boolean> {
   try {
-    await git([GitSubcommand.REV_PARSE, GitFlag.VERIFY, `refs/heads/${branchName}`]);
+    await git([GitSubcommand.REV_PARSE, GitFlag.VERIFY, `refs/heads/${branchName}`], repoRoot);
     return true;
   } catch {
     return false;
@@ -134,16 +134,16 @@ async function unmergedPaths(cwd: string = process.cwd()): Promise<string[]> {
   return splitGitPathLines(await git([GitSubcommand.DIFF, GitFlag.NAME_ONLY, '--diff-filter=U'], cwd));
 }
 
-async function abortMergeIfNeeded(): Promise<void> {
-  const unmerged = await unmergedPaths();
+async function abortMergeIfNeeded(repoRoot: string): Promise<void> {
+  const unmerged = await unmergedPaths(repoRoot);
   if (unmerged.length === 0) return;
-  await git([GitSubcommand.MERGE, GitFlag.ABORT]);
+  await git([GitSubcommand.MERGE, GitFlag.ABORT], repoRoot);
 }
 
-async function unstageIndexBeforeMerge(eventStore: EventStore, beadId: string, targetBranch: string): Promise<void> {
-  const paths = await stagedPaths();
+async function unstageIndexBeforeMerge(eventStore: EventStore, beadId: string, targetBranch: string, repoRoot: string): Promise<void> {
+  const paths = await stagedPaths(repoRoot);
   if (paths.length === 0) return;
-  await git([GitSubcommand.RESTORE, GitFlag.STAGED, GitFlag.ARG_SEPARATOR, ...paths]);
+  await git([GitSubcommand.RESTORE, GitFlag.STAGED, GitFlag.ARG_SEPARATOR, ...paths], repoRoot);
   await eventStore.record(DomainEventName.GIT_INDEX_UNSTAGED, {
     beadId,
     targetBranch,
@@ -245,7 +245,9 @@ async function autoRestoreConfiguredPaths(
 
 export type { WorktreeResult, MergeResult };
 
-export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin): RuntimePlugin {
+export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoader, bdPlugin?: RuntimePlugin, projectRoot: string = process.cwd()): RuntimePlugin {
+  const gitLockFile = path.join(projectRoot, WorktreeDefaults.GIT_LOCK_FILE);
+
   return {
   name: 'git-worktrees',
   tools: [
@@ -261,10 +263,10 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void } } | undefined;
         try {
           assertSafeBeadId(beadId);
-          const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
+          const worktreePath = path.join(projectRoot, WorktreeDefaults.ROOT_DIR, beadId);
           if (fs.existsSync(worktreePath)) {
             Logger.info(Component.GIT, `Worktree already exists for ${beadId}. Reusing.`);
-            await withGitLock(eventStore, PluginToolName.CREATE_WORKTREE, beadId, async () => {
+            await withGitLock(eventStore, PluginToolName.CREATE_WORKTREE, beadId, gitLockFile, async () => {
               await autoRestoreConfiguredPaths(eventStore, configLoader, beadId, worktreePath);
             });
             await configureOperationalExcludes(eventStore, beadId, worktreePath);
@@ -275,19 +277,19 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
           if (ui?.hasUI) ui.ui?.setWorkingMessage(`Creating worktree for ${beadId}...`);
 
           const branchName = branchNameFor(beadId);
-          await withGitLock(eventStore, PluginToolName.CREATE_WORKTREE, beadId, async () => {
-            const repositoryHasHead = await hasHead();
-            const resolvedBaseBranch = repositoryHasHead ? (baseBranch || await currentBranch()) : undefined;
+          await withGitLock(eventStore, PluginToolName.CREATE_WORKTREE, beadId, gitLockFile, async () => {
+            const repositoryHasHead = await hasHead(projectRoot);
+            const resolvedBaseBranch = repositoryHasHead ? (baseBranch || await currentBranch(projectRoot)) : undefined;
             Logger.info(Component.GIT, `Creating worktree for ${beadId}${resolvedBaseBranch ? ` from ${resolvedBaseBranch}` : ' as orphan bootstrap worktree'}`, { branchName });
 
-            const branchExists = await localBranchExists(branchName);
+            const branchExists = await localBranchExists(branchName, projectRoot);
 
             const args = !repositoryHasHead
               ? [GitSubcommand.WORKTREE, GitSubcommand.ADD, '--orphan', '-b', branchName, worktreePath]
               : branchExists
               ? [GitSubcommand.WORKTREE, GitSubcommand.ADD, worktreePath, branchName]
               : [GitSubcommand.WORKTREE, GitSubcommand.ADD, '-b', branchName, worktreePath, resolvedBaseBranch!];
-            await git(args);
+            await git(args, projectRoot);
           });
           await configureOperationalExcludes(eventStore, beadId, worktreePath);
           await autoRestoreConfiguredPaths(eventStore, configLoader, beadId, worktreePath);
@@ -321,7 +323,7 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void; confirm: (title: string, msg: string) => Promise<boolean> } } | undefined;
         try {
           assertSafeBeadId(beadId);
-          const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
+          const worktreePath = path.join(projectRoot, WorktreeDefaults.ROOT_DIR, beadId);
           if (!fs.existsSync(worktreePath)) {
             await eventStore.record(DomainEventName.WORKTREE_REMOVE_SKIPPED, { beadId, path: worktreePath, reason: 'missing' });
             return { success: true };
@@ -338,8 +340,8 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
           if (ui?.hasUI) ui.ui?.setWorkingMessage(`Removing worktree ${beadId}...`);
 
           Logger.info(Component.GIT, `Removing worktree for ${beadId}`);
-          await withGitLock(eventStore, PluginToolName.REMOVE_WORKTREE, beadId, async () => {
-            await git([GitSubcommand.WORKTREE, 'remove', GitFlag.FORCE, worktreePath]);
+          await withGitLock(eventStore, PluginToolName.REMOVE_WORKTREE, beadId, gitLockFile, async () => {
+            await git([GitSubcommand.WORKTREE, 'remove', GitFlag.FORCE, worktreePath], projectRoot);
           });
 
           if (ui?.hasUI) {
@@ -387,29 +389,29 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         try {
           assertSafeBeadId(beadId);
           const branchName = branchNameFor(beadId);
-          const worktreePath = path.join(process.cwd(), WorktreeDefaults.ROOT_DIR, beadId);
+          const worktreePath = path.join(projectRoot, WorktreeDefaults.ROOT_DIR, beadId);
           const commitMessage = message || `Complete ${beadId}`;
 
           if (ui?.hasUI) ui.ui?.setWorkingMessage(`Merging ${beadId} into ${targetBranch}...`);
 
           Logger.info(Component.GIT, `Committing and merging ${branchName} into ${targetBranch}`, { message: commitMessage });
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_STARTED, { beadId, branchName, targetBranch, message: commitMessage });
-          await withGitLock(eventStore, PluginToolName.MERGE_AND_COMMIT, beadId, async () => {
+          await withGitLock(eventStore, PluginToolName.MERGE_AND_COMMIT, beadId, gitLockFile, async () => {
             if (fs.existsSync(worktreePath) && (await git([GitSubcommand.STATUS, GitFlag.PORCELAIN], worktreePath)).trim()) {
               await git([GitSubcommand.ADD, GitFlag.ALL], worktreePath);
               await git([GitSubcommand.COMMIT, GitFlag.MESSAGE, commitMessage], worktreePath);
             }
-            await git([GitSubcommand.SWITCH, targetBranch]);
-            await unstageIndexBeforeMerge(eventStore, beadId, targetBranch);
+            await git([GitSubcommand.SWITCH, targetBranch], projectRoot);
+            await unstageIndexBeforeMerge(eventStore, beadId, targetBranch, projectRoot);
             const args = commitMessage
               ? [GitSubcommand.MERGE, GitFlag.NO_FF, GitFlag.NO_COMMIT, branchName, GitFlag.MESSAGE, commitMessage]
               : [GitSubcommand.MERGE, GitFlag.NO_FF, GitFlag.NO_COMMIT, branchName];
-            await git(args);
-            const conflicts = await unmergedPaths();
+            await git(args, projectRoot);
+            const conflicts = await unmergedPaths(projectRoot);
             if (conflicts.length > 0) {
               throw new Error(`Merge produced unresolved conflicts: ${conflicts.join(', ')}`);
             }
-            await git([GitSubcommand.COMMIT, GitFlag.MESSAGE, commitMessage]);
+            await git([GitSubcommand.COMMIT, GitFlag.MESSAGE, commitMessage], projectRoot);
             if (closeAfterMerge) {
               const closeTool = bdPlugin?.tools.find(tool => tool.name === PluginToolName.BD_UPDATE_STATUS);
               if (!closeTool) throw new Error('Cannot close Bead during merge: bd_update_status tool is unavailable.');
@@ -426,7 +428,7 @@ export function createGitPlugin(eventStore: EventStore, configLoader?: ConfigLoa
         } catch (error) {
           let abortError: string | undefined;
           try {
-            await abortMergeIfNeeded();
+            await abortMergeIfNeeded(projectRoot);
           } catch (abortFailure) {
             abortError = String(abortFailure);
           }
