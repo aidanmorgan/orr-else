@@ -155,6 +155,9 @@ export const WORKTREE_STATE_PROJECT_TOOL_FAILURE_PATTERN =
 export const AST_GREP_NO_MATCH_MESSAGE =
   'ast_grep found no matches (exit code 1 with empty output). This is accepted absence evidence only when the pattern is known valid; otherwise adjust the pattern, language, or path and rerun with narrower arguments.';
 
+export const AST_GREP_NO_MATCH_FILTERED_RECOVERY =
+  'The ast-grep pattern ran first and the wrapper-side outputFilters post-filtered stdout after the pattern executed. Empty output here means the pattern produced output that was then filtered out — it does NOT mean the pattern found no matches. Treat this as filter-eliminated output, not pattern-no-match. Rerun without the filter or with a narrower filter to see what the pattern matched.';
+
 export const ZERO_TARGET_SCAN_MESSAGE_PREFIX =
   'INSUFFICIENT_EVIDENCE: configured security/evidence scan reported zero scanned targets.';
 

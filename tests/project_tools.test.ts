@@ -550,6 +550,45 @@ describe('project tool command arguments', () => {
     expect(result.matchStatus).toBe('no_match');
     expect(result.message).toContain('ast_grep found no matches');
     expect(result.nextAction).toBe('record_no_match');
+    const recovery = (result as any).recovery as string[];
+    expect(recovery.join('\n')).not.toContain('outputFilters');
+    expect(recovery).toEqual(['Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.']);
+  });
+
+  it('explains filter-eliminated vs pattern-no-match when ast_grep no-match result includes outputFilters', async () => {
+    const payload = {
+      tool: 'ast_grep',
+      status: ToolResultStatus.PASSED,
+      exitCode: 1,
+      stdout: '',
+      stderr: '',
+      outputFilters: ['--filter', 'some_function']
+    };
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'ast_grep',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`],
+      successExitCodes: [0, 1],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect(result.matchStatus).toBe('no_match');
+    expect(result.nextAction).toBe('record_no_match');
+    const recovery = (result as any).recovery as string[];
+    const recoveryText = recovery.join('\n');
+    expect(recoveryText).toContain('ast-grep pattern ran first');
+    expect(recoveryText).toContain('outputFilters post-filtered stdout');
+    expect(recoveryText).toContain('filter-eliminated output');
+    expect(recoveryText).toContain('does NOT mean the pattern found no matches');
+    expect(recovery).toEqual(expect.arrayContaining([
+      expect.stringContaining('wrapper-side outputFilters post-filtered stdout')
+    ]));
   });
 
   it('rejects zero-target framework semgrep output as insufficient evidence', async () => {

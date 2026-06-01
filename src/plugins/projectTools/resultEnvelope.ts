@@ -39,6 +39,7 @@ import {
   SCAN_TARGET_SAMPLE_LIMIT,
   ZERO_TARGET_SCAN_MESSAGE_PREFIX,
   ARTIFACT_VALIDATOR_TOOL_NAME,
+  AST_GREP_NO_MATCH_FILTERED_RECOVERY,
   AST_GREP_TOOL_NAME,
   CMD_FAIL_TEST_LINE_PATTERN,
   CMD_FAIL_PYTEST_SECTION_PATTERN,
@@ -1314,6 +1315,17 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
 
   if (status === ToolResultStatus.PASSED) {
     if (record[ProjectToolResultKey.MATCH_STATUS] === NO_MATCH_STATUS) {
+      const structuredResult = record[ProjectToolResultKey.STRUCTURED_RESULT];
+      const hasOutputFilters = isJsonRecord(structuredResult) && structuredResult['outputFilters'] !== undefined;
+      if (hasOutputFilters) {
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RECORD_NO_MATCH,
+          [ProjectToolResultKey.RECOVERY]: [
+            AST_GREP_NO_MATCH_FILTERED_RECOVERY,
+            'Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.'
+          ]
+        };
+      }
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RECORD_NO_MATCH,
         [ProjectToolResultKey.RECOVERY]: ['Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.']
