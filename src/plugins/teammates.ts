@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { v7 as uuidv7 } from 'uuid';
 import { execa } from 'execa';
 import { parse as parseShellCommand, quote as quoteShellArgs } from 'shell-quote';
-import type { BeadId } from '../types/index.js';
+import type { ApiAddress, BeadId } from '../types/index.js';
 
 import { getProjectRoot } from '../core/Paths.js';
 import { ConfigLoader } from '../core/ConfigLoader.js';
@@ -64,6 +64,13 @@ export class TeammateFactory {
     private readonly observability: Observability,
     private readonly configLoader: ConfigLoader,
     private readonly eventStore: EventStore,
+    /**
+     * Shared mutable holder for the SignalingServer's bound address (WI-7).
+     * Created once in createRuntimeServices and mutated by startOrrElse after
+     * the server binds. All factories sharing this reference see the bound
+     * port at spawn time — no process.env mutation required.
+     */
+    private readonly apiAddress: ApiAddress = {},
     private readonly maxSlots: number = Defaults.MAX_SLOTS,
     private readonly sessionName: string = Defaults.TMUX_SESSION,
     private readonly extensionPath?: string,
@@ -278,8 +285,8 @@ export class TeammateFactory {
       const skillPaths = resolvePiSkillPaths(config, projectRoot);
       const configPath = this.configLoader.getConfigPath();
       const workerArgs = resolveWorkerArgs(config, { configPath, projectRoot, worktreePath });
-      const apiPort = process.env[EnvVars.API_PORT] || Defaults.API_PORT;
-      const apiBase = process.env[EnvVars.API_BASE] || `http://${Defaults.API_HOST}:${apiPort}`;
+      const apiPort = this.apiAddress.port || Defaults.API_PORT;
+      const apiBase = this.apiAddress.base || `http://${Defaults.API_HOST}:${apiPort}`;
       const sessionStateId = uuidv7();
       const workerId = `worker-${beadId}-${stateId}-${Date.now()}-${process.pid}`.replace(/[^A-Za-z0-9._:-]/g, '-');
 

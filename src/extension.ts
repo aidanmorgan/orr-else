@@ -2494,17 +2494,21 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore);
   const apiPort = await server.start();
   const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
-  process.env[EnvVars.API_PORT] = String(apiPort);
-  process.env[EnvVars.API_BASE] = apiBase;
   await services.eventStore.record(DomainEventName.HARNESS_API_BOUND, {
     apiBase,
     apiPort
   });
 
+  // Mutate the shared ApiAddress holder so ALL factories (supervisor, tool, services)
+  // see the bound port at spawn time without needing per-instance setApiAddress calls.
+  services.apiAddress.port = String(apiPort);
+  services.apiAddress.base = apiBase;
+
   const factory = new TeammateFactory(
     runtimeObservability,
     services.configLoader,
     services.eventStore,
+    services.apiAddress,
     options.maxSlots || Defaults.MAX_SLOTS,
     Defaults.TMUX_SESSION,
     fileURLToPath(import.meta.url)
@@ -2730,6 +2734,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       runtimeObservability,
       services.configLoader,
       services.eventStore,
+      services.apiAddress,
       config.settings.maxConcurrentSlots || Defaults.MAX_SLOTS,
       Defaults.TMUX_SESSION,
       fileURLToPath(import.meta.url)

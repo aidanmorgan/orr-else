@@ -41,8 +41,8 @@ const ALLOWLIST: AllowlistEntry[] = [
   },
   {
     file: 'src/extension.ts',
-    reason: 'Composition-root entrypoint. Multiple deferred items: WI-4 (session state), WI-7 (API port write-back), WI-20 (TeammateFactory construction). Also holds the legitimate process.env write-back at :2496-2497 for WI-7. WorkerContext resolution (WI-6) is intentionally kept here as the boundary.',
-    deferredWI: 'WI-4,WI-7,WI-20'
+    reason: 'Composition-root entrypoint. Multiple deferred items: WI-4 (session state), WI-20 (TeammateFactory construction). WorkerContext resolution (WI-6) is intentionally kept here as the boundary. API_PORT/API_BASE write-back removed by WI-7.',
+    deferredWI: 'WI-4,WI-20'
   },
   {
     file: 'src/plugins/mailbox.ts',
@@ -51,8 +51,8 @@ const ALLOWLIST: AllowlistEntry[] = [
   },
   {
     file: 'src/plugins/teammates.ts',
-    reason: 'Reads API_PORT, API_BASE, MAX_OUTPUT_TOKENS for child-process env construction. Removal requires explicit API port threading (WI-7).',
-    deferredWI: 'WI-7'
+    reason: 'Reads MAX_OUTPUT_TOKENS for child-process env construction (forwarding the host value to the child). API_PORT and API_BASE are now threaded via the shared ApiAddress holder (WI-7 complete).',
+    deferredWI: undefined
   },
   {
     file: 'src/plugins/projectTools.ts',

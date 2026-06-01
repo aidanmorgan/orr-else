@@ -3,12 +3,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execa } from 'execa';
-import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxOptionValue } from '../src/constants/index.js';
+import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxOptionValue, Defaults } from '../src/constants/index.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
 import { setProjectRoot } from '../src/core/Paths.js';
+import type { ApiAddress } from '../src/core/RuntimeServices.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 
 const { execaMock, defaultTmuxResponse } = vi.hoisted(() => {
@@ -94,7 +95,7 @@ states:
   });
 
   it('spawns Pi teammates in tmux with automatic teammate-mode environment', async () => {
-    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
     const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
 
     expect(result.success).toBe(true);
@@ -149,6 +150,7 @@ states:
       observability,
       configLoader,
       { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
       6,
       undefined,
       currentExtensionPath
@@ -183,6 +185,7 @@ states:
       observability,
       configLoader,
       { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
       6,
       undefined,
       currentExtensionPath
@@ -218,7 +221,7 @@ states:
       return { stdout: '', stderr: '' };
     });
 
-    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
 
     await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-live']));
   });
@@ -238,7 +241,7 @@ states:
       return { stdout: '', stderr: '' };
     });
 
-    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
 
     await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
     await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-live']));
@@ -259,7 +262,7 @@ states:
       return { stdout: '', stderr: '' };
     });
 
-    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
 
     await expect(factory.getActiveTeammateCount()).resolves.toBe(1);
     await expect(factory.getLiveTeammateBeadIds()).resolves.toEqual(new Set(['cerdiwen-path']));
@@ -291,6 +294,7 @@ states:
       observability,
       configLoader,
       { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
       6,
       undefined,
       currentExtensionPath
@@ -306,6 +310,94 @@ states:
     const exitedEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_PROCESS_EXITED);
     expect(exitedEvents).toHaveLength(1);
     expect(exitedEvents[0].data.beadId).toBe('bead-term');
+  });
+
+  // ---------------------------------------------------------------------------
+  // WI-7 — shared ApiAddress holder: all factories see the bound port
+  // ---------------------------------------------------------------------------
+
+  it('(WI-7) factory constructed before the holder is set reads the bound port at spawn time', async () => {
+    // Simulates the tool-factory scenario: TeammateFactory is constructed during
+    // SESSION_START (before startOrrElse binds the server), but the shared holder
+    // reference is mutated later — the factory must use the holder value at spawn time.
+    const apiAddress: ApiAddress = {};
+    // Poison process.env to catch any accidental fallback to process.env reads.
+    const previousApiPort = process.env[EnvVars.API_PORT];
+    const previousApiBase = process.env[EnvVars.API_BASE];
+    process.env[EnvVars.API_PORT] = '9999';
+    process.env[EnvVars.API_BASE] = 'http://127.0.0.1:9999';
+
+    try {
+      // Factory constructed BEFORE the holder is populated (holder is still empty).
+      const factory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, 6, undefined, currentExtensionPath);
+
+      // Simulate startOrrElse mutating the shared holder after the server binds.
+      apiAddress.port = '4242';
+      apiAddress.base = 'http://127.0.0.1:4242';
+
+      const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+      expect(result.success).toBe(true);
+
+      const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+      expect(splitCall).toBeDefined();
+      const command = (splitCall![1] as string[])[splitCall![1].length - 1];
+
+      // Must use the bound value set on the shared holder, not the poisoned process.env values.
+      expect(command).toContain('ORR_ELSE_API_PORT=4242');
+      expect(command).toContain('ORR_ELSE_API_BASE=');
+      expect(command).toContain('4242');
+      expect(command).not.toContain('9999');
+    } finally {
+      if (previousApiPort === undefined) delete process.env[EnvVars.API_PORT];
+      else process.env[EnvVars.API_PORT] = previousApiPort;
+      if (previousApiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousApiBase;
+    }
+  });
+
+  it('(WI-7) two factories sharing one ApiAddress holder both see the bound port — cross-factory invariant', async () => {
+    // Proves the regression is fixed: the supervisor factory and the tool factory
+    // share the same holder reference so both use the same bound port.
+    const apiAddress: ApiAddress = {};
+    const factoryA = new TeammateFactory(observability, configLoader, eventStore, apiAddress, 6, undefined, currentExtensionPath);
+    const factoryB = new TeammateFactory(observability, configLoader, eventStore, apiAddress, 6, undefined, currentExtensionPath);
+
+    // Simulate startOrrElse mutating the shared holder once.
+    apiAddress.port = '5151';
+    apiAddress.base = 'http://127.0.0.1:5151';
+
+    for (const factory of [factoryA, factoryB]) {
+      vi.mocked(execa).mockReset();
+      vi.mocked(execa).mockImplementation(defaultTmuxResponse);
+
+      const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+      expect(result.success).toBe(true);
+
+      const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+      expect(splitCall).toBeDefined();
+      const command = (splitCall![1] as string[])[splitCall![1].length - 1];
+
+      expect(command).toContain('ORR_ELSE_API_PORT=5151');
+      expect(command).toContain('5151');
+    }
+  });
+
+  it('(WI-7) factory falls back to Defaults.API_PORT when the shared holder is empty (not yet bound)', async () => {
+    // Confirms the graceful-degradation path: a factory holding an unset ApiAddress
+    // uses the Defaults values, not undefined.
+    const apiAddress: ApiAddress = {};
+    const factory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, 6, undefined, currentExtensionPath);
+
+    // Do NOT populate apiAddress — simulates a spawn before startOrrElse binds.
+    const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+    expect(splitCall).toBeDefined();
+    const command = (splitCall![1] as string[])[splitCall![1].length - 1];
+
+    expect(command).toContain(`ORR_ELSE_API_PORT=${Defaults.API_PORT}`);
+    expect(command).toContain(Defaults.API_PORT);
   });
 
   // ---------------------------------------------------------------------------
@@ -326,7 +418,7 @@ states:
     // Intercept Logger.warn to capture calls without relying on file transport
     const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
     vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
-    const factory = new TeammateFactory(observability, configLoader, eventStore, 6, undefined, currentExtensionPath);
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
 
     // (b) return value / control flow: spawn still resolves to success
     const result = await factory.spawnTeammateInTmux('bead-wi18' as any, 'Planning', worktreePath);

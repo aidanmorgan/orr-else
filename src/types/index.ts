@@ -2,6 +2,17 @@ import { BeadStatus, EventName, RestartKind, TeammateEventType } from '../consta
 
 export type BeadId = string & { readonly __brand: unique symbol };
 
+/**
+ * Shared mutable holder for the SignalingServer's bound address (WI-7).
+ * Created once in createRuntimeServices, mutated by startOrrElse after the
+ * server binds. All TeammateFactory instances that hold a reference to this
+ * object see the bound port at spawn time — no process.env mutation required.
+ */
+export interface ApiAddress {
+  port?: string;
+  base?: string;
+}
+
 export interface Bead {
   id: BeadId;
   title: string;

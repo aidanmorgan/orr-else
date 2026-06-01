@@ -14,6 +14,8 @@ import { ProtocolParser } from './ProtocolParser.js';
 import { RequiredToolResolver } from './RequiredToolResolver.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { Scheduler } from './Scheduler.js';
+import type { ApiAddress } from '../types/index.js';
+export type { ApiAddress } from '../types/index.js';
 import { ShellCommandParser } from './ShellCommandParser.js';
 import { TelemetryStore } from './Telemetry.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
@@ -88,6 +90,10 @@ export interface RuntimeServices {
   transactionalStateGuard: TransactionalStateGuard;
   toolCallPathFactory: ToolCallPathFactory;
   projectToolBackpressure: ProjectToolBackpressure;
+  /** Shared mutable holder for the SignalingServer's bound address.
+   * startOrrElse mutates this after the server binds; all TeammateFactory instances
+   * that hold a reference to this object see the update at spawn time. */
+  apiAddress: ApiAddress;
   plugins: {
     bd: RuntimePlugin;
     git: RuntimePlugin;
@@ -113,7 +119,8 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
 
   const bdPlugin = createBdPlugin(eventStore, env);
   const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
-  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, undefined, undefined, undefined, env);
+  const apiAddress: ApiAddress = {};
+  const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, undefined, undefined, undefined, env);
   const projectToolBackpressure: ProjectToolBackpressure = new Map();
 
   return {
@@ -138,6 +145,7 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),
     projectToolBackpressure,
+    apiAddress,
     plugins: {
       bd: bdPlugin,
       git: gitPlugin,
