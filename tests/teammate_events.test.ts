@@ -88,6 +88,26 @@ describe('TeammateEvents', () => {
     );
   });
 
+  it('does not mutate the input body and returns a new event object with truncated handover', () => {
+    // Build an event with a handover that exceeds the 8 KiB write limit (8192 bytes).
+    const longHandover = 'x'.repeat(9000);
+    const input = transitionedEvent({ handover: longHandover });
+
+    // Freeze the input so any in-place write throws a TypeError in strict mode.
+    const frozen = Object.freeze(input);
+
+    const result = validateTeammateEvent(frozen);
+
+    expect(result.ok).toBe(true);
+    // (a) Input object must NOT be mutated — the original handover is intact.
+    expect(frozen.handover).toBe(longHandover);
+    // (b) Returned event is a distinct object (referential inequality).
+    expect(result.event).not.toBe(frozen);
+    // (c) Returned event carries the truncated handover.
+    expect(result.event?.handover.length).toBeLessThan(longHandover.length);
+    expect(result.event?.handover).toContain('[handover truncated at');
+  });
+
   it('recognizes already-applied semantic signals from durable events', () => {
     const event = transitionedEvent();
     const applied = findAppliedTeammateSignal([

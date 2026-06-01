@@ -298,7 +298,7 @@ export function validateTeammateEvent(value: any): TeammateEventValidationResult
   ) {
     const error = requireStrings(value, ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']);
     if (error) return { ok: false, error };
-    value.handover = truncateHandover(value.handover);
+    return { ok: true, event: { ...value, handover: truncateHandover(value.handover) } as TeammateEvent };
   }
 
   return { ok: true, event: value as TeammateEvent };
