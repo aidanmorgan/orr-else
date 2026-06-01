@@ -155,7 +155,14 @@ const ProjectToolNextAction = {
   FIX_ARGUMENTS: 'fix_arguments',
   ROUTE_BLOCKED: 'route_blocked',
   FIX_WORKTREE_STATE: 'fix_worktree_state',
-  FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure'
+  FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure',
+  /**
+   * structuredResult is present with decision evidence but its `omissions` field names data
+   * that was excluded from the summary.  The agent should fetch the specific missing
+   * selector/path/range named in `structuredResult.omissions` rather than running a generic
+   * rerun of the whole tool call.
+   */
+  FETCH_NAMED_OMISSION: 'fetch_named_omission'
 } as const;
 const NO_MATCH_STATUS = 'no_match';
 const TRANSIENT_PROJECT_TOOL_FAILURE_PATTERN =
@@ -1379,6 +1386,62 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
         [ProjectToolResultKey.RECOVERY]: ['Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.']
       };
     }
+
+    // Requirement 1/2: When structuredResult carries declared decision evidence, treat it as
+    // the authoritative summary and steer to use_result — even when outputTruncated/
+    // stdoutTruncated/stderrTruncated is set.  Raw-truncation markers on the serialized
+    // output are NOT sufficient reason to rerun when a structured summary already provides
+    // the decision evidence.
+    //
+    // Precedence (requirement 4 honoured first — failure/terminal/backpressure routing is
+    // evaluated BEFORE this block via the status === PASSED guard above):
+    //   1. failure / terminal / backpressure  → evaluated before this if-branch
+    //   2. structured evidence → use_result (or fetch_named_omission for omissions)
+    //   3. truncation fallback → rerun_narrower (existing path below, unchanged)
+    //
+    // Requirement 3: If structuredResult.omissions is set, the summary deliberately excluded
+    // data that may be needed for the decision.  Steer to fetch_named_omission and surface
+    // the omission description in recovery so the agent can fetch the specific missing fact
+    // rather than running a broad generic rerun.
+    const structuredResultValue = record[ProjectToolResultKey.STRUCTURED_RESULT];
+    if (structuredResultHasDecisionEvidence(structuredResultValue)) {
+      const omissions = isJsonRecord(structuredResultValue) && typeof structuredResultValue.omissions === 'string'
+        ? structuredResultValue.omissions
+        : undefined;
+      if (omissions) {
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FETCH_NAMED_OMISSION,
+          [ProjectToolResultKey.RECOVERY]: [
+            `structuredResult omissions: ${omissions}`,
+            'Fetch only the specific missing selector, path, or range identified in structuredResult.omissions; do not rerun the full tool call.'
+          ]
+        };
+      }
+      // Evidence is sufficient and nothing is omitted — use the structured result as-is.
+      if (record[ProjectToolResultKey.OUTPUT_ARCHIVE] || record[ProjectToolResultKey.OUTPUT_ACCESS]) {
+        if (record[DIAGNOSTIC_SUMMARY_KEY]) {
+          return {
+            [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
+            [ProjectToolResultKey.RECOVERY]: [
+              'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
+              'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
+              'Rerun diagnostics narrowly (single file or operation) only when representative locations in the summary are insufficient for a specific fix decision.'
+            ]
+          };
+        }
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
+          [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence; treat artifactRef as an opaque harness archive handle, not a filesystem path. Decide from structuredResult, resultPreview, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
+        };
+      }
+      return {
+        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT
+      };
+    }
+
+    // Requirement 4 (no structured evidence) / requirement 5 (ambiguous → conservative):
+    // Fall through to the existing truncation-based steering when structuredResult is absent
+    // or lacks decision evidence.  This path is unchanged from before.
     if (projectToolResultNeedsNarrowing(record)) {
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RERUN_NARROWER,
@@ -1506,9 +1569,12 @@ function pythonLspDiagnosticsPreviewHasEvidence(preview: string, operation?: str
     && /\b(?:ERROR|WARNING|INFO) at L\d+:C\d+:/i.test(preview);
 }
 
-function structuredResultHasDecisionEvidence(value: unknown): boolean {
+// Exported for unit testing only — treat as package-internal.
+export function structuredResultHasDecisionEvidence(value: unknown): boolean {
   if (!isJsonRecord(value)) return false;
-  return [
+
+  // For all evidence fields except 'counts', mere presence (non-undefined) qualifies.
+  const presenceFields = [
     'artifact',
     'path',
     'message',
@@ -1528,7 +1594,23 @@ function structuredResultHasDecisionEvidence(value: unknown): boolean {
     StructuredPayloadSummaryOutputKey.ERRORS_BY_TOOL,
     StructuredPayloadSummaryOutputKey.ERRORS_BY_FILE,
     StructuredPayloadSummaryOutputKey.TOOL_RESULTS
-  ].some(key => value[key] !== undefined);
+  ];
+  if (presenceFields.some(key => value[key] !== undefined)) return true;
+
+  // 'counts' requires a non-empty object with at least one numeric value > 0.
+  //
+  // Invariant: today the only producer of 'counts' is the diagnostic summarizer
+  // (diagnosticSummarizer, ~line 2330), which returns null when diagnostics.length === 0,
+  // so an empty or all-zero counts record is never emitted in practice.  This guard makes
+  // that invariant self-enforcing: if a future summarizer emits 'counts' on a zero-item
+  // result, or if 'counts' is added to the passthrough whitelist, an empty/all-zero value
+  // will still NOT be treated as decision evidence.
+  const counts = value['counts'];
+  if (isJsonRecord(counts)) {
+    return Object.values(counts).some(v => typeof v === 'number' && v > 0);
+  }
+
+  return false;
 }
 
 function projectToolRemediation(

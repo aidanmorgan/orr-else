@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -3155,5 +3155,244 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // because the compact structuredResult replaces the raw payload fields.
     // (archive bytes = serialized bounded-stdout result; model-facing = compact summary only)
     expect(result.outputArchive.bytes).toBeGreaterThan(modelFacingBytes);
+  });
+
+  // -------------------------------------------------------------------------
+  // EARS work item pi-experiment-cdw9: structuredResult as authoritative
+  // steering evidence
+  // -------------------------------------------------------------------------
+
+  it('(cdw9-a) structuredResult with decision evidence + outputTruncated steers to use_result, not rerun_narrower', async () => {
+    // A large payload that forces outputTruncated=true (exceeds inlineResultBytes) plus
+    // a checks array that produces structuredResult with passedCheckCount/rejectedCheckCount
+    // decision evidence.  The steering must prefer structuredResult evidence over the raw
+    // truncation marker and return use_result, not rerun_narrower.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'artifact_validator',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'artifact_validator',
+          status: 'PASSED',
+          checks: [
+            { name: 'schema', status: 'PASSED', message: 'valid' },
+            { name: 'completeness', status: 'PASSED', message: 'all required fields present' }
+          ],
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    const structuredResult = (result as any).structuredResult;
+
+    // structuredResult with decision evidence must be present
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.passedCheckCount).toBe(2);
+    expect(structuredResult.rejectedCheckCount).toBe(0);
+
+    // outputTruncated is set because payload exceeds inlineResultBytes
+    expect((result as any).outputTruncated).toBe(true);
+
+    // Steering must use structured evidence — not raw truncation markers
+    expect(result.nextAction).toBe('use_result');
+    expect(result.nextAction).not.toBe('rerun_narrower');
+  });
+
+  it('(cdw9-b) failure/rejected result still gets failure-category nextAction, not overridden to use_result', async () => {
+    // A REJECTED result with structuredResult decision evidence (rejectedCheckCount).
+    // The failure-category routing must take precedence — use_result must NOT override it.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'artifact_validator',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stdout.write(JSON.stringify({
+          tool: 'artifact_validator',
+          status: 'REJECTED',
+          checks: [
+            { name: 'schema', status: 'PASSED', message: 'valid' },
+            { name: 'completeness', status: 'REJECTED', message: 'section omitted by author' }
+          ]
+        })); process.exit(1);`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 10_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    const structuredResult = (result as any).structuredResult;
+
+    // structuredResult with decision evidence is present (rejectedCheckCount > 0)
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.rejectedCheckCount).toBe(1);
+
+    // Status is REJECTED — failure category must NOT be overridden by structured evidence
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    expect(result.nextAction).not.toBe('use_result');
+    // Verifier-failed is the expected failure-category routing for a generic REJECTED result
+    expect(result.nextAction).toBe('fix_or_route_failure');
+    expect(result.failureCategory).toBe(ProjectToolFailureCategory.VERIFIER_FAILED);
+  });
+
+  it('(cdw9-c) structuredResult with omissions yields fetch_named_omission nextAction, not a generic rerun', async () => {
+    // A PASSED result where the structuredResult is produced by a summarizer that
+    // explicitly marks omissions.  To inject a structuredResult with omissions we use a
+    // tool whose stdout JSON already carries the structuredResult key directly — the harness
+    // passes it through via structuredPayloadSummary when no richer evidence is present.
+    // We build the payload so that structuredPayloadSummary will surface the provided
+    // fields as the structuredResult.
+    //
+    // However, structuredPayloadSummary does not forward the omissions field.  We instead
+    // exercise the code path via executeConfiguredProjectTool with a payload that reaches
+    // persistAndBoundResult: the diagnostic summarizer sets omissions when
+    // summary.omittedGroups > 0.  We produce >6 distinct diagnostic groups (the
+    // STRUCTURED_SUMMARY_MAX_GROUPS cap) so the summarizer sets omissions on the
+    // structuredResult and the steering must return fetch_named_omission.
+    const diagnosticFile = path.join(tempWorktree, 'packages/example.py');
+    // 7 distinct non-import codes — one beyond the 6-group cap — triggers omittedGroups > 0
+    const makeLines = (code: string, baseL: number): string[] =>
+      Array.from({ length: 1 }, (_, i) =>
+        `ERROR at L${baseL + i}:C1: Some error message (Source: Pyright, Code: ${code})`
+      );
+    const diagnosticLines = [
+      diagnosticFile,
+      'Diagnostics in File: 7',
+      ...makeLines('codeA', 10),
+      ...makeLines('codeB', 20),
+      ...makeLines('codeC', 30),
+      ...makeLines('codeD', 40),
+      ...makeLines('codeE', 50),
+      ...makeLines('codeF', 60),
+      ...makeLines('codeG', 70)  // 7th group — exceeds 6-group cap → omittedGroups=1
+    ].join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          stdout: ${JSON.stringify(diagnosticLines)},
+          stdoutBytes: ${Buffer.byteLength(diagnosticLines)},
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    const structuredResult = (result as any).structuredResult;
+
+    // The summarizer must have set omissions because omittedGroups > 0
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.omissions).toBeDefined();
+    expect(typeof structuredResult.omissions).toBe('string');
+
+    // Steering must return fetch_named_omission, NOT a generic rerun_narrower
+    expect(result.nextAction).toBe('fetch_named_omission');
+    expect(result.nextAction).not.toBe('rerun_narrower');
+
+    // Recovery must surface the omissions text
+    const recovery = (result as any).recovery as string[];
+    expect(recovery).toBeDefined();
+    expect(recovery.join('\n')).toContain('omissions');
+    expect(recovery.join('\n')).toContain('specific missing');
+  });
+
+  it('(cdw9-d) tool with NO structuredResult keeps existing truncation-based steering unchanged', async () => {
+    // A large plain-text output tool with no checks array and no diagnostic content —
+    // no structuredResult will be produced.  The existing rerun_narrower truncation
+    // steering must remain in effect (no-structuredResult path unchanged).
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'large_plain_stdout',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stdout.write('x'.repeat(20000));`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    // No structuredResult — fallback to truncation-based steering
+    expect((result as any).structuredResult).toBeUndefined();
+    expect((result as any).diagnosticSummary).toBeUndefined();
+
+    // Truncation is set
+    expect((result as any).stdoutTruncated).toBe(true);
+
+    // Steering falls back to rerun_narrower because no structured evidence
+    expect(result.nextAction).toBe('rerun_narrower');
+  });
+});
+
+describe('structuredResultHasDecisionEvidence — counts guard (defensive hardening)', () => {
+  // Invariant: the diagnostic summarizer only emits 'counts' when diagnostics.length >= 1,
+  // so all-zero or empty counts are never produced today.  These tests verify the guard is
+  // self-enforcing for any future code path that might violate that invariant.
+
+  it('returns false when the only evidence-like field is an empty counts object', () => {
+    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: {} })).toBe(false);
+  });
+
+  it('returns false when counts is present but all values are zero', () => {
+    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 0, groups: 0 } })).toBe(false);
+  });
+
+  it('returns false when counts has mixed zero and non-numeric values only', () => {
+    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 0, label: 'none' } })).toBe(false);
+  });
+
+  it('returns true when counts contains at least one numeric value > 0 (current normal case)', () => {
+    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 3, parsed: 3, groups: 2 } })).toBe(true);
+  });
+
+  it('returns true when counts has a single positive numeric value', () => {
+    expect(structuredResultHasDecisionEvidence({ counts: { total: 1 } })).toBe(true);
+  });
+
+  it('returns false when value is not a record', () => {
+    expect(structuredResultHasDecisionEvidence(null)).toBe(false);
+    expect(structuredResultHasDecisionEvidence('counts')).toBe(false);
+    expect(structuredResultHasDecisionEvidence(42)).toBe(false);
+  });
+
+  it('returns true for other presence-based evidence fields regardless of counts', () => {
+    expect(structuredResultHasDecisionEvidence({ verdict: 'pass' })).toBe(true);
+    expect(structuredResultHasDecisionEvidence({ error: 'boom' })).toBe(true);
+    expect(structuredResultHasDecisionEvidence({ artifact: '/path/to/file' })).toBe(true);
+    expect(structuredResultHasDecisionEvidence({ findingsDetected: false })).toBe(true);
+    expect(structuredResultHasDecisionEvidence({ routingHint: 'retry' })).toBe(true);
+  });
+
+  it('returns false when no evidence fields are present', () => {
+    expect(structuredResultHasDecisionEvidence({ status: 'ok' })).toBe(false);
+    expect(structuredResultHasDecisionEvidence({})).toBe(false);
   });
 });
