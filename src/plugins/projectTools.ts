@@ -1311,8 +1311,9 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
         return {
           [ProjectToolResultKey.NEXT_ACTION]: 'use_result',
           [ProjectToolResultKey.RECOVERY]: [
-            'Use diagnosticSummary and resultPreview first: inspect non-import groups before grouped reportMissingImports noise.',
-            'Full raw diagnostics are archived behind outputArchive.artifactRef; rerun diagnostics narrowly only if the representative locations are insufficient.'
+            'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
+            'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
+            'Rerun diagnostics narrowly (single file or operation) only when representative locations in the summary are insufficient for a specific fix decision.'
           ]
         };
       }
@@ -1747,8 +1748,17 @@ function resultRecord(result: unknown): Record<string, unknown> {
 
 function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult {
   const record = resultRecord(result);
+  // When a diagnosticSummary is present the compact grouped text in RESULT_PREVIEW
+  // is the authoritative model-facing representation. Suppress the raw MCP `result`
+  // key (which would otherwise dump tens-of-KiB diagnostic lines inline) and keep
+  // RESULT_PREVIEW visible so the summary reaches the model.  All other keys
+  // follow the standard MODEL_HIDDEN_RESULT_KEYS filter unchanged.
+  const hasDiagnosticSummary = Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
+  const hiddenKeys = hasDiagnosticSummary
+    ? new Set([...MODEL_HIDDEN_RESULT_KEYS].filter(k => k !== ProjectToolResultKey.RESULT_PREVIEW).concat('result'))
+    : MODEL_HIDDEN_RESULT_KEYS;
   const modelFacing = Object.fromEntries(
-    Object.entries(record).filter(([key, value]) => !MODEL_HIDDEN_RESULT_KEYS.has(key) && value !== undefined)
+    Object.entries(record).filter(([key, value]) => !hiddenKeys.has(key) && value !== undefined)
   );
   const toolCalls = toolCallsFromRecord(record);
   if (toolCalls && !Array.isArray(modelFacing[ProjectToolResultKey.TOOL_CALLS])) {
@@ -2175,13 +2185,26 @@ function commandPayloadPreviewText(record: Record<string, unknown>): string | un
 }
 
 function resultPreviewText(record: Record<string, unknown>, limitBytes: number): string | undefined {
-  const mcpText = textFromMcpContent(record.result);
+  // When a diagnosticSummary is present the compact grouped preview in
+  // RESULT_PREVIEW is already the authoritative model-facing text.  Skip raw
+  // MCP content so tens-of-KiB diagnostic payloads do not reappear alongside
+  // the summary and create token pressure.  The raw text remains retrievable
+  // via the outputArchive and by rerunning the tool with narrower arguments.
+  // Correctness: RESULT_PREVIEW is only populated here when applyDiagnosticModelSummary
+  // has already run (caller: persistAndBoundResult).  commandPayloadPreviewText below
+  // reads RESULT_PREVIEW and returns it directly for the hasDiagnosticSummary branch.
+  const hasDiagnosticSummary = Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
+  const mcpText = hasDiagnosticSummary ? undefined : textFromMcpContent(record.result);
   const commandText = commandPayloadPreviewText(record);
   const outputText = typeof record.output === 'string' && record.output.trim()
     ? record.output
     : undefined;
   const preview = mcpText || commandText || outputText;
-  return preview ? boundedPreviewText(preview, limitBytes) : undefined;
+  if (!preview) return undefined;
+  const cap = hasDiagnosticSummary
+    ? ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES
+    : limitBytes;
+  return boundedPreviewText(preview, cap);
 }
 
 function structuredCommandResultPreview(record: Record<string, unknown> | undefined): string | undefined {

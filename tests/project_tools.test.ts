@@ -7,7 +7,7 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
-import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
+import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
 
@@ -1415,7 +1415,7 @@ describe('project tool command arguments', () => {
     expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
     expect(result.outputAccess).toContain('Archived by harness');
     expect(result.stdout).toBeUndefined();
-    expect(result.resultPreview.length).toBeLessThan(2000);
+    expect(result.resultPreview.length).toBeLessThan(1200);
     expect(result.resultPreview).toContain('Diagnostics in File: 257');
     expect(result.resultPreview).toContain('Pyright/reportMissingImports count=257');
     expect(result.resultPreview).not.toContain('module_256');
@@ -1499,6 +1499,322 @@ describe('project tool command arguments', () => {
     expect(result.resultPreview).toContain('reportUndefinedVariable');
     expect(result.resultPreview).toContain('Pyright/reportMissingImports count=32');
     expect(result.resultPreview).not.toContain('noise_31');
+  });
+
+  it('keeps resultPreview compact when diagnosticSummary is present even with large raw MCP diagnostic content', async () => {
+    // This test targets the MCP python_lsp code path where record.result contains
+    // MCP content with the full raw diagnostic text.  Before the fix, resultPreviewText
+    // would pick record.result content (tens of KiB of raw lines) over the compact
+    // diagnosticSummary preview already placed in RESULT_PREVIEW, causing token pressure.
+    const diagnosticFile = path.join(tempWorktree, 'packages/type_mapping.py');
+    const rawDiagnosticLines = [
+      diagnosticFile,
+      'Diagnostics in File: 257',
+      ...Array.from({ length: 257 }, (_, index) =>
+        `ERROR at L${12 + index}:C${(index % 20) + 1}: Import "ceridwen_foundation.generated.module_${index}" could not be resolved (Source: Pyright, Code: reportMissingImports)`
+      )
+    ].join('\n');
+
+    // Simulate the shape of an MCP python_lsp result: the MCP SDK wraps the
+    // response text in result.content[].text — the structure that
+    // textFromMcpContent() extracts.
+    const mcpContent = {
+      content: [{ type: 'text', text: rawDiagnosticLines }]
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          result: ${JSON.stringify(mcpContent)},
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect(result.outputTruncated).toBe(true);
+    expect(result.nextAction).toBe('use_result');
+    // The model-facing resultPreview must be the compact summary, not the raw
+    // MCP diagnostic text.  Assert it is well within the named budget constant
+    // and does not expose individual raw import lines.
+    expect(result.resultPreview).toBeDefined();
+    expect(result.resultPreview.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    expect(result.resultPreview).toContain('Diagnostics in File: 257');
+    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=257');
+    // Raw individual module import lines must NOT appear in the preview.
+    expect(result.resultPreview).not.toContain('module_256');
+    expect(result.resultPreview).not.toContain('module_0');
+    // diagnosticSummary must be present and correct.
+    const summary = result.diagnosticSummary as any;
+    expect(summary.totalDiagnostics).toBe(257);
+    expect(summary.missingImportCount).toBe(257);
+    expect(summary.groups).toHaveLength(1);
+    // Recovery guidance must direct agents to cite groups and rerun narrowly.
+    expect(result.recovery).toEqual(expect.arrayContaining([
+      expect.stringContaining('diagnosticSummary groups'),
+      expect.stringContaining('Rerun diagnostics narrowly')
+    ]));
+    // Raw diagnostics remain available via outputArchive — not deleted.
+    expect(result.outputArchive).toMatchObject({ truncated: true });
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+  });
+
+  it('keeps actionable mixed diagnostics visible in resultPreview even when MCP content is present', async () => {
+    // Mixed case: non-import errors alongside import noise, delivered via MCP content.
+    // The compact preview must keep actionable groups visible and omit raw lines.
+    const diagnosticFile = path.join(tempWorktree, 'packages/arithmetic_normalizer.py');
+    const importNoise = Array.from({ length: 32 }, (_, index) =>
+      `ERROR at L${80 + index}:C10: Import "ceridwen_foundation.pli.noise_${index}" could not be resolved (Source: Pyright, Code: reportMissingImports)`
+    );
+    const rawDiagnosticLines = [
+      diagnosticFile,
+      'Diagnostics in File: 35',
+      'ERROR at L24:C15: Type "str" is not assignable to declared type "int" (Source: Pyright, Code: reportAssignmentType)',
+      'ERROR at L42:C9: "normalize_operand" is not defined (Source: Pyright, Code: reportUndefinedVariable)',
+      'WARNING at L61:C5: Type of "result" is partially unknown (Source: Pyright, Code: reportUnknownVariableType)',
+      ...importNoise
+    ].join('\n');
+
+    const mcpContent = {
+      content: [{ type: 'text', text: rawDiagnosticLines }]
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          result: ${JSON.stringify(mcpContent)},
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    const summary = result.diagnosticSummary as any;
+    const codes = summary.groups.map((group: any) => group.code);
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect(result.outputTruncated).toBe(true);
+    expect(result.nextAction).toBe('use_result');
+    // Actionable (non-import) groups must appear ahead of import noise.
+    expect(result.resultPreview).toContain('reportAssignmentType');
+    expect(result.resultPreview).toContain('reportUndefinedVariable');
+    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=32');
+    // The group listing must have non-import groups before the import noise group.
+    // Use indexOf on the group entry markers (numbered group lines) rather than
+    // the code name strings, because the summary header also mentions reportMissingImports.
+    expect(result.resultPreview.indexOf('Pyright/reportAssignmentType')).toBeLessThan(
+      result.resultPreview.indexOf('Pyright/reportMissingImports count=32')
+    );
+    // Raw individual raw import lines must not appear.
+    expect(result.resultPreview).not.toContain('noise_31');
+    // Preview must fit within the named budget.
+    expect(result.resultPreview.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    // Summary groups are correctly ordered (non-import first).
+    expect(codes.slice(0, 3)).toEqual([
+      'reportAssignmentType',
+      'reportUndefinedVariable',
+      'reportUnknownVariableType'
+    ]);
+    expect(codes).toContain('reportMissingImports');
+  });
+
+  it('inline-path: resultPreview is summary-first when diagnosticSummary present and result fits under inline cap', async () => {
+    // DEFECT 1 regression: before the fix, modelFacingInlineResult stripped RESULT_PREVIEW
+    // (compact summary) but kept the raw `result` MCP content, so the model saw raw
+    // diagnostic lines instead of the grouped summary.  This test exercises the INLINE
+    // path — no filler, no forced outputTruncated — so serialized.length < inlineResultBytes.
+    const diagnosticFile = path.join(tempWorktree, 'packages/inline_target.py');
+    const rawDiagnosticLines = [
+      diagnosticFile,
+      'Diagnostics in File: 5',
+      ...Array.from({ length: 5 }, (_, index) =>
+        `ERROR at L${10 + index}:C1: Import "ceridwen_foundation.generated.inline_module_${index}" could not be resolved (Source: Pyright, Code: reportMissingImports)`
+      )
+    ].join('\n');
+
+    // Simulate an MCP python_lsp result shape.
+    const mcpContent = {
+      content: [{ type: 'text', text: rawDiagnosticLines }]
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE
+      // No inlineResultBytes override — uses default 4 KiB. The small result fits inline.
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    // The inline path must NOT have outputTruncated — this confirms we hit the inline branch.
+    expect(result.outputTruncated).toBeUndefined();
+
+    // The compact summary must reach the model.
+    expect(result.resultPreview).toBeDefined();
+    expect(result.resultPreview).toContain('Diagnostics in File: 5');
+    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=5');
+
+    // Raw individual module import lines must NOT appear inline.
+    expect(result.resultPreview).not.toContain('inline_module_0');
+    expect(result.resultPreview).not.toContain('inline_module_4');
+    // The raw MCP 'result' field must be absent from the inline payload —
+    // modelFacingInlineResult must have suppressed it when diagnosticSummary is present.
+    expect((result as any).result).toBeUndefined();
+
+    // The structured diagnosticSummary must still be present.
+    const summary = result.diagnosticSummary as any;
+    expect(summary).toBeDefined();
+    expect(summary.totalDiagnostics).toBe(5);
+    expect(summary.missingImportCount).toBe(5);
+    expect(summary.groups).toHaveLength(1);
+  });
+
+  it('no-summary regression guard: raw MCP content appears in resultPreview when no diagnosticSummary', async () => {
+    // DEFECT 1 guard: ensure hasDiagnosticSummary=false does not suppress normal MCP previews.
+    // Uses a non-diagnostic MCP tool name so applyDiagnosticModelSummary returns no summary.
+    const mcpContent = {
+      content: [{ type: 'text', text: 'symbol ceridwen_unique_codemap_symbol found at packages/engine.py:42' }]
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'codemap',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'codemap',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    // No diagnosticSummary: raw MCP content must reach the model.
+    expect(result.diagnosticSummary).toBeUndefined();
+    // The MCP content text must appear somewhere in the serialized result.
+    expect(JSON.stringify(result)).toContain('ceridwen_unique_codemap_symbol');
+  });
+
+  it('cap-truncation: diagnosticSummaryPreview truncates gracefully when many groups exceed the byte cap', async () => {
+    // DEFECT 2 regression: the constant comment falsely claimed no truncation.
+    // Construct a payload with 6 distinct non-import codes × 3 occurrences each
+    // (filling 3 representative locations per group) plus an import group.  With a
+    // long file path (≈90 chars per location × 3 per group × 6 groups = ≈1620 chars
+    // for locations alone, plus headers/group-labels) the untruncated summary text
+    // exceeds DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES (2048).
+    // Confirms: preview <= cap, truncation marker present, top (non-import) groups survive.
+    const diagnosticFile = path.join(tempWorktree, 'packages/large_module_with_a_very_long_path_segment/subpackage/arithmetic_normalizer_extended.py');
+
+    // 6 distinct actionable (non-import) codes, 3 occurrences each → 3 representative
+    // locations per group in the summary.
+    const makeLines = (code: string, baseL: number) =>
+      Array.from({ length: 3 }, (_, i) =>
+        `ERROR at L${baseL + i}:C${i + 1}: Some diagnostic message for code ${code} at position ${baseL + i} (Source: Pyright, Code: ${code})`
+      );
+    const actionableLines = [
+      ...makeLines('reportAssignmentType', 10),
+      ...makeLines('reportUndefinedVariable', 20),
+      ...makeLines('reportUnknownVariableType', 30),
+      ...makeLines('reportAttributeAccessIssue', 40),
+      ...makeLines('reportReturnType', 50),
+      ...makeLines('reportArgumentType', 60)
+    ];
+    const importNoise = Array.from({ length: 10 }, (_, i) =>
+      `ERROR at L${100 + i}:C1: Import "ceridwen_foundation.generated.noise_module_${i}" could not be resolved (Source: Pyright, Code: reportMissingImports)`
+    );
+    const allLines = [
+      diagnosticFile,
+      `Diagnostics in File: ${actionableLines.length + importNoise.length}`,
+      ...actionableLines,
+      ...importNoise
+    ].join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'python_lsp',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'python_lsp',
+          status: 'PASSED',
+          server: 'python-lsp',
+          operation: 'diagnostics',
+          stdout: ${JSON.stringify(allLines)},
+          stdoutBytes: Buffer.byteLength(${JSON.stringify(allLines)}),
+          filler: 'x'.repeat(20000)
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any);
+
+    expect(result.outputTruncated).toBe(true);
+    expect(result.resultPreview).toBeDefined();
+
+    // Truncation marker must be present (summary exceeded the cap).
+    expect(result.resultPreview).toMatch(/\[truncated \d+ characters/);
+
+    // The content before the truncation marker must fit within the cap.
+    // boundedPreviewText slices at cap chars then appends the marker, so the total
+    // preview length is cap + marker-suffix length — we check the slice, not the total.
+    const markerIndex = result.resultPreview.indexOf('\n\n[truncated ');
+    expect(markerIndex).toBeGreaterThan(0);
+    expect(markerIndex).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+
+    // Top non-import groups survive (they sort first in the summary).
+    expect(result.resultPreview).toContain('reportAssignmentType');
+    expect(result.resultPreview).toContain('reportUndefinedVariable');
   });
 
   it('keeps useful command stdout in resultPreview when project tool output is archived', async () => {
