@@ -27,7 +27,7 @@ import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { resolveProject } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
-import { App, Component, EnvVars, Numeric, ObservabilityDefaults, ToolResultStatus } from '../constants/index.js';
+import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OtelAttr, ToolResultStatus } from '../constants/index.js';
 
 export interface SpanContext {
   traceId: string;
@@ -296,10 +296,10 @@ export class Observability {
           'service.instance.id': this.sessionId,
           'session.id': this.sessionId,
           'session.state_id': this.sessionStateId || undefined,
-          'orr_else.bead_id': process.env[EnvVars.BEAD_ID] || undefined,
-          'orr_else.state_id': process.env[EnvVars.STATE_ID] || undefined,
-          'orr_else.action_id': process.env[EnvVars.ACTION_ID] || undefined,
-          'orr_else.worker_id': process.env[EnvVars.WORKER_ID] || undefined,
+          [OtelAttr.ORR_ELSE_BEAD_ID]: process.env[EnvVars.BEAD_ID] || undefined,
+          [OtelAttr.ORR_ELSE_STATE_ID]: process.env[EnvVars.STATE_ID] || undefined,
+          [OtelAttr.ORR_ELSE_ACTION_ID]: process.env[EnvVars.ACTION_ID] || undefined,
+          [OtelAttr.ORR_ELSE_WORKER_ID]: process.env[EnvVars.WORKER_ID] || undefined,
           'process.pid': process.pid,
           ...attributes
         })

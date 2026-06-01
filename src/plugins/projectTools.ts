@@ -128,6 +128,9 @@ const PROJECT_TOOL_MODEL_CONTRACT = [
 const PROJECT_TOOL_DESCRIPTION_SUFFIX =
   'Returns bounded inline previews and structured summaries; outputArchive.artifactRef is an opaque harness handle, not a path to read. Decide from resultPreview, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
+const AST_GREP_TOOL_NAME = 'ast_grep';
+const CODEMAP_TOOL_NAME = 'codemap';
+const PYTHON_LSP_TOOL_NAME = 'python_lsp';
 const UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS = new Set<string>([
   '--output-limit'
 ]);
@@ -142,6 +145,19 @@ export const ProjectToolFailureCategory = {
 } as const;
 export type ProjectToolFailureCategory =
   (typeof ProjectToolFailureCategory)[keyof typeof ProjectToolFailureCategory];
+const ProjectToolNextAction = {
+  RECORD_NO_MATCH: 'record_no_match',
+  RERUN_NARROWER: 'rerun_narrower',
+  USE_RESULT: 'use_result',
+  WAIT_FOR_IN_FLIGHT_RESULT: 'wait_for_in_flight_result',
+  ROUTE_CONFIGURED_OUTCOME: 'route_configured_outcome',
+  RETRY_ONCE: 'retry_once',
+  FIX_ARGUMENTS: 'fix_arguments',
+  ROUTE_BLOCKED: 'route_blocked',
+  FIX_WORKTREE_STATE: 'fix_worktree_state',
+  FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure'
+} as const;
+const NO_MATCH_STATUS = 'no_match';
 const TRANSIENT_PROJECT_TOOL_FAILURE_PATTERN =
   /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|ENOSPC|timed out|timeout|socket|transport|network|response headers timed out|temporar(?:y|ily))\b/i;
 const TOOL_INPUT_PROJECT_TOOL_FAILURE_PATTERN =
@@ -166,7 +182,7 @@ const DIAGNOSTIC_SUMMARY_KEY = 'diagnosticSummary';
 const DIAGNOSTIC_SUMMARY_LOCATION_LIMIT = 3;
 const DIAGNOSTIC_MESSAGE_PREFIX_CHARS = 160;
 const DIAGNOSTIC_TRUNCATION_PATTERN = /\[truncated\b/i;
-const SERIAL_MCP_TOOL_NAMES = new Set(['python_lsp']);
+const SERIAL_MCP_TOOL_NAMES = new Set([PYTHON_LSP_TOOL_NAME]);
 const SERIAL_MCP_LOCK_STALE_MS = 10 * 60 * 1000;
 const SERIAL_MCP_LOCK_RETRIES = 480;
 const SERIAL_MCP_LOCK_RETRY_MIN_MS = 250;
@@ -1165,7 +1181,7 @@ function projectToolBackpressureResult(
       stateId: context.templateContext.stateId,
       actionId: context.templateContext.actionId
     },
-    nextAction: 'wait_for_in_flight_result',
+    nextAction: ProjectToolNextAction.WAIT_FOR_IN_FLIGHT_RESULT,
     recovery: [
       'Use the result from the project-tool call that is already in progress.',
       'If more evidence is still required after that result, rerun the same configured project tool once with narrower arguments.'
@@ -1312,22 +1328,22 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
   }
 
   if (status === ToolResultStatus.PASSED) {
-    if (record[ProjectToolResultKey.MATCH_STATUS] === 'no_match') {
+    if (record[ProjectToolResultKey.MATCH_STATUS] === NO_MATCH_STATUS) {
       return {
-        [ProjectToolResultKey.NEXT_ACTION]: 'record_no_match',
+        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RECORD_NO_MATCH,
         [ProjectToolResultKey.RECOVERY]: ['Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.']
       };
     }
     if (projectToolResultNeedsNarrowing(record)) {
       return {
-        [ProjectToolResultKey.NEXT_ACTION]: 'rerun_narrower',
+        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RERUN_NARROWER,
         [ProjectToolResultKey.RECOVERY]: ['First decide from resultPreview, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read outputArchive.artifactRef just because the preview is truncated.']
       };
     }
     if (record[ProjectToolResultKey.OUTPUT_ARCHIVE] || record[ProjectToolResultKey.OUTPUT_ACCESS]) {
       if (record[DIAGNOSTIC_SUMMARY_KEY]) {
         return {
-          [ProjectToolResultKey.NEXT_ACTION]: 'use_result',
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
           [ProjectToolResultKey.RECOVERY]: [
             'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
             'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
@@ -1336,31 +1352,31 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
         };
       }
       return {
-        [ProjectToolResultKey.NEXT_ACTION]: 'use_result',
+        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
         [ProjectToolResultKey.RECOVERY]: ['Treat artifactRef as an opaque harness archive handle, not a filesystem path. Decide from resultPreview, structuredResult, and toolCalls; rerun narrower only when a named missing fact or decision blocker remains.']
       };
     }
     return {
-      [ProjectToolResultKey.NEXT_ACTION]: 'use_result'
+      [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT
     };
   }
 
   const failureCategory = classifyProjectToolFailure(definition, record);
   switch (failureCategory) {
     case ProjectToolFailureCategory.BACKPRESSURE:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'wait_for_in_flight_result' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.WAIT_FOR_IN_FLIGHT_RESULT };
     case ProjectToolFailureCategory.TERMINAL_GATE:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'route_configured_outcome' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.ROUTE_CONFIGURED_OUTCOME };
     case ProjectToolFailureCategory.TRANSIENT_TRANSPORT:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'retry_once' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RETRY_ONCE };
     case ProjectToolFailureCategory.TOOL_INPUT_ERROR:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'fix_arguments' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_ARGUMENTS };
     case ProjectToolFailureCategory.UNAVAILABLE:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'route_blocked' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.ROUTE_BLOCKED };
     case ProjectToolFailureCategory.WORKTREE_STATE_ERROR:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'fix_worktree_state' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_WORKTREE_STATE };
     case ProjectToolFailureCategory.VERIFIER_FAILED:
-      return { [ProjectToolResultKey.NEXT_ACTION]: 'fix_or_route_failure' };
+      return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_OR_ROUTE_FAILURE };
     default:
       return {};
   }
@@ -1423,8 +1439,8 @@ function projectToolResultHasActionableTruncatedPreview(record: Record<string, u
   const tool = stringField(record, 'tool') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'tool');
   const operation = stringField(record, 'operation') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'operation');
 
-  if (tool === 'codemap' && codemapStructurePreviewHasOverview(preview, operation)) return true;
-  if (tool === 'python_lsp' && pythonLspDiagnosticsPreviewHasEvidence(preview, operation)) return true;
+  if (tool === CODEMAP_TOOL_NAME && codemapStructurePreviewHasOverview(preview, operation)) return true;
+  if (tool === PYTHON_LSP_TOOL_NAME && pythonLspDiagnosticsPreviewHasEvidence(preview, operation)) return true;
   return false;
 }
 
@@ -1479,19 +1495,19 @@ function projectToolRemediation(
   const toolName = definition.name;
   const text = searchableFailureText(result);
 
-  if (toolName === 'artifact_validator') {
+  if (toolName === ARTIFACT_VALIDATOR_TOOL_NAME) {
     guidance.add('Treat artifact_validator output as an authoritative gate: use structuredResult, rejectedChecks, diagnosticPreview, and routingHint to revise the plan/artifact or route the configured failure edge.');
     guidance.add('Do not rerun artifact_validator unchanged after a terminal gate rejection.');
   }
 
-  if (toolName === 'ast_grep') {
+  if (toolName === AST_GREP_TOOL_NAME) {
     guidance.add('For ast_grep failures, adjust the pattern/language/path and rerun with narrower arguments; do not fall back to shell grep for configured project-tool coverage.');
     if (/exitCode["']?:?1|NO_MATCH|no match/i.test(text)) {
       guidance.add('Exit code 1 from ast-grep usually means no match, not infrastructure failure; record the no-match evidence if that satisfies the check.');
     }
   }
 
-  if (toolName === 'codemap') {
+  if (toolName === CODEMAP_TOOL_NAME) {
     guidance.add('For codemap failures, pass worktree-relative paths or paths under the active bead worktree; do not pass project-root, sibling-worktree, or harness artifact paths.');
   }
 
@@ -1873,7 +1889,7 @@ function shouldSummarizeDiagnostics(
 ): boolean {
   const toolName = diagnosticToolName(definition, record);
   const operation = diagnosticOperationName(record);
-  return toolName.includes('python_lsp')
+  return toolName.includes(PYTHON_LSP_TOOL_NAME)
     || operation === 'diagnostics'
     || /\bDiagnostics in File:\s*\d+\b/.test(text);
 }
@@ -2169,7 +2185,7 @@ function textFromMcpContent(value: unknown): string | undefined {
 }
 
 function commandPayloadPreviewText(record: Record<string, unknown>): string | undefined {
-  if (record[ProjectToolResultKey.MATCH_STATUS] === 'no_match') return undefined;
+  if (record[ProjectToolResultKey.MATCH_STATUS] === NO_MATCH_STATUS) return undefined;
 
   if (typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string' && String(record[ProjectToolResultKey.RESULT_PREVIEW]).trim()) {
     return String(record[ProjectToolResultKey.RESULT_PREVIEW]);
@@ -2576,7 +2592,7 @@ function astGrepNoMatch(
   stderr: string,
   structuredStdout?: Record<string, unknown>
 ): boolean {
-  if (definition.name !== 'ast_grep') return false;
+  if (definition.name !== AST_GREP_TOOL_NAME) return false;
   if (exitCode === CommandExitCode.NO_MATCH && stdout.trim().length === 0 && stderr.trim().length === 0) return true;
   return structuredStdout?.exitCode === CommandExitCode.NO_MATCH
     && String(structuredStdout.stdout || '').trim().length === 0
@@ -2592,7 +2608,7 @@ function commandResultAnnotations(
 ): Record<string, unknown> {
   if (!astGrepNoMatch(definition, exitCode, stdout, stderr, structuredStdout)) return {};
   return {
-    [ProjectToolResultKey.MATCH_STATUS]: 'no_match',
+    [ProjectToolResultKey.MATCH_STATUS]: NO_MATCH_STATUS,
     message: AST_GREP_NO_MATCH_MESSAGE
   };
 }

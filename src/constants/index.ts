@@ -49,8 +49,11 @@ export const HttpHeader = {
 
 export const HttpStatus = {
   OK: 200,
+  NO_CONTENT: 204,
   BAD_REQUEST: 400,
   NOT_FOUND: 404,
+  REQUEST_TIMEOUT: 408,
+  TOO_MANY_REQUESTS: 429,
   INTERNAL_SERVER_ERROR: 500
 } as const;
 
@@ -473,7 +476,9 @@ export const ProviderRequestLimits = {
   ANTHROPIC_MAX_OUTPUT_TOKENS: 32000,
   // Output headroom preserved when an extended-thinking budget is present;
   // Anthropic requires `budget_tokens < max_tokens`.
-  ANTHROPIC_MIN_OUTPUT_HEADROOM: 4096
+  ANTHROPIC_MIN_OUTPUT_HEADROOM: 4096,
+  // Anthropic enforces a minimum budget_tokens value of 1024 for extended thinking.
+  ANTHROPIC_MIN_THINKING_BUDGET_TOKENS: 1024
 } as const;
 
 /**
@@ -985,6 +990,26 @@ export const ToolDefaults = {
   // Factor 9 ("Compact Errors", ~3 attempts). Open circuit short-circuits
   // further invocations until the bead transitions.
   MAX_CONSECUTIVE_FAILURES: 3
+} as const;
+
+/**
+ * OTEL span attribute keys for project-owned namespaces (orr_else.* and agent.*).
+ * gen_ai.* keys (OpenTelemetry GenAI semantic conventions) are NOT aliased here —
+ * they are a published spec and must remain as verbatim string literals at their
+ * use sites.
+ */
+export const OtelAttr = {
+  // orr_else.* — harness-specific context propagated on every span
+  ORR_ELSE_BEAD_ID: 'orr_else.bead_id',
+  ORR_ELSE_STATE_ID: 'orr_else.state_id',
+  ORR_ELSE_ACTION_ID: 'orr_else.action_id',
+  ORR_ELSE_WORKER_ID: 'orr_else.worker_id',
+  ORR_ELSE_COST_TOTAL: 'orr_else.cost_total',
+  // agent.* — teammate spawn context
+  AGENT_BEAD_ID: 'agent.bead_id',
+  AGENT_STATE_ID: 'agent.state_id',
+  AGENT_WORKER_ID: 'agent.worker_id',
+  AGENT_EVENT_TYPE: 'agent.event_type'
 } as const;
 
 /**

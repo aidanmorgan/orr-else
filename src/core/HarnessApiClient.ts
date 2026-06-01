@@ -1,6 +1,6 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import ky from 'ky';
-import { ApiPath, Defaults, EnvVars, HttpMethod, WorkerDefaults } from '../constants/index.js';
+import { ApiPath, Defaults, EnvVars, HttpMethod, HttpStatus, WorkerDefaults } from '../constants/index.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { TeammateEvent } from './TeammateEvents.js';
 
@@ -38,7 +38,7 @@ function shouldRetryHarnessApiError(error: unknown): boolean {
     ? (error as { response?: { status?: unknown } }).response?.status
     : undefined;
   if (typeof status !== 'number') return true;
-  return status === 408 || status === 429 || status >= 500;
+  return status === HttpStatus.REQUEST_TIMEOUT || status === HttpStatus.TOO_MANY_REQUESTS || status >= HttpStatus.INTERNAL_SERVER_ERROR;
 }
 
 export async function harnessApiRequest<T = unknown>(
@@ -55,7 +55,7 @@ export async function harnessApiRequest<T = unknown>(
         retry: 0,
         ...(options.body !== undefined ? { json: options.body } : {})
       });
-      if (response.status === 204) return null;
+      if (response.status === HttpStatus.NO_CONTENT) return null;
 
       const text = await response.text();
       if (!text) return null;

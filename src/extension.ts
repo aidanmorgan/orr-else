@@ -84,7 +84,8 @@ import {
   ReviewArtifactKind,
   ReviewArtifactStore,
   ToolDefaults,
-  LLMProviderName
+  LLMProviderName,
+  OtelAttr
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { Teammate } from './core/Teammate.js';
@@ -341,10 +342,10 @@ function beadIdFromToolParams(params: any): string | undefined {
 
 function activeSpanAttributes(beadId?: string): SpanAttributes {
   return {
-    'orr_else.bead_id': beadId || activeRun?.beadId || process.env[EnvVars.BEAD_ID],
-    'orr_else.state_id': activeRun?.stateId || process.env[EnvVars.STATE_ID],
-    'orr_else.action_id': activeRun?.action?.id || process.env[EnvVars.ACTION_ID],
-    'orr_else.worker_id': process.env[EnvVars.WORKER_ID]
+    [OtelAttr.ORR_ELSE_BEAD_ID]: beadId || activeRun?.beadId || process.env[EnvVars.BEAD_ID],
+    [OtelAttr.ORR_ELSE_STATE_ID]: activeRun?.stateId || process.env[EnvVars.STATE_ID],
+    [OtelAttr.ORR_ELSE_ACTION_ID]: activeRun?.action?.id || process.env[EnvVars.ACTION_ID],
+    [OtelAttr.ORR_ELSE_WORKER_ID]: process.env[EnvVars.WORKER_ID]
   };
 }
 
@@ -969,11 +970,11 @@ async function recordTurnUsage(event: any, services: RuntimeServices): Promise<v
       'gen_ai.usage.output_tokens': record.event.outputTokens,
       'gen_ai.usage.cache_read_tokens': record.event.cacheReadTokens,
       'gen_ai.usage.total_tokens': record.event.totalTokens,
-      'orr_else.bead_id': record.event.beadId,
-      'orr_else.state_id': record.event.stateId,
-      'orr_else.action_id': record.event.actionId,
-      'orr_else.worker_id': record.event.workerId,
-      'orr_else.cost_total': record.event.costTotal
+      [OtelAttr.ORR_ELSE_BEAD_ID]: record.event.beadId,
+      [OtelAttr.ORR_ELSE_STATE_ID]: record.event.stateId,
+      [OtelAttr.ORR_ELSE_ACTION_ID]: record.event.actionId,
+      [OtelAttr.ORR_ELSE_WORKER_ID]: record.event.workerId,
+      [OtelAttr.ORR_ELSE_COST_TOTAL]: record.event.costTotal
     });
     services.observability.endSpan(span.spanId);
   } catch (error) {

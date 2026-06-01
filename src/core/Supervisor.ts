@@ -4,7 +4,7 @@ import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
 import { TeammateFactory } from '../plugins/teammates.js';
-import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, RestartKind, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
@@ -363,7 +363,7 @@ export class Supervisor {
         const data = event.data || {};
         if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED || event.type === DomainEventName.CONTEXT_RESTART_REQUESTED) {
           return {
-            restartKind: event.type === DomainEventName.HARNESS_RESTART_REQUESTED ? 'harness' : 'context',
+            restartKind: event.type === DomainEventName.HARNESS_RESTART_REQUESTED ? RestartKind.HARNESS : RestartKind.CONTEXT,
             restartEvent: data.transitionEvent,
             restartFromState: data.stateId,
             restartTargetState: data.targetState || data.stateId,
@@ -376,7 +376,7 @@ export class Supervisor {
           data.processingDecision === TeammateEventDecisionAction.ACCEPT
         ) {
           return {
-            restartKind: data.type === TeammateEventType.HARNESS_RESTART_REQUESTED ? 'harness' : 'context',
+            restartKind: data.type === TeammateEventType.HARNESS_RESTART_REQUESTED ? RestartKind.HARNESS : RestartKind.CONTEXT,
             restartEvent: data.transitionEvent,
             restartFromState: data.stateId,
             restartTargetState: data.targetState || data.stateId,

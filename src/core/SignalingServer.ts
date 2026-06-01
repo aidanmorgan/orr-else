@@ -5,7 +5,7 @@ import { TeammateEvent, validateTeammateEvent } from './TeammateEvents.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, TeammateEventType, WorkerDefaults } from '../constants/index.js';
+import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, OtelAttr, TeammateEventType, WorkerDefaults } from '../constants/index.js';
 
 type SignalHandler = (event: TeammateEvent) => Promise<void> | void;
 
@@ -113,12 +113,12 @@ export class SignalingServer {
         }
 
         const tracedSignal = this.observability.tracedAsync(`signal:${event.type}`, {
-          'agent.bead_id': event.beadId,
-          'agent.worker_id': event.workerId,
-          'agent.event_type': event.type,
-          'orr_else.bead_id': event.beadId,
-          'orr_else.state_id': event.stateId,
-          'orr_else.worker_id': event.workerId
+          [OtelAttr.AGENT_BEAD_ID]: event.beadId,
+          [OtelAttr.AGENT_WORKER_ID]: event.workerId,
+          [OtelAttr.AGENT_EVENT_TYPE]: event.type,
+          [OtelAttr.ORR_ELSE_BEAD_ID]: event.beadId,
+          [OtelAttr.ORR_ELSE_STATE_ID]: event.stateId,
+          [OtelAttr.ORR_ELSE_WORKER_ID]: event.workerId
         }, async (event: TeammateEvent) => {
           Logger.info(Component.SIGNALING, 'Received signal', {
             type: event.type,

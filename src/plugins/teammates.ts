@@ -19,6 +19,7 @@ import {
   PluginToolName,
   ProcessFlag,
   DomainEventName,
+  OtelAttr,
   PiCliCommand,
   PiCliFlag,
   TmuxCommand,
@@ -245,8 +246,8 @@ export class TeammateFactory {
 
   public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: any): Promise<{ success: boolean; paneId?: string; error?: string }> {
     return this.observability.tracedAsync('spawn_teammate', {
-      'agent.bead_id': beadId,
-      'agent.state_id': stateId
+      [OtelAttr.AGENT_BEAD_ID]: beadId,
+      [OtelAttr.AGENT_STATE_ID]: stateId
     }, async () => this.spawnTeammateInTmuxInner(beadId, stateId, worktreePath, ctx))();
   }
 

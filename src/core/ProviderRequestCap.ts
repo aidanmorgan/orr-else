@@ -37,7 +37,7 @@ export function capAnthropicMaxTokens<T extends CappableAnthropicPayload>(
   if (thinking && thinking.type === 'enabled' && typeof thinking.budget_tokens === 'number') {
     const maxBudget = cap - minOutputHeadroom;
     if (thinking.budget_tokens > maxBudget) {
-      thinking.budget_tokens = Math.max(1024, maxBudget);
+      thinking.budget_tokens = Math.max(ProviderRequestLimits.ANTHROPIC_MIN_THINKING_BUDGET_TOKENS, maxBudget);
     }
   }
 
