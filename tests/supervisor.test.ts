@@ -283,4 +283,28 @@ describe('Supervisor', () => {
     expect((supervisor as any).missingStartedBeadChecks.has('bead-1')).toBe(false);
     expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
   });
+
+  it('releaseClaimedAfterPause clears claimed/active state and preserves inactiveRestartedAtMs backoff', async () => {
+    const { supervisor, release, clock } = supervisorHarness(NOW_MS);
+    const claimedBead = { id: 'bead-1' } as any;
+
+    // Populate all four tracking maps to mirror a normally-started bead
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now());
+    (supervisor as any).missingStartedBeadChecks.set('bead-1', 2);
+    // inactiveRestartedAtMs holds the backoff timestamp — must survive the release
+    (supervisor as any).inactiveRestartedAtMs.set('bead-1', clock.now() - TimeMs.MINUTE);
+
+    // Trigger a pause so releaseClaimedAfterPause is reachable, then call it directly
+    await (supervisor as any).releaseClaimedAfterPause(claimedBead);
+
+    // Claimed/active tracking maps must be cleared
+    expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
+    expect((supervisor as any).startedBeadAtMs.has('bead-1')).toBe(false);
+    expect((supervisor as any).missingStartedBeadChecks.has('bead-1')).toBe(false);
+    // Backoff timestamp must NOT be reset — this is the WI-26 invariant
+    expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
+    // The bd_release tool must have been called to drop the lease
+    expect(release).toHaveBeenCalledWith({ id: 'bead-1' });
+  });
 });

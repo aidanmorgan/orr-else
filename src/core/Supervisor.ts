@@ -161,9 +161,7 @@ export class Supervisor {
         error: String(error)
       });
     });
-    this.startedBeads.delete(claimed.id);
-    this.startedBeadAtMs.delete(claimed.id);
-    this.missingStartedBeadChecks.delete(claimed.id);
+    this.markBeadExited(claimed.id, { preserveInactiveRestartBackoff: true });
     Logger.warn(Component.SUPERVISOR, 'Stopped assignment dispatch after scheduling pause', {
       beadId: claimed.id,
       pauseUntil: this.pausedUntilIso(),
