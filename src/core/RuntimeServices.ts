@@ -26,6 +26,18 @@ import { createQualityPlugin } from '../plugins/quality.js';
 import { signalingPlugin } from '../plugins/signaling.js';
 import { teammatePlugin, TeammateFactory } from '../plugins/teammates.js';
 
+/** Shape of a single in-flight project-tool call entry tracked by the backpressure map.
+ * Defined here in core so the map type can live in RuntimeServices without a core→plugin import. */
+export interface InFlightProjectToolCall {
+  token: string;
+  startedAtMs: number;
+}
+
+/** Process-scoped in-flight backpressure map for project-tool calls.
+ * Created once in createRuntimeServices and injected wherever project tools are executed,
+ * so backpressure state is owned by the coordinator process rather than module-level statics. */
+export type ProjectToolBackpressure = Map<string, InFlightProjectToolCall>;
+
 export interface RuntimeTool {
   name: string;
   description: string;
@@ -75,6 +87,7 @@ export interface RuntimeServices {
   shellCommandParser: ShellCommandParser;
   transactionalStateGuard: TransactionalStateGuard;
   toolCallPathFactory: ToolCallPathFactory;
+  projectToolBackpressure: ProjectToolBackpressure;
   plugins: {
     bd: RuntimePlugin;
     git: RuntimePlugin;
@@ -101,6 +114,7 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
   const bdPlugin = createBdPlugin(eventStore, env);
   const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin);
   const teammateFactory = new TeammateFactory(observability, configLoader, eventStore, undefined, undefined, undefined, env);
+  const projectToolBackpressure: ProjectToolBackpressure = new Map();
 
   return {
     configLoader,
@@ -123,6 +137,7 @@ export function createRuntimeServices(env: RuntimeEnvironment = nodeRuntimeEnvir
     shellCommandParser,
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),
+    projectToolBackpressure,
     plugins: {
       bd: bdPlugin,
       git: gitPlugin,

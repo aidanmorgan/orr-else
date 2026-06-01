@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { getProjectRoot, setProjectRoot } from '../src/core/Paths.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -166,7 +166,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['/workspace/worktrees/bd-1/packages/example.py', '-k', 'selector']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(JSON.parse(result.stdout).argv).toEqual([
@@ -203,7 +203,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['/workspace/framework/tests/teammates.test.ts']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(JSON.parse(result.stdout)).toEqual({
@@ -240,7 +240,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: [frameworkPath]
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(JSON.parse(result.stdout).argv).toEqual([frameworkPath]);
@@ -273,7 +273,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: [path.join(tempWorktree, 'tests/example.py')]
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.message).toContain('escapes configured framework root');
@@ -307,7 +307,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: [unrelatedPath]
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.message).toContain('escapes configured framework root');
@@ -344,7 +344,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['--changed-file=/workspace/packages/example.py']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(JSON.parse(result.stdout).argv).toEqual([
@@ -375,7 +375,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: [path.join(tempRoot, 'outside.py')]
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.failureCategory).toBe(ProjectToolFailureCategory.TOOL_INPUT_ERROR);
@@ -409,7 +409,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['../bd-2/tests/example.py']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.message).toContain('escapes configured worktree root');
@@ -470,7 +470,7 @@ describe('project tool command arguments', () => {
       ...context,
       operation: 'definition',
       arguments: { path: 'example.py' }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result).toMatchObject({
       tool: 'python_lsp',
@@ -523,7 +523,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.exitCode).toBe(1);
@@ -549,7 +549,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.matchStatus).toBe('no_match');
@@ -587,7 +587,7 @@ describe('project tool command arguments', () => {
       stateId: 'AdversarialPostReview',
       actionId: 'adversarial-code-review',
       frameworkRoot
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = result.structuredResult as any;
 
@@ -648,7 +648,7 @@ describe('project tool command arguments', () => {
       stateId: 'AdversarialPostReview',
       actionId: 'adversarial-code-review',
       frameworkRoot
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = result.structuredResult as any;
 
@@ -693,8 +693,8 @@ describe('project tool command arguments', () => {
       stateId: 'Implementation',
       actionId: 'surgical-execution'
     };
-    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(first).toMatchObject({
       tool: 'pytest',
@@ -737,8 +737,8 @@ describe('project tool command arguments', () => {
       actionId: 'adversarial-code-review'
     };
 
-    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(first).toMatchObject({ tool: 'pytest', status: ToolResultStatus.REJECTED });
     expect(second).toMatchObject({ tool: 'pytest', status: ToolResultStatus.REJECTED });
@@ -747,6 +747,7 @@ describe('project tool command arguments', () => {
   });
 
   it('backpressures concurrent configured project-tool invocations for the same worker action', async () => {
+    const sharedBackpressure: ProjectToolBackpressure = new Map();
     const tool: ProjectCommandToolConfig = {
       name: 'slow_probe',
       type: ProjectToolType.COMMAND,
@@ -761,9 +762,9 @@ describe('project tool command arguments', () => {
     };
 
     const results = await Promise.all([
-      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any),
-      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any),
-      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any)
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, sharedBackpressure),
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, sharedBackpressure),
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, sharedBackpressure)
     ]);
 
     expect(results.filter(result => (result as any).status === ToolResultStatus.PASSED)).toHaveLength(1);
@@ -782,6 +783,78 @@ describe('project tool command arguments', () => {
       event.data?.tool === 'slow_probe' &&
       event.data?.failureCategory === ProjectToolFailureCategory.BACKPRESSURE
     )).toHaveLength(2);
+  });
+
+  it('independent backpressure holders do not share in-flight state', async () => {
+    const holderA: ProjectToolBackpressure = new Map();
+    const holderB: ProjectToolBackpressure = new Map();
+    const tool: ProjectCommandToolConfig = {
+      name: 'slow_probe_isolation',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'setTimeout(() => { console.log(JSON.stringify({ tool: "slow_probe_isolation", status: "PASSED" })); }, 80);'],
+      cwd: CwdMode.WORKTREE
+    };
+    const context = {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'formulate-plan'
+    };
+
+    // Reserve via holderA — holderB must NOT see the in-flight entry
+    const resultsA = await Promise.all([
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, holderA),
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, holderA)
+    ]);
+    // holderB is completely independent — both calls should proceed without backpressure
+    const resultsB = await Promise.all([
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, holderB),
+      executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, holderB)
+    ]);
+
+    // holderA: one success, one backpressured
+    expect(resultsA.filter(r => (r as any).status === ToolResultStatus.PASSED)).toHaveLength(1);
+    expect(resultsA.filter(r => (r as any).failureCategory === ProjectToolFailureCategory.BACKPRESSURE)).toHaveLength(1);
+
+    // holderB: independent — its own pair is unaffected by holderA
+    // One succeeds and one is backpressured within its own holder
+    expect(resultsB.filter(r => (r as any).status === ToolResultStatus.PASSED)).toHaveLength(1);
+    expect(resultsB.filter(r => (r as any).failureCategory === ProjectToolFailureCategory.BACKPRESSURE)).toHaveLength(1);
+
+    // Crucially: holderA reserves don't bleed into holderB and vice versa
+    expect(holderA.size).toBe(0); // fully released after both calls complete
+    expect(holderB.size).toBe(0);
+  });
+
+  it('reserve and release on the injected holder behave exactly as before', async () => {
+    const backpressure: ProjectToolBackpressure = new Map();
+    const tool: ProjectCommandToolConfig = {
+      name: 'reserve_release_probe',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'console.log(JSON.stringify({ tool: "reserve_release_probe", status: "PASSED" }));'],
+      cwd: CwdMode.WORKTREE
+    };
+    const context = {
+      beadId: 'bd-2',
+      stateId: 'Planning',
+      actionId: 'reserve-release-action'
+    };
+
+    // Map is empty before the call
+    expect(backpressure.size).toBe(0);
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, backpressure);
+
+    // Call succeeds
+    expect((result as any).status).toBe(ToolResultStatus.PASSED);
+    // Map is empty after release (finally block ran)
+    expect(backpressure.size).toBe(0);
+
+    // A second sequential call on the same context succeeds — the first was released
+    const result2 = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, backpressure);
+    expect((result2 as any).status).toBe(ToolResultStatus.PASSED);
+    expect(backpressure.size).toBe(0);
   });
 
   it('ignores legacy unscoped failures when enforcing per-state failure limits', async () => {
@@ -818,7 +891,7 @@ describe('project tool command arguments', () => {
       }
     });
 
-    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(result).toMatchObject({
       tool: 'pytest',
@@ -846,8 +919,8 @@ describe('project tool command arguments', () => {
     };
 
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
     expect(terminalRetry).toMatchObject({
       failureLimit: {
         failureCount: 1,
@@ -861,7 +934,7 @@ describe('project tool command arguments', () => {
       transitionEvent: EventName.CONTEXT_RESTART
     });
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    const restartedRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const restartedRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
     expect(restartedRetry).toMatchObject({
       failureLimit: {
         failureCount: 2,
@@ -890,8 +963,8 @@ describe('project tool command arguments', () => {
     };
 
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
     expect(terminalRetry).toMatchObject({
       failureLimit: {
         failureCount: 1,
@@ -906,7 +979,7 @@ describe('project tool command arguments', () => {
       transitionEvent: EventName.BLOCKED
     });
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    const freshRunFailure = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const freshRunFailure = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
     expect(freshRunFailure).toMatchObject({
       status: ToolResultStatus.REJECTED,
       failureLimit: {
@@ -936,8 +1009,8 @@ describe('project tool command arguments', () => {
     };
 
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const terminalRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
     expect(terminalRetry).toMatchObject({
       failureLimit: {
         failureCount: 1,
@@ -951,7 +1024,7 @@ describe('project tool command arguments', () => {
       transitionEvent: EventName.FAILURE
     });
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
-    const freshRunFailure = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const freshRunFailure = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(freshRunFailure).toMatchObject({
       status: ToolResultStatus.REJECTED,
@@ -987,8 +1060,8 @@ describe('project tool command arguments', () => {
       stateId: 'AdversarialPostReview',
       actionId: 'adversarial-code-review'
     };
-    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(second).toMatchObject({
       failureLimit: {
@@ -1025,8 +1098,8 @@ describe('project tool command arguments', () => {
       actionId: 'formulate-plan'
     };
 
-    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
-    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any);
+    const first = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
 
     expect(first).toMatchObject({
       status: ToolResultStatus.REJECTED,
@@ -1072,7 +1145,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['planContract', '--output-limit', '20000']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result).toMatchObject({
       tool: 'artifact_validator',
@@ -1120,7 +1193,7 @@ describe('project tool command arguments', () => {
       arguments: {
         argv: ['planContract']
       }
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // Compact metadata fields are retained
     expect(result).toMatchObject({
@@ -1191,7 +1264,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.maxBufferExceeded).toBe(false);
@@ -1231,7 +1304,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputTruncated).toBe(true);
@@ -1275,7 +1348,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = result.structuredResult as any;
 
@@ -1326,7 +1399,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputTruncated).toBe(true);
@@ -1368,7 +1441,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputTruncated).toBe(true);
@@ -1413,7 +1486,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const summary = result.diagnosticSummary as any;
 
@@ -1487,7 +1560,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const summary = result.diagnosticSummary as any;
     const codes = summary.groups.map((group: any) => group.code);
@@ -1555,7 +1628,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputTruncated).toBe(true);
@@ -1626,7 +1699,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const summary = result.diagnosticSummary as any;
     const codes = summary.groups.map((group: any) => group.code);
@@ -1696,7 +1769,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // The inline path must NOT have outputTruncated — this confirms we hit the inline branch.
     expect(result.outputTruncated).toBeUndefined();
@@ -1745,7 +1818,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // No diagnosticSummary: raw MCP content must reach the model.
     expect(result.diagnosticSummary).toBeUndefined();
@@ -1809,7 +1882,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.outputTruncated).toBe(true);
     expect(result.resultPreview).toBeDefined();
@@ -1857,7 +1930,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputTruncated).toBe(true);
@@ -1890,7 +1963,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.outputTruncated).toBe(true);
@@ -1930,7 +2003,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = result.structuredResult as any;
 
@@ -2187,7 +2260,7 @@ describe('project tool command arguments', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputFile).toBeUndefined();
@@ -2226,7 +2299,7 @@ describe('project tool command arguments', () => {
       stateId: 'AdversarialPostReview',
       actionId: 'quality',
       cwd: CwdMode.PROJECT
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     const payload = JSON.parse(result.stdout);
@@ -2250,12 +2323,12 @@ describe('project tool command arguments', () => {
       beadId: 'bd-3',
       stateId: 'Planning',
       actionId: 'repeat'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
     const second = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, envProbeTool(CwdMode.WORKTREE), {
       beadId: 'bd-3',
       stateId: 'Planning',
       actionId: 'repeat'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const firstPayload = JSON.parse(first.stdout);
     const secondPayload = JSON.parse(second.stdout);
@@ -2395,7 +2468,7 @@ describe('buildCommandResult field completeness', () => {
       eventStore, toolCallPathFactory,
       minimalCommandTool('process.stdout.write(JSON.stringify({ok:true}))'),
       { beadId: 'bd-shape', stateId: 'Planning', actionId: 'test' },
-      {} as any
+      {} as any, undefined, new Map()
     ) as any;
 
     expect(result.tool).toBe('shape_probe');
@@ -2429,7 +2502,7 @@ describe('buildCommandResult field completeness', () => {
         maxOutputBytes: 10_000
       },
       { beadId: 'bd-shape', stateId: 'Planning', actionId: 'test' },
-      {} as any
+      {} as any, undefined, new Map()
     ) as any;
 
     expect(result.tool).toBe('shape_probe_fail');
@@ -2520,7 +2593,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // structuredResult must be present with all stable fields
     const structuredResult = result.structuredResult as any;
@@ -2567,7 +2640,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // Tool should still succeed
     expect(result.status).toBe(ToolResultStatus.PASSED);
@@ -2621,7 +2694,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // Archive is always written regardless of summarizer outcome (requirement 5)
     expect(result.outputArchive).toBeDefined();
@@ -2666,7 +2739,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // 7i0 behavior: diagnosticSummary is present with the expected shape
     const summary = result.diagnosticSummary as any;
@@ -2741,7 +2814,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // Model-facing result must be compact — well within 5 KiB
     const modelFacingJson = JSON.stringify(result);
@@ -2812,7 +2885,7 @@ describe('per-tool structured summarizer registry', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'verify'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = result.structuredResult as any;
     expect(structuredResult).toBeDefined();
@@ -2917,7 +2990,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(truncatedResult.status).toBe(ToolResultStatus.PASSED);
     expect(truncatedResult.outputTruncated).toBe(true);
@@ -2947,7 +3020,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(inlineResult.status).toBe(ToolResultStatus.PASSED);
     // Small result fits inline (no outputTruncated)
@@ -2994,7 +3067,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.outputTruncated).toBe(true);
@@ -3028,7 +3101,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'search'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     // No structuredResult (tool has no structured output)
@@ -3083,7 +3156,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     // 7i0 behavior preserved: inline path, no outputTruncated
     expect(result.outputTruncated).toBeUndefined();
@@ -3136,7 +3209,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     const modelFacingJson = JSON.stringify(result);
     const modelFacingBytes = Buffer.byteLength(modelFacingJson);
@@ -3189,7 +3262,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = (result as any).structuredResult;
 
@@ -3230,7 +3303,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = (result as any).structuredResult;
 
@@ -3300,7 +3373,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     const structuredResult = (result as any).structuredResult;
 
@@ -3338,7 +3411,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze'
-    }, {} as any);
+    }, {} as any, undefined, new Map());
 
     // No structuredResult — fallback to truncation-based steering
     expect((result as any).structuredResult).toBeUndefined();
@@ -3474,7 +3547,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     // Status must be REJECTED (failure)
     expect(result.status).toBe(ToolResultStatus.REJECTED);
@@ -3540,7 +3613,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'lint'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3593,7 +3666,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3625,7 +3698,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     // Tool must have timed out
     expect(result.status).toBe(ToolResultStatus.REJECTED);
@@ -3662,7 +3735,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3698,7 +3771,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     // Must still be PASSED
     expect(result.status).toBe(ToolResultStatus.PASSED);
@@ -3744,7 +3817,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'verify'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3797,7 +3870,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'test'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3848,7 +3921,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'lint'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3887,7 +3960,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'build'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -3931,7 +4004,7 @@ describe('commandFailureSummarizer', () => {
       beadId: 'bd-1',
       stateId: 'Implementation',
       actionId: 'lint'
-    }, {} as any) as any;
+    }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
@@ -4033,7 +4106,7 @@ process.stdout.write(JSON.stringify(result));
     const result = await executeConfiguredProjectTool(
       eventStore, toolCallPathFactory, cachingTool(),
       { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'build' },
-      {} as any
+      {} as any, undefined, new Map()
     ) as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
@@ -4067,7 +4140,7 @@ process.stdout.write(JSON.stringify(result));
 
     for (let i = 0; i < 3; i++) {
       const result = await executeConfiguredProjectTool(
-        eventStore, toolCallPathFactory, tool, args, {} as any
+        eventStore, toolCallPathFactory, tool, args, {} as any, undefined, new Map()
       ) as any;
       expect(result.status).toBe(ToolResultStatus.PASSED);
     }
@@ -4105,12 +4178,12 @@ process.stdout.write(JSON.stringify(result));
       executeConfiguredProjectTool(
         eventStore, toolCallPathFactory, tool,
         { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'parallel-a' },
-        {} as any
+        {} as any, undefined, new Map()
       ) as Promise<any>,
       executeConfiguredProjectTool(
         eventStore, toolCallPathFactory, tool,
         { beadId: 'bd-scratch', stateId: 'Impl', actionId: 'parallel-b' },
-        {} as any
+        {} as any, undefined, new Map()
       ) as Promise<any>
     ]);
 

@@ -1881,7 +1881,7 @@ async function runParentSequenceActionsBeforeActive(
       stateId: run.stateId,
       actionId: action.id,
       arguments: action.arguments || {}
-    }, ctx);
+    }, ctx, undefined, services.projectToolBackpressure);
     runtimeObservability.recordToolInvocation(action.tool, result);
 
     for (const toolCall of extractFrameworkToolCalls(result)) {
@@ -2757,7 +2757,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         stateId: session.activeRun.stateId,
         actionId: session.activeRun.action.id
       }
-      : undefined);
+      : undefined, undefined, services.projectToolBackpressure);
     validateNativePiExtensionProjectTools(pi, config);
 
     pi.registerTool(wrapRuntimeTool({

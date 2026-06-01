@@ -21,6 +21,7 @@ import { ProjectToolConfig, ProjectCommandToolConfig, ProjectMcpToolConfig, Proj
 import { Logger } from '../core/Logger.js';
 import { EventStore, type DomainEvent } from '../core/EventStore.js';
 import { isRestartTransition } from '../core/EventUtils.js';
+import type { InFlightProjectToolCall, ProjectToolBackpressure } from '../core/RuntimeServices.js';
 import { Component, ProjectToolType, CwdMode, EnvVars, ToolResultStatus, Defaults, DomainEventName, EventName, WorkerDefaults, CommandExitCode, CommandErrorCode, ProjectToolDefaults, TeammateEventType, ToolDefaults } from '../constants/index.js';
 
 const DEFAULT_MCP_CONFIG_PATH = '{{projectRoot}}/.pi/mcp/config.json';
@@ -308,11 +309,6 @@ interface ProjectToolOutputArchive {
   truncated: boolean;
 }
 
-interface InFlightProjectToolCall {
-  token: string;
-  startedAtMs: number;
-}
-
 type ModelFacingProjectToolResult = Record<string, unknown> & {
   [ProjectToolResultKey.OUTPUT_ARCHIVE]?: ProjectToolOutputArchive;
   [ProjectToolResultKey.OUTPUT_ACCESS]?: string;
@@ -408,7 +404,7 @@ export interface ProjectToolSummarizer {
   ): StructuredResult | null;
 }
 
-const inFlightProjectToolCalls = new Map<string, InFlightProjectToolCall>();
+export type { ProjectToolBackpressure } from '../core/RuntimeServices.js';
 
 export function shouldSerializeMcpTool(definition: Pick<ProjectToolConfig, 'name' | 'type'>): boolean {
   return definition.type === ProjectToolType.MCP && SERIAL_MCP_TOOL_NAMES.has(definition.name);
@@ -1184,9 +1180,9 @@ function projectToolBackpressureStaleMs(definition: ProjectToolConfig): number {
     : ToolDefaults.WRAPPER_TIMEOUT_MS;
 }
 
-function reserveProjectToolCall(definition: ProjectToolConfig, context: ProjectToolExecutionContext): { key: string; existing?: InFlightProjectToolCall } {
+function reserveProjectToolCall(backpressure: ProjectToolBackpressure, definition: ProjectToolConfig, context: ProjectToolExecutionContext): { key: string; existing?: InFlightProjectToolCall } {
   const key = projectToolBackpressureKey(definition, context);
-  const existing = inFlightProjectToolCalls.get(key);
+  const existing = backpressure.get(key);
   const now = Date.now();
   if (existing) {
     const staleMs = projectToolBackpressureStaleMs(definition);
@@ -1203,17 +1199,17 @@ function reserveProjectToolCall(definition: ProjectToolConfig, context: ProjectT
     });
   }
 
-  inFlightProjectToolCalls.set(key, {
+  backpressure.set(key, {
     token: context.templateContext.toolInvocationId || uuidv7(),
     startedAtMs: now
   });
   return { key };
 }
 
-function releaseProjectToolCall(key: string, token: string | undefined): void {
-  const existing = inFlightProjectToolCalls.get(key);
+function releaseProjectToolCall(backpressure: ProjectToolBackpressure, key: string, token: string | undefined): void {
+  const existing = backpressure.get(key);
   if (!existing || existing.token !== token) return;
-  inFlightProjectToolCalls.delete(key);
+  backpressure.delete(key);
 }
 
 function projectToolBackpressureResult(
@@ -4192,7 +4188,8 @@ export async function executeConfiguredProjectTool(
   definition: ProjectToolConfig,
   args: Record<string, unknown>,
   ctx: ExtensionContext,
-  env: RuntimeEnvironment = nodeRuntimeEnvironment
+  env: RuntimeEnvironment | undefined,
+  backpressure: ProjectToolBackpressure
 ): Promise<unknown> {
   const beadId = beadIdFromArgs(args, env);
   const context = executionContext(pathFactory, definition, args, env);
@@ -4217,7 +4214,7 @@ export async function executeConfiguredProjectTool(
     return finalResult;
   }
 
-  const reservation = reserveProjectToolCall(definition, context);
+  const reservation = reserveProjectToolCall(backpressure, definition, context);
   if (reservation.existing) {
     const result = attachProjectToolSteering(
       definition,
@@ -4314,7 +4311,7 @@ export async function executeConfiguredProjectTool(
       throw error;
     }
   } finally {
-    releaseProjectToolCall(reservation.key, context.templateContext.toolInvocationId);
+    releaseProjectToolCall(backpressure, reservation.key, context.templateContext.toolInvocationId);
   }
 }
 
@@ -4422,8 +4419,9 @@ export function registerConfiguredProjectTools(
   config: HarnessConfig,
   seen: Set<string>,
   wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
-  runtimeContext?: () => ProjectToolRuntimeContext | undefined,
-  env: RuntimeEnvironment = nodeRuntimeEnvironment
+  runtimeContext: (() => ProjectToolRuntimeContext | undefined) | undefined,
+  env: RuntimeEnvironment | undefined,
+  backpressure: ProjectToolBackpressure
 ) {
   const tools = config.tools || [];
   for (const definition of tools) {
@@ -4458,7 +4456,7 @@ export function registerConfiguredProjectTools(
           ...(params || {}),
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {})
-        }, ctx, env);
+        }, ctx, env, backpressure);
       }
     }));
   }
