@@ -17,6 +17,12 @@ interface ClaudeCodeKeychainCredential {
  * without ever copying the token into Pi's auth.json.
  */
 export function readClaudeCodeAccessToken(): string {
+  if (process.platform !== 'darwin') {
+    throw new Error(
+      'Claude Code keychain access is only available on macOS (ENOTSUP). ' +
+        `Current platform: ${process.platform}.`
+    );
+  }
   let raw: string;
   try {
     raw = execFileSync('security', ['find-generic-password', '-s', ClaudeCodeAuth.KEYCHAIN_SERVICE, '-w'], {

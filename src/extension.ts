@@ -18,6 +18,7 @@ import {
   registerConfiguredProjectTools
 } from './plugins/projectTools.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
+import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer } from './core/SignalingServer.js';
 import { Bead, BeadId } from './types/index.js';
 import {
@@ -82,7 +83,8 @@ import {
   FileMutationPolicyDefaults,
   ReviewArtifactKind,
   ReviewArtifactStore,
-  ToolDefaults
+  ToolDefaults,
+  LLMProviderName
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { Teammate } from './core/Teammate.js';
@@ -2496,11 +2498,6 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   registerProcessLifecycleObservers();
   Logger.info(Component.ORR_ELSE, 'Orr Else extension loading', { version: App.VERSION });
 
-  if (!claudeCodeLoginRegistered) {
-    claudeCodeLoginRegistered = true;
-    registerClaudeCodeLiveLogin(pi);
-  }
-
   const services = providedServices || createRuntimeServices();
 
   const seenTools = new Set<string>();
@@ -2584,6 +2581,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     registerPiToolObservers(pi, services);
     registerProviderRequestCap(pi);
     registerAgentLifecycleObservers(pi, services);
+
+    if (!claudeCodeLoginRegistered && resolveProviderName(config.settings.defaultProvider) === LLMProviderName.ANTHROPIC) {
+      claudeCodeLoginRegistered = true;
+      registerClaudeCodeLiveLogin(pi);
+    }
+
     const wrapRuntimeTool = (tool: { name: string, description: string, parameters: any, execute: Function }) =>
       wrapPluginTool(tool, runtimeObservability, services);
 
