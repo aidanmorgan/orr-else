@@ -4,6 +4,7 @@ import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
 import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, QuarantineReason, RestartKind, RetentionDefaults, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { detectFinalBlockedState, ScanCategory } from './PaneTranscriptScanner.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent } from './EventStore.js';
@@ -19,6 +20,17 @@ export interface SupervisorOptions {
   requestedBeadId?: string;
   clock?: Clock;
 }
+
+/**
+ * Number of consecutive supervisor polls on which a bead must be detected as
+ * final-blocked before the early-trip recovery fires.  Requiring two consecutive
+ * detections eliminates one-frame false kills caused by transient pane snapshots
+ * that happen to end mid-stream on a matching line.
+ *
+ * Latency cost: ≈ 2 × POLL_INTERVAL_MS instead of 1 × POLL_INTERVAL_MS.
+ * That is still far faster than the full noProgressTimeoutMs path.
+ */
+const FINAL_BLOCKED_CONFIRM_POLLS = 2;
 
 /** Quarantine entry for a bead whose worktree creation repeatedly fails.
  * The bead is skipped on subsequent scans until its signature changes, preventing
@@ -103,6 +115,16 @@ export class Supervisor {
    * Quarantined beads are skipped during scanAndSpawn unless their signature changes.
    * Single-process-local; no persistence needed (signatures are re-derived from live state). */
   private readonly quarantine = new Map<string, QuarantineEntry>();
+  /**
+   * Per-bead count of consecutive supervisor polls on which the bead's pane was
+   * detected as final-blocked.  Reset to zero when the bead is NOT detected as
+   * blocked (i.e. pane shows progress).  Only when the count reaches
+   * FINAL_BLOCKED_CONFIRM_POLLS does the early-trip recovery fire.
+   *
+   * This is a plain instance field (no static) so each Supervisor instance has
+   * its own independent debounce state.
+   */
+  private readonly finalBlockedPollCounts = new Map<string, number>();
   private readonly clock: Clock;
 
   constructor(
@@ -148,6 +170,7 @@ export class Supervisor {
     this.startedBeads.delete(id);
     this.startedBeadAtMs.delete(id);
     this.missingStartedBeadChecks.delete(id);
+    this.finalBlockedPollCounts.delete(id);
     if (!options.preserveInactiveRestartBackoff) this.inactiveRestartedAtMs.delete(id);
   }
 
@@ -833,7 +856,7 @@ export class Supervisor {
       heartbeatOnlyStaleBeadIds
     });
 
-    await this.recoverInactiveBeads(inactiveBeadIds, latestProgressEvents, heartbeatDetails, noProgressTimeoutMs);
+    await this.recoverInactiveBeads(inactiveBeadIds, effectiveLiveBeadIds, latestProgressEvents, heartbeatDetails, noProgressTimeoutMs);
   }
 
   private async recordCapacityUnderfill(details: {
@@ -894,12 +917,133 @@ export class Supervisor {
 
   private async recoverInactiveBeads(
     inactiveBeadIds: string[],
+    effectiveLiveBeadIds: string[],
     latestProgressEvents: Map<string, DomainEvent>,
     heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>,
     noProgressTimeoutMs: number
   ): Promise<void> {
-    if (inactiveBeadIds.length === 0) return;
     const config = await this.services.configLoader.load();
+
+    // --- Early-trip: final-blocked pane detection ---
+    // Check effective live beads that are not already past the no-progress
+    // timeout and not in backoff for a terminal-blocked pane output.  When a
+    // pane's final output is a blocked/fatal banner, the bead is stalled NOW —
+    // no further progress will occur — so we recover it on this tick rather
+    // than waiting for the full noProgressTimeoutMs to elapse.
+    //
+    // Guards applied per bead (BLOCKER A + C):
+    //   1. captureBeadPaneText must exist on the factory (defensive, some test
+    //      factories omit it).  If absent, skip the early-trip entirely.
+    //   2. Skip beads already covered by the standard timeout path below.
+    //   3. Skip beads still in inactive-restart backoff.
+    //   4. Require TEMPORAL CORROBORATION (FINAL_BLOCKED_CONFIRM_POLLS = 2
+    //      consecutive polls) before recovering, to avoid killing a bead on a
+    //      single transient snapshot that happens to end on a matching line.
+    //      The per-bead counter is reset when the pane shows no blocked signal.
+    //
+    // Metric: detection latency ≈ 2 × POLL_INTERVAL_MS instead of the full
+    // noProgressTimeoutMs (~15 min), so the latency win is preserved while
+    // one-frame false kills are eliminated.
+    const hasCaptureBeadPaneText = typeof this.factory.captureBeadPaneText === 'function';
+    if (hasCaptureBeadPaneText) {
+      const inactiveSet = new Set(inactiveBeadIds);
+      for (const beadId of effectiveLiveBeadIds) {
+        // Skip beads already covered by the standard timeout path below.
+        if (inactiveSet.has(beadId)) continue;
+
+        // Skip beads whose backoff is still active (recently restarted).
+        const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;
+        const now = this.clock.now();
+        if (now - lastRestartAtMs < noProgressTimeoutMs) {
+          // Also reset the debounce counter — bead is in backoff, not being checked.
+          this.finalBlockedPollCounts.delete(beadId);
+          continue;
+        }
+
+        // Capture the live pane snapshot to inspect for a terminal-blocked banner.
+        const paneSnapshot = await this.factory.captureBeadPaneText(beadId).catch(() => '');
+        if (!paneSnapshot) {
+          this.finalBlockedPollCounts.delete(beadId);
+          continue;
+        }
+
+        const finalBlockedResult = detectFinalBlockedState(paneSnapshot);
+        if (!finalBlockedResult.blocked) {
+          // Agent is progressing — reset the debounce counter.
+          this.finalBlockedPollCounts.delete(beadId);
+          continue;
+        }
+
+        // Increment the consecutive-detection counter (BLOCKER C debounce).
+        const previousCount = this.finalBlockedPollCounts.get(beadId) ?? 0;
+        const newCount = previousCount + 1;
+        this.finalBlockedPollCounts.set(beadId, newCount);
+
+        if (newCount < FINAL_BLOCKED_CONFIRM_POLLS) {
+          // Not yet confirmed — wait for the next poll.
+          Logger.info(Component.SUPERVISOR, 'Final-blocked pane candidate; awaiting temporal confirmation', {
+            beadId,
+            pollCount: newCount,
+            requiredPolls: FINAL_BLOCKED_CONFIRM_POLLS,
+            category: finalBlockedResult.category
+          });
+          continue;
+        }
+
+        // Confirmed on FINAL_BLOCKED_CONFIRM_POLLS consecutive polls: recover.
+        this.finalBlockedPollCounts.delete(beadId);
+        this.inactiveRestartedAtMs.set(beadId, now);
+
+        const latestProgressEvent = latestProgressEvents.get(beadId);
+        const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
+        const blockedCategory: ScanCategory | string = finalBlockedResult.category ?? ScanCategory.PANIC_FATAL;
+        const blockedEvidence = finalBlockedResult.evidenceLine
+          ? ` Evidence: "${finalBlockedResult.evidenceLine}".`
+          : '';
+        const summary = [
+          AgentFailureSummary.FINAL_BLOCKED,
+          `Detected category: ${blockedCategory}.${blockedEvidence}`,
+          `Last non-heartbeat event: ${latestProgressEvent?.type || 'none'} at ${latestProgressEvent?.timestamp || 'unknown'}.`,
+          AgentFailureSummary.EVENT_STORE_DETAILS
+        ].join(' ');
+        const evidence = `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`;
+
+        Logger.warn(Component.SUPERVISOR, 'Final-blocked pane detected; recovering bead immediately', {
+          beadId,
+          stateId,
+          category: blockedCategory,
+          evidenceLine: finalBlockedResult.evidenceLine
+        });
+
+        await this.services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
+          beadId,
+          stateId,
+          summary,
+          paneSnapshot,
+          error: summary
+        }).catch(() => {});
+        await this.services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
+          beadId,
+          stateId,
+          targetState: stateId,
+          transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
+          summary,
+          evidence,
+          handover: summary
+        }).catch(() => {});
+
+        await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
+          Logger.warn(Component.SUPERVISOR, 'Unable to terminate final-blocked teammate panes', { beadId, error: String(error) });
+        });
+        await this.beadsPort().release(beadId).catch((error: unknown) => {
+          Logger.warn(Component.SUPERVISOR, 'Unable to release final-blocked Bead after teammate termination', { beadId, error: String(error) });
+        });
+        this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
+      }
+    }
+
+    // --- Standard path: no-progress timeout recovery ---
+    if (inactiveBeadIds.length === 0) return;
 
     for (const beadId of inactiveBeadIds) {
       const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;

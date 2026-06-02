@@ -28,6 +28,8 @@ import {
   formatScanSummary,
   ScanCategory,
   SCAN_MAX_REPRESENTATIVE_LINES,
+  detectFinalBlockedState,
+  SCAN_FINAL_TAIL_LINES,
 } from '../src/core/PaneTranscriptScanner.js';
 import { PaneTranscriptDefaults, OperationalArtifactPath, EnvVars } from '../src/constants/index.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
@@ -290,6 +292,252 @@ describe('formatScanSummary', () => {
     const summary = formatScanSummary(result);
     expect(summary).toContain('ENOENT');
     expect(summary).toContain('(1)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFinalBlockedState — final-blocked pane detection
+// ---------------------------------------------------------------------------
+
+describe('detectFinalBlockedState — terminal blocked banner as final output', () => {
+  it('returns blocked=true when a PANIC_FATAL pattern is the last line', () => {
+    const text = [
+      'Tool call: bd_get_bead',
+      'Output: {"status": "open"}',
+      'fatal error: out of memory'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+    expect(result.category).toBe(ScanCategory.PANIC_FATAL);
+    expect(result.evidenceLine).toContain('fatal error');
+  });
+
+  it('returns blocked=true when a STUCK_PROMPT pattern is the last line', () => {
+    const text = [
+      'Running test suite',
+      'Press Enter to continue...'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+    expect(result.category).toBe(ScanCategory.STUCK_PROMPT);
+  });
+
+  it('returns blocked=true when a FINAL_BLOCKED_PATTERNS line is the last line', () => {
+    const text = [
+      'Preparing build...',
+      'Compiling sources...',
+      'command failed'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+  });
+
+  it('returns blocked=true for a "process exited with code" terminal banner at end', () => {
+    const text = [
+      'Starting agent...',
+      'Running action: plan',
+      'exited with code 1'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+  });
+
+  it('returns blocked=false when error appears mid-transcript but later lines show progress', () => {
+    const text = [
+      'Tool call: bash',
+      'fatal error: temporary failure',    // error here
+      'Retrying...',                         // but progress follows
+      'Tool call: bd_get_bead',
+      'Output: success'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    // Error is not the final output — agent continued
+    expect(result.blocked).toBe(false);
+  });
+
+  it('returns blocked=false when the tail is entirely clean output', () => {
+    const text = [
+      'Starting bead pi-experiment-test in state Planning',
+      'Tool call: bd_get_bead',
+      'State transition: Planning -> Implementation',
+      'Heartbeat recorded at 2026-01-01T00:00:00Z'
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(false);
+  });
+
+  it('returns blocked=false for empty string', () => {
+    const result = detectFinalBlockedState('');
+    expect(result.blocked).toBe(false);
+  });
+
+  it('returns blocked=false for whitespace-only string', () => {
+    const result = detectFinalBlockedState('   \n  \n  ');
+    expect(result.blocked).toBe(false);
+  });
+
+  it('respects the tail window: an error before SCAN_FINAL_TAIL_LINES of clean progress is NOT final-blocked', () => {
+    // Build a transcript with an error near the beginning, then more than
+    // SCAN_FINAL_TAIL_LINES clean lines after it.  The error is outside the
+    // tail window, so it must NOT trigger final-blocked detection.
+    const cleanLines = Array.from({ length: SCAN_FINAL_TAIL_LINES + 5 }, (_, i) =>
+      `Progress line ${i + 1}: tool call succeeded`
+    );
+    const text = [
+      'fatal error: something went wrong',   // far outside tail window
+      ...cleanLines
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(false);
+  });
+
+  it('detects final-blocked even when error is within the tail window but followed only by more errors', () => {
+    // Two consecutive blocked lines — the second is the final line.
+    const text = [
+      'Tool call: bash',
+      'process killed',
+      'fatal error: agent terminated'  // final line, also a blocked signal
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+  });
+
+  it('truncates a very long evidence line to <= 200 chars', () => {
+    const longLine = 'fatal error: ' + 'x'.repeat(300);
+    const result = detectFinalBlockedState(longLine);
+    expect(result.blocked).toBe(true);
+    expect(result.evidenceLine).toBeDefined();
+    expect(result.evidenceLine!.length).toBeLessThanOrEqual(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFinalBlockedState — NEGATIVE tests: healthy agent prose must NOT trigger
+// ---------------------------------------------------------------------------
+
+describe('detectFinalBlockedState — NEGATIVE: healthy agent prose must NOT be detected as blocked', () => {
+  it('returns blocked=false for agent narrating a command failure mid-prose', () => {
+    // "I see the command failed" is agent narration, not a terminal banner.
+    const text = [
+      'Bead: bead-1  State: Planning',
+      'Tool call: bash { "command": "npm test" }',
+      'I see the command failed, let me investigate the error output.',
+      'Tool call: bash { "command": "npm test -- --reporter verbose" }'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false for inline "error: expected X but got Y" in tool output mid-prose', () => {
+    // "error: expected 200 but got 404" is tool output mid-run, not a final banner.
+    const text = [
+      'Tool call: bash { "command": "curl http://localhost:3000/health" }',
+      'error: expected 200 but got 404',
+      'The endpoint returned 404; checking the server logs.',
+      'Tool call: bash { "command": "cat server.log" }'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false when "awaiting user feedback" appears in agent narration prose', () => {
+    // "awaiting user feedback" is agent prose — not a stuck-prompt banner.
+    const text = [
+      'I have completed the implementation.',
+      'Currently awaiting user feedback on the PR.',
+      'Tool call: bd_update_bead { "status": "in_progress" }',
+      'Output: {"ok": true}'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false when "Cannot proceed without the API key" appears in agent prose followed by progress', () => {
+    // Agent narrates an obstacle but then continues working.
+    const text = [
+      'Cannot proceed without the API key, checking env vars.',
+      'Tool call: bash { "command": "echo $API_KEY" }',
+      'Output: sk-prod-xxx (truncated)'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false for "process killed" appearing in git log output mid-run', () => {
+    // "process killed" embedded in quoted git log context — agent is reading log,
+    // not experiencing an OS kill.  The pattern IS in PANIC_FATAL, so this is
+    // a real false-positive risk; the tail-window + progress-after-match check
+    // must protect against it when progress lines follow.
+    const text = [
+      'Tool call: bash { "command": "git log --oneline -5" }',
+      "a1b2c3 fix: handle 'process killed' edge case in teardown",
+      'Tool call: bd_get_bead',
+      'Output: {"status": "open"}'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false for mid-prose "cannot continue" NOT at line start', () => {
+    // "cannot continue" was a dropped pattern (prose-prone); confirm it no longer
+    // triggers final-blocked detection even when it appears as the last line.
+    const text = [
+      'Reviewing the options available.',
+      'The old approach cannot continue to scale with this data size.'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('returns blocked=false for "build failed" embedded mid-line in agent narration', () => {
+    // "build failed" mid-line must not match the now line-anchored pattern.
+    const text = [
+      'The CI reported that the build failed earlier, but I have fixed it.',
+      'Tool call: bash { "command": "npm run build" }',
+      'Output: Build succeeded'
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  // FIX 1 — regression tests: process-termination phrases mid-line must NOT match
+
+  it('(FIX-1) returns blocked=false when final line is a git-log entry containing "process killed" mid-line', () => {
+    // "process killed" appears inside a commit message, not as a leading OS kill banner.
+    // Pre-fix: PANIC_FATAL_PATTERNS used \b which matched mid-line, causing a false positive.
+    // Post-fix: FINAL_BLOCKED_PANIC_FATAL_PATTERNS requires the phrase to start the line.
+    const text = [
+      'Tool call: bash { "command": "git log --oneline -3" }',
+      'a1b2c3 fix: handle process killed edge case in teardown',
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  it('(FIX-1) returns blocked=false when final line is a log-reader line containing "exited with code 1" mid-line', () => {
+    // "exited with code 1" appears after a timestamp — not a leading exit-banner.
+    // Pre-fix: FINAL_BLOCKED_PROCESS_PATTERNS used \b which matched mid-line.
+    // Post-fix: the pattern requires the phrase to lead the trimmed line.
+    const text = [
+      'Tool call: bash { "command": "cat worker.log" }',
+      '2026-01-01 worker exited with code 1',
+    ].join('\n');
+    expect(detectFinalBlockedState(text).blocked).toBe(false);
+  });
+
+  // FIX 1 — positive tests: genuine leading banners must still trigger blocked=true
+
+  it('(FIX-1) returns blocked=true when final line is a leading "process killed" OS banner', () => {
+    // A genuine OS kill banner that starts the line must still be detected.
+    const text = [
+      'Starting agent...',
+      'process killed',
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
+    expect(result.category).toBe(ScanCategory.PANIC_FATAL);
+  });
+
+  it('(FIX-1) returns blocked=true when final line is a leading "exited with code 1" banner', () => {
+    // A genuine exit banner that starts the line must still be detected.
+    const text = [
+      'Starting agent...',
+      'exited with code 1',
+    ].join('\n');
+    const result = detectFinalBlockedState(text);
+    expect(result.blocked).toBe(true);
   });
 });
 

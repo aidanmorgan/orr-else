@@ -920,6 +920,7 @@ export const AgentFailureSummary = {
   CONTEXT_OVERFLOW: 'Agent lifecycle failure: context window exceeded; context restart requested.',
   HARNESS_TRANSIENT: 'Agent lifecycle failure: transient harness transport error; harness restart requested.',
   NO_PROGRESS: 'Agent lifecycle failure: teammate heartbeat continued without non-heartbeat progress; harness restart requested.',
+  FINAL_BLOCKED: 'Agent lifecycle failure: pane final output is a terminal blocked/halted banner; immediate stall recovery requested.',
   USAGE_LIMIT: 'Agent lifecycle failure: usage limit reached; harness capacity pause requested.',
   EVENT_STORE_DETAILS: 'Full provider error remains in the event store.'
 } as const;

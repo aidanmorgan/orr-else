@@ -304,6 +304,28 @@ describe('Supervisor', () => {
     expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
   });
 
+  // ---------------------------------------------------------------------------
+  // FIX 2 — finalBlockedPollCounts memory-leak prevention
+  // ---------------------------------------------------------------------------
+
+  it('(FIX-2) markBeadExited removes bead from finalBlockedPollCounts (no memory leak)', () => {
+    // Scenario: a bead is detected as final-blocked on one poll (count=1) but
+    // completes/exits before the second confirmation poll.  markBeadExited must
+    // delete its entry from finalBlockedPollCounts so it does not accumulate
+    // indefinitely (unbounded growth with one entry per blip-blocked bead).
+    const { supervisor } = supervisorHarness(NOW_MS);
+
+    // Simulate a single blocked detection: count reaches 1 but recovery has
+    // not fired yet (needs 2 consecutive detections).
+    (supervisor as any).finalBlockedPollCounts.set('bead-1', 1);
+
+    // The bead then exits (e.g. finishes its work or is terminated externally).
+    supervisor.markBeadExited('bead-1');
+
+    // The stale entry must be gone — no leak.
+    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+  });
+
   it('releaseClaimedAfterPause clears claimed/active state and preserves inactiveRestartedAtMs backoff', async () => {
     const { supervisor, release, clock } = supervisorHarness(NOW_MS);
     const claimedBead = { id: 'bead-1' } as any;
@@ -831,5 +853,213 @@ describe('Supervisor', () => {
     expect(quarantineEvent!.data.beadId).toBe('bead-q');
     expect(quarantineEvent!.data.reason).toBe('INVALID_BRANCH_REF');
     expect(typeof quarantineEvent!.data.signature).toBe('string');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Final-blocked pane early-trip recovery
+  // ---------------------------------------------------------------------------
+
+  it('(final-blocked) recovers a bead immediately when its pane shows a terminal blocked banner, without waiting the full no-progress timeout', async () => {
+    // Scenario: bead-1 has RECENT progress (within the timeout window) so it
+    // would NOT be picked up by the standard no-progress path.  But its pane
+    // output ends with a fatal-error terminal banner → it must be recovered
+    // after FINAL_BLOCKED_CONFIRM_POLLS (2) consecutive detections via the
+    // final-blocked early-trip.
+    const terminalPaneOutput = [
+      'Bead: bead-1  State: Planning',
+      'Tool call: bash { "command": "npm test" }',
+      'Running tests...',
+      'fatal error: agent process killed'
+    ].join('\n');
+
+    const { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText } =
+      supervisorHarness(
+        NOW_MS,  // latestProgressAtMs = NOW_MS → bead is NOT past the no-progress timeout
+      );
+    captureBeadPaneText.mockResolvedValue(terminalPaneOutput);
+
+    // Poll 1: detected but not yet confirmed — no recovery.
+    // (lastSlotHealthEventMs starts at 0, so this first call is not throttled.)
+    await (supervisor as any).recordSlotHealth('test');
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
+
+    // Poll 2: reset the slot-health throttle so the second call is not skipped,
+    // then confirm: second consecutive detection → recovery fires.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    // The bead must have been recovered via the final-blocked early-trip.
+    expect(captureBeadPaneText).toHaveBeenCalledWith('bead-1');
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(true);
+    expect(records.some(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(true);
+
+    // The summary must indicate a final-blocked detection, NOT the standard no-progress message.
+    const turnFailedEvent = records.find(r => r.event === DomainEventName.AGENT_TURN_FAILED);
+    expect(turnFailedEvent!.data.summary).toContain('terminal blocked/halted banner');
+    expect(turnFailedEvent!.data.summary).not.toContain('without non-heartbeat progress');
+
+    // Teammate must be terminated and bead released.
+    expect(terminateTeammatesForBead).toHaveBeenCalledWith('bead-1', expect.stringContaining('terminal blocked/halted banner'));
+    expect(release).toHaveBeenCalledWith('bead-1');
+  });
+
+  it('(final-blocked) does NOT prematurely recover a merely-slow bead whose pane shows ongoing work', async () => {
+    // Scenario: bead-1 has recent progress (within the timeout window) AND its
+    // pane shows clean, non-blocked output.  No recovery must happen.
+    const cleanPaneOutput = [
+      'Bead: bead-1  State: Planning',
+      'Tool call: bd_get_bead',
+      'Output: {"status": "open"}',
+      'State transition: Planning -> Implementation'
+    ].join('\n');
+
+    const { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText } =
+      supervisorHarness(NOW_MS);  // recent progress → not inactive
+    captureBeadPaneText.mockResolvedValue(cleanPaneOutput);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    // No recovery events must be emitted.
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
+    expect(records.some(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(false);
+    expect(terminateTeammatesForBead).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('(final-blocked) evidence in HARNESS_RESTART_REQUESTED includes category and evidence line', async () => {
+    const terminalPaneOutput = [
+      'Starting action: plan',
+      'command failed'
+    ].join('\n');
+
+    const { supervisor, records, captureBeadPaneText } =
+      supervisorHarness(NOW_MS);  // not past timeout
+    captureBeadPaneText.mockResolvedValue(terminalPaneOutput);
+
+    // Two polls required to confirm (FINAL_BLOCKED_CONFIRM_POLLS = 2).
+    // Reset slot-health throttle between polls so the second call is not skipped.
+    await (supervisor as any).recordSlotHealth('test');
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    const restartEvent = records.find(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED);
+    expect(restartEvent).toBeDefined();
+    const evidence: string = restartEvent!.data.evidence;
+    // Evidence must include the pane snapshot.
+    expect(evidence).toContain('Pane snapshot (reasoning redacted)');
+    // Summary must not include the standard no-progress message.
+    const summary: string = restartEvent!.data.summary;
+    expect(summary).toContain('terminal blocked/halted banner');
+    expect(summary).not.toContain('without non-heartbeat progress');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Debounce and backoff tests (SHOULD-FIX E)
+  // ---------------------------------------------------------------------------
+
+  it('(final-blocked debounce) bead detected blocked on ONE poll is NOT recovered; only recovered after the SECOND consecutive detection', async () => {
+    // Ensures the FINAL_BLOCKED_CONFIRM_POLLS=2 debounce prevents one-frame kills.
+    // Uses the finalBlockedPollCounts map directly to verify the internal counter.
+    // Reset slot-health throttle (lastSlotHealthEventMs) between poll calls so
+    // each call is actually processed.
+    const terminalPaneOutput = [
+      'Tool call: bash',
+      'fatal error: process killed'
+    ].join('\n');
+
+    const { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText } =
+      supervisorHarness(NOW_MS);  // recent progress → not past no-progress timeout
+    captureBeadPaneText.mockResolvedValue(terminalPaneOutput);
+
+    // Poll 1: first detection — counter reaches 1, recovery must NOT fire yet.
+    await (supervisor as any).recordSlotHealth('test');
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
+    expect(records.some(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(false);
+    expect(terminateTeammatesForBead).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+    // Counter must be 1 after first detection.
+    expect((supervisor as any).finalBlockedPollCounts.get('bead-1')).toBe(1);
+
+    // Poll 2: reset throttle, second consecutive detection — counter reaches 2 =
+    // FINAL_BLOCKED_CONFIRM_POLLS, recovery fires and counter is cleared.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(true);
+    expect(records.some(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(true);
+    expect(terminateTeammatesForBead).toHaveBeenCalledWith('bead-1', expect.stringContaining('terminal blocked/halted banner'));
+    expect(release).toHaveBeenCalledWith('bead-1');
+    // Counter must be cleared after recovery.
+    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+  });
+
+  it('(final-blocked debounce) counter resets when pane shows non-blocked output between polls', async () => {
+    // If a blocked detection is followed by a clean (non-blocked) snapshot on the
+    // next poll, the counter must reset to zero — no recovery must occur.
+    const terminalPaneOutput = [
+      'Tool call: bash',
+      'fatal error: process killed'
+    ].join('\n');
+    const cleanPaneOutput = [
+      'Tool call: bd_get_bead',
+      'Output: {"status": "open"}',
+      'State transition: Planning -> Implementation'
+    ].join('\n');
+
+    const { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText } =
+      supervisorHarness(NOW_MS);
+    captureBeadPaneText.mockResolvedValue(terminalPaneOutput);
+
+    // Poll 1: blocked detected, counter = 1.
+    await (supervisor as any).recordSlotHealth('test');
+    expect((supervisor as any).finalBlockedPollCounts.get('bead-1')).toBe(1);
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
+
+    // Poll 2: clean snapshot → counter resets, no recovery.
+    // Reset the slot-health throttle so the second call is not skipped.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    captureBeadPaneText.mockResolvedValue(cleanPaneOutput);
+    await (supervisor as any).recordSlotHealth('test');
+    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+    expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
+    expect(terminateTeammatesForBead).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it('(final-blocked backoff) early-trip does NOT re-fire for the same blocked pane while bead is in inactive-restart backoff', async () => {
+    // After a bead is recovered via the early-trip, it enters inactiveRestartedAtMs
+    // backoff.  The early-trip must skip the bead entirely during the backoff window —
+    // captureBeadPaneText must not be called for the early-trip, and no additional
+    // recovery events must fire.
+    // Reset slot-health throttle between poll calls so each is actually processed.
+    const terminalPaneOutput = [
+      'Tool call: bash',
+      'fatal error: process killed'
+    ].join('\n');
+
+    const { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText } =
+      supervisorHarness(NOW_MS);
+    captureBeadPaneText.mockResolvedValue(terminalPaneOutput);
+
+    // Polls 1 + 2: confirm and recover.
+    await (supervisor as any).recordSlotHealth('test');
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+    expect(terminateTeammatesForBead).toHaveBeenCalledTimes(1);
+    expect(release).toHaveBeenCalledTimes(1);
+    const agentTurnFailedCountAfterRecovery = records.filter(r => r.event === DomainEventName.AGENT_TURN_FAILED).length;
+    const harnessRestartCountAfterRecovery = records.filter(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED).length;
+
+    // Poll 3: bead has been recovered (markBeadExited removes it from startedBeads)
+    // and enters inactiveRestartedAtMs backoff.  A third poll must NOT produce
+    // additional AGENT_TURN_FAILED or HARNESS_RESTART_REQUESTED recovery events.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    const captureCallCountBeforePoll3 = captureBeadPaneText.mock.calls.length;
+    await (supervisor as any).recordSlotHealth('test');
+    // No additional recovery events emitted.
+    expect(records.filter(r => r.event === DomainEventName.AGENT_TURN_FAILED).length).toBe(agentTurnFailedCountAfterRecovery);
+    expect(records.filter(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED).length).toBe(harnessRestartCountAfterRecovery);
+    // captureBeadPaneText call count did not increase for the early-trip path
+    // (bead is no longer tracked as live after markBeadExited).
+    expect(captureBeadPaneText.mock.calls.length).toBe(captureCallCountBeforePoll3);
   });
 });
