@@ -2167,20 +2167,17 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.GET_ARTIFACT_PATHS,
         description:
-          'Resolve configured stable artifact paths and bounded artifact content previews for the current Bead/state/action. ' +
-          'Use this instead of native reads for .pi/artifacts files. ' +
-          'IMPORTANT: For large structured JSON artifacts (planContract, requirementsAnalysis) — which are commonly 30–60 KB — ' +
-          'do NOT request large maxInlineBytes budgets. Instead, use query_artifact with "summary":true first to see ' +
-          'per-projection size estimates (byteCount + tokenEstimate), then request only the named projections you need ' +
-          '(e.g. projection:"writeSet", projection:"verifierObligations"). This avoids the ~14k-token cost of inlining a full plan contract.',
+          'Resolve configured stable artifact paths, existence, and deterministic file metadata (bytes + sha256) for the current Bead/state/action. ' +
+          'Returns paths, existence flags, per-artifact metadata (bytes, sha256), and missing-artifact lists. ' +
+          'Content is never inlined — use query_artifact with "summary":true to see per-projection size estimates, ' +
+          'then query_artifact with "projection" or "selector" to read the content you need. ' +
+          'Use this tool to confirm which artifacts exist and check their identity before fetching content.',
         parameters: Type.Object({
           beadId: Type.String({ description: 'The Bead ID' }),
           stateId: Type.Optional(Type.String({ description: 'Optional state ID' })),
           actionId: Type.Optional(Type.String({ description: 'Optional action ID' })),
-          artifactId: Type.Optional(Type.String({ description: 'Optional artifact ID for template expansion' })),
-          includeContent: Type.Optional(Type.Boolean({ description: 'Include bounded content previews for existing artifacts. Defaults to true.' })),
-          maxInlineBytes: Type.Optional(Type.Number({ description: 'Requested bytes to inline per artifact preview; the framework applies a hard safety cap. For planContract/requirementsAnalysis prefer query_artifact instead of large inline budgets.' })),
-          maxTotalInlineBytes: Type.Optional(Type.Number({ description: 'Requested aggregate bytes to inline across artifact previews; the framework applies a hard safety cap.' }))
+          artifactId: Type.Optional(Type.String({ description: 'Optional artifact ID to resolve only that template entry' })),
+          includeContent: Type.Optional(Type.Boolean({ description: 'When true (default), include deterministic file metadata (bytes, sha256) for existing artifacts. Set false to return only paths and existence flags.' }))
         }),
         execute: async (params: any) => services.artifactPaths.resolve(params)
       }) as any);
