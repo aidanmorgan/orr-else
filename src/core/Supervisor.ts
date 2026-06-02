@@ -3,7 +3,7 @@ import { Bead, BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
-import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, PluginToolName, QuarantineReason, RestartKind, RetentionDefaults, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, OtelAttr, PluginToolName, QuarantineReason, RestartKind, RetentionDefaults, SpanName, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { detectFinalBlockedState, ScanCategory } from './PaneTranscriptScanner.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
@@ -513,7 +513,21 @@ export class Supervisor {
 
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
 
+    const spawnStartMs = Date.now();
     const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx);
+    const spawnEndMs = Date.now();
+
+    // Emit a teammate_spawn span covering the tmux pane creation duration.
+    try {
+      this.observability.recordCompletedSpan(SpanName.TEAMMATE_SPAWN, {
+        [OtelAttr.ORR_ELSE_BEAD_ID]: claimed.id,
+        [OtelAttr.ORR_ELSE_STATE_ID]: bead.stateId,
+        'spawn.success': spawned.success
+      }, spawnStartMs, spawnEndMs);
+    } catch {
+      // Span emission is best-effort — never block the spawn path.
+    }
+
     if (!spawned.success) {
       await beadsPort.release(claimed.id).catch(() => {});
       throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);

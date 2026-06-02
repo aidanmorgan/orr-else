@@ -1,10 +1,12 @@
 import { Type } from "@earendil-works/pi-ai";
 import { execa } from 'execa';
 import { Logger } from '../core/Logger.js';
-import { Component, PluginToolName, ToolResultStatus } from '../constants/index.js';
+import { Component, EnvVars, OtelAttr, PluginToolName, SpanName, ToolResultStatus } from '../constants/index.js';
+import type { Observability } from '../core/Observability.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
-export function createQualityPlugin(): RuntimePlugin {
+export function createQualityPlugin(observability?: Observability, env: RuntimeEnvironment = nodeRuntimeEnvironment): RuntimePlugin {
   return {
   name: 'quality-assurance',
   tools: [
@@ -17,33 +19,55 @@ export function createQualityPlugin(): RuntimePlugin {
       execute: async (params: unknown, ctx?: unknown) => {
         const { command } = (params && typeof params === 'object' ? params : {}) as { command?: string };
         const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;
-        try {
-          if (ui?.hasUI) ui.ui?.setWorkingMessage("Running quality checks...");
 
-          let output = '';
+        if (ui?.hasUI) ui.ui?.setWorkingMessage("Running quality checks...");
+
+        const startMs = Date.now();
+        let output = '';
+        let exitCode: number | undefined;
+        let verdict: 'passed' | 'failed' = 'passed';
+
+        try {
           if (command) {
-            const { stdout } = await execa('sh', ['-lc', command]);
-            output = stdout;
+            const result = await execa('sh', ['-lc', command]);
+            output = result.stdout;
+            exitCode = result.exitCode;
           } else {
             const build = await execa('npm', ['run', 'build']);
             const test = await execa('npm', ['test']);
             output = `${build.stdout}\n${test.stdout}`;
+            exitCode = test.exitCode;
           }
-
-          if (ui?.hasUI) {
-            ui.ui?.notify("Quality checks PASSED", "info");
-            ui.ui?.setWorkingMessage(undefined);
-          }
-          return { status: ToolResultStatus.PASSED, output };
         } catch (error: unknown) {
-          const output = (error && typeof error === 'object' && 'stdout' in error ? (error as { stdout: string }).stdout : undefined) || (error instanceof Error ? error.message : String(error));
+          verdict = 'failed';
+          output = (error && typeof error === 'object' && 'stdout' in error ? (error as { stdout: string }).stdout : undefined) || (error instanceof Error ? error.message : String(error));
+          exitCode = (error && typeof error === 'object' && 'exitCode' in error ? (error as { exitCode?: number }).exitCode : undefined) ?? 1;
           Logger.error(Component.QUALITY, 'Quality checks failed', { error: output });
+        }
+
+        const endMs = Date.now();
+        try {
+          observability?.recordCompletedSpan(SpanName.VERIFIER_RUN, {
+            [OtelAttr.ORR_ELSE_BEAD_ID]: env.env(EnvVars.BEAD_ID) || undefined,
+            [OtelAttr.ORR_ELSE_STATE_ID]: env.env(EnvVars.STATE_ID) || undefined,
+            'verifier.verdict': verdict,
+            'verifier.exit_code': exitCode ?? 0
+          }, startMs, endMs);
+        } catch { /* best-effort: telemetry must never fail the check */ }
+
+        if (verdict === 'failed') {
           if (ui?.hasUI) {
             ui.ui?.notify("Quality checks FAILED", "error");
             ui.ui?.setWorkingMessage(undefined);
           }
           return { status: ToolResultStatus.REJECTED, output };
         }
+
+        if (ui?.hasUI) {
+          ui.ui?.notify("Quality checks PASSED", "info");
+          ui.ui?.setWorkingMessage(undefined);
+        }
+        return { status: ToolResultStatus.PASSED, output };
       }
     },
     {

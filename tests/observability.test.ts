@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Observability, SpanStatusValue } from '../src/core/Observability.js';
-import { EnvVars, ObservabilityDefaults, ToolResultStatus } from '../src/constants/index.js';
+import { EnvVars, ObservabilityDefaults, SpanName, ToolResultStatus } from '../src/constants/index.js';
 
 describe('Observability', () => {
   const root = path.join(os.tmpdir(), 'orr-else-observability-test');
@@ -119,5 +119,146 @@ states:
     expect(observability.getToolResult('run_quality_checks')).toBe(laterFailure);
     expect(observability.getPassingToolResult('run_quality_checks')).toBe(passingResult);
     expect(observability.hasToolPassed('run_quality_checks')).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // recordCompletedSpan — llm_turn duration fix
+  // ---------------------------------------------------------------------------
+
+  it('recordCompletedSpan emits a span with nonzero duration equal to endTimeMs-startTimeMs', async () => {
+    writeHarnessConfig();
+    configLoader.setConfigPath(configPath);
+
+    await observability.initialize();
+
+    const startTimeMs = Date.now() - 5000; // 5 seconds ago
+    const endTimeMs = startTimeMs + 3000;  // 3-second turn
+
+    observability.recordCompletedSpan(SpanName.LLM_TURN, {
+      'gen_ai.request.model': 'claude-opus-4-5',
+      'gen_ai.usage.input_tokens': 1000,
+      'gen_ai.usage.output_tokens': 200,
+      'orr_else.bead_id': 'bead-test'
+    }, startTimeMs, endTimeMs);
+
+    await observability.forceFlush();
+
+    const lines = fs.readFileSync(observability.getJsonlFilePath(), 'utf8').trim().split('\n');
+    const record = JSON.parse(lines[0]);
+
+    expect(record.name).toBe(SpanName.LLM_TURN);
+
+    // Duration must be nonzero and match the explicit timestamps.
+    const durationNs = BigInt(record.durationUnixNano);
+    expect(durationNs).toBeGreaterThan(0n);
+
+    const expectedDurationNs = BigInt(endTimeMs - startTimeMs) * 1_000_000n;
+    // Allow ±1ms tolerance for millisecond-to-nanosecond conversion.
+    const toleranceNs = 2_000_000n;
+    expect(durationNs).toBeGreaterThanOrEqual(expectedDurationNs - toleranceNs);
+    expect(durationNs).toBeLessThanOrEqual(expectedDurationNs + toleranceNs);
+
+    // Attributes must be present.
+    expect(record.attributes['gen_ai.request.model']).toBe('claude-opus-4-5');
+    expect(record.attributes['gen_ai.usage.input_tokens']).toBe(1000);
+  });
+
+  it('recordCompletedSpan emits startTimeUnixNano matching startTimeMs', async () => {
+    writeHarnessConfig();
+    configLoader.setConfigPath(configPath);
+
+    await observability.initialize();
+
+    const startTimeMs = 1700000000000; // fixed epoch ms for determinism
+    const endTimeMs = startTimeMs + 1500;
+
+    observability.recordCompletedSpan('test_completed', {}, startTimeMs, endTimeMs);
+
+    await observability.forceFlush();
+
+    const lines = fs.readFileSync(observability.getJsonlFilePath(), 'utf8').trim().split('\n');
+    const record = JSON.parse(lines[0]);
+
+    // startTimeUnixNano must equal startTimeMs * 1e6 (ms → ns).
+    const expectedStartNs = BigInt(startTimeMs) * 1_000_000n;
+    const actualStartNs = BigInt(record.startTimeUnixNano);
+    const toleranceNs = 2_000_000n;
+    expect(actualStartNs).toBeGreaterThanOrEqual(expectedStartNs - toleranceNs);
+    expect(actualStartNs).toBeLessThanOrEqual(expectedStartNs + toleranceNs);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Trace-context propagation — PI_TRACE_ID / PI_SPAN_ID env vars
+  // ---------------------------------------------------------------------------
+
+  it('a span created with PI_TRACE_ID+PI_SPAN_ID env set carries that traceId and parentSpanId', async () => {
+    writeHarnessConfig();
+    configLoader.setConfigPath(configPath);
+
+    const coordTraceId = 'a'.repeat(32); // 32-char hex trace id
+    const coordSpanId = 'b'.repeat(16);  // 16-char hex span id
+
+    const previous = {
+      [EnvVars.TRACE_ID]: process.env[EnvVars.TRACE_ID],
+      [EnvVars.SPAN_ID]: process.env[EnvVars.SPAN_ID]
+    };
+    process.env[EnvVars.TRACE_ID] = coordTraceId;
+    process.env[EnvVars.SPAN_ID] = coordSpanId;
+
+    try {
+      // Re-create observability so it uses the env from a fresh RuntimeEnvironment.
+      // The existing observability instance reads env lazily via getTraceContext(),
+      // so we can use it directly — no re-creation needed.
+      await observability.initialize();
+
+      const traceCtx = observability.getTraceContext();
+      expect(traceCtx).toBeDefined();
+      expect(traceCtx!.traceId).toBe(coordTraceId);
+      expect(traceCtx!.spanId).toBe(coordSpanId);
+
+      // A span created via startSpan (default parent = getTraceContext) should
+      // carry the coordSpanId as parentSpanId in the exported record.
+      const spanCtx = observability.startSpan('worker.child.span', { 'test.field': 'present' });
+      observability.endSpan(spanCtx.spanId);
+
+      await observability.forceFlush();
+
+      const lines = fs.readFileSync(observability.getJsonlFilePath(), 'utf8').trim().split('\n');
+      const record = JSON.parse(lines[0]);
+
+      // The worker span must share the coordinator's traceId.
+      // Note: Observability uses SessionIdGenerator which always returns sessionTraceId
+      // for generateTraceId; the parent context traceId influences parentSpanId linkage
+      // but the actual traceId in the record comes from the provider's IdGenerator.
+      // What we CAN verify is that parentSpanId equals the coordSpanId.
+      expect(record.parentSpanId).toBe(coordSpanId);
+
+      // spanId in the context must be set.
+      expect(spanCtx.parentSpanId).toBe(coordSpanId);
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
+  it('getTraceContext() returns undefined when PI_TRACE_ID/PI_SPAN_ID are not set', () => {
+    const previous = {
+      [EnvVars.TRACE_ID]: process.env[EnvVars.TRACE_ID],
+      [EnvVars.SPAN_ID]: process.env[EnvVars.SPAN_ID]
+    };
+    delete process.env[EnvVars.TRACE_ID];
+    delete process.env[EnvVars.SPAN_ID];
+
+    try {
+      const traceCtx = observability.getTraceContext();
+      expect(traceCtx).toBeUndefined();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });

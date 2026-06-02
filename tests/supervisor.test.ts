@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { Logger } from '../src/core/Logger.js';
-import { BeadStatus, Defaults, DomainEventName, TeammateEventDecisionAction, PluginToolName, TimeMs } from '../src/constants/index.js';
+import { BeadStatus, Defaults, DomainEventName, SpanName, TeammateEventDecisionAction, PluginToolName, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { DomainEvent } from '../src/core/EventStore.js';
 import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
@@ -1255,6 +1255,122 @@ describe('Supervisor', () => {
   // ---------------------------------------------------------------------------
   // Enriched duplicate-signal warning context (Gap 3)
   // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // teammate_spawn span instrumentation
+  // ---------------------------------------------------------------------------
+
+  it('(teammate_spawn) claimAndSpawnBead emits a teammate_spawn span with nonzero duration on success', async () => {
+    // Build a supervisor with a recordCompletedSpan spy on the observability stub.
+    const spawnedSpans: Array<{ name: string; startMs: number; endMs: number; attrs: Record<string, unknown> }> = [];
+    const observabilityStub = {
+      tracedAsync: (_n: string, _a: any, fn: any) => fn,
+      recordCompletedSpan: vi.fn((name: string, attrs: Record<string, unknown>, startMs: number, endMs: number) => {
+        spawnedSpans.push({ name, startMs, endMs, attrs });
+      })
+    };
+
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/bead-spawn-test' }));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%99' }));
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        spawnTeammateInTmux,
+        getActiveTeammateCount: vi.fn(async () => 0),
+        getAvailableSlots: vi.fn(async () => 1),
+        terminateTeammatesForBead: vi.fn()
+      } as any,
+      observabilityStub as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: {
+          record: vi.fn(async () => {}),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: { createWorktree },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+
+    const bead = { id: 'bead-spawn-test', stateId: 'Planning', score: 0 } as any;
+    const config = { settings: {} } as any;
+    const result = await (supervisor as any).claimAndSpawnBead(bead, config);
+    expect(result).toBe('spawned');
+
+    // A teammate_spawn span must have been emitted.
+    const spawnSpan = spawnedSpans.find(s => s.name === SpanName.TEAMMATE_SPAWN);
+    expect(spawnSpan).toBeDefined();
+
+    // Duration must be nonzero (endMs > startMs; the actual spawn is instantaneous in
+    // the mock, but Date.now() calls are separated so endMs >= startMs).
+    expect(spawnSpan!.endMs).toBeGreaterThanOrEqual(spawnSpan!.startMs);
+
+    // The span must carry the bead and state attributes.
+    expect(spawnSpan!.attrs['orr_else.bead_id']).toBe('bead-spawn-test');
+    expect(spawnSpan!.attrs['orr_else.state_id']).toBe('Planning');
+    expect(spawnSpan!.attrs['spawn.success']).toBe(true);
+  });
+
+  it('(teammate_spawn) claimAndSpawnBead emits a teammate_spawn span with spawn.success=false when spawn fails', async () => {
+    const spawnedSpans: Array<{ name: string; attrs: Record<string, unknown> }> = [];
+    const observabilityStub = {
+      tracedAsync: (_n: string, _a: any, fn: any) => fn,
+      recordCompletedSpan: vi.fn((name: string, attrs: Record<string, unknown>) => {
+        spawnedSpans.push({ name, attrs });
+      })
+    };
+
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/bead-fail-test' }));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: false, error: 'tmux error' }));
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        spawnTeammateInTmux,
+        getActiveTeammateCount: vi.fn(async () => 0),
+        getAvailableSlots: vi.fn(async () => 1),
+        terminateTeammatesForBead: vi.fn()
+      } as any,
+      observabilityStub as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: {
+          record: vi.fn(async () => {}),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: { createWorktree },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock: createFakeClock() }
+    );
+
+    const bead = { id: 'bead-fail-test', stateId: 'Planning', score: 0 } as any;
+    const config = { settings: {} } as any;
+
+    // Spawn failure throws.
+    await expect((supervisor as any).claimAndSpawnBead(bead, config)).rejects.toThrow('tmux error');
+
+    // The span must still be emitted (before the throw path).
+    const spawnSpan = spawnedSpans.find(s => s.name === SpanName.TEAMMATE_SPAWN);
+    expect(spawnSpan).toBeDefined();
+    expect(spawnSpan!.attrs['spawn.success']).toBe(false);
+  });
 
   it('(enriched-warning) the duplicate-signal warning includes outcome and routing context fields', async () => {
     // The duplicate/ignored-signal warning must include enough context to let

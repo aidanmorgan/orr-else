@@ -13,7 +13,7 @@ import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { createTeammateEventIdempotencyKey, findAppliedTeammateSignal } from '../core/TeammateEvents.js';
 import { postHarnessSignal } from '../core/HarnessApiClient.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName, OtelAttr, SpanName } from '../constants/index.js';
 import type { TeammateEventType } from '../constants/index.js';
 
 // ── worker env resolved by the composition root ──────────────────────────────
@@ -83,25 +83,45 @@ export async function hasAppliedTeammateSignal(services: RuntimeServices, event:
 export async function postWorkerSignal(services: RuntimeServices, event: TeammateEvent): Promise<void> {
   await services.eventStore.record(DomainEventName.SIGNAL_INTENT_RECORDED, teammateSignalEventData(event));
 
+  const postStartMs = Date.now();
+  let postError: unknown;
+
   try {
     await postHarnessSignal(event);
+  } catch (err) {
+    postError = err;
+  }
+
+  const postEndMs = Date.now();
+
+  // Best-effort telemetry — never throw from here.
+  try {
+    services.observability.recordCompletedSpan(SpanName.SIGNAL_ACK, {
+      [OtelAttr.ORR_ELSE_BEAD_ID]: event.beadId || undefined,
+      [OtelAttr.ORR_ELSE_STATE_ID]: event.stateId || undefined,
+      [OtelAttr.AGENT_EVENT_TYPE]: event.type,
+      'signal.success': postError === undefined
+    }, postStartMs, postEndMs);
+  } catch { /* best-effort: telemetry must never affect signal posting */ }
+
+  if (postError === undefined) {
     await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, teammateSignalEventData(event));
     return;
-  } catch (error) {
-    const applied = await hasAppliedTeammateSignal(services, event).catch(() => false);
-    await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
-      ...teammateSignalEventData(event),
-      error: String(error),
-      appliedAfterTransportFailure: applied
-    }).catch(() => {});
-
-    if (applied) {
-      await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
-        ...teammateSignalEventData(event),
-        source: 'event-store-reconcile'
-      });
-      return;
-    }
-    throw error;
   }
+
+  const applied = await hasAppliedTeammateSignal(services, event).catch(() => false);
+  await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+    ...teammateSignalEventData(event),
+    error: String(postError),
+    appliedAfterTransportFailure: applied
+  }).catch(() => {});
+
+  if (applied) {
+    await services.eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
+      ...teammateSignalEventData(event),
+      source: 'event-store-reconcile'
+    });
+    return;
+  }
+  throw postError;
 }

@@ -326,6 +326,61 @@ export class Observability {
     return contextValue;
   }
 
+  /**
+   * Record a span whose start and end timestamps are known in advance (e.g. an
+   * LLM turn recorded after the fact with exact token-usage timing).
+   *
+   * Unlike startSpan+endSpan, both timestamps are set explicitly so the
+   * exported duration = endTimeMs - startTimeMs, regardless of wall-clock drift
+   * between the JS event loop and the OTel SDK.
+   *
+   * @param name        Span name — use a SpanName constant.
+   * @param attributes  Span attributes merged on top of the standard session attrs.
+   * @param startTimeMs Unix epoch milliseconds for the span start.
+   * @param endTimeMs   Unix epoch milliseconds for the span end (must be ≥ startTimeMs).
+   * @param parentContext Optional explicit parent; falls back to getTraceContext().
+   */
+  public recordCompletedSpan(
+    name: string,
+    attributes: SpanAttributes,
+    startTimeMs: number,
+    endTimeMs: number,
+    parentContext?: SpanContext
+  ): void {
+    const parent = parentContext || this.getTraceContext();
+    const parentOtelContext = parent
+      ? trace.setSpanContext(context.active(), {
+          traceId: parent.traceId,
+          spanId: parent.spanId,
+          traceFlags: TraceFlags.SAMPLED,
+          isRemote: true
+        })
+      : undefined;
+
+    const span = this.tracer.startSpan(
+      name,
+      {
+        kind: SpanKind.INTERNAL,
+        startTime: startTimeMs,
+        attributes: cleanAttributes({
+          'service.name': App.SERVICE_NAME,
+          'service.instance.id': this.sessionId,
+          'session.id': this.sessionId,
+          'session.state_id': this.sessionStateId || undefined,
+          [OtelAttr.ORR_ELSE_BEAD_ID]: this.env.env(EnvVars.BEAD_ID) || undefined,
+          [OtelAttr.ORR_ELSE_STATE_ID]: this.env.env(EnvVars.STATE_ID) || undefined,
+          [OtelAttr.ORR_ELSE_ACTION_ID]: this.env.env(EnvVars.ACTION_ID) || undefined,
+          [OtelAttr.ORR_ELSE_WORKER_ID]: this.env.env(EnvVars.WORKER_ID) || undefined,
+          'process.pid': process.pid,
+          ...attributes
+        })
+      },
+      parentOtelContext
+    );
+    span.setStatus({ code: SpanStatusCode.OK });
+    span.end(endTimeMs);
+  }
+
   public endSpan(spanId: string, status: SpanStatus = SpanStatusValue.OK, message?: string): void {
     const span = this.activeSpans.get(spanId);
     if (!span) return;

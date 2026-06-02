@@ -6,7 +6,8 @@ import { execa } from 'execa';
 import { simpleGit } from 'simple-git';
 import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
-import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults, WorktreePreserveReason } from '../constants/index.js';
+import { BeadStatus, Component, DomainEventName, EnvVars, FileMutationPolicyDefaults, OtelAttr, PluginToolName, SpanName, TransactionalStateDefaults, WorktreeDefaults, WorktreePreserveReason } from '../constants/index.js';
+import type { Observability } from '../core/Observability.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
 import type { MergeResult, RuntimePlugin, RuntimeTool, WorktreeResult } from '../core/RuntimeServices.js';
 
@@ -398,7 +399,8 @@ export function createGitPlugin(
   configLoader?: ConfigLoader,
   bdPlugin?: RuntimePlugin,
   projectRoot: string = process.cwd(),
-  getLiveTeammateBeadIds?: () => Promise<Set<string>>
+  getLiveTeammateBeadIds?: () => Promise<Set<string>>,
+  observability?: Observability
 ): RuntimePlugin {
   const gitLockFile = path.join(projectRoot, WorktreeDefaults.GIT_LOCK_FILE);
 
@@ -540,6 +542,10 @@ export function createGitPlugin(
           closeReason?: string;
         };
         const ui = ctx as { hasUI?: boolean; ui?: { setWorkingMessage: (m: string | undefined) => void; notify: (m: string, t: string) => void } } | undefined;
+
+        const mergeStartMs = Date.now();
+        let mergeSuccess = false;
+
         try {
           assertSafeBeadId(beadId);
           const branchName = branchNameFor(beadId);
@@ -573,11 +579,20 @@ export function createGitPlugin(
             }
           });
 
+          mergeSuccess = true;
+
           if (ui?.hasUI) {
             ui.ui?.notify(`Merged ${beadId} into ${targetBranch}`, 'info');
             ui.ui?.setWorkingMessage(undefined);
           }
           await eventStore.record(DomainEventName.MERGE_AND_COMMIT_SUCCEEDED, { beadId, branchName, targetBranch, message: commitMessage });
+
+          try {
+            observability?.recordCompletedSpan(SpanName.BEAD_MERGE_CLOSE, {
+              [OtelAttr.ORR_ELSE_BEAD_ID]: beadId || undefined,
+              'merge.success': true
+            }, mergeStartMs, Date.now());
+          } catch { /* best-effort: telemetry must never fail the merge */ }
 
           // Best-effort auto-remove: never fails the merge.
           await autoRemoveWorktreeAfterMerge(
@@ -598,6 +613,14 @@ export function createGitPlugin(
 
           return { success: true };
         } catch (error) {
+          if (!mergeSuccess) {
+            try {
+              observability?.recordCompletedSpan(SpanName.BEAD_MERGE_CLOSE, {
+                [OtelAttr.ORR_ELSE_BEAD_ID]: beadId || undefined,
+                'merge.success': false
+              }, mergeStartMs, Date.now());
+            } catch { /* best-effort */ }
+          }
           let abortError: string | undefined;
           try {
             await abortMergeIfNeeded(projectRoot);

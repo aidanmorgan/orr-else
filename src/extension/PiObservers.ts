@@ -33,6 +33,7 @@ import {
   App,
   OtelAttr,
   PiEventName,
+  SpanName,
   ToolResultStatus,
   TeammateEventType
 } from '../constants/index.js';
@@ -273,7 +274,7 @@ export async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServ
   });
 
   try {
-    const span = services.observability.startSpan('llm_turn', {
+    services.observability.recordCompletedSpan(SpanName.LLM_TURN, {
       'gen_ai.request.model': record.event.model,
       'gen_ai.usage.input_tokens': record.event.inputTokens,
       'gen_ai.usage.output_tokens': record.event.outputTokens,
@@ -284,8 +285,7 @@ export async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServ
       [OtelAttr.ORR_ELSE_ACTION_ID]: record.event.actionId,
       [OtelAttr.ORR_ELSE_WORKER_ID]: record.event.workerId,
       [OtelAttr.ORR_ELSE_COST_TOTAL]: record.event.costTotal
-    });
-    services.observability.endSpan(span.spanId);
+    }, record.telemetry.startTime, record.telemetry.endTime);
   } catch (error) {
     Logger.debug(Component.OBSERVABILITY, 'Skipped OTEL token-usage span', { error: String(error) });
   }

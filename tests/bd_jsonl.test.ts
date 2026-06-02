@@ -3,7 +3,8 @@ import { execa } from 'execa';
 import { createBdPlugin, parseFlatListOutput, parseReadyPlainOutput } from '../src/plugins/bd.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
-import { App, BeadsDefaults, DomainEventName, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
+import type { Observability } from '../src/core/Observability.js';
+import { App, BeadsDefaults, DomainEventName, SpanName, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
 
 const execaMock = vi.hoisted(() => {
   function bdOutput(args: string[], options: any) {
@@ -581,5 +582,48 @@ describe('Beads JSONL compatibility tools', () => {
       status: 'in_progress',
       assignee: undefined
     }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MUST-FIX 1 — observability DI threading: lock-wait span fires in production
+//
+// Tests that createBdPlugin threads the observability instance into BeadsClient
+// so that recordCompletedSpan(SpanName.BEADS_LOCK_WAIT, ...) is called when a
+// bd command runs. Without the DI fix the span is dead (observability undefined
+// inside BeadsClient) even though the call site exists.
+// ---------------------------------------------------------------------------
+
+describe('createBdPlugin — observability DI threading (BEADS_LOCK_WAIT span)', () => {
+  it('threads observability into BeadsClient so recordCompletedSpan fires on bd invocation', async () => {
+    const recordCompletedSpan = vi.fn();
+    const spyObservability: Partial<Observability> = { recordCompletedSpan };
+
+    const mockEventStore = {
+      record: vi.fn().mockResolvedValue(undefined),
+      projectBead: vi.fn().mockResolvedValue({}),
+      projectBeads: vi.fn().mockResolvedValue(new Map())
+    } as any;
+
+    // createBdPlugin now accepts observability as the 4th param; thread the spy in.
+    const plugin = createBdPlugin(mockEventStore, undefined, process.cwd(), spyObservability as Observability);
+    const readyTool = plugin.tools.find(t => t.name === 'bd_ready');
+    if (!readyTool) throw new Error('missing bd_ready tool');
+
+    // The execa mock is already wired (vi.mock at top of file) — bd_ready runs bd.
+    await readyTool.execute({ limit: 1 });
+
+    // recordCompletedSpan must have been called with BEADS_LOCK_WAIT — proving
+    // observability was successfully threaded from createBdPlugin → BeadsClient.
+    expect(recordCompletedSpan).toHaveBeenCalled();
+    const calls = recordCompletedSpan.mock.calls;
+    const lockWaitCall = calls.find(([name]: [string]) => name === SpanName.BEADS_LOCK_WAIT);
+    expect(lockWaitCall).toBeDefined();
+
+    // Validate timing invariant: startMs <= endMs (both are Date.now() samples).
+    const [, , startMs, endMs] = lockWaitCall!;
+    expect(typeof startMs).toBe('number');
+    expect(typeof endMs).toBe('number');
+    expect(startMs).toBeLessThanOrEqual(endMs);
   });
 });

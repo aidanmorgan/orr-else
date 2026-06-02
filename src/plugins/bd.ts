@@ -23,6 +23,7 @@ import {
   WorkerDefaults
 } from '../constants/index.js';
 import type { BeadStateChartProjection } from '../core/EventStore.js';
+import type { Observability } from '../core/Observability.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 import { BeadsClient } from './BeadsClient.js';
 
@@ -528,13 +529,14 @@ async function updateIssueStatus(client: BeadsClient, eventStore: EventStore, id
   return normalizeIssue(eventStore, await getIssue(client, eventStore, id, env ?? nodeRuntimeEnvironment, root));
 }
 
-export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedProjectRoot: string = process.cwd()) {
+export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedProjectRoot: string = process.cwd(), observability?: Observability) {
   // Resolve root once at factory time. WI-1 precedence: env PROJECT_ROOT wins,
   // then the injected root resolved from the composition boundary.
   const root = resolveProjectRoot(env, injectedProjectRoot);
   // One BeadsClient per coordinator process — owns the bd subprocess, read cache,
   // mutation serializer, and lock-wait telemetry for this plugin instance.
-  const client = new BeadsClient();
+  // observability is threaded in so the lock-wait span actually fires in production.
+  const client = new BeadsClient(observability);
   const plugin: RuntimePlugin = {
   name: 'beads-orchestration',
   tools: [

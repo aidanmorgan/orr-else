@@ -1,12 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
+import type { Observability } from '../src/core/Observability.js';
 import { createGitPlugin } from '../src/plugins/git.js';
-import { DomainEventName, PluginToolName, WorktreePreserveReason } from '../src/constants/index.js';
+import { DomainEventName, PluginToolName, SpanName, WorktreePreserveReason } from '../src/constants/index.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -542,5 +543,105 @@ describe('git plugin — auto-remove worktree after merge', () => {
     const preservedEvent = emittedEvents.find(e => e.type === DomainEventName.WORKTREE_AUTO_REMOVE_PRESERVED);
     expect(preservedEvent).toBeDefined();
     expect(preservedEvent!.data.reason).toBe(WorktreePreserveReason.UNKNOWN);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// git plugin — BEAD_MERGE_CLOSE span
+//
+// Uses a real git repo (same pattern as above) so we can assert the span is
+// emitted with SpanName.BEAD_MERGE_CLOSE, nonzero duration (startMs <= endMs),
+// and the correct orr_else.bead_id + merge.success attributes.
+// ---------------------------------------------------------------------------
+
+describe('git plugin — BEAD_MERGE_CLOSE span', () => {
+  let tempRoot: string;
+  let previousCwd: string;
+
+  beforeEach(() => {
+    previousCwd = process.cwd();
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-git-span-')));
+    // Reuse makeRepo helper — defined at top of file.
+    writeMinimalHarnessConfig(tempRoot);
+    git(tempRoot, ['init', '-b', 'main']);
+    git(tempRoot, ['config', 'user.name', 'Orr Else']);
+    git(tempRoot, ['config', 'user.email', 'orr-else@example.invalid']);
+    fs.mkdirSync(path.join(tempRoot, '.beads'));
+    fs.writeFileSync(path.join(tempRoot, 'source.txt'), 'before\n');
+    fs.writeFileSync(path.join(tempRoot, '.gitignore'), '.beads/issues.jsonl\n');
+    git(tempRoot, ['add', 'source.txt', '.gitignore']);
+    git(tempRoot, ['commit', '-m', 'initial']);
+    process.chdir(tempRoot);
+  });
+
+  afterEach(() => {
+    process.chdir(previousCwd);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('emits SpanName.BEAD_MERGE_CLOSE with startMs<=endMs and merge.success=true on successful merge', async () => {
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-obs');
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-obs', worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'merged\n');
+
+    const obs = { recordCompletedSpan: vi.fn() } as unknown as Observability;
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, undefined, obs);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    const result = await mergeTool.execute({ beadId: 'bd-obs', message: 'Complete bd-obs' });
+
+    expect(result).toMatchObject({ success: true });
+    expect(obs.recordCompletedSpan).toHaveBeenCalledOnce();
+    const [name, attrs, startMs, endMs] = (obs.recordCompletedSpan as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(name).toBe(SpanName.BEAD_MERGE_CLOSE);
+    expect(startMs).toBeLessThanOrEqual(endMs);
+    expect(endMs - startMs).toBeGreaterThanOrEqual(0);
+    expect(attrs['merge.success']).toBe(true);
+    expect(attrs['orr_else.bead_id']).toBe('bd-obs');
+  });
+
+  it('emits merge.success=false and startMs<=endMs when merge fails (conflicts)', async () => {
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-conflict');
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-conflict', worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'branch-change\n');
+
+    // Create a conflicting commit on main.
+    fs.writeFileSync(path.join(tempRoot, 'source.txt'), 'main-change\n');
+    git(tempRoot, ['add', 'source.txt']);
+    git(tempRoot, ['commit', '-m', 'conflicting main commit']);
+
+    const obs = { recordCompletedSpan: vi.fn() } as unknown as Observability;
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, undefined, obs);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    const result = await mergeTool.execute({ beadId: 'bd-conflict', message: 'Complete bd-conflict' });
+
+    expect(result).toMatchObject({ success: false });
+    expect(obs.recordCompletedSpan).toHaveBeenCalledOnce();
+    const [name, attrs, startMs, endMs] = (obs.recordCompletedSpan as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(name).toBe(SpanName.BEAD_MERGE_CLOSE);
+    expect(startMs).toBeLessThanOrEqual(endMs);
+    expect(attrs['merge.success']).toBe(false);
+  });
+
+  it('telemetry error does not break the merge (best-effort)', async () => {
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-otel-err');
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-otel-err', worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'otel-err\n');
+
+    const obs = {
+      recordCompletedSpan: vi.fn().mockImplementation(() => { throw new Error('otel down'); })
+    } as unknown as Observability;
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot, undefined, obs);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    const result = await mergeTool.execute({ beadId: 'bd-otel-err', message: 'Complete' });
+    expect(result).toMatchObject({ success: true });
   });
 });

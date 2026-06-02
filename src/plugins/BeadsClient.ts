@@ -19,9 +19,11 @@ import path from 'node:path';
 import { execa } from 'execa';
 import lockfile from 'proper-lockfile';
 import { Logger } from '../core/Logger.js';
+import type { Observability } from '../core/Observability.js';
 import {
   BeadsDefaults,
-  Component
+  Component,
+  SpanName
 } from '../constants/index.js';
 
 // ---------------------------------------------------------------------------
@@ -58,9 +60,15 @@ async function ensureBdLockFile(root: string): Promise<string> {
   return lockPath;
 }
 
-async function withBdCliLock<T>(fn: () => Promise<T>, root: string): Promise<T> {
+interface LockResult<T> {
+  value: T;
+  lockWaitStartMs: number;
+  lockAcquiredMs: number;
+}
+
+async function withBdCliLock<T>(fn: () => Promise<T>, root: string): Promise<LockResult<T>> {
   const lockPath = await ensureBdLockFile(root);
-  const startedAtMs = Date.now();
+  const lockWaitStartMs = Date.now();
   let release: (() => Promise<void>) | undefined;
   try {
     release = await lockfile.lock(lockPath, {
@@ -73,16 +81,18 @@ async function withBdCliLock<T>(fn: () => Promise<T>, root: string): Promise<T> 
       }
     });
   } catch (error) {
-    throw new Error(`Timed out acquiring bd CLI lock after ${Date.now() - startedAtMs}ms: ${String(error)}`);
+    throw new Error(`Timed out acquiring bd CLI lock after ${Date.now() - lockWaitStartMs}ms: ${String(error)}`);
   }
 
-  const waitedMs = Date.now() - startedAtMs;
+  const lockAcquiredMs = Date.now();
+  const waitedMs = lockAcquiredMs - lockWaitStartMs;
   if (waitedMs > BEADS_LOCK_WAIT_WARN_MS) {
     Logger.warn(Component.BEADS_CLI, 'Waited for bd CLI lock', { waitedMs, lockPath });
   }
 
   try {
-    return await fn();
+    const value = await fn();
+    return { value, lockWaitStartMs, lockAcquiredMs };
   } finally {
     await release?.().catch((error: unknown) => {
       Logger.warn(Component.BEADS_CLI, 'Unable to release bd CLI lock', { lockPath, error: String(error) });
@@ -132,6 +142,8 @@ export class BeadsClient {
 
   // Mutation serializer: tail of the promise chain (mutations queue behind this).
   private mutationTail: Promise<unknown> = Promise.resolve();
+
+  constructor(private readonly observability?: Observability) {}
 
   // ---------------------------------------------------------------------------
   // Public API
@@ -215,13 +227,25 @@ export class BeadsClient {
 
   /** Raw bd subprocess invocation — lock acquisition + execa. */
   private async invoke(finalArgs: string[], options: BdInvokeOptions): Promise<BdResult> {
-    const raw = await withBdCliLock(async () => {
+    const { value: raw, lockWaitStartMs, lockAcquiredMs } = await withBdCliLock(async () => {
       return execa('bd', finalArgs, {
         input: options.input,
         maxBuffer: BeadsDefaults.MAX_BUFFER_BYTES,
         timeout: BeadsDefaults.CLI_TIMEOUT_MS
       });
     }, options.root);
+
+    // Emit a lock-wait span so dashboards can track bd CLI contention.
+    // Duration = time from wait-start to lock-acquired (excludes the bd execution itself).
+    // The orr_else.bead_id / state_id attrs are added automatically by recordCompletedSpan
+    // from env vars; 'bd.command' captures the first arg for grouping in dashboards.
+    try {
+      this.observability?.recordCompletedSpan(SpanName.BEADS_LOCK_WAIT, {
+        'bd.command': finalArgs[0] ?? ''
+      }, lockWaitStartMs, lockAcquiredMs);
+    } catch {
+      // Span emission is best-effort — never block the bd invocation.
+    }
 
     return { stdout: raw.stdout, stderr: raw.stderr };
   }

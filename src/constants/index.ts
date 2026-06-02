@@ -1190,6 +1190,32 @@ export const OtelAttr = {
 } as const;
 
 /**
+ * OTEL span names for key Orr Else operations.
+ * Named constants eliminate magic strings and serve as the single source of
+ * truth for span names referenced in tests and dashboards.
+ */
+export const SpanName = {
+  /** LLM model turn — duration = endTimeMs - startTimeMs of the turn. */
+  LLM_TURN: 'llm_turn',
+  /** Time spent waiting to acquire the cross-process bd CLI lock. */
+  BEADS_LOCK_WAIT: 'beads_lock_wait',
+  /** Teammate process spawn (tmux pane creation). */
+  TEAMMATE_SPAWN: 'teammate_spawn',
+  /**
+   * Verifier / quality-check run duration.
+   * Span is emitted from quality.ts (run_quality_checks tool execute path).
+   */
+  VERIFIER_RUN: 'verifier_run',
+  /**
+   * Bead merge + close (git merge-and-commit + bd close) combined duration.
+   * Span is emitted from git.ts (merge_and_commit tool execute path).
+   */
+  BEAD_MERGE_CLOSE: 'bead_merge_close',
+  /** Signal acknowledgement posted from a worker teammate to the coordinator. */
+  SIGNAL_ACK: 'signal_ack'
+} as const;
+
+/**
  * Defaults
  */
 export const PathContextDefaults = {
