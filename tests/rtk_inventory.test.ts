@@ -10,6 +10,8 @@
  *  5. NO assertion requires all tools to expose uniform return keys
  *     (structuredResult / resultPreview / outputArchive).
  *  6. Each inventory entry has the mandatory fields populated and valid values.
+ *  7. No inventory entry carries a byteBudget or any other generic byte-cap field.
+ *  8. Every entry has rawOutputLocation + deterministicCompaction + schemaTypeName + skillPath.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -18,9 +20,9 @@ import {
   RTK_INVENTORY_BY_NAME,
   checkRtkInventoryCoverage,
   getRtkContractEntry,
-  type RtkArchiveStrategy,
   type RtkContractEntry,
   type RtkInventoryViolation,
+  type RtkRawOutputLocation,
   type RtkToolClass
 } from '../src/core/RtkContract.js';
 import {
@@ -41,35 +43,51 @@ const VALID_TOOL_CLASSES: Set<RtkToolClass> = new Set([
   'project_configured'
 ]);
 
-const VALID_ARCHIVE_STRATEGIES: Set<RtkArchiveStrategy> = new Set([
-  'none',
-  'byte_budget_cap',
-  'structured_preview',
-  'archive_with_ref',
-  'sampling',
-  'pass_through'
+const VALID_RAW_OUTPUT_LOCATIONS: Set<RtkRawOutputLocation> = new Set([
+  'tool_calls_dir',
+  'tool_output_dir',
+  'none_minimal'
 ]);
 
+/**
+ * Generic byte-cap field names that must NOT appear on any inventory entry.
+ * See docs/raw-output-contract.md for the full forbidden list.
+ */
+const FORBIDDEN_BYTE_CAP_FIELDS: readonly string[] = [
+  'byteBudget',
+  'outputLimit',
+  'inlineResultBytes',
+  'inlineResultLimit',
+];
+
 function assertEntryShape(entry: RtkContractEntry): void {
+  // toolName
   expect(typeof entry.toolName).toBe('string');
   expect(entry.toolName.length).toBeGreaterThan(0);
 
+  // toolClass
   expect(VALID_TOOL_CLASSES.has(entry.toolClass)).toBe(true);
 
+  // owningFile
   expect(typeof entry.owningFile).toBe('string');
-  expect(entry.owningFile.startsWith('src/')).toBe(true);
+  expect(entry.owningFile.startsWith('src/') || entry.owningFile === 'harness.yaml').toBe(true);
 
+  // schemaTypeName
   expect(typeof entry.schemaTypeName).toBe('string');
   expect(entry.schemaTypeName.length).toBeGreaterThan(0);
 
+  // skillPath
   expect(typeof entry.skillPath).toBe('string');
   expect(entry.skillPath.startsWith('.pi/skills/')).toBe(true);
 
-  expect(typeof entry.byteBudget).toBe('number');
-  expect(entry.byteBudget).toBeGreaterThanOrEqual(0);
+  // rawOutputLocation
+  expect(typeof entry.rawOutputLocation).toBe('string');
+  expect(VALID_RAW_OUTPUT_LOCATIONS.has(entry.rawOutputLocation)).toBe(true);
 
-  expect(VALID_ARCHIVE_STRATEGIES.has(entry.archiveStrategy)).toBe(true);
+  // deterministicCompaction
+  expect(typeof entry.deterministicCompaction).toBe('boolean');
 
+  // mutating
   expect(typeof entry.mutating).toBe('boolean');
 }
 
@@ -295,5 +313,91 @@ describe('RTK inventory — structural integrity', () => {
     for (const name of Object.values(BuiltInToolName)) {
       expect(getRtkContractEntry(name), `getRtkContractEntry('${name}')`).toBeDefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. No byte-cap fields
+//    No inventory entry uses a byteBudget or any other generic byte-cap field.
+//    See docs/raw-output-contract.md for the full forbidden list.
+// ---------------------------------------------------------------------------
+
+describe('RTK inventory — no byte-cap fields', () => {
+  it('no entry carries a byteBudget field', () => {
+    for (const entry of RTK_INVENTORY) {
+      expect(
+        Object.prototype.hasOwnProperty.call(entry, 'byteBudget'),
+        `entry for "${entry.toolName}" must not have a byteBudget field`
+      ).toBe(false);
+    }
+  });
+
+  it.each(FORBIDDEN_BYTE_CAP_FIELDS)(
+    'no entry carries the forbidden cap field "%s"',
+    (field) => {
+      for (const entry of RTK_INVENTORY) {
+        expect(
+          Object.prototype.hasOwnProperty.call(entry, field),
+          `entry for "${entry.toolName}" must not have a "${field}" field`
+        ).toBe(false);
+      }
+    }
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 8. Required new fields: rawOutputLocation + deterministicCompaction
+// ---------------------------------------------------------------------------
+
+describe('RTK inventory — required new fields', () => {
+  it('every entry has a rawOutputLocation field with a valid value', () => {
+    for (const entry of RTK_INVENTORY) {
+      expect(
+        VALID_RAW_OUTPUT_LOCATIONS.has(entry.rawOutputLocation),
+        `entry for "${entry.toolName}" must have a valid rawOutputLocation`
+      ).toBe(true);
+    }
+  });
+
+  it('every entry has a deterministicCompaction boolean field', () => {
+    for (const entry of RTK_INVENTORY) {
+      expect(
+        typeof entry.deterministicCompaction,
+        `entry for "${entry.toolName}" must have deterministicCompaction: boolean`
+      ).toBe('boolean');
+    }
+  });
+
+  it('every entry has a non-empty schemaTypeName', () => {
+    for (const entry of RTK_INVENTORY) {
+      expect(
+        entry.schemaTypeName.length,
+        `entry for "${entry.toolName}" must have a non-empty schemaTypeName`
+      ).toBeGreaterThan(0);
+    }
+  });
+
+  it('every entry has a skillPath rooted at .pi/skills/', () => {
+    for (const entry of RTK_INVENTORY) {
+      expect(
+        entry.skillPath.startsWith('.pi/skills/'),
+        `entry for "${entry.toolName}" must have a skillPath under .pi/skills/`
+      ).toBe(true);
+    }
+  });
+
+  it('tool_calls_dir or tool_output_dir entries may declare deterministicCompaction independently of none_minimal entries', () => {
+    // Tools with rawOutputLocation=tool_calls_dir or tool_output_dir archive
+    // complete raw output; their deterministicCompaction flag describes whether
+    // the tool reduces raw output into its schema before returning.
+    // Tools with rawOutputLocation=none_minimal are already minimal (their native
+    // result IS the schema); deterministicCompaction is therefore informational only
+    // for those entries and may be either value.
+    const archivingEntries = RTK_INVENTORY.filter(
+      e => e.rawOutputLocation === 'tool_calls_dir' || e.rawOutputLocation === 'tool_output_dir'
+    );
+    // No structural invariant to check here beyond valid boolean — already covered
+    // by assertEntryShape and the deterministicCompaction boolean test above.
+    expect(archivingEntries.length).toBeGreaterThan(0);
   });
 });

@@ -8,9 +8,10 @@
  * outputArchive are project-tool compatibility fields that remain where they are
  * already used; they are NOT required by any other tool class.
  *
- * The harness MAY add runtime-path injection, timeouts, telemetry, accounting,
- * and last-resort byte-budget caps.  It MUST NOT require every tool to return a
- * generic structure.
+ * The harness manages raw-output persistence (PI_TOOL_CALL_DIR), path injection,
+ * timeouts, and telemetry.  It MUST NOT impose generic byte caps, output-limit
+ * knobs, or truncation envelopes on every tool.  See docs/raw-output-contract.md
+ * for the full policy statement.
  *
  * INVENTORY COVERAGE
  * ------------------
@@ -47,41 +48,47 @@ export type RtkToolClass =
   | 'project_configured';
 
 /**
- * How the tool minimises model-facing token cost for large raw outputs.
+ * Where the complete raw output of a tool invocation is persisted by the harness.
  *
- *   none                — output is inherently small; no strategy required
- *   byte_budget_cap     — harness enforces a hard byte budget before returning
- *   structured_preview  — returns a compact preview/counts envelope instead of raw
- *   archive_with_ref    — raw output archived; model receives an opaque artifactRef
- *   sampling            — representative samples returned; remainder archived
- *   pass_through        — raw output passed unchanged; caller/harness responsible
+ *   tool_calls_dir  — written to PI_TOOL_CALL_DIR under the standard
+ *                     {beadId}/{stateId}/{actionId}/{toolName}/{toolInvocationId} path.
+ *                     This is the default for all command, MCP, and diagnostic tools
+ *                     whose raw output may be large.
+ *   tool_output_dir — written to PI_TOOL_OUTPUT_DIR (used for structured artifact
+ *                     exports such as JSONL dumps where the output is a named file).
+ *   none_minimal    — the tool's entire native result is already minimal (e.g. a
+ *                     pure acknowledgement / signal with no data payload); no
+ *                     separate archive step is required.
  */
-export type RtkArchiveStrategy =
-  | 'none'
-  | 'byte_budget_cap'
-  | 'structured_preview'
-  | 'archive_with_ref'
-  | 'sampling'
-  | 'pass_through';
+export type RtkRawOutputLocation =
+  | 'tool_calls_dir'
+  | 'tool_output_dir'
+  | 'none_minimal';
 
 /**
  * Per-tool RTK contract entry.
  *
  * Fields
  * ------
- *   toolName          Tool name string as registered with Pi.
- *   toolClass         Category (see RtkToolClass).
- *   owningFile        Source file that defines/registers the tool (repo-relative).
- *   schemaTypeName    TypeScript type/interface name for the tool's return schema, or
- *                     'untyped_record' when the return is Record<string,unknown>.
- *   skillPath         Path to the SKILL.md that documents model-facing usage
- *                     (planned path prefix '.pi/skills/' when file not yet created).
- *   byteBudget        Approximate model-facing byte budget for the inline result.
- *                     0 = not applicable (tool returns an acknowledgement/signal,
- *                     not data). Negative values are not used.
- *   archiveStrategy   Token-minimisation approach for large outputs.
- *   mutating          Whether calling the tool causes a side-effect (writes to
- *                     git, beads, filesystem, tmux, …).
+ *   toolName              Tool name string as registered with Pi.
+ *   toolClass             Category (see RtkToolClass).
+ *   owningFile            Source file that defines/registers the tool (repo-relative).
+ *   schemaTypeName        TypeScript type/interface name for the tool's return schema, or
+ *                         'untyped_record' when the return is Record<string,unknown>.
+ *                         Schema types are owned by each tool (or Cerdiwen for project tools).
+ *   skillPath             Path to the SKILL.md that documents model-facing usage
+ *                         (planned path prefix '.pi/skills/' when file not yet created).
+ *   rawOutputLocation     Where the harness persists the complete raw output of each
+ *                         invocation (see RtkRawOutputLocation).
+ *   deterministicCompaction  Whether this tool performs deterministic, non-LLM compaction
+ *                         of its raw output into its minimal schema before returning.
+ *                         true  — the tool itself reduces raw output to its schema without
+ *                                 any LLM involvement (e.g. structured extraction, field
+ *                                 selection, counting).
+ *                         false — the tool passes raw output unchanged; harness or caller
+ *                                 is responsible for any further reduction.
+ *   mutating              Whether calling the tool causes a side-effect (writes to
+ *                         git, beads, filesystem, tmux, …).
  */
 export interface RtkContractEntry {
   readonly toolName: string;
@@ -89,8 +96,8 @@ export interface RtkContractEntry {
   readonly owningFile: string;
   readonly schemaTypeName: string;
   readonly skillPath: string;
-  readonly byteBudget: number;
-  readonly archiveStrategy: RtkArchiveStrategy;
+  readonly rawOutputLocation: RtkRawOutputLocation;
+  readonly deterministicCompaction: boolean;
   readonly mutating: boolean;
 }
 
@@ -110,6 +117,8 @@ export interface RtkContractEntry {
  *  - No entry may demand a structuredResult/resultPreview/outputArchive return
  *    shape unless the tool is a project-configured command/mcp tool that already
  *    uses those compatibility fields.
+ *  - No entry uses a byteBudget or any other generic byte-cap field — see
+ *    docs/raw-output-contract.md for the full forbidden list.
  */
 export const RTK_INVENTORY: readonly RtkContractEntry[] = [
 
@@ -124,8 +133,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -135,8 +144,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -146,8 +155,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -157,8 +166,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -168,8 +177,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -179,8 +188,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -190,8 +199,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/reviewer/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -201,8 +210,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -212,8 +221,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -223,8 +232,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -234,8 +243,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/artifact-evidence/SKILL.md',
-    byteBudget: 2048,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -245,9 +254,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/artifact-evidence/SKILL.md',
-    // ArtifactQueryDefaults.RESULT_MAX_BYTES = 8 KiB
-    byteBudget: 8192,
-    archiveStrategy: 'sampling',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -257,8 +265,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -268,9 +276,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // PathContextDefaults.MAX_SLICE_LINES * ~80 chars/line ≈ 32 KiB cap
-    byteBudget: 32768,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -280,8 +287,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'structured_preview',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -291,8 +298,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/extension.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 2048,
-    archiveStrategy: 'structured_preview',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -308,8 +315,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -319,9 +326,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // BeadsDefaults.INLINE_JSONL_EXPORT_PREVIEW_BYTES = 4 KiB per bead, N beads
-    byteBudget: 8192,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -331,8 +337,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 8192,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -342,9 +348,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // BeadsDefaults.INLINE_JSONL_EXPORT_PREVIEW_BYTES = 4 KiB preview
-    byteBudget: 4096,
-    archiveStrategy: 'structured_preview',
+    rawOutputLocation: 'tool_output_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -354,8 +359,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -365,8 +370,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -376,8 +381,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -387,9 +392,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // StateChartToolDefaults drives bounded projections
-    byteBudget: 8192,
-    archiveStrategy: 'structured_preview',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -399,8 +403,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -410,8 +414,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -421,8 +425,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -432,8 +436,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/bd.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -445,8 +449,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/git.ts',
     schemaTypeName: 'WorktreeResult',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -456,8 +460,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/git.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -467,8 +471,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/git.ts',
     schemaTypeName: 'MergeResult',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 2048,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: true
   },
 
@@ -480,8 +484,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/mailbox.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -491,8 +495,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/mailbox.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -504,8 +508,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/quality.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 8192,
-    archiveStrategy: 'structured_preview',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
     mutating: false
   },
 
@@ -515,8 +519,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/quality.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -528,8 +532,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/teammates.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -541,8 +545,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/plugins/meta.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 1024,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -557,9 +561,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // NativeReadPolicyDefaults.MAX_LIMIT_LINES * ~80 chars = 32 KiB ceiling
-    byteBudget: 32768,
-    archiveStrategy: 'pass_through',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -569,8 +572,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 512,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -580,8 +583,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 8192,
-    archiveStrategy: 'pass_through',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -591,8 +594,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 8192,
-    archiveStrategy: 'pass_through',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -602,8 +605,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 4096,
-    archiveStrategy: 'pass_through',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -613,8 +616,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 16384,
-    archiveStrategy: 'pass_through',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: true
   },
 
@@ -624,9 +627,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    // NativeReadPolicyDefaults.MAX_LIMIT_LINES * ~80 chars = 32 KiB ceiling
-    byteBudget: 32768,
-    archiveStrategy: 'byte_budget_cap',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: false,
     mutating: false
   },
 
@@ -636,8 +638,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     owningFile: 'src/constants/index.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
-    byteBudget: 256,
-    archiveStrategy: 'none',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
     mutating: true
   }
 
@@ -652,8 +654,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   //   owningFile: 'harness.yaml',
   //   schemaTypeName: 'ModelFacingProjectToolResult',
   //   skillPath: '.pi/skills/tool-routing/SKILL.md',
-  //   byteBudget: 4096,  // ProjectToolDefaults.INLINE_RESULT_BYTES
-  //   archiveStrategy: 'archive_with_ref',  // outputArchive + artifactRef
+  //   rawOutputLocation: 'tool_calls_dir',
+  //   deterministicCompaction: true,  // set false for pass-through commands
   //   mutating: false  // set true for write/mutation commands
   // }
   //
