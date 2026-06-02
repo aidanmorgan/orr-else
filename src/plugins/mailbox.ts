@@ -11,7 +11,7 @@ export function createMailboxPlugin(eventStore: EventStore, projectRoot: string 
   tools: [
     {
       name: PluginToolName.SEND_MAILBOX_MESSAGE,
-      description: "Send an asynchronous message to the Team Lead or another teammate.",
+      description: "Send an asynchronous message to the Team Lead or another teammate. Returns a minimal ack with the new message ID.",
       parameters: Type.Object({
         to: Type.String({ description: "Target recipient (e.g., 'TeamLead')" }),
         beadId: Type.String(),
@@ -20,13 +20,14 @@ export function createMailboxPlugin(eventStore: EventStore, projectRoot: string 
       }),
       execute: async (params: unknown) => {
         const { to, beadId, type, content } = (params && typeof params === 'object' ? params : {}) as { to: string; beadId: string; type: MailboxMessageType; content: string };
-        await mailbox.sendMessage({ from: MailboxDefaults.TEAMMATE_SENDER, to, beadId, type, content });
-        return `Message sent to ${to}.`;
+        const messageId = await mailbox.sendMessage({ from: MailboxDefaults.TEAMMATE_SENDER, to, beadId, type, content });
+        // Minimal ack: id + status only. Body is archived by the harness.
+        return { messageId, status: 'sent' as const };
       }
     },
     {
       name: PluginToolName.CHECK_MAILBOX,
-      description: "Read pending messages addressed to you.",
+      description: "List pending messages addressed to you. Returns message IDs, routing metadata (from/to/subject/timestamp), and count — no inline bodies. Use fetch_mailbox_message to retrieve a specific body.",
       parameters: Type.Object({
         recipient: Type.String({ description: "Your name (e.g., 'TeamLead')" })
       }),
@@ -34,10 +35,19 @@ export function createMailboxPlugin(eventStore: EventStore, projectRoot: string 
         // recipient is declared in the parameters schema but the actual lookup uses the worker env var
         void params; // params shape: { recipient: string } — unused at runtime; lookup uses WORKER_ID
         const workerId = process.env[EnvVars.WORKER_ID] || Defaults.API_HOST; // Fallback
-        const messages = await mailbox.readMessagesFor(workerId);
-        if (messages.length === 0) return MailboxDefaults.EMPTY_MESSAGE;
-
-        return messages;
+        // Return routing-only result: ids + metadata, no body content.
+        return await mailbox.listMessagesFor(workerId);
+      }
+    },
+    {
+      name: 'fetch_mailbox_message',
+      description: "Retrieve the full body of a single mailbox message by ID. Use this after check_mailbox returns a message ID you need to act on.",
+      parameters: Type.Object({
+        messageId: Type.String({ description: "The message ID returned by check_mailbox." })
+      }),
+      execute: async (params: unknown) => {
+        const { messageId } = (params && typeof params === 'object' ? params : {}) as { messageId: string };
+        return await mailbox.fetchMessage(messageId);
       }
     }
   ] satisfies RuntimeTool[]

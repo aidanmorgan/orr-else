@@ -28,12 +28,14 @@ describe('ToolRegistry composition', () => {
       PluginToolName.SPAWN_TEAMMATE,
       PluginToolName.SEND_MAILBOX_MESSAGE,
       PluginToolName.CHECK_MAILBOX,
+      'fetch_mailbox_message',
       PluginToolName.CREATE_NEW_PLUGIN
     ]);
 
     expect(registry.getStateTools().map(tool => tool.name)).toEqual([
       PluginToolName.SEND_MAILBOX_MESSAGE,
       PluginToolName.CHECK_MAILBOX,
+      'fetch_mailbox_message',
       PluginToolName.RUN_QUALITY_CHECKS,
       PluginToolName.COMPRESS_SESSION_LOGS,
       BuiltInToolName.SIGNAL_COMPLETION
