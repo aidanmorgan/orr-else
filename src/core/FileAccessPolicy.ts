@@ -24,6 +24,8 @@ interface MutationContext {
   projectRoot: string;
   worktreePath: string;
   cwd: string;
+  /** Absolute path to the framework root (ORR_ELSE_FRAMEWORK_ROOT), if configured. */
+  frameworkRoot?: string;
 }
 
 interface PolicyResult {
@@ -135,6 +137,14 @@ export class FileAccessPolicy {
       return null;
     }
 
+    // (mis) Early framework-root write-set rejection: give a clear, named rejection
+    // before the generic worktree-scope error when the target is under the framework root.
+    const frameworkRootRejection = this.frameworkRootWriteSetRejection(targetPath, context, `\`${event.toolName}\``);
+    if (frameworkRootRejection) {
+      await this.recordRejection(event, context, targetPath, frameworkRootRejection);
+      return { rejection: frameworkRootRejection };
+    }
+
     const scopeRejection = this.worktreeScopeRejection(targetPath, context, `\`${event.toolName}\``, 'mutate');
     if (scopeRejection) {
       await this.recordRejection(event, context, targetPath, scopeRejection);
@@ -199,6 +209,12 @@ export class FileAccessPolicy {
       await this.recordRejection(event, context, target.text, operationalRejection);
       return { rejection: operationalRejection };
     }
+    // (mis) Early framework-root write-set rejection for shell targets.
+    const frameworkRootRejection = this.frameworkRootWriteSetRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
+    if (frameworkRootRejection) {
+      await this.recordRejection(event, context, target.text, frameworkRootRejection);
+      return { rejection: frameworkRootRejection };
+    }
     const scopeRejection = this.worktreeScopeRejection(target.text, context, `\`${NativePiToolName.BASH}\``, 'mutate');
     if (scopeRejection) {
       await this.recordRejection(event, context, target.text, scopeRejection);
@@ -256,12 +272,14 @@ export class FileAccessPolicy {
   }
 
   private context(): MutationContext {
+    const frameworkRootEnv = this.env.env(EnvVars.FRAMEWORK_ROOT);
     return {
       beadId: this.env.env(EnvVars.BEAD_ID),
       stateId: this.env.env(EnvVars.STATE_ID),
       projectRoot: this.env.env(EnvVars.PROJECT_ROOT) || this.projectRoot,
       worktreePath: this.env.env(EnvVars.WORKTREE_PATH) || '',
-      cwd: process.cwd()
+      cwd: process.cwd(),
+      frameworkRoot: frameworkRootEnv || undefined
     };
   }
 
@@ -382,6 +400,46 @@ export class FileAccessPolicy {
       if (!token.startsWith('-')) return token;
     }
     return undefined;
+  }
+
+  // (mis) Framework-root write-set early rejection.
+  //
+  // When a Cerdiwen worker targets a path that is inside the framework root
+  // (ORR_ELSE_FRAMEWORK_ROOT) but outside the active worktree, reject EARLY
+  // with a clear framework-root-contract message rather than a confusing
+  // generic "escapes worktree" error.
+  //
+  // SECURITY: this is HARDENING only — it does NOT broaden what is allowed.
+  // The worktreeScopeRejection that follows still applies to all other paths
+  // outside the worktree, so the security surface is strictly unchanged.
+  // canonicalPath + isInside are the same safe idiom used throughout this class.
+  //
+  // The full "supported route" for framework-root changes (finalize through
+  // the harness repo + Cerdiwen project-tool root-contract agreement) is a
+  // dual-repo fix that requires live cerdiwen context and is explicitly
+  // OUT OF SCOPE for this harness-side bead.
+  private frameworkRootWriteSetRejection(
+    targetPath: string,
+    context: MutationContext,
+    toolLabel: string
+  ): string | null {
+    if (!context.frameworkRoot) return null;
+    const resolvedPath = this.resolvePath(targetPath, context.cwd);
+    if (!this.isInside(resolvedPath, context.frameworkRoot)) return null;
+    // Path IS under the framework root. If it's also inside the worktree,
+    // allow it to proceed through normal policy (no early rejection needed).
+    if (context.worktreePath && this.isInside(resolvedPath, context.worktreePath)) return null;
+    // Path is under framework root but outside the active worktree.
+    // Give an explicit early rejection naming the framework-root contract.
+    return [
+      `PROTOCOL VIOLATION: ${toolLabel} attempted to write to \`${targetPath}\`,`,
+      `which is inside the framework root (\`${context.frameworkRoot}\`)`,
+      'but outside the active Bead worktree.',
+      'Framework-root paths must be finalized through the harness repository, not through a Cerdiwen worktree.',
+      'The supported route for framework-root changes (harness-repo finalization + Cerdiwen project-tool',
+      'root-contract agreement) is a dual-repo operation — see the framework-root contract documentation.',
+      'If you intended to write a worktree file, use a path inside the active Bead worktree instead.'
+    ].join(' ');
   }
 
   private worktreeScopeRejection(

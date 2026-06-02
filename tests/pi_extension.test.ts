@@ -2099,3 +2099,202 @@ states:
     }
   });
 });
+
+// ── Part A (mis): zero-target scan gate tests ─────────────────────────────────
+//
+// A scan result with scannedTargetCount === 0 must NOT satisfy a required
+// verifier gate even when its status field is PASSED.  The model must rerun
+// the scan against at least one real target for the evidence to count.
+
+describe('signal_completion gate — zero-target scan as required verifier evidence (mis Part A)', () => {
+  it('rejects SUCCESS when a required tool returned status=PASSED but scannedTargetCount=0 (vacuous evidence)', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-zero-target-gate-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // The tool returns status=PASSED but scannedTargetCount=0 — vacuous scan.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: AdversarialPreReview
+tools:
+  - name: zero_target_verifier
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'zero_target_verifier', status: 'PASSED', scannedTargetCount: 0 }));"
+states:
+  AdversarialPreReview:
+    identity: { role: "Reviewer", expertise: "Review", constraints: [] }
+    baseInstructions: "Review"
+    actions:
+      - id: adversarial-pre-review
+        type: prompt
+        prompt: "Review"
+    requiredTools: [zero_target_verifier]
+    transitions: { SUCCESS: "completed", FAILURE: "AdversarialPreReview" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-zero-target-gate';
+      process.env[EnvVars.STATE_ID] = 'AdversarialPreReview';
+      process.env[EnvVars.ACTION_ID] = 'adversarial-pre-review';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const zeroTargetTool = harness.tools.find((t: any) => t.name === 'zero_target_verifier');
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Invoke the tool: returns PASSED but with zero scanned targets.
+      await zeroTargetTool.execute('zero-scan', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // signal_completion with SUCCESS should be REJECTED — the zero-target scan
+      // is not accepted as passing verifier evidence.
+      const completion = await signalCompletion.execute('signal-success', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(completion.details).toContain('REJECTED: Protocol Violation');
+      // Must surface the zero-target scan as the blocking reason.
+      expect(completion.details).toContain('zero_target_verifier');
+      expect(completion.details).toMatch(/zero.scanned.targets|zero-target scan|zero scanned targets/i);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts SUCCESS when a required tool returned status=PASSED with scannedTargetCount>=1 (real evidence — no regression)', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-nonzero-target-gate-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    const receivedEvents: unknown[] = [];
+    // Tool returns status=PASSED with scannedTargetCount=2 — real scan evidence.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: AdversarialPreReview
+tools:
+  - name: real_target_verifier
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'real_target_verifier', status: 'PASSED', scannedTargetCount: 2 }));"
+states:
+  AdversarialPreReview:
+    identity: { role: "Reviewer", expertise: "Review", constraints: [] }
+    baseInstructions: "Review"
+    actions:
+      - id: adversarial-pre-review
+        type: prompt
+        prompt: "Review"
+    requiredTools: [real_target_verifier]
+    transitions: { SUCCESS: "completed", FAILURE: "AdversarialPreReview" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let server: import('node:http').Server | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-nonzero-target-gate';
+      process.env[EnvVars.STATE_ID] = 'AdversarialPreReview';
+      process.env[EnvVars.ACTION_ID] = 'adversarial-pre-review';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      server = await startSignalAckServer(receivedEvents);
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const realTargetTool = harness.tools.find((t: any) => t.name === 'real_target_verifier');
+      const submitCheckpoint = harness.tools.find((t: any) => t.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Invoke the tool with real (non-zero) scan targets.
+      await realTargetTool.execute('real-scan', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Submit a checkpoint so signal_completion can proceed.
+      await submitCheckpoint.execute('checkpoint', { summary: 'checkpoint' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // signal_completion with SUCCESS should ACCEPT — scannedTargetCount=2 is real evidence.
+      const completion = await signalCompletion.execute('signal-real-success', {
+        outcome: 'SUCCESS',
+        summary: 'done with real targets'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must NOT be rejected on zero-target grounds.
+      expect(completion.details).not.toContain('zero.scanned.targets');
+      expect(completion.details).not.toContain('zero-target scan');
+      // Should succeed (or fail for unrelated gate reasons — the key assertion is
+      // that the zero-target check did NOT fire).
+      const wasRejectedForZeroTargets =
+        typeof completion.details === 'string'
+        && /zero.scanned.targets|zero-target scan|zero scanned targets/i.test(completion.details);
+      expect(wasRejectedForZeroTargets).toBe(false);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
