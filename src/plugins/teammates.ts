@@ -16,7 +16,7 @@ import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
-import { resolvePiSkillPaths, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
+import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
 import {
   Component,
   EnvVars,
@@ -444,7 +444,8 @@ export class TeammateFactory {
       const config = await this.configLoader.load();
       const llm = this.configLoader.resolveLLMConfig(stateId, config);
       const workerExtensions = resolveWorkerExtensionPaths(config, projectRoot, extensionPath);
-      const skillPaths = resolvePiSkillPaths(config, projectRoot);
+      const resolvedSkills = resolvePiSkillPathsForState(config, projectRoot, stateId);
+      const skillPaths = resolvedSkills.map(s => s.path);
       const configPath = this.configLoader.getConfigPath();
       const workerArgs = resolveWorkerArgs(config, { configPath, projectRoot, worktreePath });
       const apiPort = this.apiAddress.port || Defaults.API_PORT;
@@ -495,6 +496,7 @@ export class TeammateFactory {
       ];
 
       const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
+      const skillNames = resolvedSkills.map(s => s.name);
       Logger.info(Component.FACTORY, 'Spawning Orr Else teammate in tmux', {
         beadId,
         stateId,
@@ -502,6 +504,7 @@ export class TeammateFactory {
         provider: llm.provider,
         model: llm.model,
         skillCount: skillPaths.length,
+        skillNames,
         workerExtensionCount: workerExtensions.length,
         workerArgsCount: workerArgs.length,
         runDir
@@ -514,6 +517,7 @@ export class TeammateFactory {
         provider: llm.provider,
         model: llm.model,
         thinking: llm.thinking,
+        skillNames,
         skillPaths,
         workerExtensions,
         workerArgs,

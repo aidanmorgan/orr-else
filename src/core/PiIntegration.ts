@@ -111,6 +111,78 @@ export function resolvePiSkillPaths(config: HarnessConfig, projectRoot: string):
   });
 }
 
+/**
+ * Convention: skill name "foo" maps to <projectRoot>/.pi/skills/foo/SKILL.md
+ */
+const SKILL_FILE_NAME = 'SKILL.md';
+const SKILLS_BASE_DIR = '.pi/skills';
+
+export interface ResolvedSkill {
+  name: string;
+  path: string;
+}
+
+/**
+ * Resolve skill paths for a specific state worker.
+ *
+ * Resolution order:
+ *  1. If the named state exists and has a non-empty `skills` array, resolve each
+ *     skill name to <projectRoot>/.pi/skills/<name>/SKILL.md. Missing skills throw.
+ *  2. Global skills from settings.pi.skillPaths are appended after state skills.
+ *  3. Fallback (no stateId, unknown state, or empty state.skills): behaves like
+ *     resolvePiSkillPaths — returns only the global skillPaths list.
+ *
+ * The existing resolvePiSkillPaths is left unchanged so extension.ts callers are
+ * unaffected.
+ */
+function resolveGlobalSkills(config: HarnessConfig, projectRoot: string, excludePaths?: Set<string>): ResolvedSkill[] {
+  return unique(config.settings.pi?.skillPaths || []).flatMap(configuredPath => {
+    const resolvedPath = resolveProjectPath(projectRoot, configuredPath);
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(`Configured Pi skill path does not exist: ${configuredPath} (${resolvedPath})`);
+    }
+    if (excludePaths?.has(resolvedPath)) return [];
+    return [{ name: path.basename(path.dirname(resolvedPath)), path: resolvedPath }];
+  });
+}
+
+export function resolvePiSkillPathsForState(
+  config: HarnessConfig,
+  projectRoot: string,
+  stateId?: string
+): ResolvedSkill[] {
+  const skillsBaseDir = path.resolve(projectRoot, SKILLS_BASE_DIR);
+  const state = stateId ? config.states?.[stateId] : undefined;
+  const stateSkillNames = state?.skills && state.skills.length > 0 ? state.skills : undefined;
+
+  if (stateSkillNames) {
+    // State-scoped resolution: map each skill name to its SKILL.md path.
+    const stateSkills: ResolvedSkill[] = unique(stateSkillNames).map(skillName => {
+      const skillPath = path.join(projectRoot, SKILLS_BASE_DIR, skillName, SKILL_FILE_NAME);
+      // Guard against path-traversal: the resolved path must remain inside .pi/skills.
+      if (!path.resolve(skillPath).startsWith(skillsBaseDir + path.sep)) {
+        throw new Error(
+          `State "${stateId}" references skill "${skillName}" whose resolved path escapes the skills directory. ` +
+          `Skill names must not contain path separators or ".." segments.`
+        );
+      }
+      if (!fs.existsSync(skillPath)) {
+        throw new Error(
+          `State "${stateId}" references skill "${skillName}" but no SKILL.md was found at: ${skillPath}`
+        );
+      }
+      return { name: skillName, path: skillPath };
+    });
+
+    // Append global skills (settings.pi.skillPaths), deduplicating by resolved path.
+    const statePaths = new Set(stateSkills.map(s => s.path));
+    return [...stateSkills, ...resolveGlobalSkills(config, projectRoot, statePaths)];
+  }
+
+  // Fallback: behave exactly like the global resolvePiSkillPaths.
+  return resolveGlobalSkills(config, projectRoot);
+}
+
 export function resolveWorkerArgs(
   config: HarnessConfig,
   context: TemplateContext

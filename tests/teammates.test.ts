@@ -561,6 +561,145 @@ states:
   });
 
   // ---------------------------------------------------------------------------
+  // State-scoped skill resolution — spawn uses only matching state's skills
+  // ---------------------------------------------------------------------------
+
+  it('spawn uses state-scoped skills when state.skills is configured', async () => {
+    // Create a state-scoped skill SKILL.md for the 'Planning' state.
+    const plannerSkillPath = path.join(root, '.pi', 'skills', 'planner', 'SKILL.md');
+    fs.mkdirSync(path.dirname(plannerSkillPath), { recursive: true });
+    fs.writeFileSync(plannerSkillPath, '# Planner Skill\n');
+
+    // Also create a reviewer skill to prove it is NOT injected for Planning spawn.
+    const reviewerSkillPath = path.join(root, '.pi', 'skills', 'reviewer', 'SKILL.md');
+    fs.mkdirSync(path.dirname(reviewerSkillPath), { recursive: true });
+    fs.writeFileSync(reviewerSkillPath, '# Reviewer Skill\n');
+
+    // Config: state Planning has skills: ['planner']; no global skillPaths.
+    fs.writeFileSync(configPath, `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    skills: ['planner']
+    actions: []
+    transitions: { SUCCESS: completed }
+  Review:
+    identity: { role: reviewer, expertise: review, constraints: [] }
+    baseInstructions: review
+    skills: ['reviewer']
+    actions: []
+    transitions: { SUCCESS: completed }
+`);
+    configLoader.reset();
+
+    const records: Array<{ event: string; data: any }> = [];
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    const result = await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+    const command = (splitCall![1] as string[])[splitCall![1].length - 1];
+
+    // Planner skill is injected.
+    expect(command).toContain(plannerSkillPath);
+    // Reviewer skill is NOT injected for Planning spawn.
+    expect(command).not.toContain(reviewerSkillPath);
+  });
+
+  it('spawn event records resolved skill names and paths', async () => {
+    // Create state-scoped skill file.
+    const plannerSkillPath = path.join(root, '.pi', 'skills', 'planner', 'SKILL.md');
+    fs.mkdirSync(path.dirname(plannerSkillPath), { recursive: true });
+    fs.writeFileSync(plannerSkillPath, '# Planner Skill\n');
+
+    fs.writeFileSync(configPath, `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    skills: ['planner']
+    actions: []
+    transitions: { SUCCESS: completed }
+`);
+    configLoader.reset();
+
+    const records: Array<{ event: string; data: any }> = [];
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+
+    const spawnStarted = records.find(r => r.event === 'TEAMMATE_SPAWN_STARTED');
+    expect(spawnStarted).toBeDefined();
+    // Event records both skill names and paths.
+    expect(spawnStarted!.data.skillNames).toEqual(['planner']);
+    expect(spawnStarted!.data.skillPaths).toEqual([plannerSkillPath]);
+  });
+
+  it('spawn falls back to global skillPaths when state has no skills', async () => {
+    // Global skill is already set up via configuredSkillPath in beforeEach.
+    // The Planning state in the default config has no skills array.
+    const records: Array<{ event: string; data: any }> = [];
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await factory.spawnTeammateInTmux('pi-experiment-proof' as any, 'Planning', worktreePath);
+
+    const spawnStarted = records.find(r => r.event === 'TEAMMATE_SPAWN_STARTED');
+    expect(spawnStarted).toBeDefined();
+    // Falls back to the global skill from settings.pi.skillPaths.
+    expect(spawnStarted!.data.skillPaths).toEqual([configuredSkillPath]);
+    // skill name derived from parent directory of the global path.
+    expect(spawnStarted!.data.skillNames).toEqual(['quality']);
+  });
+
+  // ---------------------------------------------------------------------------
   // WI-18 — ensureAgentsWindow catch: warn logged, spawn return value unchanged
   // ---------------------------------------------------------------------------
   it('(WI-18) warns when set-window-option fails but spawn still succeeds', async () => {

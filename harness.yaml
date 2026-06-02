@@ -85,7 +85,7 @@ states:
       change. If the requested outcome is ambiguous, stop and record the
       ambiguity in the Bead instead of guessing.
     ruleCategories: ['planner']
-    skills: ['planner']
+    skills: ['planner', 'tool-routing', 'artifact-evidence']
     checklist:
       - text: Explored codebase structure
         mandatory: true
@@ -127,7 +127,7 @@ states:
       git history, rules, and documentation. Reject any plan that is not grounded
       in the actual codebase or that violates the core/plugin boundary.
     ruleCategories: ['reviewer']
-    skills: ['reviewer']
+    skills: ['reviewer', 'tool-routing', 'artifact-evidence']
     checklist:
       - text: Independently validated planner exploration
         mandatory: true
@@ -174,7 +174,7 @@ states:
       the next fix attempt. After 5 failed verification iterations, stop and
       mark the Bead blocked with evidence.
     ruleCategories: ['implementer']
-    skills: ['implementer']
+    skills: ['implementer', 'tool-routing', 'artifact-evidence']
     contextRotThreshold: 5
     checklist:
       - text: Code changes match approved plan
@@ -215,7 +215,7 @@ states:
       incomplete, overbroad, untested, or incorrectly integrated, reject it with
       actionable feedback so the Bead returns to Implementation.
     ruleCategories: ['reviewer']
-    skills: ['reviewer']
+    skills: ['reviewer', 'tool-routing', 'artifact-evidence']
     checklist:
       - text: Verified implementation matches approved plan
         mandatory: true
