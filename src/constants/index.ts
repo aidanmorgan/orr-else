@@ -149,6 +149,9 @@ export enum DomainEventName {
   BEAD_CLAIMED = 'BEAD_CLAIMED',
   BEAD_CLOSED = 'BEAD_CLOSED',
   BEAD_CREATED = 'BEAD_CREATED',
+  /** REPLAY-ONLY / HISTORICAL: This event is no longer emitted by any live code path.
+   *  It exists solely so that old event logs containing it can still be replayed
+   *  by BeadStateProjection. No new code may record this event. */
   BEAD_METADATA_MERGED = 'BEAD_METADATA_MERGED',
   BEAD_RELEASED = 'BEAD_RELEASED',
   BEAD_STATUS_UPDATED = 'BEAD_STATUS_UPDATED',
@@ -729,11 +732,6 @@ export enum FeatureStatus {
   FAILED = 'failed'
 }
 
-export const HarnessMetadataKey = {
-  CURRENT: 'orr_else',
-  LEGACY_MICROMANAGER: 'micromanager'
-} as const;
-
 /**
  * System Component Names (for Logging)
  */
@@ -1254,7 +1252,6 @@ export const Defaults = {
   TEAMMATE_MISSING_REAP_THRESHOLD: 3,
   PROCESS_REAP_INTERVAL_MS: TimeMs.MINUTE,
   LOG_RETENTION_DAYS: 7,
-  METADATA_KEY: HarnessMetadataKey.CURRENT,
   TMUX_SESSION: 'orr-else',
   TMUX_COORDINATOR_WINDOW: 'Coordinator',
   TMUX_AGENTS_WINDOW: 'Agents',

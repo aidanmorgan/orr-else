@@ -407,6 +407,10 @@ export class BeadStateProjection {
       const data = event.data || {};
       projection.lastActivity = event.timestamp;
       switch (event.type) {
+        // REPLAY-ONLY / HISTORICAL: BEAD_METADATA_MERGED is no longer emitted by
+        // any live code path. This consumer exists solely so that old event logs
+        // containing the event can still be replayed correctly. No new code may
+        // record BEAD_METADATA_MERGED.
         case DomainEventName.BEAD_METADATA_MERGED:
           Object.assign(
             projection,

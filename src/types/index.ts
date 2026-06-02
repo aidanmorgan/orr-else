@@ -57,7 +57,6 @@ export interface BeadDependencyRecord {
   type?: string;
   created_at?: string;
   created_by?: string;
-  metadata?: string | Record<string, unknown>;
 }
 
 export interface BeadCommentRecord {
@@ -115,9 +114,6 @@ export interface BeadsIssueRecord {
   created_at?: string;
   created_by?: string;
   updated_at?: string;
-  metadata?: Record<string, unknown> & {
-    orr_else?: HarnessBeadMetadata;
-  };
   labels?: string[];
   dependencies?: BeadDependencyRecord[];
   comments?: BeadCommentRecord[];

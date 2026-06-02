@@ -501,7 +501,7 @@ async function normalizeIssues(
 }
 
 async function getIssue(client: BeadsClient, eventStore: EventStore, id: string, env: RuntimeEnvironment, root: string): Promise<BeadsIssueRecord> {
-  const result = await runBd(client, eventStore, ['show', id, '--long'], { env, root });
+  const result = await runBd(client, eventStore, ['show', id], { env, root });
   const issue = Array.isArray(result) ? result[0] : result;
   if (!issue || typeof issue !== 'object' || !(issue as Record<string, unknown>).id) throw new Error(`Bead ${id} not found`);
   return issue as BeadsIssueRecord;
@@ -703,7 +703,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
     },
     {
       name: PluginToolName.BD_GET_BEAD,
-      description: 'Retrieve the task-facing Bead record by ID via `bd show --long --json`. Uses a fast native Beads view by default; pass includeDetails=true or use bd_get_state_chart for event-store checklist, handover, action, and transition details. NOTE: Bead.status reflects the event-store projection (runtime statechart state), NOT Beads-native metadata — the event store is the single source of truth for runtime state.',
+      description: 'Retrieve the task-facing Bead record by ID via `bd show --json`. Uses a fast native Beads view by default; pass includeDetails=true or use bd_get_state_chart for event-store checklist, handover, action, and transition details. NOTE: Bead.status reflects the event-store projection (runtime statechart state), NOT Beads-native metadata — the event store is the single source of truth for runtime state.',
       parameters: Type.Object({
         id: Type.String({ description: 'The ID of the Bead' }),
         includeDetails: Type.Optional(Type.Boolean({ description: 'Include derived event-store details. Default false; prefer bd_get_state_chart for targeted statechart details.' }))
