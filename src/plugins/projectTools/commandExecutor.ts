@@ -113,11 +113,8 @@ export function isAcceptedMaxBufferFailure(definition: ProjectCommandToolConfig,
     && (error as { code?: unknown }).code === CommandErrorCode.MAX_BUFFER;
 }
 
-export function commandReturnBytes(definition: ProjectCommandToolConfig): number {
-  if (typeof definition.maxOutputBytes !== 'number' || !Number.isFinite(definition.maxOutputBytes) || definition.maxOutputBytes <= 0) {
-    return ProjectToolDefaults.COMMAND_RETURN_BYTES;
-  }
-  return Math.min(definition.maxOutputBytes, ProjectToolDefaults.COMMAND_RETURN_BYTES);
+export function commandReturnBytes(_definition: ProjectCommandToolConfig): number {
+  return ProjectToolDefaults.COMMAND_RETURN_BYTES;
 }
 
 export function boundedCommandText(value: unknown, limitBytes: number): { text: string; bytes: number; truncated: boolean } {

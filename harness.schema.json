@@ -278,7 +278,6 @@
               "allowCwdOverride": { "type": "boolean" },
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-              "maxOutputBytes": { "type": "integer", "minimum": 1 },
               "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
               "successExitCodes": {

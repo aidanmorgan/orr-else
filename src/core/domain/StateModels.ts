@@ -74,7 +74,6 @@ export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   cwd?: CwdMode | string;
   allowCwdOverride?: boolean;
   timeoutMs?: number;
-  maxOutputBytes?: number;
   successExitCodes?: number[];
   acceptMaxBuffer?: boolean;
   env?: Record<string, string>;

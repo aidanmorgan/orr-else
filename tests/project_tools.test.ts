@@ -70,7 +70,6 @@ console.log(JSON.stringify(payload));
     defaultArgs: ['-e', script],
     cwd,
     allowCwdOverride: true,
-    maxOutputBytes: 10_000
   };
 }
 
@@ -157,7 +156,6 @@ describe('project tool command arguments', () => {
         virtualRoots: ['/workspace/worktrees/{{beadId}}', '/workspace'],
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -193,7 +191,6 @@ describe('project tool command arguments', () => {
         virtualRoots: ['/workspace/framework'],
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -231,7 +228,6 @@ describe('project tool command arguments', () => {
         rootKind: 'framework',
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'AdversarialPreReview',
@@ -263,7 +259,6 @@ describe('project tool command arguments', () => {
         rootKind: 'framework',
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -298,7 +293,6 @@ describe('project tool command arguments', () => {
         rootKind: 'framework',
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'AdversarialPreReview',
@@ -335,7 +329,6 @@ describe('project tool command arguments', () => {
         virtualRoots: ['/workspace'],
         flags: ['--changed-file']
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -366,7 +359,6 @@ describe('project tool command arguments', () => {
         root: CwdMode.WORKTREE,
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -400,7 +392,6 @@ describe('project tool command arguments', () => {
         root: CwdMode.WORKTREE,
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -619,7 +610,6 @@ describe('project tool command arguments', () => {
         virtualRoots: ['/workspace/framework'],
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'AdversarialPostReview',
@@ -680,7 +670,6 @@ describe('project tool command arguments', () => {
         virtualRoots: ['/workspace/framework'],
         positionals: true
       },
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'AdversarialPostReview',
@@ -1223,7 +1212,6 @@ describe('project tool command arguments', () => {
       cwd: CwdMode.WORKTREE,
       allowArgs: true,
       argsMode: 'append',
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'AdversarialPreReview',
@@ -1297,7 +1285,6 @@ describe('project tool command arguments', () => {
       command: process.execPath,
       defaultArgs: ['-e', `process.stdout.write('x'.repeat(${outputBytes}));`],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 1024
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -1315,9 +1302,9 @@ describe('project tool command arguments', () => {
     expect(result.recovery.join('\n')).toContain('First decide from resultPreview, structuredResult, and toolCalls');
     expect(result.recovery.join('\n')).toContain('Do not read outputArchive.artifactRef just because the preview is truncated');
     expect(result.recovery.join('\n')).not.toMatch(/read .*archive first|read .*archive before/i);
-    expect(result.stdout).toContain('[truncated 198976 bytes; full stream archived by harness]');
+    // With COMMAND_RETURN_BYTES=4096 the bounded-stdout serialized result exceeds inlineResultBytes,
+    // so the envelope uses the truncated path: stdout is suppressed, archive is always present.
     expect(result.stdoutFile).toBeUndefined();
-    expect(result.outputAccess).toBeUndefined();
     expect(result.outputArchive).toMatchObject({ truncated: true });
     expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
     expect(JSON.stringify(result.outputArchive)).not.toContain(tempRoot);
@@ -2491,7 +2478,6 @@ describe('buildCommandResult field completeness', () => {
     command: process.execPath,
     defaultArgs: ['-e', script],
     cwd: CwdMode.WORKTREE,
-    maxOutputBytes: 10_000
   });
 
   it('success branch carries all expected fields', async () => {
@@ -2533,7 +2519,6 @@ describe('buildCommandResult field completeness', () => {
         command: process.execPath,
         defaultArgs: ['-e', 'process.exit(1)'],
         cwd: CwdMode.WORKTREE,
-        maxOutputBytes: 10_000
       },
       { beadId: 'bd-shape', stateId: 'Planning', actionId: 'test' },
       {} as any, undefined, new Map()
@@ -3088,7 +3073,6 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3201,13 +3185,13 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
   });
 
   // Token metric: model-facing size with structuredResult is substantially smaller than the
-  // archived (raw) payload.  Uses maxOutputBytes large enough to capture the full filler
-  // so the archive bytes reflect the actual raw payload size.
+  // archived (raw) payload.  The harness always captures the full raw stream (COMMAND_RETURN_BYTES
+  // is the model-facing return cap only); archive bytes reflect the actual raw payload size.
   it('token metric: model-facing result with structuredResult is compact vs raw payload size', async () => {
     // Build a large payload with a checks array (triggers structuredResult via structuredPayloadSummary)
     // plus filler to force the truncated path.
-    // maxOutputBytes is set large so the full filler is captured by boundedCommandFile,
-    // ensuring serialized.length (== archive bytes) reflects the actual large payload.
+    // The harness captures the full raw stream; serialized.length (== archive bytes) reflects
+    // the actual large payload regardless of the model-facing return cap.
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
       name: 'coding_standards',
       type: ProjectToolType.COMMAND,
@@ -3230,7 +3214,6 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 60_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3564,7 +3547,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(pytestStderr)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3630,7 +3612,6 @@ describe('commandFailureSummarizer', () => {
         `process.stdout.write(${JSON.stringify(eslintOutput)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3682,7 +3663,6 @@ describe('commandFailureSummarizer', () => {
         process.exitCode = 1;
       `],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000,
       timeoutMs: 10_000
     }, {
       beadId: 'bd-1',
@@ -3714,7 +3694,6 @@ describe('commandFailureSummarizer', () => {
       command: process.execPath,
       defaultArgs: ['-e', `setTimeout(() => {}, 30000);`],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000,
       timeoutMs: 100
     }, {
       beadId: 'bd-1',
@@ -3751,7 +3730,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(gibberish)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000,
       inlineResultBytes: 1000
     }, {
       beadId: 'bd-1',
@@ -3788,7 +3766,6 @@ describe('commandFailureSummarizer', () => {
         process.stdout.write('All tests passed.\\n1 passed, 0 failed\\n');
       `],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3834,7 +3811,6 @@ describe('commandFailureSummarizer', () => {
         })); process.exit(1);`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -3886,7 +3862,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(failureLines)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 200_000,
       inlineResultBytes: 1000
     }, {
       beadId: 'bd-1',
@@ -3937,7 +3912,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(eslintOutput)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
       // No inlineResultBytes override — defaults to large inline limit, so stays inline
     }, {
       beadId: 'bd-1',
@@ -3977,7 +3951,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(goError)}); process.exitCode = 2;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -4021,7 +3994,6 @@ describe('commandFailureSummarizer', () => {
         `process.stderr.write(${JSON.stringify(lintLines)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -4116,7 +4088,6 @@ process.stdout.write(JSON.stringify(result));
       command: process.execPath,
       defaultArgs: ['-e', script],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 10_000
     };
   }
 
@@ -4320,7 +4291,6 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4368,8 +4338,8 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
 
   // Metric 2: ast_grep-style large output → compact structuredResult + use_result (not rerun_narrower).
   //
-  // The "before" scenario uses a large stdout that triggers stdoutTruncated=true (via low maxOutputBytes)
-  // with no structured summary — this produces rerun_narrower.  The "after" scenario uses ast_grep
+  // The "before" scenario uses a large stdout that triggers stdoutTruncated=true (output exceeds
+  // COMMAND_RETURN_BYTES) with no structured summary — this produces rerun_narrower.  The "after" scenario uses ast_grep
   // with the same type of large MCP payload but the generic summarizer produces structuredResult +
   // use_result instead.
   it('ast_grep large MCP result with no existing resultPreview → compact structuredResult + use_result (not rerun_narrower)', async () => {
@@ -4398,9 +4368,7 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
         // Plain text (not JSON) ensures no structuredPayloadSummary or summarizer fires
         `process.stdout.write(${JSON.stringify(largeAstGrepText + '\nextra line'.repeat(100))})`
       ],
-      cwd: CwdMode.WORKTREE,
-      // Set maxOutputBytes low so stdoutTruncated=true
-      maxOutputBytes: 2048
+      cwd: CwdMode.WORKTREE
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4422,7 +4390,6 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4492,7 +4459,6 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4542,7 +4508,6 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4585,7 +4550,6 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4669,7 +4633,6 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4717,7 +4680,6 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4765,7 +4727,6 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
       ],
       cwd: CwdMode.WORKTREE,
       inlineResultBytes: 1000,
-      maxOutputBytes: 500_000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',
@@ -4835,7 +4796,6 @@ describe('failure-gated re-read steering (wp8h)', () => {
         `process.stderr.write(${JSON.stringify(failureLines)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 200_000,
       inlineResultBytes: 1000  // Low inline limit to force archive
     }, {
       beadId: 'bd-1',
@@ -4874,7 +4834,6 @@ describe('failure-gated re-read steering (wp8h)', () => {
         `process.stdout.write(${JSON.stringify(payload)});`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 200_000,
       inlineResultBytes: 200  // Very low to force archive on success path
     }, {
       beadId: 'bd-1',
@@ -4905,7 +4864,6 @@ describe('failure-gated re-read steering (wp8h)', () => {
         `process.stderr.write(${JSON.stringify(smallFailure)}); process.exitCode = 1;`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
       // No inlineResultBytes override — default is large, no archive forced
     }, {
       beadId: 'bd-1',
@@ -4971,7 +4929,6 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
         `console.log(JSON.stringify({ tool: 'run_tests', status: 'PASSED', message: 'all ok' }));`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -5003,7 +4960,6 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
         `console.log(JSON.stringify({ tool: 'run_tests', status: 'PASSED', message: 'all ok' }));`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -5168,7 +5124,6 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
       command: process.execPath,
       defaultArgs: ['-e', 'process.exit(1);'],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000,
       failureLimit: {
         maxFailuresPerState: 1,
         suggestedOutcome: 'BLOCKED',
@@ -5235,7 +5190,6 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
         `console.log(JSON.stringify({ tool: 'large_tool', status: 'PASSED', stdout: ${JSON.stringify(largePayload)} }));`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 200_000
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
@@ -5278,7 +5232,6 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
         `console.log(JSON.stringify({ tool: 'small_tool', status: 'PASSED', message: 'ok' }));`
       ],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
@@ -5354,7 +5307,6 @@ describe('structured-invocation registry integration (5fij)', () => {
       // defaultArgs become finalArgs — the registry must not touch them.
       defaultArgs: ['-e', argEchoScript],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 10_000
     }, {
       beadId: 'bd-1',
       stateId: 'Implementation',
@@ -5426,7 +5378,6 @@ describe('structured-invocation registry integration (5fij)', () => {
       command: 'semgrep',
       defaultArgs: ['--config=auto', '.'],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 50_000,
       env: { PATH: `${binDir}:${process.env.PATH ?? ''}` }
     }, {
       beadId: 'bd-1',
@@ -5457,7 +5408,6 @@ describe('structured-invocation registry integration (5fij)', () => {
       command: 'mypy',
       defaultArgs: ['src/'],
       cwd: CwdMode.WORKTREE,
-      maxOutputBytes: 10_000,
       env: { PATH: `${binDir}:${process.env.PATH ?? ''}` }
     }, {
       beadId: 'bd-1',
