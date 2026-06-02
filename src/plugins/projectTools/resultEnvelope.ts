@@ -51,7 +51,19 @@ import {
   CMD_FAIL_TIMEOUT_PATTERN,
   CMD_FAIL_MAX_BUFFER_PATTERN,
   CMD_FAIL_SIGNAL_PATTERN,
-  CMD_FAIL_TRANSPORT_PATTERN
+  CMD_FAIL_TRANSPORT_PATTERN,
+  HIGH_VOLUME_PAYLOAD_MIN_BYTES,
+  HIGH_VOLUME_SAMPLE_COUNT,
+  HIGH_VOLUME_NARROW_RERUN_RECOVERY,
+  HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES,
+  CODEMAP_RESULT_PREVIEW_MAX_BYTES,
+  AST_GREP_RESULT_PREVIEW_MAX_BYTES,
+  REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES,
+  GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES,
+  WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES,
+  GIT_HISTORY_TOOL_NAME,
+  REFERENCE_DOCS_TOOL_NAME,
+  WORKFLOW_PARITY_TOOL_NAME
 } from './constants.js';
 import {
   classifyProjectToolFailure,
@@ -851,11 +863,188 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
   }
 };
 
+// ---- genericHighVolumeSummarizer ----
+//
+// Covers all high-volume tools that do NOT have a more specific summarizer
+// (codemap, ast_grep, reference_docs, git_history, workflow_parity).  For
+// any PASSED result whose raw payload exceeds HIGH_VOLUME_PAYLOAD_MIN_BYTES
+// this summarizer emits a compact {status, counts, representativeSamples,
+// omissions, nextAction} envelope before truncation so the model-facing
+// result is a bounded summary rather than a raw truncated dump.
+//
+// The gate-evidence precedence guard in persistAndBoundResult ensures this
+// result does NOT clobber a richer structuredResult already present (e.g.
+// from structuredPayloadSummary or a more specific summarizer).
+//
+// Recovery text points agents to narrow-rerun / selector paths rather than
+// whole-archive reads (scope: archive section retrieval by path/range).
+
+const HIGH_VOLUME_TOOL_NAMES = new Set<string>([
+  CODEMAP_TOOL_NAME,
+  AST_GREP_TOOL_NAME,
+  GIT_HISTORY_TOOL_NAME,
+  REFERENCE_DOCS_TOOL_NAME,
+  WORKFLOW_PARITY_TOOL_NAME
+]);
+
+function highVolumePreviewBudget(toolName: string): number {
+  switch (toolName) {
+    case CODEMAP_TOOL_NAME: return CODEMAP_RESULT_PREVIEW_MAX_BYTES;
+    case AST_GREP_TOOL_NAME: return AST_GREP_RESULT_PREVIEW_MAX_BYTES;
+    case REFERENCE_DOCS_TOOL_NAME: return REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES;
+    case GIT_HISTORY_TOOL_NAME: return GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES;
+    case WORKFLOW_PARITY_TOOL_NAME: return WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES;
+    default: return HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
+  }
+}
+
+function isHighVolumeTool(definition: ProjectToolConfig): boolean {
+  return HIGH_VOLUME_TOOL_NAMES.has(definition.name.toLowerCase());
+}
+
+function rawPayloadBytes(record: Record<string, unknown>): number {
+  let total = 0;
+  for (const key of ['stdout', 'stderr', 'output', 'result']) {
+    const value = record[key];
+    if (typeof value === 'string') total += value.length;
+    else if (value && typeof value === 'object') {
+      try { total += JSON.stringify(value).length; } catch { /* ignore */ }
+    }
+  }
+  if (typeof record.stdoutBytes === 'number') total = Math.max(total, record.stdoutBytes);
+  if (typeof record.stderrBytes === 'number') total += record.stderrBytes;
+  return total;
+}
+
+function extractHighVolumeText(record: Record<string, unknown>): string | undefined {
+  const mcpText = textFromMcpContent(record.result);
+  if (mcpText) return mcpText;
+
+  const stdoutRecord = parseJsonRecord(record[ProjectToolResultKey.STDOUT]);
+  const nestedStdout = typeof stdoutRecord?.stdout === 'string' && stdoutRecord.stdout.trim()
+    ? stdoutRecord.stdout : undefined;
+  if (nestedStdout) return nestedStdout;
+
+  const existing = typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string'
+    && (record[ProjectToolResultKey.RESULT_PREVIEW] as string).trim()
+    ? record[ProjectToolResultKey.RESULT_PREVIEW] as string
+    : undefined;
+  if (existing) return existing;
+
+  const stdout = typeof record[ProjectToolResultKey.STDOUT] === 'string'
+    ? record[ProjectToolResultKey.STDOUT] as string : undefined;
+  if (stdout?.trim()) return stdout;
+
+  const output = typeof record.output === 'string' ? record.output : undefined;
+  if (output?.trim()) return output;
+
+  return undefined;
+}
+
+function splitIntoLines(text: string): string[] {
+  return text.split(/\r?\n/).filter(line => line.trim().length > 0);
+}
+
+function genericHighVolumePreview(
+  toolName: string,
+  lines: string[],
+  totalLines: number,
+  budget: number
+): string {
+  const header = `${toolName} result: ${totalLines} lines`;
+  const samples: string[] = [];
+  let used = header.length + 1;
+  for (const line of lines.slice(0, HIGH_VOLUME_SAMPLE_COUNT)) {
+    if (used + line.length + 1 > budget) break;
+    samples.push(line);
+    used += line.length + 1;
+  }
+  const omittedLines = totalLines - samples.length;
+  const parts = [header, ...samples];
+  if (omittedLines > 0) {
+    parts.push(`[${omittedLines} lines omitted; rerun with narrower path/range/symbol to retrieve a specific section]`);
+  }
+  return parts.join('\n');
+}
+
+const genericHighVolumeSummarizer: ProjectToolSummarizer = {
+  name: 'generic_high_volume',
+  appliesTo(definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
+    if (!isHighVolumeTool(definition)) return false;
+    // Only apply to PASSED results — failures are handled by commandFailureSummarizer
+    if (record.status !== 'PASSED') return false;
+    // Do NOT apply when an existing resultPreview already fits within the per-tool
+    // preview budget.  The command executor sets RESULT_PREVIEW from the tool's stdout
+    // (e.g. codemap structure overview, ast_grep match preview).  If that preview is
+    // already compact enough, no summarizer is needed.  But if it exceeds the budget
+    // (e.g. a raw large MCP text set as RESULT_PREVIEW by structuredCommandResultPreview),
+    // we should still apply the generic summarizer to produce a compact structured result.
+    const existingPreview = record[ProjectToolResultKey.RESULT_PREVIEW];
+    if (typeof existingPreview === 'string' && existingPreview.trim().length > 0) {
+      const budget = highVolumePreviewBudget(definition.name);
+      // If the existing preview already fits within budget, leave it alone
+      if (existingPreview.length <= budget) return false;
+    }
+    // Only apply when the raw payload is large enough to warrant summarization
+    return rawPayloadBytes(record) >= HIGH_VOLUME_PAYLOAD_MIN_BYTES;
+  },
+  summarize(
+    definition: ProjectToolConfig,
+    record: Record<string, unknown>,
+    _context: ProjectToolExecutionContext
+  ): StructuredResult | null {
+    try {
+      const toolName = definition.name;
+      const budget = highVolumePreviewBudget(toolName);
+      const text = extractHighVolumeText(record);
+      const payloadSize = rawPayloadBytes(record);
+
+      const counts: Record<string, number> = { payloadBytes: payloadSize };
+
+      let representativeSamples: unknown[] | undefined;
+
+      if (text && text.trim().length > 0) {
+        const lines = splitIntoLines(text);
+        counts.lines = lines.length;
+        const sampleLines = lines.slice(0, HIGH_VOLUME_SAMPLE_COUNT);
+        // Note: we do NOT set `omissions` here.  Setting omissions would trigger
+        // fetch_named_omission routing, but for a high-volume bulk output the
+        // structuredResult IS sufficient decision evidence (counts/samples/preview)
+        // and the agent should use_result rather than fetch a specific named omission.
+        // The sample + compact preview gives enough orientation; if a specific line
+        // or entry is needed, the agent reruns the tool with narrower arguments.
+        counts.sampleLines = sampleLines.length;
+        if (lines.length > sampleLines.length) {
+          counts.omittedLines = lines.length - sampleLines.length;
+        }
+        const compactPreview = genericHighVolumePreview(toolName, sampleLines, lines.length, budget);
+        counts.previewBytes = compactPreview.length;
+        representativeSamples = sampleLines.map(line => ({ line: truncateString(line, 160) }));
+      }
+
+      const result: StructuredResult = {
+        status: 'ok',
+        counts,
+        nextAction: ProjectToolNextAction.USE_RESULT
+      };
+      if (representativeSamples && representativeSamples.length > 0) {
+        result.representativeSamples = representativeSamples;
+      }
+      // No omissions field — see comment above.  Use counts.omittedLines instead.
+
+      return result;
+    } catch {
+      return { status: 'parse_error', nextAction: 'inspect_archive_narrowly_if_needed' };
+    }
+  }
+};
+
 // ---- Summarizer registry ----
 
 export const PROJECT_TOOL_SUMMARIZER_REGISTRY: ProjectToolSummarizer[] = [
   diagnosticSummarizer,
-  commandFailureSummarizer
+  commandFailureSummarizer,
+  genericHighVolumeSummarizer
 ];
 
 function applyStructuredSummarizerRegistry(
@@ -1357,6 +1546,12 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
             ]
           };
         }
+        if (isHighVolumeTool(definition) && isGenericHighVolumeSummarizerResult(record)) {
+          return {
+            [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
+            [ProjectToolResultKey.RECOVERY]: [HIGH_VOLUME_NARROW_RERUN_RECOVERY]
+          };
+        }
         return {
           [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
           [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence; treat artifactRef as an opaque harness archive handle, not a filesystem path. Decide from structuredResult, resultPreview, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
@@ -1572,7 +1767,19 @@ function commandPayloadPreviewText(record: Record<string, unknown>): string | un
   return stdout || (stderr ? `stderr:\n${stderr}` : undefined);
 }
 
-function resultPreviewText(record: Record<string, unknown>, limitBytes: number): string | undefined {
+function isGenericHighVolumeSummarizerResult(record: Record<string, unknown>): boolean {
+  if (record[DIAGNOSTIC_SUMMARY_KEY]) return false;
+  const sr = record[ProjectToolResultKey.STRUCTURED_RESULT];
+  if (!isJsonRecord(sr) || typeof sr['counts'] !== 'object') return false;
+  const counts = sr['counts'] as Record<string, unknown>;
+  return typeof counts['payloadBytes'] === 'number';
+}
+
+function resultPreviewText(
+  record: Record<string, unknown>,
+  limitBytes: number,
+  definition?: Pick<ProjectToolConfig, 'name'>
+): string | undefined {
   const hasStructuredModelSummary =
     Boolean(record[ProjectToolResultKey.STRUCTURED_RESULT]) || Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
 
@@ -1582,7 +1789,13 @@ function resultPreviewText(record: Record<string, unknown>, limitBytes: number):
       ? String(record[ProjectToolResultKey.RESULT_PREVIEW])
       : undefined;
     if (!existingPreview) return undefined;
-    return boundedPreviewText(existingPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    // For high-volume tools summarized by genericHighVolumeSummarizer, apply the
+    // per-tool preview budget (which may exceed the shared 2 KiB diagnostic constant).
+    // Diagnostics are unchanged: they still use DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES.
+    const previewBudget = (definition && isGenericHighVolumeSummarizerResult(record))
+      ? highVolumePreviewBudget(definition.name)
+      : ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES;
+    return boundedPreviewText(existingPreview, previewBudget);
   }
 
   const mcpText = textFromMcpContent(record.result);
@@ -1605,7 +1818,7 @@ function modelFacingTruncatedResult(
   const toolCalls = toolCallsFromRecord(record);
   const diagnosticPreview = commandDiagnosticPreview(record);
   const previewBytes = outputPreviewLimit(maxInlineBytes);
-  const resultPreview = resultPreviewText(record, previewBytes);
+  const resultPreview = resultPreviewText(record, previewBytes, definition);
   return {
     ...baseResultSummary(definition, record),
     ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {}),
@@ -1668,6 +1881,53 @@ export function summarizeToolResult(result: unknown): unknown {
   return summary;
 }
 
+// ---- applyHighVolumeModelSummary ----
+//
+// Injects a compact RESULT_PREVIEW for high-volume tools summarized by
+// genericHighVolumeSummarizer, mirroring the pattern used by
+// applyDiagnosticModelSummary.  Only runs when the structuredResult on the
+// record came from the generic summarizer (identified by presence of
+// counts.payloadBytes without a diagnosticSummary) AND no RESULT_PREVIEW
+// is already set.  This ensures the model-facing resultPreview is within
+// the per-tool budget rather than a raw truncated dump.
+
+function applyHighVolumeModelSummary(
+  definition: ProjectToolConfig,
+  result: unknown
+): unknown {
+  if (!isHighVolumeTool(definition)) return result;
+  const record = resultRecord(result);
+  const budget = highVolumePreviewBudget(definition.name);
+  // Only inject when no compact RESULT_PREVIEW is already present.
+  // An existing preview that fits within budget is fine as-is.  One that
+  // exceeds the budget (e.g. raw MCP text) should be replaced with the
+  // compact summary from the generic summarizer.
+  const existingPreview = record[ProjectToolResultKey.RESULT_PREVIEW];
+  if (typeof existingPreview === 'string'
+    && existingPreview.trim().length > 0
+    && existingPreview.length <= budget) {
+    return result;
+  }
+  // Require a structuredResult from the generic summarizer (payloadBytes present).
+  const sr = record[ProjectToolResultKey.STRUCTURED_RESULT];
+  if (!isJsonRecord(sr) || typeof sr['counts'] !== 'object') return result;
+  const counts = sr['counts'] as Record<string, unknown>;
+  if (typeof counts['payloadBytes'] !== 'number') return result;
+
+  const text = extractHighVolumeText(record);
+  if (!text || !text.trim()) return result;
+
+  const toolName = definition.name;
+  const lines = splitIntoLines(text);
+  const sampleLines = lines.slice(0, Math.min(HIGH_VOLUME_SAMPLE_COUNT, lines.length));
+  const compactPreview = genericHighVolumePreview(toolName, sampleLines, lines.length, budget);
+
+  return withoutUndefined({
+    ...record,
+    [ProjectToolResultKey.RESULT_PREVIEW]: compactPreview
+  });
+}
+
 // ---- persistAndBoundResult ----
 
 export async function persistAndBoundResult(
@@ -1689,7 +1949,11 @@ export async function persistAndBoundResult(
     ? withoutUndefined({ ...resultRecord(policyResult), [ProjectToolResultKey.STRUCTURED_RESULT]: structuredResult })
     : policyResult;
 
-  const modelResult = applyDiagnosticModelSummary(definition, enrichedResult, context);
+  const modelResult = applyDiagnosticModelSummary(
+    definition,
+    applyHighVolumeModelSummary(definition, enrichedResult),
+    context
+  );
   const record = resultRecord(modelResult);
   if (serialized.length <= maxInlineBytes) {
     return attachArchiveIfNeeded(modelFacingInlineResult(modelResult), context, serialized.length, false);

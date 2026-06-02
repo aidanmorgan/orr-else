@@ -122,6 +122,43 @@ export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
 export const AST_GREP_TOOL_NAME = 'ast_grep';
 export const CODEMAP_TOOL_NAME = 'codemap';
 export const PYTHON_LSP_TOOL_NAME = 'python_lsp';
+export const GIT_HISTORY_TOOL_NAME = 'git_history';
+export const REFERENCE_DOCS_TOOL_NAME = 'reference_docs';
+export const WORKFLOW_PARITY_TOOL_NAME = 'workflow_parity';
+
+// High-volume tool preview budgets (model-facing resultPreview byte caps).
+// These constants bound the compact structured summary preview emitted by the
+// generic high-volume summarizer so the model never receives a raw truncated dump.
+//
+// DEFAULT: used for any high-volume tool that does not have a family override.
+export const HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+// Codemap structure dumps can include large directory trees — keep the overview
+// tight so the model sees the header (Files / Top Extensions) without raw paths.
+export const CODEMAP_RESULT_PREVIEW_MAX_BYTES = 2 * 1024; // 2 KiB
+// ast_grep match output: each match line is short, so allow slightly more lines.
+export const AST_GREP_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+// Reference docs / git history / workflow parity: JSON/text blobs that compress
+// well into a compact {status, counts, samples} envelope.
+export const REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+export const GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+export const WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+
+// Minimum byte size of a result's raw payload that qualifies it as "high-volume"
+// and triggers the generic summarizer.  Results below this threshold are not
+// worth summarizing — the raw preview already fits within the budget.
+export const HIGH_VOLUME_PAYLOAD_MIN_BYTES = 4 * 1024; // 4 KiB
+
+// Generic summarizer representative sample cap: how many entries (lines/items) to
+// surface in representativeSamples when the full content would exceed the preview budget.
+export const HIGH_VOLUME_SAMPLE_COUNT = 8;
+
+// Recovery guidance template for high-volume summarized tools: directs agents to
+// rerun with narrower args / path / range rather than reading the raw archive.
+export const HIGH_VOLUME_NARROW_RERUN_RECOVERY =
+  'This is a compact summary of a large result. Raw output is preserved in outputArchive. '
+  + 'To retrieve a specific section: rerun the same tool with a narrower path, range, symbol, '
+  + 'or operation argument. Do not read outputArchive.artifactRef directly — '
+  + 'use the narrow-rerun / selector path to fetch only the named missing fact.';
 
 export const UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS = new Set<string>([
   '--output-limit'

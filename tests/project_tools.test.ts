@@ -9,6 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
+import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, HIGH_VOLUME_NARROW_RERUN_RECOVERY } from '../src/plugins/projectTools/constants.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -4223,5 +4224,385 @@ process.stdout.write(JSON.stringify(result));
       const tmpDir = path.join(scratchToolDir, callDirs[0], 'tmp');
       expect(fs.existsSync(tmpDir)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Generic high-volume summarizer regression metrics
+//
+// These tests verify that high-volume tools (codemap, ast_grep, reference_docs,
+// git_history, workflow_parity) emit a compact structuredResult + use_result
+// steering when their MCP/JSON/text payload is large, and that the model-facing
+// size is within the per-tool preview budget.
+//
+// BEFORE (without genericHighVolumeSummarizer): a large MCP payload with no
+//   existing resultPreview would produce a raw truncated dump + rerun_narrower.
+// AFTER: a compact {status, counts, representativeSamples} + use_result.
+//
+// Metrics: outputTruncated frequency / rerun_narrower frequency / input-token
+// impact are captured via the model-facing byte assertions below.
+// ---------------------------------------------------------------------------
+describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-hv-summ-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-hv-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  // Metric 1: codemap-style MCP result with large JSON body → compact structuredResult
+  // + use_result (not rerun_narrower), model-facing size within CODEMAP_RESULT_PREVIEW_MAX_BYTES.
+  it('codemap MCP result with large body → compact structuredResult + use_result, model-facing within budget', async () => {
+    // Simulate a large codemap MCP response: many lines of directory tree output
+    // delivered via MCP content wrapper (as a real codemap MCP tool would).
+    const codemapLines = [
+      'src',
+      'Files: 320 | Size: 2.1MB',
+      'Top Extensions: .ts (210), .json (45), .md (30)',
+      ...Array.from({ length: 200 }, (_, i) => `|-- module_${i}/`),
+      ...Array.from({ length: 100 }, (_, i) => `    |-- file_${i}.ts`)
+    ];
+    const largeCodemapText = codemapLines.join('\n');
+
+    // MCP content wrapper (as textFromMcpContent would decode)
+    const mcpContent = {
+      content: [{ type: 'text', text: largeCodemapText }]
+    };
+
+    const rawTextBytes = Buffer.byteLength(largeCodemapText);
+    expect(rawTextBytes).toBeGreaterThan(4 * 1024); // confirms it's high-volume
+
+    // Test the summarizer via the command tool path with MCP-shaped output.
+    // (The MCP transport path is not testable here; the summarizer logic operates
+    // on the result record regardless of how the tool was invoked.)
+    const result2 = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'codemap',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'codemap',
+          status: 'PASSED',
+          server: 'codemap',
+          operation: 'get_structure',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const modelFacingJson = JSON.stringify(result2);
+    const modelFacingBytes = Buffer.byteLength(modelFacingJson);
+
+    // The raw text payload was large — verify it exceeds the model-facing result
+    expect(rawTextBytes).toBeGreaterThan(modelFacingBytes);
+
+    // structuredResult must be present (generic summarizer fired)
+    const structuredResult = (result2 as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+    expect(structuredResult.counts).toBeDefined();
+    expect(structuredResult.counts.payloadBytes).toBeGreaterThan(0);
+
+    // METRIC: nextAction must be use_result (NOT rerun_narrower) — outputTruncated is set
+    // but structured evidence overrides raw truncation signal.
+    expect((result2 as any).outputTruncated).toBe(true);
+    expect(result2.nextAction).toBe('use_result');
+    expect(result2.nextAction).not.toBe('rerun_narrower');
+
+    // METRIC: model-facing result is compact — within the high-volume budget (8 KiB generous cap)
+    expect(modelFacingBytes).toBeLessThan(8 * 1024);
+
+    // resultPreview must be present and compact
+    expect((result2 as any).resultPreview).toBeDefined();
+    expect(typeof (result2 as any).resultPreview).toBe('string');
+    const previewLen = ((result2 as any).resultPreview as string).length;
+    // METRIC: Preview is bounded by the per-tool CODEMAP_RESULT_PREVIEW_MAX_BYTES budget (2 KiB).
+    // The truncation marker appended by boundedPreviewText may push length slightly above the
+    // slice point, so we allow a small overhead for the marker itself.
+    expect(previewLen).toBeLessThanOrEqual(CODEMAP_RESULT_PREVIEW_MAX_BYTES + 256);
+
+    // Archive is preserved
+    expect((result2 as any).outputArchive).toBeDefined();
+    expect((result2 as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+
+    // Raw MCP result field must be absent (suppressed by hasStructuredModelSummary)
+    expect((result2 as any).result).toBeUndefined();
+  });
+
+  // Metric 2: ast_grep-style large output → compact structuredResult + use_result (not rerun_narrower).
+  //
+  // The "before" scenario uses a large stdout that triggers stdoutTruncated=true (via low maxOutputBytes)
+  // with no structured summary — this produces rerun_narrower.  The "after" scenario uses ast_grep
+  // with the same type of large MCP payload but the generic summarizer produces structuredResult +
+  // use_result instead.
+  it('ast_grep large MCP result with no existing resultPreview → compact structuredResult + use_result (not rerun_narrower)', async () => {
+    // Simulate a large ast_grep MCP response: many match lines
+    const matchLines = Array.from({ length: 300 }, (_, i) =>
+      `packages/module_${i % 20}/file_${i}.ts:${10 + (i % 50)}:class AstGrepMatch_${i} { value = ${i}; }`
+    );
+    const largeAstGrepText = matchLines.join('\n');
+
+    const mcpContent = {
+      content: [{ type: 'text', text: largeAstGrepText }]
+    };
+
+    const rawPayloadSize = Buffer.byteLength(largeAstGrepText);
+    expect(rawPayloadSize).toBeGreaterThan(4 * 1024); // confirms high-volume
+
+    // BEFORE state: simulate a non-high-volume tool receiving large stdout that gets
+    // stream-truncated (stdoutTruncated=true, no structured evidence) → rerun_narrower.
+    // We use a plain-text large stdout (not JSON) so no structuredPayloadSummary fires.
+    const beforeResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'large_plain_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        // Plain text (not JSON) ensures no structuredPayloadSummary or summarizer fires
+        `process.stdout.write(${JSON.stringify(largeAstGrepText + '\nextra line'.repeat(100))})`
+      ],
+      cwd: CwdMode.WORKTREE,
+      // Set maxOutputBytes low so stdoutTruncated=true
+      maxOutputBytes: 2048
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    // AFTER state: same kind of payload but for ast_grep (generic summarizer fires via MCP result)
+    const afterResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'ast_grep',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'ast_grep',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const afterBytes = Buffer.byteLength(JSON.stringify(afterResult));
+
+    // BEFORE: no structured evidence, stdout truncated → rerun_narrower
+    expect((beforeResult as any).stdoutTruncated).toBe(true);
+    expect((beforeResult as any).structuredResult).toBeUndefined();
+    expect(beforeResult.nextAction).toBe('rerun_narrower');
+
+    // AFTER: structuredResult present → use_result steering
+    const structuredResult = (afterResult as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+    expect(structuredResult.counts.payloadBytes).toBeGreaterThan(0);
+    expect(afterResult.nextAction).toBe('use_result');
+    expect(afterResult.nextAction).not.toBe('rerun_narrower');
+
+    // METRIC: "after" model-facing result is compact — within 8 KiB
+    expect(afterBytes).toBeLessThan(8 * 1024);
+
+    // METRIC: rerun_narrower frequency drops — "before" gets rerun_narrower, "after" does not.
+    expect(beforeResult.nextAction).toBe('rerun_narrower');
+    expect(afterResult.nextAction).not.toBe('rerun_narrower');
+
+    // METRIC: ast_grep resultPreview is bounded by its per-tool budget (AST_GREP_RESULT_PREVIEW_MAX_BYTES = 3 KiB),
+    // NOT by the shared 2 KiB diagnostic constant. The marker overhead is small.
+    const afterPreview = (afterResult as any).resultPreview as string | undefined;
+    if (afterPreview !== undefined) {
+      expect(afterPreview.length).toBeLessThanOrEqual(AST_GREP_RESULT_PREVIEW_MAX_BYTES + 256);
+    }
+
+    // representativeSamples must be present (sample lines from the large output)
+    expect(Array.isArray(structuredResult.representativeSamples)).toBe(true);
+    expect(structuredResult.representativeSamples.length).toBeGreaterThan(0);
+
+    // Archive is preserved — raw output stored in outputArchive
+    expect((afterResult as any).outputArchive).toBeDefined();
+    expect((afterResult as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+  });
+
+  // Metric 3: git_history large result → compact structuredResult + use_result.
+  it('git_history large MCP result → compact structuredResult + use_result, within budget', async () => {
+    // Simulate a large git history response
+    const historyLines = Array.from({ length: 150 }, (_, i) =>
+      `commit ${i.toString(16).padStart(40, 'a')} Author: Dev <dev@example.com> Date: 2024-0${(i % 9) + 1}-${(i % 28) + 1} Commit message ${i}: refactor module ${i % 10}`
+    );
+    const largeHistoryText = historyLines.join('\n');
+    const mcpContent = { content: [{ type: 'text', text: largeHistoryText }] };
+
+    expect(Buffer.byteLength(largeHistoryText)).toBeGreaterThan(4 * 1024);
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'git_history',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'git_history',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const structuredResult = (result as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+    expect(structuredResult.counts.payloadBytes).toBeGreaterThan(0);
+
+    // use_result, not rerun_narrower
+    expect(result.nextAction).toBe('use_result');
+    expect(result.nextAction).not.toBe('rerun_narrower');
+
+    // Model-facing compact
+    const modelFacingBytes = Buffer.byteLength(JSON.stringify(result));
+    expect(modelFacingBytes).toBeLessThan(8 * 1024);
+  });
+
+  // (gate-evidence guard) generic summarizer does NOT clobber a pre-existing
+  // structuredPayloadSummary (rich gate evidence) on a high-volume tool.
+  it('gate-evidence guard: pre-existing rich structuredResult on codemap is NOT clobbered by generic summarizer', async () => {
+    // Payload has rich gate-evidence keys (artifact, verdict) which trigger
+    // structuredPayloadSummary BEFORE persistAndBoundResult runs the registry.
+    // The generic summarizer must be blocked by the hasGateEvidence guard.
+    const richPayload = {
+      tool: 'codemap',
+      status: 'PASSED',
+      artifact: 'codemap_analysis',
+      verdict: 'pass',
+      checks: [
+        { name: 'structure', status: 'PASSED', message: 'ok' }
+      ],
+      result: {
+        content: [{ type: 'text', text: Array.from({ length: 300 }, (_, i) => `line ${i}`).join('\n') }]
+      }
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'codemap',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify(${JSON.stringify(richPayload)}))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const structuredResult = (result as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+
+    // Rich gate-evidence fields from structuredPayloadSummary must be present
+    expect(structuredResult.artifact).toBe('codemap_analysis');
+    expect(structuredResult.verdict).toBe('pass');
+    expect(typeof structuredResult.passedCheckCount).toBe('number');
+
+    // The generic summarizer's leaner counts.payloadBytes must NOT be present
+    // (if the guard failed, we'd see counts with payloadBytes)
+    expect(structuredResult.counts?.payloadBytes).toBeUndefined();
+  });
+
+  // (recovery text) summarized high-volume result carries narrow-rerun recovery guidance
+  // pointing agents to rerun with narrower args rather than reading raw archive.
+  it('summarized high-volume result recovery text points to narrow-rerun / selector path', async () => {
+    const largeText = Array.from({ length: 200 }, (_, i) =>
+      `entry ${i}: some reference documentation line that is moderately long for testing purposes`
+    ).join('\n');
+
+    const mcpContent = { content: [{ type: 'text', text: largeText }] };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'reference_docs',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'reference_docs',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    expect(result.nextAction).toBe('use_result');
+
+    // Recovery text must be present and must be HIGH_VOLUME_NARROW_RERUN_RECOVERY.
+    // FIX 2: high-volume summarized results now wire the narrow-rerun recovery constant
+    // so agents get archive-section / selector guidance rather than generic archive text.
+    const recovery = (result as any).recovery as string[] | undefined;
+    expect(recovery).toBeDefined();
+    expect(Array.isArray(recovery)).toBe(true);
+    const recoveryText = (recovery ?? []).join('\n');
+    // The wired constant contains narrow-rerun / selector guidance
+    expect(recoveryText).toContain(HIGH_VOLUME_NARROW_RERUN_RECOVERY);
+    // Must NOT say "read the archive" as a first action
+    expect(recoveryText).not.toMatch(/read .*archive first|read .*archive before/i);
+    // Must mention rerunning narrower (from the wired constant)
+    expect(recoveryText).toMatch(/rerun.*narrower|narrow.*rerun/i);
   });
 });
