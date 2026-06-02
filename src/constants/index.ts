@@ -225,6 +225,7 @@ export enum DomainEventName {
   BEAD_QUARANTINED = 'BEAD_QUARANTINED',
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
   RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
+  RETENTION_DISK_HEALTH = 'RETENTION_DISK_HEALTH',
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
   PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED',
   PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED',
@@ -1162,8 +1163,101 @@ export const RetentionDefaults = {
   /** Files/directories older than this threshold are eligible for removal. */
   MAX_AGE_MS: 2 * TimeMs.DAY,
   /** Retention cleanup runs at most once per this interval (coordinator only). */
-  CLEANUP_INTERVAL_MS: TimeMs.HOUR
+  CLEANUP_INTERVAL_MS: TimeMs.HOUR,
+  /** Default event-JSONL compaction window: events older than this may be compacted (non-critical types only). */
+  COMPACTION_WINDOW_MS: 7 * TimeMs.DAY,
+  /** Whether event-JSONL compaction is enabled by default. */
+  COMPACTION_ENABLED: false,
+  /** Disk-usage health event is emitted when total bytes reclaimed exceeds this threshold in a single run. */
+  DISK_HEALTH_WARN_BYTES: 50 * 1024 * 1024, // 50 MiB
 } as const;
+
+/**
+ * REPLAY_CRITICAL_EVENT_TYPES — the complete set of DomainEventNames that MUST
+ * never be compacted away from the primary event JSONL.
+ *
+ * There are three consumers that require completeness:
+ *
+ *  1. BeadStateProjection.projectBeadStateChartFromEvents /
+ *     BeadStateProjection.projectBeadFromEvents — read via eventsForBead() and
+ *     switch on event type to rebuild per-bead projected state.
+ *
+ *  2. Supervisor.rebuildProcessedSignalsFromEvents — reads the FULL log via
+ *     readAll() on startup to reconstruct the in-memory idempotency set; it
+ *     filters on TEAMMATE_EVENT events whose processingDecision === ACCEPT.
+ *     Dropping these breaks signal idempotency across coordinator restarts
+ *     (double-processing of already-handled signals).
+ *
+ *  3. Supervisor.reconcileUnacknowledgedSignalIntents — reads the FULL log via
+ *     readAll() on startup to find SIGNAL_INTENT_RECORDED events that were never
+ *     acknowledged; it also consults SIGNAL_ACKNOWLEDGED, TEAMMATE_EVENT, and
+ *     SIGNAL_INTENT_RECONCILED to determine which intents have been handled.
+ *     Dropping any of these breaks intent reconciliation.
+ *
+ *  4. Supervisor.hasDurableInactiveEvent / pruneDurablyInactiveStartedBeads —
+ *     reads events via eventsForBeads() and switches on TEAMMATE_PROCESS_EXITED
+ *     to determine whether a started bead's slot is durably inactive and should
+ *     be pruned. Dropping these breaks slot-health pruning across restarts.
+ *
+ *  5. projectTools/preflight.ts projectToolFailureLimit /
+ *     eventsForActiveProjectToolRun — reads events via eventsForBead() and
+ *     switches on PROJECT_TOOL_FAILED to enforce consecutive-failure circuit
+ *     breaking. Dropping these causes the failure counter to reset silently
+ *     after compaction, defeating the circuit breaker.
+ *
+ * Non-critical (compactable) events are pure telemetry not consumed by any of
+ * the above: heartbeats, slot-health, token-usage, command lifecycle events,
+ * tool-invocation events, etc.
+ */
+export const REPLAY_CRITICAL_EVENT_TYPES = new Set<string>([
+  // Core bead lifecycle — both projection methods consume these
+  DomainEventName.BEAD_CLAIMED,
+  DomainEventName.BEAD_CLOSED,
+  DomainEventName.BEAD_RELEASED,
+  DomainEventName.BEAD_STATUS_UPDATED,
+  DomainEventName.BEAD_TOMBSTONED,
+  // REPLAY-ONLY / HISTORICAL: consumed by projectBeadFromEvents for old logs
+  DomainEventName.BEAD_METADATA_MERGED,
+  // State execution
+  DomainEventName.STATE_RUN_INITIALIZED,
+  DomainEventName.STATE_TRANSITION_APPLIED,
+  DomainEventName.ACTION_COMPLETED,
+  // Teammate / worktree
+  DomainEventName.TEAMMATE_SPAWNED,
+  DomainEventName.WORKTREE_CREATED,
+  DomainEventName.WORKTREE_REUSED,
+  DomainEventName.WORKTREE_PROVISIONED,
+  DomainEventName.WORKTREE_REMOVED,
+  // Restart signals
+  DomainEventName.CONTEXT_RESTART_REQUESTED,
+  DomainEventName.HARNESS_RESTART_REQUESTED,
+  // Checklist / checkpoint
+  DomainEventName.CHECKLIST_ITEM_TICKED,
+  DomainEventName.CHECKLIST_ITEM_ADDED,
+  DomainEventName.CHECKPOINT_SUBMITTED,
+  // Compaction counter
+  DomainEventName.CONTEXT_COMPACTION_RECORDED,
+  // Merge lifecycle
+  DomainEventName.MERGE_AND_COMMIT_STARTED,
+  DomainEventName.MERGE_AND_COMMIT_SUCCEEDED,
+  DomainEventName.MERGE_AND_COMMIT_FAILED,
+  // Signal idempotency & intent reconciliation — read via readAll() by the
+  // Supervisor on every coordinator startup (see consumers 2 and 3 above).
+  // Dropping these silently breaks cross-restart signal deduplication and
+  // unacknowledged-intent detection.
+  DomainEventName.TEAMMATE_EVENT,
+  DomainEventName.SIGNAL_INTENT_RECORDED,
+  DomainEventName.SIGNAL_ACKNOWLEDGED,
+  DomainEventName.SIGNAL_INTENT_RECONCILED,
+  // Slot-health pruning — Supervisor.hasDurableInactiveEvent switches on this
+  // via eventsForBeads() to decide if a started bead is durably inactive
+  // (consumer 4 above).
+  DomainEventName.TEAMMATE_PROCESS_EXITED,
+  // Project-tool circuit breaker — projectToolFailureLimit switches on this
+  // via eventsForActiveProjectToolRun() to enforce per-bead failure limits
+  // (consumer 5 above).
+  DomainEventName.PROJECT_TOOL_FAILED,
+]);
 
 export const TelemetryDefaults = {
   LOOP_DETECTION_WINDOW: 3,

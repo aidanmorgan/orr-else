@@ -200,6 +200,32 @@
         }
       }
     },
+    "retention": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Retention policy for harness-owned log/.tmp/.trash areas and event-JSONL compaction.",
+      "properties": {
+        "maxAgeMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum age in milliseconds for harness-owned log/.tmp/.trash entries. Defaults to 2 days."
+        },
+        "compactionEnabled": {
+          "type": "boolean",
+          "description": "Whether event-JSONL compaction is enabled. Defaults to false (safe default)."
+        },
+        "compactionWindowMs": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Age in ms after which non-replay-critical events may be compacted. Defaults to 7 days."
+        },
+        "diskHealthWarnBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Bytes threshold for emitting a RETENTION_DISK_HEALTH event. Defaults to 50 MiB."
+        }
+      }
+    },
     "tools": {
       "type": "array",
       "items": {

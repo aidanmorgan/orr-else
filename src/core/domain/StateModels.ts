@@ -283,6 +283,7 @@ export interface HarnessConfig {
     }
   };
   statechart?: StatechartConfig;
+  retention?: RetentionConfig;
   validationGates?: ValidationGateConfig[];
   states: Record<string, SDLCState>;
   tools?: ProjectToolConfig[];
@@ -332,6 +333,37 @@ export interface StatechartConfig {
    * Declare here to keep the interface stable across beads.
    */
   customEvents?: string[];
+}
+
+/**
+ * Retention policy configuration (settings.retention in harness.yaml).
+ *
+ * All fields are optional — when absent the system uses the named constants in
+ * RetentionDefaults (backward-safe: no config → current behavior unchanged).
+ */
+export interface RetentionConfig {
+  /**
+   * Maximum age in milliseconds for log/.tmp/.trash entries before removal.
+   * Defaults to RetentionDefaults.MAX_AGE_MS (2 days).
+   */
+  maxAgeMs?: number;
+  /**
+   * Whether event-JSONL compaction is enabled.
+   * Defaults to RetentionDefaults.COMPACTION_ENABLED (false).
+   * When false, the compaction step is skipped entirely (safe default).
+   */
+  compactionEnabled?: boolean;
+  /**
+   * Age in milliseconds after which non-replay-critical events may be
+   * compacted out of the JSONL.
+   * Defaults to RetentionDefaults.COMPACTION_WINDOW_MS (7 days).
+   */
+  compactionWindowMs?: number;
+  /**
+   * Bytes threshold for emitting a RETENTION_DISK_HEALTH event.
+   * Defaults to RetentionDefaults.DISK_HEALTH_WARN_BYTES (50 MiB).
+   */
+  diskHealthWarnBytes?: number;
 }
 
 /**

@@ -95,6 +95,81 @@ export class BeadEventIndex {
   }
 
   // ---------------------------------------------------------------------------
+  // Invalidation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Invalidates the by-bead index for every beadId whose index JSONL currently
+   * contains events sourced from any of the given primary-file basenames.
+   *
+   * Call this after a primary JSONL is compacted (rewritten to a smaller file
+   * via tmp+rename).  Compaction shrinks the primary, so any stored byte-offset
+   * in the per-bead .ready marker becomes stale: the next top-up read would
+   * `scanFromOffset` past the end of the compacted file (or into wrong bytes),
+   * silently producing a corrupt per-bead projection.
+   *
+   * Invalidation deletes the .ready marker file for every affected bead index,
+   * forcing the next `eventsForBead` call to treat the index as absent and fall
+   * back to a full primary-scan rebuild from offset 0 of the compacted file.
+   * The index JSONL itself (the cached events) is also removed so the rebuild
+   * writes a fresh, self-consistent copy.
+   *
+   * Only reads the `sources` keys in each .ready file — never the primary JSONL —
+   * so this operation is cheap and does not alter the primary files.
+   *
+   * @param location     The event-store location (contains the events dir path).
+   * @param sourceBasenames  The set of primary-file basenames that were compacted
+   *                         (e.g. `new Set(['project.jsonl'])`).
+   */
+  async invalidateForSources(location: BeadIndexLocation, sourceBasenames: Set<string>): Promise<void> {
+    if (sourceBasenames.size === 0) return;
+    const dir = this.indexDir(location);
+    if (!existsSync(dir)) return;
+
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      // Only consider .ready marker files.
+      if (!entry.name.endsWith(EventStoreDefaults.INDEX_READY_FILE_EXTENSION)) continue;
+
+      const markerPath = path.join(dir, entry.name);
+      let marker: BeadIndexMarker;
+      try {
+        const text = await fs.promises.readFile(markerPath, 'utf8');
+        marker = JSON.parse(text) as BeadIndexMarker;
+      } catch {
+        continue;
+      }
+
+      // Check whether any source tracked in this marker was compacted.
+      const sources = marker?.sources ?? {};
+      const affected = Object.keys(sources).some(basename => sourceBasenames.has(basename));
+      if (!affected) continue;
+
+      // Derive the corresponding index JSONL path from the marker path.
+      const indexJsonlPath = markerPath.slice(
+        0,
+        markerPath.length - EventStoreDefaults.INDEX_READY_FILE_EXTENSION.length
+      );
+
+      // Delete both the index JSONL and the .ready marker so the next read rebuilds from scratch.
+      await rmAsync(indexJsonlPath, { force: true }).catch(() => {});
+      await rmAsync(markerPath, { force: true }).catch(() => {});
+
+      Logger.debug(Component.CORE, 'Invalidated by-bead index after primary compaction', {
+        indexJsonlPath,
+        markerPath,
+        compactedSources: [...sourceBasenames]
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Read
   // ---------------------------------------------------------------------------
 
