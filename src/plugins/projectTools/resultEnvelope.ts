@@ -24,7 +24,6 @@ import {
   MODEL_HIDDEN_RESULT_KEYS,
   MODEL_RAW_SUPPRESSED_KEYS,
   NO_MATCH_STATUS,
-  PROJECT_TOOL_OUTPUT_ACCESS_GUIDANCE,
   ProjectToolNextAction,
   ProjectToolResultKey,
   PYTHON_LSP_TOOL_NAME,
@@ -65,8 +64,7 @@ import {
   REFERENCE_DOCS_TOOL_NAME,
   WORKFLOW_PARITY_TOOL_NAME,
   FAILURE_REREAD_ARCHIVE_RECOVERY,
-  TOKEN_ESTIMATE_CHARS_PER_TOKEN,
-  MODEL_FACING_RESULT_BUDGET_BYTES
+  TOKEN_ESTIMATE_CHARS_PER_TOKEN
 } from './constants.js';
 import {
   classifyProjectToolFailure,
@@ -99,10 +97,9 @@ import {
 import {
   commandDiagnosticPreview,
   textFromMcpContent,
-  toolCallsFromRecord,
-  structuredCommandResultPreview
+  toolCallsFromRecord
 } from './commandExecutor.js';
-import { outputArtifactRef } from './contextHelpers.js';
+// outputArtifactRef import removed — outputArchiveSummary removed in s3wp.24/s3wp.25
 import { pathArgumentRootKind, pathArgumentEscapeGuidance, resolvePathArgumentRoot } from './pathNormalization.js';
 
 // ---- (9g8z) Module-level accounting registry ----
@@ -458,9 +455,16 @@ function diagnosticSummaryPreview(summary: ProjectDiagnosticSummary): string {
 }
 
 function diagnosticsTextFromRecord(record: Record<string, unknown>): string | undefined {
+  // s3wp.25: record.result / record.stdout / record.stderr may be absent from the
+  // model-facing result (hidden by MODEL_HIDDEN_RESULT_KEYS), but the internal
+  // result record (pre-model-facing filter) still has stdout/stderr for extraction.
+  // Also check the nested JSON within record.stdout (structured tool output).
   const mcpText = textFromMcpContent(record.result);
   const mcpJson = parseJsonRecord(mcpText);
   const stdoutRecord = parseJsonRecord(record[ProjectToolResultKey.STDOUT]);
+  // For tools that wrap MCP content inside their JSON stdout (e.g. python_lsp
+  // command-wrapper tests), extract the nested MCP text from stdoutRecord.result.
+  const nestedMcpText = textFromMcpContent(stdoutRecord?.result);
   const candidates = [
     record[ProjectToolResultKey.RESULT_PREVIEW],
     stdoutRecord?.stdout,
@@ -468,6 +472,7 @@ function diagnosticsTextFromRecord(record: Record<string, unknown>): string | un
     mcpJson?.stdout,
     mcpJson?.stderr,
     mcpText,
+    nestedMcpText,
     record[ProjectToolResultKey.STDOUT],
     record[ProjectToolResultKey.STDERR],
     record.output
@@ -522,10 +527,14 @@ function applyDiagnosticModelSummary(
   const summary = diagnosticSummaryForRecord(definition, record, context);
   if (!summary) return result;
 
+  // Apply the per-tool budget to the compact preview so the model never receives
+  // an unbounded diagnostic summary even on the inline (non-truncated) path.
+  const rawPreview = diagnosticSummaryPreview(summary);
+  const boundedPreview = boundedPreviewText(rawPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
   return withoutUndefined({
     ...record,
     [DIAGNOSTIC_SUMMARY_KEY]: summary,
-    [ProjectToolResultKey.RESULT_PREVIEW]: diagnosticSummaryPreview(summary)
+    [ProjectToolResultKey.RESULT_PREVIEW]: boundedPreview
   });
 }
 
@@ -952,10 +961,17 @@ function rawPayloadBytes(record: Record<string, unknown>): number {
 }
 
 function extractHighVolumeText(record: Record<string, unknown>): string | undefined {
+  // s3wp.25: record.result and record.stdout may be hidden from the model-facing result
+  // but still present in the internal record (pre-filter) for semantic extraction.
+  // Also check nested fields within the structured JSON stdout.
   const mcpText = textFromMcpContent(record.result);
   if (mcpText) return mcpText;
 
   const stdoutRecord = parseJsonRecord(record[ProjectToolResultKey.STDOUT]);
+  // Check for nested MCP content inside structured JSON stdout
+  const nestedMcpText = textFromMcpContent(stdoutRecord?.result);
+  if (nestedMcpText) return nestedMcpText;
+
   const nestedStdout = typeof stdoutRecord?.stdout === 'string' && stdoutRecord.stdout.trim()
     ? stdoutRecord.stdout : undefined;
   if (nestedStdout) return nestedStdout;
@@ -1537,12 +1553,24 @@ function projectToolResultHasMessageNarrowingSignal(record: Record<string, unkno
   ].some(projectToolMessageSuggestsNarrowing);
 }
 
+// Minimum total raw bytes (stdout + stderr) that, in the absence of a compact
+// structuredResult, signal the model to rerun with narrower arguments.
+// Aligned with the old INLINE_RESULT_BYTES (4 KiB) threshold that previously
+// triggered the truncated path: results smaller than this are cheap to review inline.
+const NARROWING_RAW_BYTES_THRESHOLD = 4 * 1024;
+
 function projectToolResultNeedsNarrowing(record: Record<string, unknown>): boolean {
   const hasSufficientCompactEvidence = projectToolResultHasSufficientCompactEvidence(record);
   if (projectToolResultHasMessageNarrowingSignal(record)) return true;
   if (!hasSufficientCompactEvidence && projectToolResultHasPreviewNarrowingSignal(record)) return true;
-  if (record.maxBufferExceeded === true) return true;
-  if (record.outputTruncated === true || record.stdoutTruncated === true || record.stderrTruncated === true) {
+  // s3wp.25: stdoutTruncated/stderrTruncated/maxBufferExceeded are no longer set by
+  // buildCommandResult.  Use raw byte counts as the narrowing signal instead:
+  // if the command produced more bytes than the narrowing threshold and there is no
+  // compact structured evidence, the model should rerun narrower.
+  const stdoutBytes = typeof record.stdoutBytes === 'number' ? record.stdoutBytes : 0;
+  const stderrBytes = typeof record.stderrBytes === 'number' ? record.stderrBytes : 0;
+  const totalBytes = stdoutBytes + stderrBytes;
+  if (totalBytes > NARROWING_RAW_BYTES_THRESHOLD) {
     return !hasSufficientCompactEvidence;
   }
   return false;
@@ -1607,24 +1635,20 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
           ]
         };
       }
-      if (record[ProjectToolResultKey.OUTPUT_ARCHIVE] || record[ProjectToolResultKey.OUTPUT_ACCESS]) {
-        if (record[DIAGNOSTIC_SUMMARY_KEY]) {
-          return {
-            [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-            [ProjectToolResultKey.RECOVERY]: [
-              'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
-              'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
-              'Rerun diagnostics narrowly (single file or operation) only when representative locations in the summary are insufficient for a specific fix decision.'
-            ]
-          };
-        }
+      // s3wp.25: outputArchive/outputAccess are no longer in the model-facing result.
+      // Fire diagnostic recovery directly when diagnosticSummary is present.
+      if (record[DIAGNOSTIC_SUMMARY_KEY]) {
         return {
           [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-          [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence; treat artifactRef as an opaque harness archive handle, not a filesystem path. Decide from structuredResult, resultPreview, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
+          [ProjectToolResultKey.RECOVERY]: [
+            'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
+            'Raw diagnostic lines are in stderrFile/stdoutFile (not truncated in resultPreview); rerun diagnostics narrowly only when representative locations in the summary are insufficient for a specific fix decision.'
+          ]
         };
       }
       return {
-        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT
+        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
+        [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence. Decide from structuredResult, resultPreview, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
       };
     }
 
@@ -1634,20 +1658,15 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
         [ProjectToolResultKey.RECOVERY]: ['First decide from resultPreview, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read outputArchive.artifactRef just because the preview is truncated.']
       };
     }
-    if (record[ProjectToolResultKey.OUTPUT_ARCHIVE] || record[ProjectToolResultKey.OUTPUT_ACCESS]) {
-      if (record[DIAGNOSTIC_SUMMARY_KEY]) {
-        return {
-          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-          [ProjectToolResultKey.RECOVERY]: [
-            'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
-            'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
-            'Rerun diagnostics narrowly (single file or operation) only when representative locations in the summary are insufficient for a specific fix decision.'
-          ]
-        };
-      }
+    // s3wp.25: outputArchive/outputAccess no longer in model-facing result.
+    // Fire diagnostic recovery directly when diagnosticSummary is present.
+    if (record[DIAGNOSTIC_SUMMARY_KEY]) {
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-        [ProjectToolResultKey.RECOVERY]: ['Treat artifactRef as an opaque harness archive handle, not a filesystem path. Decide from resultPreview, structuredResult, and toolCalls; rerun narrower only when a named missing fact or decision blocker remains.']
+        [ProjectToolResultKey.RECOVERY]: [
+          'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
+          'Raw diagnostic lines are in stderrFile/stdoutFile; rerun diagnostics narrowly only when representative locations in the summary are insufficient for a specific fix decision.'
+        ]
       };
     }
     return {
@@ -1670,9 +1689,18 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
   //
   // SUCCESS-path steering is intentionally unchanged — the success path returns
   // above at `if (status === ToolResultStatus.PASSED)` and never reaches here.
-  const hasArchive = Boolean(record[ProjectToolResultKey.OUTPUT_ARCHIVE]);
+  //
+  // s3wp.25: outputArchive is no longer in the model-facing result.  Use a byte-count
+  // threshold to determine whether the failure has "expensive" output worth reading
+  // before rerunning (e.g. a large test suite or build log).  Small failures (e.g.
+  // a single error line) don't need a "read the archive first" nudge.
+  // Threshold aligned with NARROWING_RAW_BYTES_THRESHOLD (4 KiB).
+  const totalRawBytes =
+    (typeof record.stdoutBytes === 'number' ? record.stdoutBytes : 0)
+    + (typeof record.stderrBytes === 'number' ? record.stderrBytes : 0);
+  const hasLargeRawOutput = totalRawBytes > NARROWING_RAW_BYTES_THRESHOLD;
   const hasNonZeroExit = typeof record.exitCode === 'number' && record.exitCode !== 0;
-  const isExpensiveCommandFailureWithArchive = hasArchive && hasNonZeroExit;
+  const isExpensiveCommandFailureWithArchive = hasLargeRawOutput && hasNonZeroExit;
 
   const failureCategory = classifyProjectToolFailure(definition, record);
   switch (failureCategory) {
@@ -1734,25 +1762,15 @@ export function attachProjectToolSteering(definition: ProjectToolConfig, result:
 
 // ---- Model-facing envelope ----
 
-function outputArchiveSummary(context: ProjectToolExecutionContext, bytes: number, truncated: boolean): ProjectToolOutputArchive {
-  return {
-    artifactRef: outputArtifactRef(context),
-    bytes,
-    truncated
-  };
-}
+// outputArchiveSummary removed (obsolete — s3wp.24/s3wp.25).
+// The generic outputArchive envelope field is forbidden per docs/raw-output-contract.md.
+// Raw output is referenced via stdoutFile/stderrFile on command tools.
 
-function inlineResultLimit(definition: ProjectToolConfig): number {
-  const configured = definition.inlineResultBytes;
-  if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
-    return Math.min(configured, ProjectToolDefaults.INLINE_RESULT_BYTES);
-  }
-  return ProjectToolDefaults.INLINE_RESULT_BYTES;
-}
-
-function outputPreviewLimit(inlineBytes: number): number {
-  return Math.min(inlineBytes, ProjectToolDefaults.OUTPUT_PREVIEW_BYTES);
-}
+// inlineResultLimit and outputPreviewLimit removed (obsolete — s3wp.24).
+// Generic byte-cap gating of the model-facing result is forbidden per
+// docs/raw-output-contract.md.  persistAndBoundResult now always uses the
+// modelFacingInlineResult path; the truncated path (modelFacingTruncatedResult)
+// has been removed.
 
 function baseResultSummary(definition: ProjectToolConfig, result: Record<string, unknown>): Record<string, unknown> {
   return withoutUndefined({
@@ -1776,9 +1794,6 @@ function baseResultSummary(definition: ProjectToolConfig, result: Record<string,
     stderrBytes: result.stderrBytes,
     [ProjectToolResultKey.SCANNED_TARGET_COUNT]: result[ProjectToolResultKey.SCANNED_TARGET_COUNT],
     [ProjectToolResultKey.SCANNED_TARGET_SAMPLES]: result[ProjectToolResultKey.SCANNED_TARGET_SAMPLES],
-    stdoutTruncated: result.stdoutTruncated,
-    stderrTruncated: result.stderrTruncated,
-    maxBufferExceeded: result.maxBufferExceeded,
     [ProjectToolResultKey.STRUCTURED_RESULT]: result[ProjectToolResultKey.STRUCTURED_RESULT]
   });
 }
@@ -1800,9 +1815,12 @@ function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult 
   if (toolCalls && !Array.isArray(modelFacing[ProjectToolResultKey.TOOL_CALLS])) {
     modelFacing[ProjectToolResultKey.TOOL_CALLS] = toolCalls;
   }
+  // For failed/rejected results, derive a compact diagnosticPreview from the
+  // internal stdout/stderr fields.  This is tool-owned semantic compaction (the
+  // commandDiagnosticPreview function extracts error-pattern lines) — allowed
+  // per docs/raw-output-contract.md.  Not a generic byte cap.
   if (
-    hasStructuredModelSummary
-    && record.status !== ToolResultStatus.PASSED
+    record.status !== ToolResultStatus.PASSED
     && !modelFacing[ProjectToolResultKey.DIAGNOSTIC_PREVIEW]
   ) {
     const dp = commandDiagnosticPreview(record);
@@ -1811,33 +1829,11 @@ function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult 
   return modelFacing;
 }
 
-function hasArchivedStream(record: Record<string, unknown>): boolean {
-  return record.stdoutTruncated === true
-    || record.stderrTruncated === true
-    || record.maxBufferExceeded === true;
-}
-
-function attachArchiveIfNeeded(
-  result: ModelFacingProjectToolResult,
-  context: ProjectToolExecutionContext,
-  bytes: number,
-  truncated: boolean
-): ModelFacingProjectToolResult {
-  const archiveTruncated = truncated || hasArchivedStream(result);
-  if (!archiveTruncated) return result;
-  return {
-    ...result,
-    [ProjectToolResultKey.OUTPUT_ARCHIVE]: outputArchiveSummary(context, bytes, archiveTruncated)
-  };
-}
-
-function outputPreviewText(definition: ProjectToolConfig, record: Record<string, unknown>, serialized: string, limitBytes: number): string {
-  const summary = baseResultSummary(definition, record);
-  const summaryText = Object.keys(summary).length > 0 ? JSON.stringify(summary, null, 2) : '';
-  const previewSource = summaryText || serialized;
-  if (previewSource.length <= limitBytes) return previewSource;
-  return `${previewSource.slice(0, limitBytes)}\n\n[truncated ${previewSource.length - limitBytes} characters; full result archived by harness]`;
-}
+// hasArchivedStream, attachArchiveIfNeeded, outputPreviewText removed (obsolete — s3wp.24/s3wp.25).
+// Command tools no longer set stdoutTruncated/stderrTruncated/maxBufferExceeded, and the
+// generic outputArchive/outputAccess/outputTruncated envelope fields are forbidden per
+// docs/raw-output-contract.md.  Raw persistence is handled by writing stdout/stderr to
+// stdoutFile/stderrFile (always, on success/failure/timeout) instead.
 
 function boundedPreviewText(value: string, limitBytes: number): string {
   if (value.length <= limitBytes) return value;
@@ -1913,28 +1909,10 @@ function resultPreviewText(
   return boundedPreviewText(preview, limitBytes);
 }
 
-function modelFacingTruncatedResult(
-  definition: ProjectToolConfig,
-  record: Record<string, unknown>,
-  context: ProjectToolExecutionContext,
-  serialized: string,
-  maxInlineBytes: number
-): ModelFacingProjectToolResult {
-  const toolCalls = toolCallsFromRecord(record);
-  const diagnosticPreview = commandDiagnosticPreview(record);
-  const previewBytes = outputPreviewLimit(maxInlineBytes);
-  const resultPreview = resultPreviewText(record, previewBytes, definition);
-  return {
-    ...baseResultSummary(definition, record),
-    ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {}),
-    ...(resultPreview ? { [ProjectToolResultKey.RESULT_PREVIEW]: resultPreview } : {}),
-    ...(diagnosticPreview ? { [ProjectToolResultKey.DIAGNOSTIC_PREVIEW]: diagnosticPreview } : {}),
-    [ProjectToolResultKey.OUTPUT_ARCHIVE]: outputArchiveSummary(context, serialized.length, true),
-    [ProjectToolResultKey.OUTPUT_ACCESS]: PROJECT_TOOL_OUTPUT_ACCESS_GUIDANCE,
-    outputTruncated: true,
-    outputPreview: outputPreviewText(definition, record, serialized, previewBytes)
-  };
-}
+// modelFacingTruncatedResult removed (obsolete — s3wp.24/s3wp.25).
+// The generic truncated-result path (outputTruncated + outputArchive + outputAccess +
+// outputPreview) is forbidden per docs/raw-output-contract.md.  persistAndBoundResult
+// now always uses modelFacingInlineResult for all tool types.
 
 // ---- summarizeToolResult (for event store) ----
 
@@ -1962,7 +1940,10 @@ export function summarizeToolResult(result: unknown): unknown {
     [ProjectToolResultKey.RESULT_PREVIEW]: record[ProjectToolResultKey.RESULT_PREVIEW],
     [ProjectToolResultKey.DIAGNOSTIC_PREVIEW]: record[ProjectToolResultKey.DIAGNOSTIC_PREVIEW],
     [DIAGNOSTIC_SUMMARY_KEY]: record[DIAGNOSTIC_SUMMARY_KEY],
-    [ProjectToolResultKey.STRUCTURED_RESULT]: record[ProjectToolResultKey.STRUCTURED_RESULT]
+    [ProjectToolResultKey.STRUCTURED_RESULT]: record[ProjectToolResultKey.STRUCTURED_RESULT],
+    // s3wp.25: include stderrHint in event-store summary so isInfrastructureProjectToolFailure
+    // can detect ENOSPC/transient patterns when checking stored failure events.
+    ...(record.stderrHint !== undefined ? { stderrHint: record.stderrHint } : {})
   };
   for (const key of ['stdout', 'stderr', 'output', 'result']) {
     const value = record[key];
@@ -2002,7 +1983,7 @@ export function summarizeToolResult(result: unknown): unknown {
   return summary;
 }
 
-// ---- (9g8z) Per-tool-result token accounting + leak flag ----
+// ---- (9g8z) Per-tool-result token accounting ----
 //
 // Accounting lives exclusively on the harness/event side:
 //   - persistAndBoundResult computes it and registers it in resultAccountingRegistry
@@ -2012,15 +1993,13 @@ export function summarizeToolResult(result: unknown): unknown {
 //     via spread so the WeakMap entry survives through the steering pipeline.
 //   - summarizeToolResult reads from the WeakMap and copies _accounting into the
 //     event-store summary as an enumerable field for harness-internal aggregation.
-//   - rawExceededBudget compares the RAW (pre-bounding) serialized bytes to
-//     MODEL_FACING_RESULT_BUDGET_BYTES (4 KiB) — it fires when the tool produced more
-//     data than the budget and the harness had to truncate/bound the output.  This is
-//     the meaningful, reachable signal; modelFacingBytes is hard-clamped so a
-//     modelFacingBytes-based check would be permanently dead.
+//   - rawExceededBudget: true when rawBytes > modelFacingBytes (the tool produced a
+//     non-trivial amount of raw data that the pipeline compacted).  The old
+//     MODEL_FACING_RESULT_BUDGET_BYTES threshold has been removed (s3wp.24).
 // A future leak-report tool can aggregate these records to identify hot spots.
 
 export interface ResultAccounting {
-  /** Byte length of the serialized full result before bounding. */
+  /** Byte length of the serialized full result before compaction. */
   rawBytes: number;
   /** Byte length of the final model-facing serialized result. */
   modelFacingBytes: number;
@@ -2028,14 +2007,13 @@ export interface ResultAccounting {
   tokenEstimate: number;
   /** Ratio: modelFacingBytes / rawBytes.  Lower is better (more reduction). */
   reductionRatio: number;
-  /** True when the RAW (pre-bounding) result exceeded MODEL_FACING_RESULT_BUDGET_BYTES,
-   *  meaning the harness had to truncate/bound the output.  This is the meaningful leak
-   *  signal: the tool produced more data than the budget and the pipeline had to intervene.
-   *  Based on rawBytes (reachable), NOT modelFacingBytes (which is hard-clamped to <= budget). */
+  /** True when the raw result was larger than the model-facing result, i.e., the
+   *  semantic summarizer reduced the payload before returning it to the model. */
   rawExceededBudget: boolean;
   /** Tool name for aggregation. */
   tool: string;
-  /** The raw-output budget threshold used for the rawExceededBudget flag computation. */
+  /** Kept for backward compatibility with existing event-store readers; always 0
+   *  after s3wp.24 (the byte-budget threshold has been removed). */
   resultBudgetBytes: number;
 }
 
@@ -2110,12 +2088,10 @@ function computeResultAccounting(
 ): ResultAccounting {
   const tokenEstimate = Math.ceil(modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
   const reductionRatio = rawBytes > 0 ? modelFacingBytes / rawBytes : 1;
-  // rawExceededBudget: true when the RAW (pre-bounding) result exceeded the budget,
-  // meaning the harness had to truncate it.  Based on rawBytes, NOT modelFacingBytes —
-  // modelFacingBytes is hard-clamped to <= INLINE_RESULT_BYTES so it can NEVER exceed
-  // MODEL_FACING_RESULT_BUDGET_BYTES, making a modelFacingBytes-based check permanently
-  // dead.  The raw check is the meaningful, reachable signal for leaky tool producers.
-  const rawExceededBudget = rawBytes > MODEL_FACING_RESULT_BUDGET_BYTES;
+  // rawExceededBudget: true when the raw serialized result was larger than the
+  // model-facing result, meaning the semantic summarizer reduced the payload.
+  // The old MODEL_FACING_RESULT_BUDGET_BYTES threshold has been removed (s3wp.24).
+  const rawExceededBudget = rawBytes > modelFacingBytes;
   return {
     rawBytes,
     modelFacingBytes,
@@ -2123,7 +2099,7 @@ function computeResultAccounting(
     reductionRatio,
     rawExceededBudget,
     tool: toolName,
-    resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+    resultBudgetBytes: 0 // obsolete — kept for backward compat with event-store readers
   };
 }
 
@@ -2176,6 +2152,14 @@ function applyHighVolumeModelSummary(
 
 // ---- persistAndBoundResult ----
 
+// ---- persistAndBoundResult (s3wp.24: no generic byte-cap gating) ----
+//
+// Persists the full result to outputFile, then returns the model-facing minimal
+// schema produced by modelFacingInlineResult.  The old inlineResultBytes gating
+// (switching between modelFacingInlineResult and modelFacingTruncatedResult) has
+// been removed: the model always receives the tool's own minimal schema, never a
+// generic truncated envelope.  See docs/raw-output-contract.md.
+
 export async function persistAndBoundResult(
   definition: ProjectToolConfig,
   result: unknown,
@@ -2185,7 +2169,6 @@ export async function persistAndBoundResult(
   const serialized = serializeProjectToolResult(policyResult);
   await writeFile(context.outputFile, serialized);
   void cleanupToolCallScratch(context);
-  const maxInlineBytes = inlineResultLimit(definition);
 
   const structuredResult = applyStructuredSummarizerRegistry(definition, policyResult, context);
 
@@ -2200,20 +2183,15 @@ export async function persistAndBoundResult(
     applyHighVolumeModelSummary(definition, enrichedResult),
     context
   );
-  const record = resultRecord(modelResult);
 
-  let modelFacingResult: ModelFacingProjectToolResult;
-  if (serialized.length <= maxInlineBytes) {
-    modelFacingResult = attachArchiveIfNeeded(modelFacingInlineResult(modelResult), context, serialized.length, false);
-  } else {
-    modelFacingResult = modelFacingTruncatedResult(definition, record, context, serialized, maxInlineBytes);
-  }
+  // s3wp.24: always use the minimal-schema inline path — no byte-cap gating.
+  const modelFacingResult: ModelFacingProjectToolResult = modelFacingInlineResult(modelResult);
 
   // (9g8z) Compute lightweight token accounting and register it in the module-level
   // WeakMap (resultAccountingRegistry) keyed on the returned model-facing result object.
   // The WeakMap holds no strong reference — the entry is GC-eligible when the result is
   // no longer reachable.  No accounting key is added to modelFacingResult, so the
-  // model-facing payload is byte-identical to before 9g8z.
+  // model-facing payload is unchanged.
   // attachProjectToolSteering re-registers the accounting on any new spread object it
   // creates so the entry survives through the steering pipeline.
   // summarizeToolResult reads from the registry and writes _accounting into the

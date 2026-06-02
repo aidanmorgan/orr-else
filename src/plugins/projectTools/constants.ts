@@ -176,13 +176,11 @@ export const FAILURE_REREAD_ARCHIVE_RECOVERY =
 // GPT-4 / Claude tokenizer approximation: ~4 chars per token on average for mixed code+prose.
 export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 
-// (9g8z) Raw-output budget: the byte threshold for the RAW (pre-bounding) serialized
-// result above which a tool is flagged as a heavy/leaky producer (rawExceededBudget=true).
-// Aligned with ProjectToolDefaults.INLINE_RESULT_BYTES (~4 KiB) — tools whose raw output
-// exceeds this threshold required the harness to truncate/bound their result, which is
-// the meaningful signal for per-result accounting.  modelFacingBytes is hard-clamped to
-// <= this value, so a modelFacingBytes-based check would be permanently dead.
-export const MODEL_FACING_RESULT_BUDGET_BYTES = 4 * 1024; // 4 KiB
+// NOTE: MODEL_FACING_RESULT_BUDGET_BYTES has been removed (obsolete — s3wp.24).
+// Generic byte-budget gating of the model-facing result is forbidden per
+// docs/raw-output-contract.md.  The rawExceededBudget field on ResultAccounting
+// now always reflects whether the raw payload was non-trivial (>0 bytes) relative
+// to the model-facing result, without a fixed byte cap.  See resultEnvelope.ts.
 
 export const UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS = new Set<string>([
   '--output-limit'
@@ -277,14 +275,27 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
   ProjectToolParameter.CWD_MODE
 ]);
 
+// MODEL_HIDDEN_RESULT_KEYS: fields always removed from the model-facing payload.
+//
+// s3wp.25:
+//   stdout / stderr: present in the internal result record for semantic summarizers
+//     (diagnostics extraction, high-volume compaction, failure classification).
+//     Always hidden from the model.  Full raw streams are in stdoutFile / stderrFile.
+//   stdoutFile / stderrFile: intentionally NOT in this set — raw-output file refs
+//     that the model should see.
+//   stderrHint: intentionally NOT in this set.  It is a compact (≤512-char) excerpt
+//     of stderr included in the model-facing result for failure classification context
+//     and for classifyProjectToolFailure to identify ENOSPC/transient patterns.
+//   outputFile: internal harness reference, always hidden.
+//   outputTruncated, outputPreview, outputAccess, outputArchive: forbidden per the
+//     minimal-schema contract (docs/raw-output-contract.md).
 export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'outputFile',
-  'stdoutFile',
-  'stderrFile',
   'outputBytes',
   'outputTruncated',
   'outputPreview',
-  ProjectToolResultKey.RESULT_PREVIEW,
+  ProjectToolResultKey.STDOUT,
+  ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,
   ProjectToolResultKey.OUTPUT_ARCHIVE,
   ProjectToolResultKey.FRAMEWORK_TOOL_CALLS

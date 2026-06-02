@@ -1060,19 +1060,17 @@ export const ProjectToolDefaults = {
   TMP_DIR_NAME: 'tmp',
   OUTPUT_DIR_NAME: 'output',
   OUTPUT_FILE_NAME_TEMPLATE: '{{toolName}}-{{toolInvocationId}}.json',
-  COMMAND_RETURN_BYTES: 4 * DataSize.KIB,
-  INLINE_RESULT_BYTES: 4 * DataSize.KIB,
-  OUTPUT_PREVIEW_BYTES: DataSize.KIB,
-  COMMAND_DIAGNOSTIC_PREVIEW_BYTES: 3 * DataSize.KIB,
+  // NOTE: COMMAND_RETURN_BYTES, INLINE_RESULT_BYTES, OUTPUT_PREVIEW_BYTES,
+  // COMMAND_DIAGNOSTIC_PREVIEW_BYTES, and TOOL_CALL_EXTRACTION_MAX_BYTES have
+  // been removed (obsolete — s3wp.24/s3wp.25). Generic byte caps are forbidden
+  // per docs/raw-output-contract.md. Semantic summarizer caps below are KEPT.
   // Hard safety bound for the model-facing resultPreview when a diagnosticSummary
-  // is available. Measured in UTF-16 code units (.length) like sibling _BYTES
-  // constants. Compact grouped text is typically under 1 KiB; a worst-case
-  // 6-group summary with long messages and paths may approach ~1.5 KiB, so the
-  // preview can be truncated — the truncation marker is intentionally graceful
-  // (non-import groups sort first and survive). Far below the raw diagnostic
-  // payload (tens of KiB).
+  // is available. Measured in UTF-16 code units (.length). Compact grouped text
+  // is typically under 1 KiB; a worst-case 6-group summary with long messages
+  // and paths may approach ~1.5 KiB, so the preview can be truncated — the
+  // truncation marker is intentionally graceful (non-import groups sort first and
+  // survive). Far below the raw diagnostic payload (tens of KiB).
   DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES: 2 * DataSize.KIB,
-  TOOL_CALL_EXTRACTION_MAX_BYTES: 256 * DataSize.KIB,
   STRUCTURED_SUMMARY_MAX_GROUPS: 6,
   STRUCTURED_SUMMARY_MAX_ITEMS_PER_GROUP: 3,
   STRUCTURED_SUMMARY_TEXT_CHARS: 240,

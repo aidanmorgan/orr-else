@@ -283,7 +283,6 @@
               "allowCwdOverride": { "type": "boolean" },
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-              "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
               "successExitCodes": {
                 "type": "array",
@@ -342,7 +341,6 @@
               "configPath": { "type": "string" },
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-              "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "argumentDefaults": {
                 "type": "object",
                 "additionalProperties": {
@@ -426,7 +424,6 @@
                 }
               },
               "type": { "const": "extension" },
-              "inlineResultBytes": { "type": "integer", "minimum": 1 },
               "optional": { "type": "boolean" },
               "validationRules": {
                 "type": "array",

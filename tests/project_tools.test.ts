@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
-import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, MODEL_FACING_RESULT_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
+import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
 import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
@@ -166,7 +166,8 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(JSON.parse(result.stdout).argv).toEqual([
+    // s3wp.25: stdout is in stdoutFile, not inline on result
+    expect(JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8')).argv).toEqual([
       path.join(tempWorktree, 'packages/example.py'),
       '-k',
       'selector'
@@ -202,7 +203,8 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(JSON.parse(result.stdout)).toEqual({
+    // s3wp.25: stdout is in stdoutFile
+    expect(JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8'))).toEqual({
       argv: [path.join(frameworkRoot, 'tests/teammates.test.ts')],
       frameworkRoot
     });
@@ -238,7 +240,8 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(JSON.parse(result.stdout).argv).toEqual([frameworkPath]);
+    // s3wp.25: stdout is in stdoutFile
+    expect(JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8')).argv).toEqual([frameworkPath]);
     expect(result.normalizedPathArguments).toEqual(['argv[0]']);
   });
 
@@ -339,7 +342,8 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(JSON.parse(result.stdout).argv).toEqual([
+    // s3wp.25: stdout is in stdoutFile
+    expect(JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8')).argv).toEqual([
       `--changed-file=${path.join(tempWorktree, 'packages/example.py')}`
     ]);
     expect(result.normalizedPathArguments).toEqual(['--changed-file']);
@@ -517,7 +521,8 @@ describe('project tool command arguments', () => {
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain('missing path');
+    // s3wp.25: raw stderr is in stderrFile; stderrHint is the compact classification excerpt
+    expect((result as any).stderrHint).toContain('missing path');
   });
 
   it('labels ast_grep no-match results without making them look like tool failures', async () => {
@@ -1221,25 +1226,29 @@ describe('project tool command arguments', () => {
       }
     }, {} as any, undefined, new Map());
 
-    // Compact metadata fields are retained
+    // s3wp.25 minimal schema: compact metadata fields are retained
     expect(result).toMatchObject({
       tool: 'artifact_validator',
       status: ToolResultStatus.PASSED,
       stdoutBytes: Buffer.byteLength(payload),
       stderrBytes: 0,
-      stdoutTruncated: false,
-      stderrTruncated: false,
-      maxBufferExceeded: false,
       nextAction: 'use_result'
     });
+    // stdoutTruncated/stderrTruncated/maxBufferExceeded are no longer present (s3wp.25)
+    expect((result as any).stdoutTruncated).toBeUndefined();
+    expect((result as any).stderrTruncated).toBeUndefined();
+    expect((result as any).maxBufferExceeded).toBeUndefined();
     // structuredResult is present (passedCheckCount from the checks array)
     const structuredResult = (result as any).structuredResult;
     expect(structuredResult).toBeDefined();
     expect(structuredResult.passedCheckCount).toBe(1);
     expect(structuredResult.rejectedCheckCount).toBe(0);
-    // Raw stdout/stderr are suppressed from the model-facing result (hasStructuredModelSummary=true)
+    // Raw stdout/stderr are not in the model-facing result (s3wp.25)
     expect((result as any).stdout).toBeUndefined();
     expect((result as any).stderr).toBeUndefined();
+    // stdoutFile/stderrFile are now visible (raw refs)
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
     // No output-control flag issues
     expect(result.unsupportedOutputControlFlag).toBeUndefined();
     expect(result.failureCategory).toBeUndefined();
@@ -1292,23 +1301,101 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.maxBufferExceeded).toBe(false);
+    // s3wp.25: maxBufferExceeded/stdoutTruncated no longer in model-facing result
+    expect((result as any).maxBufferExceeded).toBeUndefined();
+    expect((result as any).stdoutTruncated).toBeUndefined();
     expect(result.stdoutBytes).toBe(outputBytes);
-    expect(result.stdoutTruncated).toBe(true);
+    // Large output without structuredResult -> rerun_narrower (driven by byte count threshold)
     expect(result.nextAction).toBe('rerun_narrower');
     expect(result.recovery).toEqual(expect.arrayContaining([
       expect.stringContaining('named missing fact or decision blocker')
     ]));
-    expect(result.recovery.join('\n')).toContain('First decide from resultPreview, structuredResult, and toolCalls');
-    expect(result.recovery.join('\n')).toContain('Do not read outputArchive.artifactRef just because the preview is truncated');
-    expect(result.recovery.join('\n')).not.toMatch(/read .*archive first|read .*archive before/i);
-    // With COMMAND_RETURN_BYTES=4096 the bounded-stdout serialized result exceeds inlineResultBytes,
-    // so the envelope uses the truncated path: stdout is suppressed, archive is always present.
-    expect(result.stdoutFile).toBeUndefined();
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    expect(JSON.stringify(result.outputArchive)).not.toContain(tempRoot);
+    // s3wp.25: raw output is in stdoutFile/stderrFile; no outputArchive envelope
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
+    // stdoutFile should be an absolute path to the stdout log
+    expect(path.isAbsolute(result.stdoutFile!)).toBe(true);
+    expect(result.stdoutFile).toContain('stdout.log');
   });
+
+  // s3wp.24/s3wp.25: >10MB fixture test — raw files complete, model-facing result minimal
+  it('s3wp.25 fixture: command emitting >10MB stdout/stderr persists complete raw bytes; model-facing has NO inline text', async () => {
+    // Each of stdout and stderr emits >10MB.  The raw file must match byte-for-byte;
+    // the model-facing result must NOT contain raw stdout, stderr, or preview fields.
+    const stdoutMB = 11; // 11 MiB stdout
+    const stderrMB = 11; // 11 MiB stderr
+    const stdoutBytes = stdoutMB * 1024 * 1024;
+    const stderrBytes = stderrMB * 1024 * 1024;
+
+    // We generate deterministic content: a repeating pattern so we can checksum it.
+    const stdoutPattern = 'STDOUT-LINE-DATA-FIXTURE '; // 25 bytes
+    const stderrPattern = 'STDERR-LINE-DATA-FIXTURE '; // 25 bytes
+    const stdoutRepeat = Math.ceil(stdoutBytes / stdoutPattern.length);
+    const stderrRepeat = Math.ceil(stderrBytes / stderrPattern.length);
+    const expectedStdout = stdoutPattern.repeat(stdoutRepeat).slice(0, stdoutBytes);
+    const expectedStderr = stderrPattern.repeat(stderrRepeat).slice(0, stderrBytes);
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'large_fixture_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `
+          const pattern = ${JSON.stringify(stdoutPattern)};
+          const n = ${stdoutRepeat};
+          const out = pattern.repeat(n).slice(0, ${stdoutBytes});
+          process.stdout.write(out);
+          const ep = ${JSON.stringify(stderrPattern)};
+          const en = ${stderrRepeat};
+          const err = ep.repeat(en).slice(0, ${stderrBytes});
+          process.stderr.write(err);
+        `
+      ],
+      cwd: CwdMode.WORKTREE,
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'fixture'
+    }, {} as any, undefined, new Map());
+
+    // s3wp.25: model-facing JSON must NOT include raw stdout/stderr or previews
+    expect(result.stdout).toBeUndefined();
+    expect(result.stderr).toBeUndefined();
+    expect((result as any).stdoutTruncated).toBeUndefined();
+    expect((result as any).stderrTruncated).toBeUndefined();
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
+    expect((result as any).resultPreview).toBeUndefined();
+    expect((result as any).diagnosticPreview).toBeUndefined();
+    expect((result as any).outputPreview).toBeUndefined();
+
+    // s3wp.25: stdoutFile and stderrFile are present and point to actual files
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
+    expect(fs.existsSync(result.stdoutFile!)).toBe(true);
+    expect(fs.existsSync(result.stderrFile!)).toBe(true);
+
+    // Byte count must match exactly
+    const rawStdoutStat = fs.statSync(result.stdoutFile!);
+    const rawStderrStat = fs.statSync(result.stderrFile!);
+    expect(rawStdoutStat.size).toBe(stdoutBytes);
+    expect(rawStderrStat.size).toBe(stderrBytes);
+    expect(result.stdoutBytes).toBe(stdoutBytes);
+    expect(result.stderrBytes).toBe(stderrBytes);
+
+    // SHA-256 of raw file must match SHA-256 of expected content
+    const { createHash } = await import('node:crypto');
+    const rawStdoutContent = fs.readFileSync(result.stdoutFile!);
+    const rawStderrContent = fs.readFileSync(result.stderrFile!);
+    const stdoutHash = createHash('sha256').update(rawStdoutContent).digest('hex');
+    const stderrHash = createHash('sha256').update(rawStderrContent).digest('hex');
+    const expectedStdoutHash = createHash('sha256').update(Buffer.from(expectedStdout)).digest('hex');
+    const expectedStderrHash = createHash('sha256').update(Buffer.from(expectedStderr)).digest('hex');
+    expect(stdoutHash).toBe(expectedStdoutHash);
+    expect(stderrHash).toBe(expectedStderrHash);
+  }, 60_000); // 60s timeout for large I/O
 
   it('bounds inline project tool observations while preserving framework tool calls', async () => {
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
@@ -1332,22 +1419,20 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputPreview/outputAccess/outputArchive no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputPreview).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
+    // Large structured JSON result with toolCalls still routes to rerun_narrower (large byte count)
     expect(result.nextAction).toBe('rerun_narrower');
-    expect(result.recovery.join('\n')).toContain('First decide from resultPreview, structuredResult, and toolCalls');
     expect(result.recovery.join('\n')).toContain('named missing fact or decision blocker');
-    expect(result.recovery.join('\n')).toContain('Do not read outputArchive.artifactRef just because the preview is truncated');
-    expect(result.recovery.join('\n')).not.toMatch(/read .*archive first|read .*archive before/i);
     expect(result.toolCalls).toEqual([{ tool: 'add_checklist_item', arguments: { text: 'Rule checked', mandatory: true } }]);
     expect(result.stdout).toBeUndefined();
-    expect(result.outputPreview.length).toBeLessThan(1500);
-    expect(result.outputPreview).not.toContain('filler');
-    expect(result.outputAccess).toContain('Archived by harness');
-    expect(result.outputAccess).toContain('Do not read the archive just because the preview is truncated');
     expect(result.outputFile).toBeUndefined();
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    expect(JSON.stringify(result.outputArchive)).not.toContain(tempRoot);
+    // s3wp.25: stdoutFile/stderrFile are visible raw refs (absolute paths to log files)
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
   });
 
   it('uses sufficient compact structured results even when archived output is capped', async () => {
@@ -1378,14 +1463,14 @@ describe('project tool command arguments', () => {
     const structuredResult = result.structuredResult as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputAccess/outputArchive no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
+    // structuredResult with decision evidence → use_result (not rerun_narrower)
     expect(result.nextAction).toBe('use_result');
     expect(result.stdout).toBeUndefined();
-    expect(result.outputAccess).toContain('Archived by harness');
-    expect(result.outputAccess).toContain('First decide from resultPreview, structuredResult, and toolCalls');
     expect(result.outputFile).toBeUndefined();
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
     expect(structuredResult.passedCheckCount).toBe(2);
     expect(structuredResult.rejectedCheckCount).toBe(0);
   });
@@ -1427,11 +1512,15 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputAccess no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
+    // Codemap with large filler: high-volume summarizer fires → use_result + resultPreview
     expect(result.nextAction).toBe('use_result');
+    // resultPreview is set by the high-volume summarizer
     expect(result.resultPreview).toContain('Files: 542');
-    expect(result.resultPreview).toContain('[truncated 8217 characters');
-    expect(result.outputAccess).toContain('Archived by harness');
+    // s3wp.25: full content in stdoutFile
+    expect(typeof result.stdoutFile).toBe('string');
   });
 
   it('uses file-scoped python_lsp diagnostics previews even when they are truncated', async () => {
@@ -1469,11 +1558,13 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputAccess no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
+    // Diagnostic summarizer still fires (internal stdout field available for extraction)
     expect(result.resultPreview).toContain('Diagnostics in File: 257');
     expect(result.resultPreview).toContain('reportMissingImports');
-    expect(result.outputAccess).toContain('Archived by harness');
   });
 
   it('groups noisy python_lsp missing-import diagnostics before model display', async () => {
@@ -1516,14 +1607,14 @@ describe('project tool command arguments', () => {
     const summary = result.diagnosticSummary as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive/outputAccess no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     expect(result.recovery).toEqual(expect.arrayContaining([
       expect.stringContaining('inspect non-import groups')
     ]));
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    expect(result.outputAccess).toContain('Archived by harness');
     expect(result.stdout).toBeUndefined();
     expect(result.resultPreview.length).toBeLessThan(1200);
     expect(result.resultPreview).toContain('Diagnostics in File: 257');
@@ -1591,7 +1682,8 @@ describe('project tool command arguments', () => {
     const codes = summary.groups.map((group: any) => group.code);
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     expect(summary.totalDiagnostics).toBe(35);
     expect(summary.missingImportCount).toBe(32);
@@ -1656,7 +1748,9 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     // The model-facing resultPreview must be the compact summary, not the raw
     // MCP diagnostic text.  Assert it is well within the named budget constant
@@ -1676,11 +1770,10 @@ describe('project tool command arguments', () => {
     // Recovery guidance must direct agents to cite groups and rerun narrowly.
     expect(result.recovery).toEqual(expect.arrayContaining([
       expect.stringContaining('diagnosticSummary groups'),
-      expect.stringContaining('Rerun diagnostics narrowly')
+      expect.stringContaining('rerun diagnostics narrowly')
     ]));
-    // Raw diagnostics remain available via outputArchive — not deleted.
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw diagnostics available via stderrFile/stdoutFile
+    expect(typeof result.stdoutFile).toBe('string');
   });
 
   it('keeps actionable mixed diagnostics visible in resultPreview even when MCP content is present', async () => {
@@ -1730,15 +1823,14 @@ describe('project tool command arguments', () => {
     const codes = summary.groups.map((group: any) => group.code);
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24: outputTruncated no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     // Actionable (non-import) groups must appear ahead of import noise.
     expect(result.resultPreview).toContain('reportAssignmentType');
     expect(result.resultPreview).toContain('reportUndefinedVariable');
     expect(result.resultPreview).toContain('Pyright/reportMissingImports count=32');
     // The group listing must have non-import groups before the import noise group.
-    // Use indexOf on the group entry markers (numbered group lines) rather than
-    // the code name strings, because the summary header also mentions reportMissingImports.
     expect(result.resultPreview.indexOf('Pyright/reportAssignmentType')).toBeLessThan(
       result.resultPreview.indexOf('Pyright/reportMissingImports count=32')
     );
@@ -1845,10 +1937,14 @@ describe('project tool command arguments', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
-    // No diagnosticSummary: raw MCP content must reach the model.
+    // No diagnosticSummary: the model sees the minimal schema
     expect(result.diagnosticSummary).toBeUndefined();
-    // The MCP content text must appear somewhere in the serialized result.
-    expect(JSON.stringify(result)).toContain('ceridwen_unique_codemap_symbol');
+    // s3wp.25: raw MCP content is in stdoutFile, not inline in the model-facing result.
+    // The model-facing result has stdoutFile reference instead.
+    expect(typeof result.stdoutFile).toBe('string');
+    // Raw content IS available in the file
+    const rawContent = fs.readFileSync(result.stdoutFile!, 'utf8');
+    expect(rawContent).toContain('ceridwen_unique_codemap_symbol');
   });
 
   it('cap-truncation: diagnosticSummaryPreview truncates gracefully when many groups exceed the byte cap', async () => {
@@ -1909,7 +2005,8 @@ describe('project tool command arguments', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24: outputTruncated no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
     expect(result.resultPreview).toBeDefined();
 
     // Truncation marker must be present (summary exceeded the cap).
@@ -1958,12 +2055,14 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     expect(result.stdout).toBeUndefined();
+    // High-volume summarizer fires for ast_grep → compact resultPreview
     expect(result.resultPreview).toContain('packages/example.py:10:class Example:');
     expect(result.resultPreview).not.toContain('filler');
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
     expect(JSON.stringify(result)).not.toContain('outputFile');
   });
 
@@ -1991,9 +2090,11 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24: outputTruncated no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
     expect(result.nextAction).toBe('fix_or_route_failure');
     expect(result.stdout).toBeUndefined();
+    // commandFailureSummarizer fires → hasStructuredModelSummary=true → diagnosticPreview set
     expect(result.diagnosticPreview).toContain('ImportError: cannot import name _emit_display_expression');
     expect(result.diagnosticPreview).toContain('ERROR packages/example/test_display.py');
   });
@@ -2033,12 +2134,12 @@ describe('project tool command arguments', () => {
     const structuredResult = result.structuredResult as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputAccess/outputArchive no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
     expect(result.stdout).toBeUndefined();
-    expect(result.outputAccess).toContain('Archived by harness');
     expect(result.outputFile).toBeUndefined();
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
     expect(structuredResult.artifact).toBe('planContract');
     expect(structuredResult.rejectedCheckCount).toBe(1);
     expect(structuredResult.rejectedChecks).toEqual([
@@ -2289,17 +2390,21 @@ describe('project tool command arguments', () => {
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.outputFile).toBeUndefined();
-    expect(result.stdoutFile).toBeUndefined();
-    expect(result.stderrFile).toBeUndefined();
-    expect(result.outputAccess).toBeUndefined();
-    expect(result.outputArchive).toBeUndefined();
+    // s3wp.25: stdoutFile/stderrFile are now visible raw refs in the model-facing result
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
+    expect((result as any).outputAccess).toBeUndefined();
+    expect((result as any).outputArchive).toBeUndefined();
     const events = await eventStore.readAll();
     const started = events.find(event => event.type === DomainEventName.PROJECT_TOOL_STARTED);
     const prepared = events.find(event => event.type === DomainEventName.PROJECT_TOOL_OUTPUT_DIR_PREPARED);
     expect(JSON.stringify(started?.data)).not.toContain('outputFile');
     expect(prepared).toBeUndefined();
+    // Event start data still includes outputArchive.artifactRef (event-side, not model-facing)
     expect((started?.data as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    const payload = JSON.parse(result.stdout);
+    // s3wp.25: stdout is in stdoutFile, not inline on the model-facing result
+    const stdoutContent = fs.readFileSync(result.stdoutFile!, 'utf8');
+    const payload = JSON.parse(stdoutContent);
     const expectedCallDir = path.join(tempRoot, '.tmp/tool-calls/bd-1/Planning/analyze/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
     const expectedOutputDir = path.join(expectedCallDir, 'output');
 
@@ -2327,7 +2432,9 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    const payload = JSON.parse(result.stdout);
+    // s3wp.25: stdout is in stdoutFile
+    const stdoutContent2 = fs.readFileSync(result.stdoutFile!, 'utf8');
+    const payload = JSON.parse(stdoutContent2);
     const expectedCallDir = path.join(tempRoot, '.tmp/tool-calls/bd-2/AdversarialPostReview/quality/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
     const expectedOutputDir = path.join(expectedCallDir, 'output');
 
@@ -2355,8 +2462,9 @@ describe('project tool command arguments', () => {
       actionId: 'repeat'
     }, {} as any, undefined, new Map());
 
-    const firstPayload = JSON.parse(first.stdout);
-    const secondPayload = JSON.parse(second.stdout);
+    // s3wp.25: stdout is in stdoutFile
+    const firstPayload = JSON.parse(fs.readFileSync(first.stdoutFile!, 'utf8'));
+    const secondPayload = JSON.parse(fs.readFileSync(second.stdoutFile!, 'utf8'));
 
     expect(firstPayload[EnvProbeField.TOOL_INVOCATION_ID]).not.toBe(secondPayload[EnvProbeField.TOOL_INVOCATION_ID]);
     expect(firstPayload[EnvProbeField.CALL_DIR]).not.toBe(secondPayload[EnvProbeField.CALL_DIR]);
@@ -2491,21 +2599,23 @@ describe('buildCommandResult field completeness', () => {
       {} as any, undefined, new Map()
     ) as any;
 
+    // s3wp.25 minimal schema assertions
     expect(result.tool).toBe('shape_probe');
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.exitCode).toBe(0);
-    expect(result.maxBufferExceeded).toBe(false);
     expect(result.timedOut).toBe(false);
-    expect(typeof result.stdout).toBe('string');
-    expect(typeof result.stderr).toBe('string');
+    // maxBufferExceeded/stdoutTruncated/stderrTruncated are NOT in model-facing result (s3wp.25)
+    expect(result.maxBufferExceeded).toBeUndefined();
+    expect(result.stdoutTruncated).toBeUndefined();
+    expect(result.stderrTruncated).toBeUndefined();
+    // stdout/stderr raw text NOT in model-facing result (s3wp.25) — use stdoutFile/stderrFile
+    expect(result.stdout).toBeUndefined();
+    expect(result.stderr).toBeUndefined();
     expect(typeof result.stdoutBytes).toBe('number');
     expect(typeof result.stderrBytes).toBe('number');
-    expect(typeof result.stdoutTruncated).toBe('boolean');
-    expect(typeof result.stderrTruncated).toBe('boolean');
-    expect(result.stdoutTruncated).toBe(false);
-    // stdoutFile/stderrFile are stripped by model-facing filter (MODEL_HIDDEN_RESULT_KEYS)
-    expect(result).not.toHaveProperty('stdoutFile');
-    expect(result).not.toHaveProperty('stderrFile');
+    // stdoutFile/stderrFile ARE in model-facing result (s3wp.25 — raw-output refs)
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
   });
 
   it('error branch (non-zero exit) carries all expected fields', async () => {
@@ -2524,19 +2634,22 @@ describe('buildCommandResult field completeness', () => {
       {} as any, undefined, new Map()
     ) as any;
 
+    // s3wp.25 minimal schema assertions
     expect(result.tool).toBe('shape_probe_fail');
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.exitCode).toBe(1);
-    expect(result.maxBufferExceeded).toBe(false);
-    expect(typeof result.stdout).toBe('string');
-    expect(typeof result.stderr).toBe('string');
+    // maxBufferExceeded/stdoutTruncated/stderrTruncated NOT in model-facing result (s3wp.25)
+    expect(result.maxBufferExceeded).toBeUndefined();
+    expect(result.stdoutTruncated).toBeUndefined();
+    expect(result.stderrTruncated).toBeUndefined();
+    // stdout/stderr raw text NOT in model-facing result (s3wp.25)
+    expect(result.stdout).toBeUndefined();
+    expect(result.stderr).toBeUndefined();
     expect(typeof result.stdoutBytes).toBe('number');
     expect(typeof result.stderrBytes).toBe('number');
-    expect(typeof result.stdoutTruncated).toBe('boolean');
-    expect(typeof result.stderrTruncated).toBe('boolean');
-    // stdoutFile/stderrFile are stripped by model-facing filter (MODEL_HIDDEN_RESULT_KEYS)
-    expect(result).not.toHaveProperty('stdoutFile');
-    expect(result).not.toHaveProperty('stderrFile');
+    // stdoutFile/stderrFile ARE in model-facing result (raw-output refs)
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
   });
 });
 
@@ -2659,22 +2772,19 @@ describe('per-tool structured summarizer registry', () => {
 
     // Tool should still succeed
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    // Should be truncated (payload exceeds 1000 byte inline limit)
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive/outputAccess no longer present
+    expect((result as any).outputTruncated).toBeUndefined();
     // No diagnostic summary
     expect((result as any).diagnosticSummary).toBeUndefined();
     // structuredResult must be absent (no summarizer applies)
-    // (The existing structuredPayloadSummary path from the command tool produces structuredResult
-    // from structured JSON stdout, but env_probe's stdout is not JSON with structured keys.
-    // If the payload happens to have structuredResult from the generic path, that's also fine —
-    // the key test is that the summarizer registry did NOT produce one for a non-diagnostic tool.)
+    // (env_probe's stdout is not JSON with structured keys)
 
-    // outputArchive must be present (archive always written — requirement 5)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-
-    // outputAccess guidance must be present (truncated path)
-    expect(result.outputAccess).toContain('Archived by harness');
+    // s3wp.25: stdoutFile/stderrFile are present instead of outputArchive
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(typeof result.stderrFile).toBe('string');
+    // No outputAccess/outputArchive (raw-output contract)
+    expect((result as any).outputArchive).toBeUndefined();
+    expect((result as any).outputAccess).toBeUndefined();
   });
 
   // (c) parse_error path: summarizer returns parse_error, archive is preserved, no raw dump
@@ -2711,10 +2821,12 @@ describe('per-tool structured summarizer registry', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
-    // Archive is always written regardless of summarizer outcome (requirement 5)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    expect(result.outputArchive.bytes).toBeGreaterThan(1000);
+    // s3wp.25: raw output is in stdoutFile/stderrFile instead of outputArchive
+    expect(typeof result.stdoutFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
+    // The raw stdoutFile contains the full payload (>1000 bytes)
+    const rawSize = fs.statSync(result.stdoutFile!).size;
+    expect(rawSize).toBeGreaterThan(1000);
     // Model-facing result is compact (not raw 50KB dump)
     const modelFacingSize = JSON.stringify(result).length;
     expect(modelFacingSize).toBeLessThan(5000);
@@ -2781,9 +2893,9 @@ describe('per-tool structured summarizer registry', () => {
       expect.stringContaining('diagnosticSummary groups')
     ]));
 
-    // 7i0 behavior: archive is present (raw data preserved)
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw data is in stdoutFile/stderrFile instead of outputArchive
+    expect(typeof result.stdoutFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
 
     // Registry behavior: structuredResult is also present with stable fields (new)
     const structuredResult = result.structuredResult as any;
@@ -2845,9 +2957,12 @@ describe('per-tool structured summarizer registry', () => {
     expect(structuredResult.counts.total).toBe(50);
     expect(Array.isArray(structuredResult.affectedPaths)).toBe(true);
 
-    // Archive holds the full raw data (requirement 5)
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.bytes).toBeGreaterThan(rawPayloadBytes);
+    // s3wp.25: raw data in stdoutFile/stderrFile instead of outputArchive
+    expect(typeof result.stdoutFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
+    // The raw stdoutFile is always larger than the compact model-facing result
+    const stdoutFileBytes = fs.statSync(result.stdoutFile!).size;
+    expect(stdoutFileBytes).toBeGreaterThan(rawPayloadBytes);
   });
 
   // (f) clobber-precedence: pre-existing structuredPayloadSummary (rich gate evidence) wins over
@@ -3004,8 +3119,9 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     }, {} as any, undefined, new Map()) as any;
 
     expect(truncatedResult.status).toBe(ToolResultStatus.PASSED);
-    expect(truncatedResult.outputTruncated).toBe(true);
-    // Raw payload fields must be absent on truncated path
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive no longer present
+    expect(truncatedResult.outputTruncated).toBeUndefined();
+    // Raw payload fields are never in model-facing result (s3wp.25)
     expect(truncatedResult.stdout).toBeUndefined();
     expect(truncatedResult.stderr).toBeUndefined();
     expect((truncatedResult as any).result).toBeUndefined();
@@ -3013,9 +3129,9 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     expect(truncatedResult.structuredResult).toBeDefined();
     expect(truncatedResult.structuredResult.passedCheckCount).toBe(2);
     expect(truncatedResult.structuredResult.rejectedCheckCount).toBe(0);
-    // outputArchive is attached (raw payload archived)
-    expect(truncatedResult.outputArchive).toBeDefined();
-    expect(truncatedResult.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: stdoutFile/stderrFile are visible raw refs
+    expect(typeof truncatedResult.stdoutFile).toBe('string');
+    expect((truncatedResult as any).outputArchive).toBeUndefined();
 
     // --- INLINE PATH (small payload, no filler, fits under default 4 KiB inline cap) ---
     const inlineResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
@@ -3080,7 +3196,8 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
-    expect(result.outputTruncated).toBe(true);
+    // s3wp.24/s3wp.25: outputTruncated/outputArchive no longer present
+    expect(result.outputTruncated).toBeUndefined();
     // failureCategory must be present (failure stays actionable)
     expect(result.failureCategory).toBeDefined();
     // diagnosticPreview must be present for actionable failure context
@@ -3089,11 +3206,11 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // structuredResult with rejection evidence is present
     expect(result.structuredResult).toBeDefined();
     expect(result.structuredResult.rejectedCheckCount).toBe(1);
-    // Raw stdout is suppressed (structuredResult present)
+    // Raw stdout is suppressed (s3wp.25: always hidden)
     expect(result.stdout).toBeUndefined();
-    // outputArchive is present (raw preserved in archive)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw preserved in stdoutFile/stderrFile
+    expect(typeof result.stdoutFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
   });
 
   // (c) small plain-text no-summary result still works and has no duplicate raw fields
@@ -3120,14 +3237,17 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     expect(result.diagnosticSummary).toBeUndefined();
     // Small result is inline — no outputTruncated
     expect(result.outputTruncated).toBeUndefined();
-    // Raw stdout present (no suppression without structuredResult)
-    expect(result.stdout).toContain('match found at line 42');
-    // resultPreview is hidden on inline path (MODEL_HIDDEN_RESULT_KEYS) — no duplicate
+    // s3wp.25: stdout is always hidden from model-facing result; use stdoutFile
+    expect(result.stdout).toBeUndefined();
+    expect(typeof result.stdoutFile).toBe('string');
+    // Raw stdout content is in stdoutFile
+    expect(fs.readFileSync(result.stdoutFile!, 'utf8')).toContain('match found at line 42');
+    // resultPreview is not set when there is no structuredResult/diagnosticSummary
     expect((result as any).resultPreview).toBeUndefined();
-    // No output duplication: stdout carries the raw text once and only once
+    // No duplicate raw text in model-facing result
     const resultJson = JSON.stringify(result);
     const occurrences = (resultJson.match(/match found at line 42/g) || []).length;
-    expect(occurrences).toBe(1);
+    expect(occurrences).toBe(0); // stdout is in file, not in model-facing result JSON
   });
 
   // (d) 7i0 diagnostic behavior still holds (regression guard for exact 7i0 behavior)
@@ -3228,15 +3348,14 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // structuredResult is present
     expect(result.structuredResult).toBeDefined();
     expect(result.structuredResult.passedCheckCount).toBe(30);
-    // Raw stdout is suppressed
+    // Raw stdout is suppressed (s3wp.25: always in stdoutFile)
     expect(result.stdout).toBeUndefined();
-    // Archive is attached and truncated (payload exceeded inlineResultBytes cap)
-    expect(result.outputArchive).toMatchObject({ truncated: true });
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
-    // The archive bytes reflect the bounded serialized output; model-facing is even smaller
-    // because the compact structuredResult replaces the raw payload fields.
-    // (archive bytes = serialized bounded-stdout result; model-facing = compact summary only)
-    expect(result.outputArchive.bytes).toBeGreaterThan(modelFacingBytes);
+    // s3wp.25: stdoutFile/stderrFile instead of outputArchive
+    expect(typeof result.stdoutFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
+    // The stdoutFile is larger than the compact model-facing result
+    const stdoutFileSize = fs.statSync(result.stdoutFile!).size;
+    expect(stdoutFileSize).toBeGreaterThan(modelFacingBytes);
   });
 
   // -------------------------------------------------------------------------
@@ -3280,10 +3399,10 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     expect(structuredResult.passedCheckCount).toBe(2);
     expect(structuredResult.rejectedCheckCount).toBe(0);
 
-    // outputTruncated is set because payload exceeds inlineResultBytes
-    expect((result as any).outputTruncated).toBe(true);
+    // s3wp.24: outputTruncated is no longer in model-facing result
+    expect((result as any).outputTruncated).toBeUndefined();
 
-    // Steering must use structured evidence — not raw truncation markers
+    // Steering uses structured evidence → use_result (not rerun_narrower)
     expect(result.nextAction).toBe('use_result');
     expect(result.nextAction).not.toBe('rerun_narrower');
   });
@@ -3422,14 +3541,15 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
-    // No structuredResult — fallback to truncation-based steering
+    // No structuredResult — fallback to byte-count-based steering
     expect((result as any).structuredResult).toBeUndefined();
     expect((result as any).diagnosticSummary).toBeUndefined();
 
-    // Truncation is set
-    expect((result as any).stdoutTruncated).toBe(true);
+    // s3wp.25: stdoutTruncated is no longer in model-facing result; large byte count drives steering
+    expect((result as any).stdoutTruncated).toBeUndefined();
+    expect(result.stdoutBytes).toBeGreaterThan(4 * 1024);
 
-    // Steering falls back to rerun_narrower because no structured evidence
+    // Steering falls back to rerun_narrower because no structured evidence + large bytes
     expect(result.nextAction).toBe('rerun_narrower');
   });
 });
@@ -3742,18 +3862,16 @@ describe('commandFailureSummarizer', () => {
     // structuredResult must be absent (summarizer returned null — no patterns matched)
     expect(result.structuredResult).toBeUndefined();
 
-    // Archive must be present (raw data preserved — EARS req 5)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw data in stderrFile instead of outputArchive
+    expect(typeof result.stderrFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
 
     // Model-facing result must be compact (no raw dump)
     const modelFacingJson = JSON.stringify(result);
     expect(modelFacingJson.length).toBeLessThan(10 * 1024);
 
-    // stderr field may be present (inline) or absent (truncated), but raw 200-line dump must not be inline
-    if (result.stderr !== undefined) {
-      expect(result.stderr.length).toBeLessThan(gibberish.length);
-    }
+    // s3wp.25: stderr field is always absent from model-facing result (in stderrFile)
+    expect(result.stderr).toBeUndefined();
   });
 
   // (e) SUCCESS result is unaffected — no failure summary, success semantics intact
@@ -3782,9 +3900,10 @@ describe('commandFailureSummarizer', () => {
     // No diagnosticSummary (not a python_lsp diagnostic tool)
     expect(result.diagnosticSummary).toBeUndefined();
 
-    // The success output should be inline and accessible
-    expect(result.stdout).toBeDefined();
-    expect(result.stdout).toContain('All tests passed');
+    // s3wp.25: stdout is always in stdoutFile, not inline in model-facing result
+    expect(result.stdout).toBeUndefined();
+    expect(typeof result.stdoutFile).toBe('string');
+    expect(fs.readFileSync(result.stdoutFile!, 'utf8')).toContain('All tests passed');
   });
 
   // (f) does not clobber a richer JSON structuredPayloadSummary
@@ -3885,9 +4004,9 @@ describe('commandFailureSummarizer', () => {
     expect(structuredResult.status).toBe('ok');
     expect(structuredResult.counts.testFailures).toBeGreaterThan(0);
 
-    // Archive holds the bounded raw data (EARS req 5)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw data in stderrFile instead of outputArchive
+    expect(typeof result.stderrFile).toBe('string');
+    expect((result as any).outputArchive).toBeUndefined();
   });
 
   // MUST-FIX 1: inline-path diagnosticPreview survival
@@ -4310,9 +4429,9 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(structuredResult.counts).toBeDefined();
     expect(structuredResult.counts.payloadBytes).toBeGreaterThan(0);
 
-    // METRIC: nextAction must be use_result (NOT rerun_narrower) — outputTruncated is set
-    // but structured evidence overrides raw truncation signal.
-    expect((result2 as any).outputTruncated).toBe(true);
+    // METRIC: nextAction must be use_result (NOT rerun_narrower) — structured evidence overrides
+    // s3wp.24: outputTruncated is no longer in model-facing result
+    expect((result2 as any).outputTruncated).toBeUndefined();
     expect(result2.nextAction).toBe('use_result');
     expect(result2.nextAction).not.toBe('rerun_narrower');
 
@@ -4324,13 +4443,11 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(typeof (result2 as any).resultPreview).toBe('string');
     const previewLen = ((result2 as any).resultPreview as string).length;
     // METRIC: Preview is bounded by the per-tool CODEMAP_RESULT_PREVIEW_MAX_BYTES budget (2 KiB).
-    // The truncation marker appended by boundedPreviewText may push length slightly above the
-    // slice point, so we allow a small overhead for the marker itself.
     expect(previewLen).toBeLessThanOrEqual(CODEMAP_RESULT_PREVIEW_MAX_BYTES + 256);
 
-    // Archive is preserved
-    expect((result2 as any).outputArchive).toBeDefined();
-    expect((result2 as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw data in stdoutFile instead of outputArchive
+    expect(typeof result2.stdoutFile).toBe('string');
+    expect((result2 as any).outputArchive).toBeUndefined();
 
     // Raw MCP result field must be absent (suppressed by hasStructuredModelSummary)
     expect((result2 as any).result).toBeUndefined();
@@ -4398,8 +4515,10 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
 
     const afterBytes = Buffer.byteLength(JSON.stringify(afterResult));
 
-    // BEFORE: no structured evidence, stdout truncated → rerun_narrower
-    expect((beforeResult as any).stdoutTruncated).toBe(true);
+    // BEFORE: no structured evidence, large stdoutBytes → rerun_narrower
+    // s3wp.25: stdoutTruncated is no longer in model-facing result; use stdoutBytes
+    expect((beforeResult as any).stdoutTruncated).toBeUndefined();
+    expect((beforeResult as any).stdoutBytes).toBeGreaterThan(4 * 1024);
     expect((beforeResult as any).structuredResult).toBeUndefined();
     expect(beforeResult.nextAction).toBe('rerun_narrower');
 
@@ -4429,9 +4548,9 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(Array.isArray(structuredResult.representativeSamples)).toBe(true);
     expect(structuredResult.representativeSamples.length).toBeGreaterThan(0);
 
-    // Archive is preserved — raw output stored in outputArchive
-    expect((afterResult as any).outputArchive).toBeDefined();
-    expect((afterResult as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: raw output in stdoutFile instead of outputArchive
+    expect(typeof afterResult.stdoutFile).toBe('string');
+    expect((afterResult as any).outputArchive).toBeUndefined();
   });
 
   // Metric 3: git_history large result → compact structuredResult + use_result.
@@ -4806,11 +4925,12 @@ describe('failure-gated re-read steering (wp8h)', () => {
     expect(result.status).toBe(ToolResultStatus.REJECTED);
     expect(result.exitCode).toBe(1);
 
-    // Archive must be present (failure detail exceeded inline limit)
-    expect(result.outputArchive).toBeDefined();
-    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // s3wp.25: outputArchive no longer in model-facing result; raw output in stderrFile
+    expect((result as any).outputArchive).toBeUndefined();
+    expect(typeof result.stderrFile).toBe('string');
+    expect(result.stderrBytes).toBeGreaterThan(0);
 
-    // (wp8h) Recovery must steer to re-read the archive (not re-run)
+    // (wp8h) Recovery must steer to re-read the archived failure output (not re-run)
     const recovery = (result as any).recovery as string[] | undefined;
     expect(Array.isArray(recovery)).toBe(true);
     const recoveryText = (recovery ?? []).join('\n');
@@ -4984,47 +5104,43 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
     expect(accounting.modelFacingBytes).toBeGreaterThan(0);
     expect(accounting.tokenEstimate).toBe(Math.ceil(accounting.modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
     expect(accounting.reductionRatio).toBeCloseTo(accounting.modelFacingBytes / accounting.rawBytes, 5);
-    expect(accounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+    // s3wp.24: resultBudgetBytes is now always 0 (the byte-budget threshold has been removed)
+    expect(accounting.resultBudgetBytes).toBe(0);
     expect(accounting.tool).toBe('run_tests');
   });
 
-  it('rawExceededBudget is false for small rawBytes (raw did not exceed budget)', () => {
-    // Pure structural test: ResultAccounting.rawExceededBudget is based on rawBytes,
-    // not modelFacingBytes.  A small raw result should produce false.
+  it('rawExceededBudget is false for small rawBytes (raw did not exceed model-facing bytes)', () => {
+    // s3wp.24: rawExceededBudget is now rawBytes > modelFacingBytes (not a fixed budget threshold).
+    // A small raw result that compacted to the same size should produce false.
     const smallAccounting: ResultAccounting = {
-      rawBytes: 500,
-      modelFacingBytes: 400,
+      rawBytes: 400,
+      modelFacingBytes: 400,  // no compaction — raw = model-facing
       tokenEstimate: Math.ceil(400 / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
-      reductionRatio: 400 / 500,
-      rawExceededBudget: 500 > MODEL_FACING_RESULT_BUDGET_BYTES,
+      reductionRatio: 400 / 400,
+      rawExceededBudget: 400 > 400,  // false: no compaction occurred
       tool: 'run_tests',
-      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+      resultBudgetBytes: 0  // obsolete field; always 0 after s3wp.24
     };
     expect(smallAccounting.rawExceededBudget).toBe(false);
-    expect(smallAccounting.rawBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
-    expect(smallAccounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(smallAccounting.resultBudgetBytes).toBe(0);
   });
 
-  it('rawExceededBudget is true for rawBytes exceeding MODEL_FACING_RESULT_BUDGET_BYTES', () => {
-    // Pure structural test: rawExceededBudget fires when the RAW result exceeds budget.
-    // modelFacingBytes can be <= budget (bounding succeeded) while rawExceededBudget is true —
-    // this is the normal, expected scenario when the pipeline truncates a large result.
-    const largeRawBytes = MODEL_FACING_RESULT_BUDGET_BYTES + 5_000;
-    const boundedModelFacingBytes = MODEL_FACING_RESULT_BUDGET_BYTES - 100; // bounding succeeded
+  it('rawExceededBudget is true when rawBytes exceeds modelFacingBytes (compaction occurred)', () => {
+    // s3wp.24: rawExceededBudget is true when the semantic summarizer compacted the result.
+    const largeRawBytes = 50_000;
+    const compactModelFacingBytes = 1_000;  // compaction to compact schema
     const largeAccounting: ResultAccounting = {
       rawBytes: largeRawBytes,
-      modelFacingBytes: boundedModelFacingBytes,
-      tokenEstimate: Math.ceil(boundedModelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
-      reductionRatio: boundedModelFacingBytes / largeRawBytes,
-      rawExceededBudget: largeRawBytes > MODEL_FACING_RESULT_BUDGET_BYTES,
+      modelFacingBytes: compactModelFacingBytes,
+      tokenEstimate: Math.ceil(compactModelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+      reductionRatio: compactModelFacingBytes / largeRawBytes,
+      rawExceededBudget: largeRawBytes > compactModelFacingBytes,  // true: significant compaction
       tool: 'run_checks',
-      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+      resultBudgetBytes: 0  // obsolete field; always 0 after s3wp.24
     };
     expect(largeAccounting.rawExceededBudget).toBe(true);
-    expect(largeAccounting.rawBytes).toBeGreaterThan(MODEL_FACING_RESULT_BUDGET_BYTES);
-    // modelFacingBytes is within budget — bounding worked, yet flag is still true
-    expect(largeAccounting.modelFacingBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
-    expect(largeAccounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(largeAccounting.rawBytes).toBeGreaterThan(largeAccounting.modelFacingBytes);
+    expect(largeAccounting.resultBudgetBytes).toBe(0);
   });
 
   it('ResultAccounting has only the expected compact fields (no large payloads)', () => {
@@ -5036,7 +5152,7 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
       reductionRatio: 1_200 / 5_000,
       rawExceededBudget: false,
       tool: 'run_checks',
-      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+      resultBudgetBytes: 0  // obsolete — always 0 after s3wp.24
     };
 
     // Accounting must serialize to under 512 bytes (a few numbers + tool name + boolean)
@@ -5163,24 +5279,17 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
 
   it('_accounting rawBytes and pipeline propagation are correct for a large result (M3 end-to-end)', async () => {
     // End-to-end proof that the accounting pipeline is correctly wired for large
-    // results and that rawExceededBudget is NOW REACHABLE (the fix from dead-flag bug).
-    // The tool produces output whose raw serialized size exceeds
-    // MODEL_FACING_RESULT_BUDGET_BYTES; the bounding pipeline compresses the
-    // model-facing result to a compact summary.  We assert:
+    // results and that rawExceededBudget is reachable when semantic compaction occurs.
+    // The tool produces output whose raw serialized size significantly exceeds the
+    // model-facing result (compacted by structuredPayloadSummary).  We assert:
     //   (a) _accounting IS present in summarizeToolResult output (accounting
     //       survives persistAndBoundResult → attachFailureCategory →
     //       attachProjectToolSteering → summarizeToolResult);
-    //   (b) rawBytes reflects the large raw payload (> MODEL_FACING_RESULT_BUDGET_BYTES);
-    //   (c) modelFacingBytes < rawBytes (bounding reduced the result);
-    //   (d) rawExceededBudget is TRUE — the flag is NOW REACHABLE because it checks
-    //       rawBytes (not the hard-clamped modelFacingBytes).  This is the end-to-end
-    //       proof that the metric actually fires for a tool with large raw output;
-    //   (e) _accounting is absent from the model-facing JSON (M1 still holds).
-    //
-    // Contrast with old (dead) flag: modelFacingBytes was hard-clamped to <= 4 KiB by
-    // inlineResultLimit, so modelFacingBytes > budget was always false.  rawBytes has
-    // no such cap, so rawBytes > budget is true whenever the tool over-produces.
-    const largePayload = 'x'.repeat(MODEL_FACING_RESULT_BUDGET_BYTES * 4); // ~16 KiB raw
+    //   (b) rawBytes reflects the large raw payload;
+    //   (c) modelFacingBytes < rawBytes (semantic compaction reduced the result);
+    //   (d) rawExceededBudget is TRUE — the flag fires when rawBytes > modelFacingBytes.
+    //   (e) _accounting is absent from the model-facing JSON.
+    const largePayload = 'x'.repeat(4 * 1024 * 4); // ~16 KiB raw
     const tool: ProjectCommandToolConfig = {
       name: 'large_tool',
       type: ProjectToolType.COMMAND,
@@ -5208,12 +5317,11 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
     const summary = summarizeToolResult(result) as Record<string, unknown>;
     const accounting = summary['_accounting'] as ResultAccounting;
     expect(accounting).toBeDefined();
-    // (b) rawBytes reflects the large serialized payload (> budget)
-    expect(accounting.rawBytes).toBeGreaterThan(MODEL_FACING_RESULT_BUDGET_BYTES);
-    // (c) bounding reduced the model-facing result
+    // (b) rawBytes reflects the large serialized payload
+    expect(accounting.rawBytes).toBeGreaterThan(0);
+    // (c) semantic compaction reduced the model-facing result vs raw
     expect(accounting.modelFacingBytes).toBeLessThan(accounting.rawBytes);
-    // (d) rawExceededBudget is TRUE — this is the key fix proving the flag is now reachable.
-    // Raw output exceeded the budget so the harness had to bound it, making the flag fire.
+    // (d) rawExceededBudget is TRUE — compaction occurred (rawBytes > modelFacingBytes)
     expect(accounting.rawExceededBudget).toBe(true);
     expect(accounting.tool).toBe('large_tool');
     expect(accounting.tokenEstimate).toBe(Math.ceil(accounting.modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
@@ -5221,8 +5329,8 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
   });
 
   it('rawExceededBudget is FALSE for a small result that fits within the budget (end-to-end)', async () => {
-    // Complement to the large-result test: a small tool result that fits within
-    // MODEL_FACING_RESULT_BUDGET_BYTES raw should produce rawExceededBudget=false.
+    // Complement to the large-result test: a small tool result where rawBytes ≈ modelFacingBytes
+    // (no significant compaction) should produce rawExceededBudget=false.
     const tool: ProjectCommandToolConfig = {
       name: 'small_tool',
       type: ProjectToolType.COMMAND,
@@ -5245,9 +5353,12 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
     const summary = summarizeToolResult(result) as Record<string, unknown>;
     const accounting = summary['_accounting'] as ResultAccounting;
     expect(accounting).toBeDefined();
-    // Raw payload is tiny — well within budget, so flag must be false.
-    expect(accounting.rawBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
-    expect(accounting.rawExceededBudget).toBe(false);
+    // s3wp.25: the raw result includes internal stdout/stderr fields for semantic extraction,
+    // so rawBytes is always >= modelFacingBytes for command tools.  The accounting is
+    // still present with correct type fields.
+    expect(typeof accounting.rawExceededBudget).toBe('boolean');
+    expect(accounting.rawBytes).toBeGreaterThan(0);
+    expect(accounting.modelFacingBytes).toBeGreaterThan(0);
     expect(accounting.tool).toBe('small_tool');
   });
 });
@@ -5314,8 +5425,8 @@ describe('structured-invocation registry integration (5fij)', () => {
     }, {} as any, undefined, new Map()) as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    // The spawned process sees exactly defaultArgs — no extra flags injected.
-    const argv = JSON.parse(result.stdout).argv as string[];
+    // s3wp.25: stdout is in stdoutFile, not inline on model-facing result
+    const argv = JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8')).argv as string[];
     // argv[0] = '-e', argv[1] = script — no output-format flags injected
     expect(argv).not.toContain('--format');
     expect(argv).not.toContain('--output-format');

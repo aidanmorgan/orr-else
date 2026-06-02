@@ -113,9 +113,10 @@ export function isAcceptedMaxBufferFailure(definition: ProjectCommandToolConfig,
     && (error as { code?: unknown }).code === CommandErrorCode.MAX_BUFFER;
 }
 
-export function commandReturnBytes(_definition: ProjectCommandToolConfig): number {
-  return ProjectToolDefaults.COMMAND_RETURN_BYTES;
-}
+// commandReturnBytes removed (obsolete — s3wp.25). Generic byte-cap on
+// command return text is forbidden per docs/raw-output-contract.md.
+// Raw stdout/stderr are persisted to files; the model-facing result references
+// stdoutFile/stderrFile + byte counts only.
 
 export function boundedCommandText(value: unknown, limitBytes: number): { text: string; bytes: number; truncated: boolean } {
   const text = typeof value === 'string'
@@ -370,6 +371,13 @@ export function structuredPayloadSummary(record: Record<string, unknown>): Recor
 
 // ---- Tool calls extraction ----
 
+// Safety guard for in-process JSON parsing of tool-output files.  Only files
+// that are reasonably-sized are loaded into memory for structured extraction.
+// This is NOT a model-facing byte cap (see docs/raw-output-contract.md) — it
+// is a memory-safety limit for the JSON.parse call below.  Raw files are always
+// persisted to disk regardless of this limit; only structured extraction is skipped.
+const JSON_EXTRACTION_MAX_BYTES = 256 * 1024; // 256 KiB
+
 export async function jsonRecordFromFile(filePath: string): Promise<Record<string, unknown> | undefined> {
   let size = 0;
   try {
@@ -377,7 +385,7 @@ export async function jsonRecordFromFile(filePath: string): Promise<Record<strin
   } catch {
     return undefined;
   }
-  if (size <= 0 || size > ProjectToolDefaults.TOOL_CALL_EXTRACTION_MAX_BYTES) return undefined;
+  if (size <= 0 || size > JSON_EXTRACTION_MAX_BYTES) return undefined;
   return parseJsonRecord(await readFile(filePath, 'utf8'));
 }
 
@@ -513,7 +521,8 @@ export function commandDiagnosticPreview(record: Record<string, unknown>): strin
     .filter((value): value is string => Boolean(value));
 
   if (sections.length === 0) return undefined;
-  return boundedCommandText(sections.join('\n\n'), ProjectToolDefaults.COMMAND_DIAGNOSTIC_PREVIEW_BYTES).text;
+  // 3 KiB cap on the diagnostic preview text (semantic summarizer budget, not a model-facing byte cap).
+  return boundedCommandText(sections.join('\n\n'), 3 * 1024).text;
 }
 
 function commandStreamDiagnosticSection(key: (typeof COMMAND_STREAM_OUTPUT_KEYS)[number], value: unknown): string | undefined {
@@ -534,36 +543,71 @@ function commandStreamDiagnosticSection(key: (typeof COMMAND_STREAM_OUTPUT_KEYS)
 
 // ---- buildCommandResult ----
 
+// ---- buildCommandResult (s3wp.25 minimal schema) ----
+//
+// Model-facing fields:
+//   tool, status, exitCode, timedOut, signal — command identity and outcome
+//   stdoutFile, stderrFile                   — raw-output file references
+//   stdoutBytes, stderrBytes                 — byte counts (size of raw files)
+//   normalizedPathArguments                  — path normalization metadata
+//   structuredResult, toolCalls              — tool-owned compact facts (semantic summarizers)
+//   plus any annotation fields (matchStatus etc.)
+//
+// Intentionally omitted (s3wp.24/s3wp.25 — forbidden generic output controls):
+//   stdout, stderr           — raw text (use stdoutFile/stderrFile instead)
+//   stdoutTruncated,
+//   stderrTruncated          — inline truncation flags
+//   resultPreview,
+//   diagnosticPreview,
+//   outputPreview            — bounded text previews
+//   maxBufferExceeded        — no longer relevant (streaming always used)
+// Maximum length of the stderrHint used for infrastructure/transient failure classification.
+// Enough to capture common error lines like ENOSPC messages, not the full raw content.
+const STDERR_HINT_MAX_CHARS = 512;
+
 export function buildCommandResult(input: CommandResultInput): object {
   const {
-    definition, status, exitCode, maxBufferExceeded, timedOut, signal,
-    stdoutFile, stderrFile, boundedStdout, boundedStderr, stdoutTruncated,
+    definition, status, exitCode, timedOut, signal,
+    stdoutFile, stderrFile, boundedStdout, boundedStderr,
     structuredStdout, structuredSummary, toolCalls, normalizedPathArguments
   } = input;
+  // stderrHint: compact excerpt for infrastructure/transient failure classification.
+  // Listed in MODEL_HIDDEN_RESULT_KEYS — the model never sees it; it is used only for
+  // classifyProjectToolFailure / isInfrastructureProjectToolFailure.  The full stderr is
+  // always available in stderrFile.
+  const stderrHint = boundedStderr.text.length > 0
+    ? boundedStderr.text.slice(0, STDERR_HINT_MAX_CHARS)
+    : undefined;
   return {
     tool: definition.name,
     status,
     exitCode,
     ...(timedOut !== undefined ? { timedOut } : {}),
     ...(signal !== undefined ? { signal } : {}),
-    maxBufferExceeded,
     stdoutFile,
     stderrFile,
-    stdout: boundedStdout.text,
-    stderr: boundedStderr.text,
     stdoutBytes: boundedStdout.bytes,
     stderrBytes: boundedStderr.bytes,
-    stdoutTruncated,
-    stderrTruncated: boundedStderr.truncated,
+    ...(stderrHint ? { stderrHint } : {}),
+    // stdout/stderr: included as INTERNAL-ONLY fields for semantic summarizers
+    // (diagnostic text extraction, high-volume compaction).  They are listed in
+    // MODEL_HIDDEN_RESULT_KEYS so the model never sees them.  The full raw streams
+    // are in stdoutFile / stderrFile; the in-process text sample here is bounded to
+    // JSON_EXTRACTION_MAX_BYTES (256 KiB) for memory-safe extraction.
+    ...(boundedStdout.text ? { [ProjectToolResultKey.STDOUT]: boundedStdout.text } : {}),
+    ...(boundedStderr.text ? { [ProjectToolResultKey.STDERR]: boundedStderr.text } : {}),
     ...commandResultAnnotations(definition, exitCode, boundedStdout.text, boundedStderr.text, structuredStdout),
     ...(normalizedPathArguments.length > 0 ? { normalizedPathArguments } : {}),
-    ...(structuredCommandResultPreview(structuredStdout) ? { [ProjectToolResultKey.RESULT_PREVIEW]: structuredCommandResultPreview(structuredStdout) } : {}),
     ...(structuredSummary ? { [ProjectToolResultKey.STRUCTURED_RESULT]: structuredSummary } : {}),
     ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {})
   };
 }
 
 // ---- executeCommandTool ----
+//
+// s3wp.25: raw stdout and stderr are persisted to stdoutFile / stderrFile on
+// SUCCESS, FAILURE, and TIMEOUT.  The model-facing result references those
+// files by path plus byte counts; no inline text is returned.
 
 export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
   const templateContext = context.templateContext;
@@ -571,7 +615,6 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
   const finalArgs = (definition.defaultArgs || []).map(arg => resolveTemplateString(arg, templateContext));
   const stdoutFile = path.join(context.outputDir, COMMAND_STDOUT_FILE_NAME);
   const stderrFile = path.join(context.outputDir, COMMAND_STDERR_FILE_NAME);
-  const returnBytes = commandReturnBytes(definition);
   const suppliedArgs = normalizeCommandArguments(args?.[ProjectToolParameter.ARGUMENTS])
     .map(arg => resolveTemplateString(arg, templateContext));
   const unsupportedOutputControlFlag = unsupportedArtifactValidatorOutputControlFlag(definition, suppliedArgs);
@@ -605,17 +648,42 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
   const structuredHandler = resolveStructuredInvocation(command, finalArgs);
   const spawnArgs = structuredHandler ? structuredHandler.augmentedArgs : finalArgs;
 
+  // Helper: read the byte count and a small text sample from a persisted output
+  // file.  The text sample is used only for in-process semantic extraction (ast_grep
+  // annotations, structuredPayloadSummary).  It is NOT included in the model-facing
+  // result.  Reading the complete file here is acceptable because jsonRecordFromFile
+  // already caps at JSON_EXTRACTION_MAX_BYTES and the diagnostic pattern matching is
+  // bounded by the file itself.  For very large files the sample is truncated purely
+  // for the in-process extraction step; the raw file on disk remains complete.
+  async function fileInfo(filePath: string): Promise<{ bytes: number; text: string }> {
+    let size = 0;
+    try { size = (await stat(filePath)).size; } catch { /* file may not exist yet */ }
+    if (size === 0) return { bytes: 0, text: '' };
+    // Read up to JSON_EXTRACTION_MAX_BYTES for structured parsing/annotation.
+    const handle = await open(filePath, 'r');
+    try {
+      const readSize = Math.min(size, JSON_EXTRACTION_MAX_BYTES);
+      const buffer = Buffer.alloc(readSize);
+      const { bytesRead } = await handle.read(buffer, 0, readSize, 0);
+      return { bytes: size, text: buffer.subarray(0, bytesRead).toString('utf8') };
+    } finally {
+      await handle.close();
+    }
+  }
+
   try {
     const result = await execa(command, spawnArgs, {
       cwd: context.cwd,
       env: { ...context.hostEnv, ...env, ...projectToolEnvironment(context) },
+      // s3wp.25: stream stdout/stderr directly to files — raw output is always
+      // persisted regardless of exit code, signal, or timeout.
       stdout: { file: stdoutFile },
       stderr: { file: stderrFile },
       reject: false,
       timeout: definition.timeoutMs || Defaults.PROCESS_REAP_INTERVAL_MS
     });
-    const boundedStdout = await boundedCommandFile(stdoutFile, returnBytes);
-    const boundedStderr = await boundedCommandFile(stderrFile, returnBytes);
+    const stdoutInfo = await fileInfo(stdoutFile);
+    const stderrInfo = await fileInfo(stderrFile);
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
     const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined;
 
@@ -623,7 +691,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
     // structuredResult.  If parse() returns null (malformed/empty JSON), fall back
     // to the existing structuredPayloadSummary path — no regression.
     const parsedStructuredResult = structuredHandler
-      ? structuredHandler.parse(boundedStdout.text, boundedStderr.text, exitCode)
+      ? structuredHandler.parse(stdoutInfo.text, stderrInfo.text, exitCode)
       : null;
     const structuredSummary = parsedStructuredResult
       ?? (structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined);
@@ -632,7 +700,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
     const acceptedExitCode = isSuccessfulCommandExitCode(definition, exitCode);
     const acceptedNonZeroExitCode = exitCode !== CommandExitCode.SUCCESS
       && acceptedExitCode
-      && boundedStderr.text.trim().length === 0;
+      && stderrInfo.text.trim().length === 0;
     const passed = !result.timedOut && (exitCode === CommandExitCode.SUCCESS || acceptedNonZeroExitCode);
 
     return buildCommandResult({
@@ -644,33 +712,39 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
       signal: result.signal,
       stdoutFile,
       stderrFile,
-      boundedStdout,
-      boundedStderr,
-      stdoutTruncated: boundedStdout.truncated,
+      boundedStdout: { text: stdoutInfo.text, bytes: stdoutInfo.bytes, truncated: false },
+      boundedStderr: { text: stderrInfo.text, bytes: stderrInfo.bytes, truncated: false },
+      stdoutTruncated: false,
       structuredStdout,
       structuredSummary,
       toolCalls,
       normalizedPathArguments: scopedArgs.normalizedPathArguments
     });
   } catch (error: any) {
-    const fileStdout = await boundedCommandFile(stdoutFile, returnBytes);
-    const fileStderr = await boundedCommandFile(stderrFile, returnBytes);
-    const stderrText = fileStderr.text || (typeof error.stderr === 'string' ? error.stderr : '');
+    // System-level error (e.g. ENOENT — command not found).  The output files may
+    // not exist or may be partially written.  Read whatever is available.
+    const stdoutInfo = await fileInfo(stdoutFile);
+    const stderrInfo = await fileInfo(stderrFile);
+    // Fall back to error properties if files are empty (command never started)
+    const stderrText = stderrInfo.text || (typeof error.stderr === 'string' ? error.stderr : '');
     const acceptedExitCode = isSuccessfulCommandExitCode(definition, error.code) && stderrText.trim().length === 0;
     const acceptedMaxBuffer = isAcceptedMaxBufferFailure(definition, error);
-    const maxBufferExceeded = error?.code === CommandErrorCode.MAX_BUFFER;
     const status = acceptedExitCode || acceptedMaxBuffer
       ? ToolResultStatus.PASSED
       : commandFailureStatus(error);
-    const boundedStdout = fileStdout.bytes > 0 ? fileStdout : boundedCommandText(error.stdout, returnBytes);
-    const boundedStderr = fileStderr.bytes > 0 ? fileStderr : boundedCommandText(error.stderr || (acceptedExitCode ? '' : error.message), returnBytes);
+
+    // For annotation/extraction purposes, use what we have from the files; fall
+    // back to error.stdout/stderr only if the files are empty.
+    const annotationStdout = stdoutInfo.text || (typeof error.stdout === 'string' ? error.stdout : '');
+    const annotationStderr = stderrText;
+
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
     const exitCode = typeof error.code === 'number' ? error.code : undefined;
 
     // Same fallback logic as in the success path: structured parse takes precedence,
     // null parse falls through to the existing structuredPayloadSummary.
     const parsedStructuredResult = structuredHandler
-      ? structuredHandler.parse(boundedStdout.text, boundedStderr.text, exitCode)
+      ? structuredHandler.parse(annotationStdout, annotationStderr, exitCode)
       : null;
     const structuredSummary = parsedStructuredResult
       ?? (structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined);
@@ -681,12 +755,12 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
       definition,
       status,
       exitCode,
-      maxBufferExceeded,
+      maxBufferExceeded: false,
       stdoutFile,
       stderrFile,
-      boundedStdout,
-      boundedStderr,
-      stdoutTruncated: boundedStdout.truncated || maxBufferExceeded,
+      boundedStdout: { text: annotationStdout, bytes: stdoutInfo.bytes, truncated: false },
+      boundedStderr: { text: annotationStderr, bytes: stderrInfo.bytes, truncated: false },
+      stdoutTruncated: false,
       structuredStdout,
       structuredSummary,
       toolCalls,

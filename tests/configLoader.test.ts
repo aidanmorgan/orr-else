@@ -516,3 +516,71 @@ describe('resolveProviderName', () => {
     expect(resolveProviderName('google')).toBe('google');
   });
 });
+
+// ---------------------------------------------------------------------------
+// s3wp.24: inlineResultBytes deprecation-warning path
+// ---------------------------------------------------------------------------
+describe('s3wp.24 inlineResultBytes deprecation-warning migration', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-s3wp24-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('logs a deprecation warning and strips inlineResultBytes so the config still loads', async () => {
+    // Write a harness.yaml that declares inlineResultBytes on a command tool.
+    // The field was removed in s3wp.24; the ConfigLoader must emit a deprecation
+    // warning (IGNORE-WITH-DEPRECATION-WARNING policy) and strip it so AJV schema
+    // validation does not fail.
+    const harnessYaml = `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+tools:
+  - name: run_tests
+    type: command
+    command: pytest
+    inlineResultBytes: 1000
+  - name: codemap
+    type: command
+    command: codemap
+    inlineResultBytes: 2048
+`;
+    const configPath = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(configPath, harnessYaml);
+
+    // Spy on Logger.warn to capture deprecation messages
+    const { Logger } = await import('../src/core/Logger.js');
+    const warnSpy = vi.spyOn(Logger, 'warn');
+
+    const loader = new ConfigLoader(undefined, tempRoot);
+    // Load must succeed (no exception thrown — IGNORE-WITH-DEPRECATION-WARNING)
+    let config: ReturnType<typeof loader.load> | undefined;
+    expect(() => { config = loader.load(configPath); }).not.toThrow();
+    expect(config).toBeDefined();
+
+    // At least one deprecation warning must have been emitted naming 'inlineResultBytes'
+    const warnCalls = warnSpy.mock.calls;
+    const deprecationWarnings = warnCalls.filter(call =>
+      String(call[1] ?? '').includes('inlineResultBytes')
+    );
+    expect(deprecationWarnings.length).toBeGreaterThanOrEqual(2); // one per tool
+
+    // The field must be stripped so it does not appear on the loaded tool configs
+    const toolConfigs = (config as any).tools as any[];
+    for (const tool of toolConfigs) {
+      expect(tool.inlineResultBytes).toBeUndefined();
+    }
+
+    warnSpy.mockRestore();
+  });
+});
