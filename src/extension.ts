@@ -139,6 +139,53 @@ import {
   compactLifecycleFailureSummary,
   handleAgentLifecycleFailure
 } from './extension/AgentLifecycleController.js';
+import {
+  nativeToolPath,
+  toSlashPath,
+  relativeOperationalPath,
+  pathWithin,
+  isProgressOrWorklogPath,
+  isOperationalReadPath,
+  isProjectToolCallOutputPath,
+  isOperationalMutationPath,
+  nativeOperationalMutationPolicyRejection,
+  gitSubcommand,
+  shellOperationalMutationPolicyRejection,
+  shellPolicyRejection,
+  mcpPolicyRejection,
+  operationalArtifactReadPolicyRejection,
+  oversizedReadPolicyRejection
+} from './extension/NativeToolPolicy.js';
+import {
+  registerProviderRequestCap,
+  registerPiToolObservers,
+  recordTurnUsage,
+  registerAgentLifecycleObservers
+} from './extension/PiObservers.js';
+import {
+  isTerminalFailureLimitPayload,
+  terminalFailureLimitDataFromResult,
+  scanTerminalFailureLimit,
+  preloadTerminalFailureLimit,
+  terminalFailureLimitContext,
+  terminalFailureLimitRejection,
+  evaluateGateReadiness,
+  type GateReadiness,
+  type RequiredToolAuditEntry,
+  type TerminalFailureLimitAudit,
+  type TerminalFailureLimitContext
+} from './extension/WorkerRunController.js';
+import {
+  actionRunContext,
+  actionCompletionKey,
+  isActionCompleted,
+  selectActiveAction,
+  nextSequencedAction,
+  appendCompletedActionId,
+  dynamicChecklistItemsForRun,
+  teammateEventTypeForOutcome,
+  shouldPersistBlockedBeadStatus as shouldPersistBlockedBeadStatusInternal
+} from './extension/CoordinatorController.js';
 
 /**
  * Orr Else Extension
@@ -289,29 +336,7 @@ interface ChecklistTickInput {
   evidencePath?: string;
 }
 
-interface TerminalFailureLimitContext {
-  failedTool: string;
-  suggestedOutcome: string;
-  stateId: string;
-  actionId: string;
-}
-
-function routingHintSuggestedOutcomeFromResult(result: Record<string, any>): string | undefined {
-  const candidates = [
-    result.routingHint,
-    isRecord(result.structuredResult) ? result.structuredResult.routingHint : undefined,
-    isRecord(result.result) ? result.result.routingHint : undefined,
-    isRecord(result.result) && isRecord(result.result.structuredResult)
-      ? result.result.structuredResult.routingHint
-      : undefined
-  ];
-  for (const candidate of candidates) {
-    if (isRecord(candidate) && typeof candidate.suggestedOutcome === 'string') {
-      return candidate.suggestedOutcome;
-    }
-  }
-  return undefined;
-}
+// TerminalFailureLimitContext, routingHintSuggestedOutcomeFromResult are in ./extension/WorkerRunController.js
 
 function getObservability(services: RuntimeServices): Observability {
   return services.observability;
@@ -357,301 +382,8 @@ function toolResult(value: unknown) {
   };
 }
 
-function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {
-  const requiredTools = [
-    ...(run.state.requiredTools || []),
-    ...(run.action.requiredTools || [])
-  ];
-  return requiredTools.length > 0 ? requiredTools : undefined;
-}
-
-interface RequiredToolAuditEntry {
-  name: string;
-  state: 'passed' | 'failed' | 'never_invoked';
-}
-
-interface TerminalFailureLimitAudit {
-  reached: boolean;
-  failedTool?: string;
-  suggestedOutcome?: string;
-}
-
-/**
- * Structured result returned by evaluateGateReadiness.
- * All fields are read-only diagnostic data — the function never mutates state.
- *
- * toolAuditFailures contains the same per-tool failure strings that
- * signal_completion builds for its REJECTED: Protocol Violation message, so
- * that signal_completion can reuse them verbatim without re-examining results.
- */
-interface GateReadiness {
-  ready: boolean;
-  transitionValid: boolean;
-  transitionError?: string;
-  requiredTools: RequiredToolAuditEntry[];
-  /** Verbatim per-tool failure strings used by signal_completion's REJECTED message. */
-  toolAuditFailures: string[];
-  terminalFailureLimit: TerminalFailureLimitAudit;
-  requiredOutcome: string | null;
-  missingChecklistItems: string[];
-  checkpointAccepted: boolean;
-  writeSetValid: boolean | null;
-  writeSetReason?: string;
-  transactionalValid: boolean | null;
-  transactionalReason?: string;
-  /** Provenance dimension: false when provenance is missing or stale. */
-  provenanceValid: boolean;
-  provenanceReason?: string;
-  blockingEvidence: string[];
-}
-
-/**
- * Shared gate predicate that evaluates whether signal_completion would ACCEPT
- * or REJECT a given outcome. This is the single source of truth for the gate
- * decision — both signal_completion and pre_signal_audit call this function so
- * that audit.ready is guaranteed equivalent to the real gate accept condition.
- *
- * IMPORTANT: This function is read-only. It does NOT record domain events,
- * does NOT auto-restore unapproved paths, does NOT post any signals, and does
- * NOT modify any state. It calls validateSuccessReadOnly (not validateSuccess)
- * on the transactional state guard so that no git restore side effects occur.
- */
-async function evaluateGateReadiness(
-  activeRun: ActiveRun,
-  outcome: string,
-  services: RuntimeServices,
-  session: ExtensionSession,
-  obs: Observability,
-  config: import('./core/ConfigLoader.js').HarnessConfig
-): Promise<GateReadiness> {
-  const blockingEvidence: string[] = [];
-
-  // ── 1. nextState transition validity ─────────────────────────────────────
-  let transitionValid = true;
-  let transitionError: string | undefined;
-  try {
-    services.flowManager.nextState(activeRun.state, outcome);
-  } catch (error) {
-    transitionValid = false;
-    transitionError = String(error);
-    blockingEvidence.push(`Invalid transition: ${transitionError}`);
-  }
-
-  // ── 2. Terminal failure limit ─────────────────────────────────────────────
-  const terminal = await terminalFailureLimitContext(services, session);
-  const terminalFailureLimit: TerminalFailureLimitAudit = terminal
-    ? { reached: true, failedTool: terminal.failedTool, suggestedOutcome: terminal.suggestedOutcome }
-    : { reached: false };
-  if (terminal && outcome !== terminal.suggestedOutcome) {
-    blockingEvidence.push(
-      `Terminal failure limit reached for \`${terminal.failedTool}\`. ` +
-      `Required outcome: \`${terminal.suggestedOutcome}\`.`
-    );
-  }
-
-  // ── 3. SUCCESS-only: mandatory checklist + required tools ─────────────────
-  let missingChecklistItems: string[] = [];
-  let requiredToolEntries: RequiredToolAuditEntry[] = [];
-  const toolAuditFailures: string[] = [];
-
-  if (outcome === EventName.SUCCESS) {
-    const projection = await services.eventStore.projectBead(activeRun.beadId);
-    missingChecklistItems = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
-    if (missingChecklistItems.length > 0) {
-      blockingEvidence.push(
-        `Mandatory checklist items outstanding: ${missingChecklistItems.map(t => `\`${t}\``).join(', ')}.`
-      );
-    }
-
-    const requiredToolResolution = await services.requiredToolResolver.resolve(
-      requiredToolsForRun(activeRun),
-      {
-        beadId: activeRun.beadId,
-        stateId: activeRun.stateId,
-        worktreePath: activeRun.worktreePath,
-        projectRoot: services.projectRoot,
-        config
-      }
-    );
-    // Build the structured audit entries and collect tool failures in two
-    // complementary formats:
-    //  - toolAuditFailures: verbatim per-tool strings reused by signal_completion
-    //    for its "REJECTED: Protocol Violation" message (original exact wording).
-    //  - blockingEvidence: user-facing strings pushed into the audit result; uses
-    //    a consistent "Required tool `X` was never invoked / did not pass" form
-    //    that the existing pre_signal_audit tests assert against.
-    requiredToolEntries = requiredToolResolution.toolNames.map(toolName => {
-      const result = obs.getToolResult(toolName);
-      let state: 'passed' | 'failed' | 'never_invoked';
-      if (result === undefined) {
-        state = 'never_invoked';
-        toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
-        blockingEvidence.push(`Required tool \`${toolName}\` was never invoked.`);
-      } else if (resultIndicatesSuccess(result)) {
-        state = 'passed';
-      } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      } else if (resultIndicatesFailure(result)) {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      } else {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      }
-      return { name: toolName, state };
-    });
-  }
-
-  // ── 4. SUCCESS-only: plan write-set preflight (read-only, pure) ───────────
-  let writeSetValid: boolean | null = null;
-  let writeSetReason: string | undefined;
-
-  if (outcome === EventName.SUCCESS) {
-    const planWriteSetPreflight = await services.planWriteSet.validatePlanContract({
-      beadId: activeRun.beadId,
-      stateId: activeRun.stateId,
-      worktreePath: activeRun.worktreePath || process.cwd(),
-      projectRoot: services.projectRoot
-    });
-    writeSetValid = planWriteSetPreflight.passed;
-    writeSetReason = planWriteSetPreflight.reason;
-    if (!planWriteSetPreflight.passed) {
-      blockingEvidence.push(
-        `Plan write-set preflight failed: ${planWriteSetPreflight.reason || 'write-set contract violation'}.`
-      );
-    }
-  }
-
-  // ── 5. SUCCESS-only: transactional state guard (read-only, no side effects) ─
-  let transactionalValid: boolean | null = null;
-  let transactionalReason: string | undefined;
-
-  if (outcome === EventName.SUCCESS) {
-    const transactionalState = await services.transactionalStateGuard.validateSuccessReadOnly(
-      activeRun.beadId,
-      activeRun.stateId,
-      activeRun.worktreePath || process.cwd()
-    );
-    transactionalValid = transactionalState.passed;
-    transactionalReason = transactionalState.reason;
-    if (!transactionalState.passed) {
-      blockingEvidence.push(
-        `Transactional state gate failed: ${transactionalState.reason || 'unapproved dirty paths'}.`
-      );
-    }
-  }
-
-  // ── 6. Checkpoint ─────────────────────────────────────────────────────────
-  const checkpointAccepted = activeRun.checkpointAccepted;
-  if (!checkpointAccepted) {
-    blockingEvidence.push(
-      `\`${BuiltInToolName.SUBMIT_CHECKPOINT}\` has not been called yet.`
-    );
-  }
-
-  // ── 7. Prompt provenance ──────────────────────────────────────────────────
-  // Re-derive this run's prompt/config hashes and compare against the snapshot
-  // recorded at STATE_RUN_INITIALIZED to detect drift since run-start.
-  //
-  // Two distinct NOT-OK cases are handled with different policy:
-  //   STALE   — provenance was recorded at init AND a prompt/config hash has
-  //             since changed.  HARD-REJECT: the agent is completing from a
-  //             different prompt baseline than it started on.
-  //   MISSING — no provenance was recorded at all (not because resolution failed,
-  //             but because the init event is absent, which should not happen in
-  //             normal operation).  HARD-REJECT: we cannot verify the prompt
-  //             baseline at all.
-  //   RESOLUTION-FAILED — provenance resolution threw at init time (recorded via
-  //             `promptProvenanceResolutionFailed: true` on the init event).
-  //             WARN-ONLY: the agent should not be penalised for a harness-level
-  //             resolution problem; completion is allowed.
-  //
-  // Performance: eventsForBead loads the bead's full event history (O(n) in the
-  // number of events for this bead) to find the latest STATE_RUN_INITIALIZED.
-  // This is acceptable because: (a) the completion path is not on the hot turn
-  // loop — it fires once per run; (b) typical bead event counts are bounded by
-  // the number of actions + turns, not total project events.  A dedicated
-  // projection/index for "latest init event for bead+state" would reduce this
-  // to O(1) if the event store ever grows to support it.
-  //
-  // Local reason constants for the two distinct failure modes.
-  const REJECT_REASON_RESOLUTION_FAILED =
-    'Prompt provenance could not be resolved at run start (harness error; warn only — completion allowed)';
-
-  let provenanceValid = true;
-  let provenanceReason: string | undefined;
-
-  if (outcome === EventName.SUCCESS) {
-    const beadEvents = await services.eventStore.eventsForBead(activeRun.beadId);
-    const initEvent = [...beadEvents]
-      .reverse()
-      .find(e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === activeRun.stateId);
-
-    // If resolution failed at init, warn but do not block completion.
-    const resolutionFailed = initEvent?.data?.promptProvenanceResolutionFailed === true;
-    if (resolutionFailed) {
-      // Warn via provenanceReason but leave provenanceValid = true (allow completion).
-      provenanceReason = REJECT_REASON_RESOLUTION_FAILED;
-      // Do NOT push to blockingEvidence — this is a warn-only path.
-    } else {
-      const recorded = initEvent?.data?.promptProvenance as
-        | { entries: PromptProvenanceEntry[]; harnessConfigVersion?: string }
-        | undefined;
-
-      if (!recorded || !Array.isArray(recorded.entries) || recorded.entries.length === 0) {
-        // No provenance recorded and no resolution-failed marker → init event is
-        // missing or was never written.  Hard-reject.
-        provenanceValid = false;
-        provenanceReason = PromptProvenanceDefaults.REJECT_REASON_MISSING;
-        blockingEvidence.push(`${PromptProvenanceDefaults.REJECT_REASON_MISSING}.`);
-      } else {
-        // Check for stale file-backed entries (non-blocking and state-config entries
-        // are automatically excluded by detectStaleProvenanceEntries).
-        const staleIdentifiers: string[] = detectStaleProvenanceEntries(recorded.entries);
-
-        // Separately check the state-config-subtree hash: re-derive the current
-        // raw-YAML subtree hash and compare with the init-time hash.
-        const stateConfigEntry = recorded.entries.find(e => e.kind === 'stateConfig');
-        if (stateConfigEntry) {
-          const fresh = computeCurrentStateConfigHash(services.configLoader.getConfigPath(), activeRun.stateId);
-          if (fresh.sha256 !== stateConfigEntry.sha256) {
-            staleIdentifiers.push(stateConfigEntry.path);
-          }
-        }
-
-        if (staleIdentifiers.length > 0) {
-          provenanceValid = false;
-          const fileList = staleIdentifiers.map(p => `\`${p}\``).join(', ');
-          provenanceReason = `${PromptProvenanceDefaults.REJECT_REASON_STALE}: ${fileList}`;
-          blockingEvidence.push(`${provenanceReason}.`);
-        }
-      }
-    }
-  }
-
-  return {
-    ready: blockingEvidence.length === 0,
-    transitionValid,
-    transitionError,
-    requiredTools: requiredToolEntries,
-    toolAuditFailures,
-    terminalFailureLimit,
-    requiredOutcome: terminal?.suggestedOutcome ?? null,
-    missingChecklistItems,
-    checkpointAccepted,
-    writeSetValid,
-    writeSetReason,
-    transactionalValid,
-    transactionalReason,
-    provenanceValid,
-    provenanceReason,
-    blockingEvidence
-  };
-}
+// requiredToolsForRun, RequiredToolAuditEntry, TerminalFailureLimitAudit, GateReadiness,
+// evaluateGateReadiness are in ./extension/WorkerRunController.js
 
 // summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
 
@@ -721,524 +453,26 @@ function commandInvokesToolName(command: string, toolName: string, services: Run
   }
 }
 
-function isTerminalFailureLimitPayload(value: unknown): value is Record<string, unknown> {
-  return isRecord(value) && isRecord(value.failureLimit) && value.failureLimit.terminal === true;
-}
+// isTerminalFailureLimitPayload, terminalFailureLimitDataFromResult, scanTerminalFailureLimit,
+// preloadTerminalFailureLimit are imported from ./extension/WorkerRunController.js
 
-function terminalFailureLimitDataFromResult(result: unknown): Record<string, unknown> | undefined {
-  if (!isTerminalFailureLimitPayload(result)) return undefined;
-  return {
-    tool: typeof result.tool === 'string' ? result.tool : undefined,
-    result
-  };
-}
+// NativeToolPolicy constants and functions are imported from ./extension/NativeToolPolicy.js
 
-function scanTerminalFailureLimit(run: ActiveRun, services: RuntimeServices): Promise<DomainEvent | undefined> {
-  return services.eventStore.latestProjectToolFailureLimitEvent(run.beadId, {
-    stateId: run.stateId,
-    actionId: run.action.id,
-    terminalOnly: true
-  });
-}
+// teammateEventTypeForOutcome and shouldPersistBlockedBeadStatus are imported
+// from ./extension/CoordinatorController.js
 
-function preloadTerminalFailureLimit(run: ActiveRun, services: RuntimeServices): void {
-  if (run.terminalFailureLimitScanned || run.terminalFailureLimitScan) return;
-  run.terminalFailureLimitScan = scanTerminalFailureLimit(run, services)
-    .then(event => {
-      run.terminalFailureLimitScanned = true;
-      if (event) run.terminalFailureLimitEvent = event;
-      return event;
-    })
-    .catch(error => {
-      run.terminalFailureLimitScan = undefined;
-      Logger.warn(Component.ORR_ELSE, 'Unable to preload terminal project-tool failure limit', {
-        beadId: run.beadId,
-        stateId: run.stateId,
-        actionId: run.action.id,
-        error: String(error)
-      });
-      return undefined;
-    });
-}
-
-const SHELL_OPERATIONAL_MUTATION_COMMANDS = new Set<string>([
-  FileMutationPolicyDefaults.CP_COMMAND,
-  FileMutationPolicyDefaults.MKDIR_COMMAND,
-  FileMutationPolicyDefaults.MV_COMMAND,
-  FileMutationPolicyDefaults.RM_COMMAND,
-  FileMutationPolicyDefaults.RMDIR_COMMAND,
-  FileMutationPolicyDefaults.SED_COMMAND,
-  FileMutationPolicyDefaults.TEE_COMMAND,
-  FileMutationPolicyDefaults.TOUCH_COMMAND,
-  FileMutationPolicyDefaults.TRUNCATE_COMMAND
-]);
-const GIT_OPERATIONAL_MUTATION_SUBCOMMANDS = new Set<string>([
-  FileMutationPolicyDefaults.GIT_ADD_SUBCOMMAND,
-  FileMutationPolicyDefaults.GIT_CLEAN_SUBCOMMAND,
-  FileMutationPolicyDefaults.GIT_MV_SUBCOMMAND,
-  FileMutationPolicyDefaults.GIT_RM_SUBCOMMAND,
-  FileMutationPolicyDefaults.GIT_RESTORE_SUBCOMMAND,
-  FileMutationPolicyDefaults.GIT_CHECKOUT_SUBCOMMAND
-]);
-const NATIVE_PATH_INPUT_KEYS = [
-  'path',
-  'filePath',
-  'file_path',
-  'targetFile',
-  'target_file'
-] as const;
-const NATIVE_OPERATIONAL_MUTATION_TOOLS = new Set<string>([
-  NativePiToolName.EDIT,
-  NativePiToolName.WRITE
-]);
-const OPERATIONAL_READ_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
-  OperationalArtifactPath.PI_EVENTS_DIR,
-  OperationalArtifactPath.PI_LOGS_DIR,
-  OperationalArtifactPath.PI_MAILBOX_DIR,
-  OperationalArtifactPath.PI_OTEL_DIR,
-  OperationalArtifactPath.PI_ARTIFACTS_DIR,
-  OperationalArtifactPath.PI_TOOL_OUTPUT_DIR
-] as const;
-const OPERATIONAL_MUTATION_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
-  OperationalArtifactPath.PI_EVENTS_DIR,
-  OperationalArtifactPath.PI_LOGS_DIR,
-  OperationalArtifactPath.PI_MAILBOX_DIR,
-  OperationalArtifactPath.PI_OTEL_DIR,
-  OperationalArtifactPath.PI_TOOL_OUTPUT_DIR,
-  OperationalArtifactPath.TEMP_DIR
-] as const;
-const PROJECT_TOOL_CALL_OUTPUT_DIR = `${OperationalArtifactPath.TEMP_DIR}/tool-calls`;
-const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
-  `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read project-tool output archives directly. ` +
-  'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';
-
-function nativeToolPath(event: ToolCallEvent): string {
-  const input = event.input as Record<string, unknown>;
-  for (const key of NATIVE_PATH_INPUT_KEYS) {
-    const value = input[key];
-    if (typeof value === 'string' && value.trim()) return value;
-  }
-  return '';
-}
-
-function toSlashPath(value: string): string {
-  return value.replaceAll(path.sep, '/');
-}
-
-function relativeOperationalPath(requestedPath: string): string {
-  const trimmed = requestedPath.trim();
-  if (!trimmed) return '';
-
-  if (!path.isAbsolute(trimmed)) return toSlashPath(trimmed).replace(/^\.\//, '');
-
-  const absolutePath = path.resolve(trimmed);
-  const roots = [
-    process.env[EnvVars.WORKTREE_PATH],
-    process.env[EnvVars.PROJECT_ROOT],
-    process.cwd()
-  ].filter((root): root is string => typeof root === 'string' && root.length > 0)
-    .map(root => path.resolve(root));
-
-  for (const root of roots) {
-    const relativePath = path.relative(root, absolutePath);
-    if (!relativePath || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))) {
-      return toSlashPath(relativePath || '.');
-    }
-  }
-
-  return toSlashPath(trimmed);
-}
-
-function pathWithin(relativePath: string, directory: string): boolean {
-  const cleanPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
-  const cleanDirectory = directory.replace(/^\/+|\/+$/g, '');
-  return cleanPath === cleanDirectory || cleanPath.startsWith(`${cleanDirectory}/`);
-}
-
-function isProgressOrWorklogPath(relativePath: string): boolean {
-  const normalizedPath = relativePath.replace(/^\.\//, '').replace(/^\/+/, '');
-  const fileName = path.posix.basename(normalizedPath);
-  const readsProgressLog = fileName === OperationalLogPath.PROGRESS_FILE;
-  const readsWorklog = normalizedPath.split('/').includes(OperationalLogPath.WORKLOG_DIR)
-    && fileName.endsWith(OperationalLogPath.WORKLOG_FILE_SUFFIX);
-  return readsProgressLog || readsWorklog;
-}
-
-function isOperationalReadPath(requestedPath: string): boolean {
-  const relativePath = relativeOperationalPath(requestedPath);
-  return isProgressOrWorklogPath(relativePath)
-    || OPERATIONAL_READ_DIRS.some(directory => pathWithin(relativePath, directory));
-}
-
-function isProjectToolCallOutputPath(requestedPath: string): boolean {
-  return pathWithin(relativeOperationalPath(requestedPath), PROJECT_TOOL_CALL_OUTPUT_DIR);
-}
-
-function isOperationalMutationPath(requestedPath: string): boolean {
-  const relativePath = relativeOperationalPath(requestedPath);
-  return isProgressOrWorklogPath(relativePath)
-    || OPERATIONAL_MUTATION_DIRS.some(directory => pathWithin(relativePath, directory));
-}
-
-function nativeOperationalMutationPolicyRejection(event: ToolCallEvent): string | null {
-  if (!isWorkerMode() || !NATIVE_OPERATIONAL_MUTATION_TOOLS.has(event.toolName)) return null;
-  const requestedPath = nativeToolPath(event);
-  if (!requestedPath || !isOperationalMutationPath(requestedPath)) return null;
-
-  return `PROTOCOL VIOLATION: \`${event.toolName}\` may not modify framework runtime artifacts ` +
-    'inside a teammate context. Use harness tools for state, progress, events, tool outputs, and generated temporary files.';
-}
-
-function gitSubcommand(args: Array<{ text: string }>): string | undefined {
-  for (let index = 0; index < args.length; index += 1) {
-    const token = args[index]?.text || '';
-    if (token === FileMutationPolicyDefaults.ARG_SEPARATOR) continue;
-    if (token === FileMutationPolicyDefaults.GIT_CHDIR_OPTION) {
-      index += 1;
-      continue;
-    }
-    if (!token.startsWith('-')) return token;
-  }
-  return undefined;
-}
-
-function shellOperationalMutationPolicyRejection(event: ToolCallEvent, services: RuntimeServices): string | null {
-  if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
-  const input = event.input as Record<string, unknown>;
-  if (input[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
-  const command = typeof input.command === 'string' ? input.command : '';
-  if (!command.trim()) return null;
-
-  let commands;
-  try {
-    commands = services.shellCommandParser.parse(command).commands;
-  } catch {
-    return null;
-  }
-  for (const shellCommand of commands) {
-    const effective = services.shellCommandParser.effectiveCommand(shellCommand);
-    const commandName = effective.basename;
-    const isMutation = SHELL_OPERATIONAL_MUTATION_COMMANDS.has(commandName)
-      || (commandName === FileMutationPolicyDefaults.GIT_COMMAND && GIT_OPERATIONAL_MUTATION_SUBCOMMANDS.has(gitSubcommand(effective.args) || ''));
-    if (!isMutation) continue;
-
-    const target = [
-      effective.name,
-      ...effective.args.map(arg => arg.text),
-      ...effective.redirects.map(redirect => redirect.file?.text || '')
-    ].find(token => token && isOperationalMutationPath(token));
-    if (!target) continue;
-
-    return `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` may not mutate framework runtime artifact path ` +
-      `\`${target}\` inside a teammate context. Leave harness artifacts to Orr Else.`;
-  }
-
-  return null;
-}
-
-function teammateEventTypeForOutcome(outcome: string): TeammateEventType {
-  const normalized = outcome.toUpperCase();
-  if (normalized === EventName.FAILURE) return TeammateEventType.STATE_FAILED;
-  if (normalized === EventName.BLOCKED) return TeammateEventType.STATE_BLOCKED;
-  return TeammateEventType.STATE_TRANSITIONED;
-}
-
+/**
+ * Public re-export for test consumers — the implementation lives in CoordinatorController.
+ */
 export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string): boolean {
-  return eventType === TeammateEventType.STATE_BLOCKED || nextState === BeadStatus.BLOCKED;
+  return shouldPersistBlockedBeadStatusInternal(eventType, nextState);
 }
 
-function shellPolicyRejection(event: ToolCallEvent, config: HarnessConfig, services: RuntimeServices): string | null {
-  if (!isWorkerMode() || event.toolName !== NativePiToolName.BASH) return null;
-  const input = event.input as Record<string, unknown>;
-  if (input[FileMutationPolicyDefaults.REWRITTEN_DELETE_FLAG]) return null;
+// shellPolicyRejection, mcpPolicyRejection, operationalArtifactReadPolicyRejection,
+// oversizedReadPolicyRejection are imported from ./extension/NativeToolPolicy.js
 
-  const policy = config.settings.pi?.shell;
-  const command = typeof input.command === 'string' ? input.command : '';
-  if (!command.trim()) return null;
-
-  for (const pattern of policy?.blockedCommandPatterns || []) {
-    if (commandMatchesPattern(command, pattern)) {
-      return `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` may not invoke configured project-tool capability matching \`${pattern}\`. Use the corresponding Orr Else/Pi tool call from harness.yaml.`;
-    }
-  }
-
-  const disallowProjectToolFallback = policy?.disallowProjectToolFallback ?? PiToolPolicyDefaults.DISALLOW_PROJECT_TOOL_FALLBACK;
-  if (!disallowProjectToolFallback) return null;
-
-  for (const tool of config.tools || []) {
-    if (commandInvokesToolName(command, tool.name, services)) {
-      return `PROTOCOL VIOLATION: \`${NativePiToolName.BASH}\` may not invoke configured project tool \`${tool.name}\`. Use the \`${tool.name}\` tool call from harness.yaml.`;
-    }
-  }
-
-  return null;
-}
-
-function mcpPolicyRejection(event: ToolCallEvent, config: HarnessConfig): string | null {
-  if (!isWorkerMode() || event.toolName !== NativePiToolName.MCP) return null;
-  const policy = config.settings.pi?.mcp;
-  const input = event.input as Record<string, unknown>;
-  const requestedTool = typeof input.tool === 'string' ? input.tool.trim() : '';
-  const isMcpToolCall = requestedTool.length > 0;
-
-  if (policy?.allowToolCalls === false) {
-    const requestedDescription = isMcpToolCall ? ` tool call \`${requestedTool}\`` : ' access';
-    return `PROTOCOL VIOLATION: direct Pi \`${NativePiToolName.MCP}\`${requestedDescription} is disabled by harness.yaml. Use the configured Orr Else project tool for this capability or route BLOCKED if none exists.`;
-  }
-
-  const blockedPatterns = policy?.blockedToolPatterns || [];
-  for (const pattern of blockedPatterns) {
-    let regex: RegExp;
-    try {
-      regex = new RegExp(pattern);
-    } catch (error) {
-      return `PROTOCOL VIOLATION: invalid harness.yaml Pi MCP blockedToolPatterns entry \`${pattern}\`: ${String(error)}`;
-    }
-    if (!requestedTool || !regex.test(requestedTool)) continue;
-    return `PROTOCOL VIOLATION: direct Pi \`${NativePiToolName.MCP}\` tool call \`${requestedTool}\` is blocked by harness.yaml. Use the configured Orr Else project tool for this capability or route BLOCKED if none exists.`;
-  }
-
-  return null;
-}
-
-function operationalArtifactReadPolicyRejection(event: ToolCallEvent): string | null {
-  if (!isWorkerMode() || event.toolName !== NativePiToolName.READ) return null;
-  const requestedPath = nativeToolPath(event);
-  if (!requestedPath.trim()) return null;
-  if (isProjectToolCallOutputPath(requestedPath)) return PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE;
-  if (!isOperationalReadPath(requestedPath)) return null;
-
-  return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read framework runtime artifacts ` +
-    `(\`${OperationalLogPath.PROGRESS_FILE}\`, \`${OperationalLogPath.WORKLOG_DIR}/*${OperationalLogPath.WORKLOG_FILE_SUFFIX}\`, ` +
-    `\`${OperationalArtifactPath.LEGACY_STATE_DIR}/\`, \`${OperationalArtifactPath.PI_EVENTS_DIR}/\`, ` +
-    `\`${OperationalArtifactPath.PI_LOGS_DIR}/\`, \`${OperationalArtifactPath.PI_MAILBOX_DIR}/\`, ` +
-    `\`${OperationalArtifactPath.PI_OTEL_DIR}/\`, \`${OperationalArtifactPath.PI_ARTIFACTS_DIR}/\`, ` +
-    `or \`${OperationalArtifactPath.PI_TOOL_OUTPUT_DIR}/\`) ` +
-    'inside a teammate context. Use `bd_get_state_chart`, `bd_get_bead`, `get_artifact_paths`, and configured artifacts for state reconstruction.';
-}
-
-function oversizedReadPolicyRejection(event: ToolCallEvent): string | null {
-  if (!isWorkerMode() || event.toolName !== NativePiToolName.READ) return null;
-  const input = event.input as Record<string, unknown>;
-  const limit = Number(input.limit);
-  if (!Number.isFinite(limit) || limit <= NativeReadPolicyDefaults.MAX_LIMIT_LINES) return null;
-
-  return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` limit ${Math.floor(limit)} exceeds ` +
-    `${NativeReadPolicyDefaults.MAX_LIMIT_LINES} lines inside a teammate context. ` +
-    'Use smaller targeted reads, codemap, ast_grep, reference_docs, or artifact validators instead of loading broad file slices.';
-}
-
-// eventToolCallId is imported from ./extension/PiEventAdapters.js
-
-function registerProviderRequestCap(pi: ExtensionAPI, session: ExtensionSession): void {
-  if (session.providerRequestCapRegistered) return;
-  session.providerRequestCapRegistered = true;
-
-  pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: BeforeProviderRequestEvent) => {
-    const cap = resolveMaxOutputTokens(process.env[EnvVars.MAX_OUTPUT_TOKENS]);
-    const payload = event.payload;
-    const originalMaxTokens =
-      payload && typeof payload === 'object' ? (payload as { max_tokens?: unknown }).max_tokens : undefined;
-    // capAnthropicMaxTokens guards payload shape internally (non-object → null).
-    const capped = capAnthropicMaxTokens(payload as CappableAnthropicPayload, cap);
-    if (!capped) return undefined;
-    Logger.info(Component.ORR_ELSE, 'Capped Anthropic max_tokens to fit subscription included quota', {
-      originalMaxTokens,
-      cappedMaxTokens: cap,
-      thinkingBudget: capped.thinking?.budget_tokens
-    });
-    return capped;
-  });
-}
-
-function registerPiToolObservers(pi: ExtensionAPI, services: RuntimeServices, session: ExtensionSession): void {
-  if (session.piToolObserverRegistered) return;
-  session.piToolObserverRegistered = true;
-
-  pi.on(PiEventName.TOOL_CALL, async (event: ToolCallEvent) => {
-    if (!session.observedPiTools.has(event.toolName)) return;
-    const runtimeObservability = session.piToolObservability;
-    const toolCallId = eventToolCallId(event);
-    const fileMutationPolicyResult = await services.fileMutationPolicy.apply(event);
-    const input = event.input as Record<string, unknown>;
-    const beadId = beadIdFromToolParams(input, session);
-    runtimeObservability?.recordToolInvocation(event.toolName);
-    const span = runtimeObservability?.startSpan(`tool:${event.toolName}`, toolSpanAttributes(event.toolName, input, beadId, session, true));
-    if (span && toolCallId) session.observedPiToolSpans.set(toolCallId, span);
-
-    await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
-      beadId,
-      tool: event.toolName,
-      externalPiTool: true,
-      toolCallId,
-      params: summarizeForEvent(input)
-    }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record Pi tool invocation start', {
-        tool: event.toolName,
-        error: String(error)
-      });
-    });
-
-    const config = await services.configLoader.load();
-    const rejection = fileMutationPolicyResult?.rejection
-      || await terminalFailureLimitRejection(event.toolName, services, session)
-      || shellPolicyRejection(event, config, services)
-      || mcpPolicyRejection(event, config)
-      || shellOperationalMutationPolicyRejection(event, services)
-      || operationalArtifactReadPolicyRejection(event)
-      || nativeOperationalMutationPolicyRejection(event)
-      || oversizedReadPolicyRejection(event)
-      || await checkToolValidationRules(event.toolName, config, runtimeObservability || getObservability(services));
-    if (!rejection) return;
-
-    if (toolCallId) session.blockedObservedPiToolCallIds.add(toolCallId);
-    runtimeObservability?.recordToolInvocation(event.toolName, {
-      status: ToolResultStatus.REJECTED,
-      isError: true,
-      message: rejection
-    });
-    if (span) runtimeObservability?.endSpan(span.spanId, SpanStatusValue.ERROR, rejection);
-    await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-      beadId,
-      tool: event.toolName,
-      externalPiTool: true,
-      toolCallId,
-      result: {
-        status: ToolResultStatus.REJECTED,
-        isError: true,
-        message: rejection
-      }
-    }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record Pi tool policy rejection', {
-        tool: event.toolName,
-        error: String(error)
-      });
-    });
-    return {
-      block: true,
-      reason: rejection,
-      ...(fileMutationPolicyResult?.nextAction ? { nextAction: fileMutationPolicyResult.nextAction } : {}),
-      ...(fileMutationPolicyResult?.recovery ? { recovery: fileMutationPolicyResult.recovery } : {})
-    };
-  });
-
-  pi.on(PiEventName.TOOL_RESULT, async (event: ToolResultEvent) => {
-    if (!session.observedPiTools.has(event.toolName)) return;
-    const runtimeObservability = session.piToolObservability;
-    const beadId = beadIdFromToolParams(event.input, session);
-    const toolCallId = eventToolCallId(event);
-    if (toolCallId && session.blockedObservedPiToolCallIds.delete(toolCallId)) {
-      session.observedPiToolSpans.delete(toolCallId);
-      return;
-    }
-    const result = externalPiToolResultFromEvent(event);
-    runtimeObservability?.recordToolInvocation(event.toolName, result);
-    const span = toolCallId ? session.observedPiToolSpans.get(toolCallId) : undefined;
-    if (span) {
-      runtimeObservability?.endSpan(
-        span.spanId,
-        result.isError ? SpanStatusValue.ERROR : SpanStatusValue.OK,
-        result.isError ? stringifySpanAttribute(result) : undefined
-      );
-      session.observedPiToolSpans.delete(toolCallId!);
-    }
-    await services.eventStore.record(
-      result.isError ? DomainEventName.TOOL_INVOCATION_FAILED : DomainEventName.TOOL_INVOCATION_SUCCEEDED,
-      {
-        beadId,
-        tool: event.toolName,
-        externalPiTool: true,
-        toolCallId,
-        result: summarizeForEvent(result)
-      }
-    ).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record Pi tool invocation result', {
-        tool: event.toolName,
-        error: String(error)
-      });
-    });
-  });
-}
-
-async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServices, session: ExtensionSession): Promise<void> {
-  const endTimeMs = Date.now();
-  const startTimeMs = session.currentTurnStartMs ?? endTimeMs;
-  session.currentTurnStartMs = undefined;
-
-  // message is AgentMessage (union of Message | CustomAgentMessages); usage/model are on AssistantMessage only.
-  // Access through unknown so we don't depend on which union member is present at runtime.
-  const msg: Record<string, unknown> = isRecord(event.message) ? (event.message as unknown as Record<string, unknown>) : {};
-  const record = buildTurnUsageRecord(
-    isRecord(msg.usage) ? (msg.usage as Parameters<typeof buildTurnUsageRecord>[0]) : undefined,
-    {
-      beadId: process.env[EnvVars.BEAD_ID] || App.COORDINATOR_ID,
-      stateId: process.env[EnvVars.STATE_ID] || App.COORDINATOR_ID,
-      actionId: process.env[EnvVars.ACTION_ID] || App.TURN_ACTION_ID,
-      workerId: process.env[EnvVars.WORKER_ID] || App.COORDINATOR_ID,
-      model: (typeof msg.model === 'string' ? msg.model : undefined) || process.env[EnvVars.LLM_MODEL] || App.UNKNOWN_MODEL,
-      startTimeMs,
-      endTimeMs
-    }
-  );
-  if (!record) return;
-
-  services.telemetryStore.recordTurn(record.telemetry);
-  await services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, record.event).catch(error => {
-    Logger.warn(Component.OBSERVABILITY, 'Failed to record token usage event', { error: String(error) });
-  });
-
-  try {
-    const span = services.observability.startSpan('llm_turn', {
-      'gen_ai.request.model': record.event.model,
-      'gen_ai.usage.input_tokens': record.event.inputTokens,
-      'gen_ai.usage.output_tokens': record.event.outputTokens,
-      'gen_ai.usage.cache_read_tokens': record.event.cacheReadTokens,
-      'gen_ai.usage.total_tokens': record.event.totalTokens,
-      [OtelAttr.ORR_ELSE_BEAD_ID]: record.event.beadId,
-      [OtelAttr.ORR_ELSE_STATE_ID]: record.event.stateId,
-      [OtelAttr.ORR_ELSE_ACTION_ID]: record.event.actionId,
-      [OtelAttr.ORR_ELSE_WORKER_ID]: record.event.workerId,
-      [OtelAttr.ORR_ELSE_COST_TOTAL]: record.event.costTotal
-    });
-    services.observability.endSpan(span.spanId);
-  } catch (error) {
-    Logger.debug(Component.OBSERVABILITY, 'Skipped OTEL token-usage span', { error: String(error) });
-  }
-}
-
-function registerAgentLifecycleObservers(pi: ExtensionAPI, services: RuntimeServices, session: ExtensionSession): void {
-  if (session.agentLifecycleObserverRegistered) return;
-  session.agentLifecycleObserverRegistered = true;
-
-  pi.on(PiEventName.TURN_START, async (event: TurnStartEvent) => {
-    session.currentTurnStartMs = typeof event.timestamp === 'number' ? event.timestamp : Date.now();
-  });
-
-  pi.on(PiEventName.TURN_END, async (event: TurnEndEvent, ctx: ExtensionContext) => {
-    await dispatchAgentLifecycleFailure(event, ctx, PiEventName.TURN_END, services, session);
-    await recordTurnUsage(event, services, session);
-  });
-
-  pi.on(PiEventName.AGENT_END, async (event: AgentEndEvent, ctx: ExtensionContext) => {
-    await dispatchAgentLifecycleFailure(event, ctx, PiEventName.AGENT_END, services, session);
-    Logger.info(Component.OBSERVABILITY, 'Session token usage summary', services.telemetryStore.getSummary());
-  });
-}
-
-// handleAgentLifecycleFailure is imported from ./extension/AgentLifecycleController.js
-// The local shim below wires the session-mutation callbacks and env-resolved
-// buildWorkerEvent so the controller module remains process.env-free.
-async function dispatchAgentLifecycleFailure(event: AgentEndEvent | TurnEndEvent, ctx: ExtensionContext, source: PiEventName, services: RuntimeServices, session: ExtensionSession): Promise<void> {
-  await handleAgentLifecycleFailure(event, ctx, source, services, {
-    isWorker: isWorkerMode(),
-    activeRun: session.activeRun,
-    agentFailureSignaled: session.agentFailureSignaled,
-    setAgentFailureSignaled: (v: boolean) => { session.agentFailureSignaled = v; },
-    buildWorkerEvent: (type, fields) => buildWorkerEvent(type, fields)
-  });
-}
+// registerProviderRequestCap, registerPiToolObservers, recordTurnUsage,
+// registerAgentLifecycleObservers are imported from ./extension/PiObservers.js
 
 // resultIndicatesFailure and resultIndicatesSuccess are imported from ./extension/PiEventAdapters.js
 
@@ -1294,59 +528,8 @@ async function checkToolValidationRules(toolName: string, config: HarnessConfig,
   return null;
 }
 
-async function terminalFailureLimitContext(services: RuntimeServices, session: ExtensionSession): Promise<TerminalFailureLimitContext | null> {
-  const run = session.activeRun;
-  if (!isWorkerMode() || !run) return null;
-
-  let data = run.terminalFailureLimitEvent?.data || run.terminalFailureLimitResult;
-
-  if (!data) {
-    if (run.terminalFailureLimitScanned) return null;
-    preloadTerminalFailureLimit(run, services);
-    const limitEvent = await run.terminalFailureLimitScan;
-    run.terminalFailureLimitScanned = true;
-    run.terminalFailureLimitScan = undefined;
-    if (!limitEvent) return null;
-    run.terminalFailureLimitEvent = limitEvent;
-    data = limitEvent.data || {};
-  }
-
-  const result = isRecord(data.result) ? data.result : {};
-  const failureLimit = isRecord(result.failureLimit) ? result.failureLimit : {};
-  const failedTool = typeof data.tool === 'string'
-    ? data.tool
-    : typeof result.tool === 'string'
-      ? result.tool
-      : 'unknown';
-  const config = await services.configLoader.load();
-  const failedToolDefinition = config.tools?.find(tool => tool.name === failedTool);
-  const recordedSuggestedOutcome = typeof failureLimit.suggestedOutcome === 'string'
-    ? failureLimit.suggestedOutcome
-    : routingHintSuggestedOutcomeFromResult(result);
-  const configuredSuggestedOutcome = projectToolFailureLimitSuggestedOutcome(
-    failedToolDefinition,
-    run.stateId,
-    run.action.id
-  );
-  const suggestedOutcome = recordedSuggestedOutcome || configuredSuggestedOutcome || EventName.BLOCKED;
-  return {
-    failedTool,
-    suggestedOutcome,
-    stateId: run.stateId,
-    actionId: run.action.id
-  };
-}
-
-async function terminalFailureLimitRejection(toolName: string, services: RuntimeServices, session: ExtensionSession): Promise<string | null> {
-  if (TERMINAL_FAILURE_ALLOWED_TOOLS.has(toolName)) return null;
-  const terminal = await terminalFailureLimitContext(services, session);
-  if (!terminal) return null;
-
-  return `PROTOCOL VIOLATION: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
-    `in ${terminal.stateId}/${terminal.actionId}. Do not call \`${toolName}\` or gather more evidence in this state. ` +
-    `Use \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with the failure-limit evidence, then ` +
-    `\`${BuiltInToolName.SIGNAL_COMPLETION}\` with outcome \`${terminal.suggestedOutcome}\`.`;
-}
+// terminalFailureLimitContext and terminalFailureLimitRejection are imported
+// from ./extension/WorkerRunController.js
 
 function lookupToolGuards(
   toolName: string,
@@ -1471,7 +654,7 @@ function wrapPluginTool(
         params: summarizeForEvent(params)
       });
 
-      const terminalRejection = await terminalFailureLimitRejection(tool.name, services, session);
+      const terminalRejection = await terminalFailureLimitRejection(tool.name, services, session, isWorkerMode(), TERMINAL_FAILURE_ALLOWED_TOOLS);
       if (terminalRejection) {
         runtimeObservability.recordToolInvocation(tool.name, {
           status: ToolResultStatus.REJECTED,
@@ -1605,85 +788,9 @@ function normalizeChecklistItem(raw: Record<string, unknown>): ChecklistItem | n
 // teammateSignalEventData, hasAppliedTeammateSignal, postWorkerSignal are
 // imported from ./extension/SignalController.js
 
-function actionRunContext(action: TeammateAction): ActionRunContext {
-  if (action.context === ActionRunContext.FRESH || action.contextMode === ActionContextMode.SUBAGENT) {
-    return ActionRunContext.FRESH;
-  }
-  return ActionRunContext.PARENT;
-}
-
-function actionCompletionKey(config: HarnessConfig, stateId: string, actionId: string): string {
-  const workflowVersion = config.settings.workflowVersion?.trim();
-  if (!workflowVersion) return actionId;
-  return [
-    `${ActionCompletionKey.WORKFLOW_PREFIX}=${workflowVersion}`,
-    `${ActionCompletionKey.STATE_PREFIX}=${stateId}`,
-    `${ActionCompletionKey.ACTION_PREFIX}=${actionId}`
-  ].join(ActionCompletionKey.FIELD_SEPARATOR);
-}
-
-function isActionCompleted(
-  config: HarnessConfig,
-  stateId: string,
-  action: TeammateAction,
-  completedActionIds: string[] = []
-): boolean {
-  return new Set(completedActionIds).has(actionCompletionKey(config, stateId, action.id));
-}
-
-function selectActiveAction(
-  config: HarnessConfig,
-  stateId: string,
-  state: SDLCState,
-  actionId?: string,
-  completedActionIds: string[] = []
-): TeammateAction | undefined {
-  if (actionId) return state.actions.find(candidate => candidate.id === actionId);
-  const pending = state.actions.filter(candidate => !isActionCompleted(config, stateId, candidate, completedActionIds));
-  const searchSpace = pending.length > 0 ? pending : state.actions;
-  return searchSpace.find(candidate =>
-    actionRunContext(candidate) === ActionRunContext.PARENT &&
-    (candidate.type === ActionType.PROMPT || candidate.type === ActionType.CHECKLIST)
-  ) || searchSpace.find(candidate => actionRunContext(candidate) === ActionRunContext.FRESH)
-    || searchSpace.find(candidate => actionRunContext(candidate) === ActionRunContext.PARENT)
-    || state.actions[0];
-}
-
-function nextSequencedAction(
-  config: HarnessConfig,
-  stateId: string,
-  state: SDLCState,
-  justCompletedActionId: string,
-  completedActionIds: string[] = []
-): TeammateAction | undefined {
-  const completedIndex = state.actions.findIndex(action => action.id === justCompletedActionId);
-  if (completedIndex < 0) return undefined;
-  const nextCompletedActionIds = [
-    ...completedActionIds,
-    actionCompletionKey(config, stateId, justCompletedActionId)
-  ];
-  return state.actions.slice(completedIndex + 1).find(action =>
-    !isActionCompleted(config, stateId, action, nextCompletedActionIds)
-  );
-}
-
-function appendCompletedActionId(
-  completedActionIds: string[] | undefined,
-  stateId: string,
-  actionId: string,
-  config: HarnessConfig
-): string[] {
-  return [...new Set([
-    ...(completedActionIds || []),
-    actionCompletionKey(config, stateId, actionId)
-  ])];
-}
-
-function dynamicChecklistItemsForRun(bead: Bead, stateId: string, actionId: string): ChecklistItem[] {
-  const runKey = `${stateId}/${actionId}`;
-  const dynamicItems = ((bead as any).dynamicChecklists || {})[runKey]?.items;
-  return Array.isArray(dynamicItems) ? dynamicItems as ChecklistItem[] : [];
-}
+// actionRunContext, actionCompletionKey, isActionCompleted, selectActiveAction,
+// nextSequencedAction, appendCompletedActionId, dynamicChecklistItemsForRun
+// are imported from ./extension/CoordinatorController.js
 
 async function addChecklistItem(rawItem: Record<string, unknown>, source: string, services: RuntimeServices, session: ExtensionSession): Promise<Record<string, unknown>> {
   const operation = session.checklistMutationQueue.then(
@@ -2873,9 +1980,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       ...getObservedPiToolNames(config),
       ...getNativePiExtensionProjectToolNames(config)
     ].filter(toolName => !wrappedToolNames.has(toolName)));
-    registerPiToolObservers(pi, services, session);
+    registerPiToolObservers(pi, services, session, {
+      beadIdFromToolParams: (input) => beadIdFromToolParams(input, session),
+      toolSpanAttributes: (toolName, params, beadId, externalPiTool) => toolSpanAttributes(toolName, params, beadId, session, externalPiTool),
+      terminalFailureLimitRejection: (toolName) => terminalFailureLimitRejection(toolName, services, session, isWorkerMode(), TERMINAL_FAILURE_ALLOWED_TOOLS),
+      checkToolValidationRules,
+      getObservability: () => getObservability(services),
+      isWorkerMode,
+      commandInvokesToolName,
+      commandMatchesPattern
+    });
     registerProviderRequestCap(pi, session);
-    registerAgentLifecycleObservers(pi, services, session);
+    registerAgentLifecycleObservers(pi, services, session, {
+      isWorkerMode,
+      buildWorkerEvent,
+      setAgentFailureSignaled: (v) => { session.agentFailureSignaled = v; }
+    });
 
     if (!session.claudeCodeLoginRegistered && resolveProviderName(config.settings.defaultProvider) === LLMProviderName.ANTHROPIC) {
       session.claudeCodeLoginRegistered = true;
@@ -3021,7 +2141,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             // ── evaluate gate readiness using the shared predicate ────────────
             // This is the SAME function signal_completion uses for its gate
             // decision, guaranteeing audit.ready == real gate accept condition.
-            const gate = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config);
+            const gate = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config, isWorkerMode());
 
             // ── domain event (best-effort) ────────────────────────────────────
             services.eventStore.record(DomainEventName.PRE_SIGNAL_AUDIT_PERFORMED, {
@@ -3274,7 +2394,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         // PASSES, we then call validateSuccess below so that the auto-restore
         // logic fires exactly as it did before refactoring.
         const obs = session.piToolObservability || getObservability(services);
-        const gateReadiness = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config);
+        const gateReadiness = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config, isWorkerMode());
 
         if (!gateReadiness.transitionValid) {
           // transitionError is set when transitionValid is false

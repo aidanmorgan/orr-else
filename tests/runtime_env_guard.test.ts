@@ -45,6 +45,16 @@ const ALLOWLIST: AllowlistEntry[] = [
     deferredWI: 'WI-4,WI-20'
   },
   {
+    file: 'src/extension/NativeToolPolicy.ts',
+    reason: 'relativeOperationalPath reads WORKTREE_PATH/PROJECT_ROOT to anchor relative paths — this is inherent to path-based policy classification (same as ArtifactQuery/PathContext). Extracted from extension.ts as part of sz75 refactor; process.env usage was always present, just in extension.ts.',
+    deferredWI: undefined
+  },
+  {
+    file: 'src/extension/PiObservers.ts',
+    reason: 'recordTurnUsage reads BEAD_ID/STATE_ID/ACTION_ID/WORKER_ID/LLM_MODEL for telemetry identity, and registerProviderRequestCap reads MAX_OUTPUT_TOKENS — the same reads that were in extension.ts before sz75 extraction. These are env-boundary reads that move with the function.',
+    deferredWI: undefined
+  },
+  {
     file: 'src/plugins/mailbox.ts',
     reason: 'Reads WORKER_ID as a heartbeat fallback. Not in WI-1 scope.',
     deferredWI: undefined
