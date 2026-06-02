@@ -15,6 +15,7 @@ import type { Observability } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
 import { Logger } from '../core/Logger.js';
 import { missingMandatoryChecklistItems } from '../core/ChecklistRequirements.js';
+import { isAdvanceOutcome } from '../core/FlowManager.js';
 import {
   DomainEventName,
   EventName,
@@ -265,12 +266,15 @@ export async function evaluateGateReadiness(
     );
   }
 
-  // ── 3. SUCCESS-only: mandatory checklist + required tools ─────────────────
+  // ── 3. advance-outcome-only: mandatory checklist + required tools ──────────
+  // Controlled by isAdvanceOutcome so that custom advance outcomes (e.g. ADVANCE
+  // in a non-SDLC statechart) are gated the same way as the default SUCCESS.
+  // With the default config this is byte-identical to `outcome === 'SUCCESS'`.
   let missingChecklistItems: string[] = [];
   let requiredToolEntries: RequiredToolAuditEntry[] = [];
   const toolAuditFailures: string[] = [];
 
-  if (outcome === EventName.SUCCESS) {
+  if (isAdvanceOutcome(outcome, config)) {
     const projection = await services.eventStore.projectBead(activeRun.beadId);
     missingChecklistItems = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
     if (missingChecklistItems.length > 0) {
@@ -322,11 +326,11 @@ export async function evaluateGateReadiness(
     });
   }
 
-  // ── 4. SUCCESS-only: plan write-set preflight (read-only, pure) ───────────
+  // ── 4. advance-outcome-only: plan write-set preflight (read-only, pure) ────
   let writeSetValid: boolean | null = null;
   let writeSetReason: string | undefined;
 
-  if (outcome === EventName.SUCCESS) {
+  if (isAdvanceOutcome(outcome, config)) {
     const planWriteSetPreflight = await services.planWriteSet.validatePlanContract({
       beadId: activeRun.beadId,
       stateId: activeRun.stateId,
@@ -342,11 +346,11 @@ export async function evaluateGateReadiness(
     }
   }
 
-  // ── 5. SUCCESS-only: transactional state guard (read-only, no side effects) ─
+  // ── 5. advance-outcome-only: transactional state guard (read-only) ─────────
   let transactionalValid: boolean | null = null;
   let transactionalReason: string | undefined;
 
-  if (outcome === EventName.SUCCESS) {
+  if (isAdvanceOutcome(outcome, config)) {
     const transactionalState = await services.transactionalStateGuard.validateSuccessReadOnly(
       activeRun.beadId,
       activeRun.stateId,
@@ -401,7 +405,7 @@ export async function evaluateGateReadiness(
   let provenanceValid = true;
   let provenanceReason: string | undefined;
 
-  if (outcome === EventName.SUCCESS) {
+  if (isAdvanceOutcome(outcome, config)) {
     const beadEvents = await services.eventStore.eventsForBead(activeRun.beadId);
     const initEvent = [...beadEvents]
       .reverse()

@@ -109,6 +109,7 @@ import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
+import { isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { PathContext } from './core/PathContext.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
@@ -463,9 +464,15 @@ function commandInvokesToolName(command: string, toolName: string, services: Run
 
 /**
  * Public re-export for test consumers — the implementation lives in CoordinatorController.
+ * Config is optional; when omitted the function uses the default vocabulary
+ * (FAILURE/BLOCKED/SUCCESS), reproducing previous literal-comparison behaviour.
  */
-export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string): boolean {
-  return shouldPersistBlockedBeadStatusInternal(eventType, nextState);
+export function shouldPersistBlockedBeadStatus(
+  eventType: string,
+  nextState: string,
+  config?: import('./core/ConfigLoader.js').HarnessConfig
+): boolean {
+  return shouldPersistBlockedBeadStatusInternal(eventType, nextState, config ?? ({} as import('./core/ConfigLoader.js').HarnessConfig));
 }
 
 // shellPolicyRejection, mcpPolicyRejection, operationalArtifactReadPolicyRejection,
@@ -1370,10 +1377,10 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const state = config.states[event.stateId];
     const actionKey = event.actionId ? actionCompletionKey(config, event.stateId, event.actionId) : undefined;
     const bead = await requireTool(services.plugins.bd, PluginToolName.BD_GET_BEAD).execute({ id: beadId, includeDetails: true }) as Bead;
-    const completedActionIds = event.transitionEvent === EventName.SUCCESS
+    const completedActionIds = isAdvanceOutcome(event.transitionEvent, config)
       ? appendCompletedActionId(bead.completedActionIds || [], event.stateId, event.actionId, config)
       : (bead.completedActionIds || []);
-    const nextAction = state && event.transitionEvent === EventName.SUCCESS
+    const nextAction = state && isAdvanceOutcome(event.transitionEvent, config)
       ? nextSequencedAction(config, event.stateId, state, event.actionId, completedActionIds)
       : undefined;
 
@@ -1418,7 +1425,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     };
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, transitionEventData);
 
-    if (nextState === BeadStatus.COMPLETED && event.transitionEvent === EventName.SUCCESS) {
+    if (isTerminalState(nextState, config) && isAdvanceOutcome(event.transitionEvent, config)) {
       const mergeTool = requireTool(services.plugins.git, PluginToolName.MERGE_AND_COMMIT);
       const mergeResult = await mergeTool.execute({
         beadId,
@@ -1462,7 +1469,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       handover: event.handover
     });
 
-    if (shouldPersistBlockedBeadStatus(event.type, nextState)) {
+    if (shouldPersistBlockedBeadStatus(event.type, nextState, config)) {
       const updateStatus = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
       if (updateStatus) {
         await Promise.resolve(updateStatus.execute({
@@ -2419,7 +2426,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             `\`${terminal.suggestedOutcome}\`; outcome \`${outcome}\` is not permitted after this terminal verifier failure.`;
         }
 
-        if (outcome === EventName.SUCCESS) {
+        if (isAdvanceOutcome(outcome, config)) {
           if (gateReadiness.missingChecklistItems.length > 0) {
             return `REJECTED: You cannot signal SUCCESS yet. The following mandatory checklist items are missing:\n${gateReadiness.missingChecklistItems.map(m => `- ${m}`).join('\n')}\nUse the \`${BuiltInToolName.TICK_ITEMS}\` tool to complete them in a batch.`;
           }
@@ -2455,7 +2462,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
         Logger.info(Component.ORR_ELSE, 'Teammate signaled turn completion', { beadId: activeRun.beadId, outcome, summary });
 
-        const event = buildWorkerEvent(teammateEventTypeForOutcome(outcome), {
+        const event = buildWorkerEvent(teammateEventTypeForOutcome(outcome, config), {
           beadId: activeRun.beadId,
           stateId: activeRun.stateId,
           actionId: activeRun.action.id,

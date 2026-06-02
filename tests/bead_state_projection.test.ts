@@ -320,4 +320,73 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
     expect(result.completedActionIds).toContain('action-2');
     expect(result.completedActionIds!.filter(a => a === 'action-1')).toHaveLength(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // SHOULD-FIX 1: null-safety — missing/falsy transitionEvent in STATE_TRANSITION_APPLIED
+  // ---------------------------------------------------------------------------
+
+  it('does NOT record action completion when STATE_TRANSITION_APPLIED has no transitionEvent (legacy/replayed event)', () => {
+    // Reproduces the bug: old code `outcome === EventName.SUCCESS` returned false for
+    // undefined; new makeAdvancePredicate guard ensures the same semantics.
+    const events = [
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        fromState: 'Planning',
+        nextState: 'Planning',
+        // transitionEvent is intentionally absent — simulates a legacy event
+        actionId: 'formulate-plan',
+        actionKey: 'formulate-plan'
+      })
+    ];
+    const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(result.completedActionIds ?? []).not.toContain('formulate-plan');
+  });
+
+  it('does NOT record action completion in stateChart when STATE_TRANSITION_APPLIED has no transitionEvent', () => {
+    const events = [
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        fromState: 'Planning',
+        nextState: 'Planning',
+        actionId: 'formulate-plan',
+        actionKey: 'formulate-plan'
+        // transitionEvent absent
+      })
+    ];
+    const result = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(result.completedActionIds).not.toContain('formulate-plan');
+  });
+
+  it('records action completion for a custom advance outcome via advanceOutcomes Set', () => {
+    const customAdvance = new Set(['ADVANCE']);
+    const events = [
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        fromState: 'Alpha',
+        nextState: 'done',
+        transitionEvent: 'ADVANCE',
+        actionId: 'do-work',
+        actionKey: 'do-work'
+      })
+    ];
+    const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true }, customAdvance);
+    expect(result.completedActionIds).toContain('do-work');
+  });
+
+  it('does NOT record action completion for SUCCESS when custom advanceOutcomes excludes it', () => {
+    const customAdvance = new Set(['ADVANCE']);
+    const events = [
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        fromState: 'Planning',
+        nextState: 'Implementation',
+        transitionEvent: 'SUCCESS',
+        actionId: 'formulate-plan',
+        actionKey: 'formulate-plan'
+      })
+    ];
+    const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true }, customAdvance);
+    // SUCCESS is not in custom advance set → not recorded
+    expect(result.completedActionIds ?? []).not.toContain('formulate-plan');
+  });
 });

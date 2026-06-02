@@ -136,6 +136,28 @@ export class BeadStateProjection {
   }
 
   // ---------------------------------------------------------------------------
+  // Advance-outcome predicate helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Default advance-outcome set — must NOT import FlowManager or ConfigLoader
+   * (layering constraint: core must not depend on plugins).  When callers thread
+   * an explicit set the default is not used.
+   */
+  private static readonly DEFAULT_ADVANCE_OUTCOMES: ReadonlySet<string> = new Set([EventName.SUCCESS]);
+
+  private makeAdvancePredicate(advanceOutcomes?: Set<string>): (outcome: string | null | undefined) => boolean {
+    const set = advanceOutcomes ?? BeadStateProjection.DEFAULT_ADVANCE_OUTCOMES;
+    // A falsy/missing outcome must return false — matching the old literal-comparison
+    // semantics where `undefined === EventName.SUCCESS` was false (no action-completion
+    // recorded for legacy/replayed STATE_TRANSITION_APPLIED events with no transitionEvent).
+    return (outcome: string | null | undefined) => {
+      if (!outcome || typeof outcome !== 'string') return false;
+      return set.has(outcome.toUpperCase()) || set.has(outcome);
+    };
+  }
+
+  // ---------------------------------------------------------------------------
   // projectBeadStateChartFromEvents
   // ---------------------------------------------------------------------------
 
@@ -143,8 +165,10 @@ export class BeadStateProjection {
     beadId: string,
     events: DomainEvent[],
     workflowVersion?: string,
-    options: EventProjectionOptions = {}
+    options: EventProjectionOptions = {},
+    advanceOutcomes?: Set<string>
   ): BeadStateChartProjection {
+    const isAdvanceOutcome = this.makeAdvancePredicate(advanceOutcomes);
     const includeDetails = this.includeDetails(options);
     const projection: BeadStateChartProjection = {
       beadId,
@@ -245,7 +269,7 @@ export class BeadStateProjection {
           if (includeDetails && this.eventAppliesToWorkflow(data, workflowVersion) && typeof data.handover === 'string' && data.fromState) {
             projection.handovers[data.fromState] = this.compactHandover(data.handover);
           }
-          if (includeDetails && data.transitionEvent === EventName.SUCCESS) completeAction(this.completedActionFromData(data, workflowVersion));
+          if (includeDetails && isAdvanceOutcome(data.transitionEvent)) completeAction(this.completedActionFromData(data, workflowVersion));
           projection.restartRequested = false;
           projection.restartKind = undefined;
           projection.restartEvent = undefined;
@@ -373,8 +397,10 @@ export class BeadStateProjection {
     beadId: string,
     events: DomainEvent[],
     workflowVersion?: string,
-    options: EventProjectionOptions = {}
+    options: EventProjectionOptions = {},
+    advanceOutcomes?: Set<string>
   ): Partial<HarnessBeadMetadata> {
+    const isAdvanceOutcome = this.makeAdvancePredicate(advanceOutcomes);
     const projection: Partial<HarnessBeadMetadata> = {};
     const includeDetails = this.includeDetails(options);
     for (const event of events) {
@@ -437,7 +463,7 @@ export class BeadStateProjection {
                 [data.fromState]: this.compactHandover(data.handover)
               };
             }
-          if (data.transitionEvent === EventName.SUCCESS) {
+          if (isAdvanceOutcome(data.transitionEvent)) {
             const completedAction = this.completedActionFromData(data, workflowVersion);
             if (completedAction && typeof completedAction === 'string') {
               projection.completedActionIds = [
@@ -480,7 +506,7 @@ export class BeadStateProjection {
       }
     }
 
-    const stateChart = this.projectBeadStateChartFromEvents(beadId, events, workflowVersion, options);
+    const stateChart = this.projectBeadStateChartFromEvents(beadId, events, workflowVersion, options, advanceOutcomes);
     const workflowScoped = !!workflowVersion?.trim();
     if (stateChart.currentState) projection.status = stateChart.currentState;
     if (stateChart.beadStatus) projection.status = stateChart.beadStatus;

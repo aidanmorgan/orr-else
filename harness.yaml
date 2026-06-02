@@ -52,6 +52,13 @@ settings:
     checkpoints, mandatory per-Bead worktrees, local completion signaling, and
     configured Claude/OpenAI provider routing.
 
+statechart:
+  initialState: Planning
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 scheduler:
   weights:
     waitTime: 1.0

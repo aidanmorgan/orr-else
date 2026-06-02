@@ -282,9 +282,56 @@ export interface HarnessConfig {
       resume?: number;
     }
   };
+  statechart?: StatechartConfig;
   validationGates?: ValidationGateConfig[];
   states: Record<string, SDLCState>;
   tools?: ProjectToolConfig[];
+}
+
+/**
+ * Statechart vocabulary configuration.
+ *
+ * Declared at the top-level `statechart` key in harness.yaml.
+ * All fields are optional — absent fields reproduce the hard-coded defaults
+ * (SUCCESS/FAILURE/BLOCKED outcomes, 'completed' terminal state), so any
+ * config without a `statechart` block behaves byte-identically to before.
+ *
+ * `customEvents` is a placeholder field whose behaviour is provided by a
+ * parallel bead; it is declared here so the interface is stable.
+ */
+export interface StatechartConfig {
+  /** Override for the initial state (mirrors settings.startState; settings wins). */
+  initialState?: string;
+  /**
+   * State IDs that are considered terminal (workflow is done when reached).
+   * Required when the block is present; defaults to ['completed'] when absent.
+   */
+  terminalStates: string[];
+  /**
+   * Outcome strings that trigger forward state advancement.
+   * Defaults to ['SUCCESS'].
+   */
+  advanceOutcomes?: string[];
+  /**
+   * Outcome strings that map to a STATE_FAILED teammate event.
+   * Defaults to ['FAILURE'].
+   */
+  failedOutcomes?: string[];
+  /**
+   * Outcome strings that map to a STATE_BLOCKED teammate event.
+   * Defaults to ['BLOCKED'].
+   */
+  blockedOutcomes?: string[];
+  /**
+   * Additional custom outcome strings (beyond the above sets).
+   * Custom outcomes map to STATE_TRANSITIONED (advance semantics without gates).
+   */
+  customOutcomes?: string[];
+  /**
+   * Placeholder: custom event names whose behaviour is filled by a parallel bead.
+   * Declare here to keep the interface stable across beads.
+   */
+  customEvents?: string[];
 }
 
 /**

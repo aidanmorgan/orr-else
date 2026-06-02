@@ -4,6 +4,77 @@ import { BeadStatus, EventName, RestartKind } from "../constants/index.js";
 import { HarnessConfig } from "./ConfigLoader.js";
 import { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+// ── Statechart outcome-vocabulary defaults ───────────────────────────────────
+// These reproduce today's hard-coded literals when no statechart block is
+// present in the config.  All helpers below are pure, config-reads only.
+
+const DEFAULT_TERMINAL_STATES: readonly string[] = [BeadStatus.COMPLETED];
+const DEFAULT_ADVANCE_OUTCOMES: readonly string[] = [EventName.SUCCESS];
+const DEFAULT_FAILED_OUTCOMES: readonly string[] = [EventName.FAILURE];
+const DEFAULT_BLOCKED_OUTCOMES: readonly string[] = [EventName.BLOCKED];
+
+/**
+ * Returns true iff `stateId` is a configured terminal state.
+ *
+ * Default (no statechart block): ['completed'].
+ */
+export function isTerminalState(stateId: string, config: HarnessConfig): boolean {
+  const terminals = config.statechart?.terminalStates ?? DEFAULT_TERMINAL_STATES;
+  return terminals.includes(stateId);
+}
+
+/**
+ * Classifies an outcome string against the configured vocabulary.
+ *
+ * Returns:
+ *  - 'advance'  — outcome is in advanceOutcomes (default ['SUCCESS'])
+ *  - 'failed'   — outcome is in failedOutcomes  (default ['FAILURE'])
+ *  - 'blocked'  — outcome is in blockedOutcomes (default ['BLOCKED'])
+ *  - 'custom'   — outcome is in customOutcomes
+ *  - 'advance'  — fallback (unknown outcomes treated as advance, same as old behaviour)
+ *
+ * With no statechart block the defaults reproduce the old hard-coded literals.
+ *
+ * A falsy / non-string outcome returns 'advance' (the safe default for
+ * teammateEventTypeForOutcome → STATE_TRANSITIONED), which is why
+ * isAdvanceOutcome has its own falsy guard returning false to preserve the
+ * old `outcome === EventName.SUCCESS` semantics (false for missing outcome).
+ */
+export function outcomeCategory(
+  outcome: string | null | undefined,
+  config: HarnessConfig
+): 'advance' | 'failed' | 'blocked' | 'custom' {
+  if (!outcome || typeof outcome !== 'string') return 'advance';
+
+  const sc = config.statechart;
+  const advance = sc?.advanceOutcomes ?? DEFAULT_ADVANCE_OUTCOMES;
+  const failed = sc?.failedOutcomes ?? DEFAULT_FAILED_OUTCOMES;
+  const blocked = sc?.blockedOutcomes ?? DEFAULT_BLOCKED_OUTCOMES;
+  const custom = sc?.customOutcomes ?? [];
+
+  const normalized = outcome.toUpperCase();
+  if (advance.map(o => o.toUpperCase()).includes(normalized)) return 'advance';
+  if (failed.map(o => o.toUpperCase()).includes(normalized)) return 'failed';
+  if (blocked.map(o => o.toUpperCase()).includes(normalized)) return 'blocked';
+  if (custom.map(o => o.toUpperCase()).includes(normalized)) return 'custom';
+  // Unknown outcomes: treat as advance (preserves today's fallback behaviour
+  // in teammateEventTypeForOutcome which returns STATE_TRANSITIONED for anything
+  // that isn't FAILURE/BLOCKED).
+  return 'advance';
+}
+
+/**
+ * Returns true iff `outcome` is in the configured advance-outcomes set.
+ *
+ * Default (no statechart block): equivalent to `outcome === 'SUCCESS'`.
+ * A falsy/missing outcome returns false — matching the old literal-comparison
+ * semantics where `undefined === 'SUCCESS'` was false.
+ */
+export function isAdvanceOutcome(outcome: string | null | undefined, config: HarnessConfig): boolean {
+  if (!outcome || typeof outcome !== 'string') return false;
+  return outcomeCategory(outcome, config) === 'advance';
+}
+
 export interface FlowManagerResult {
   status: BeadStatus;
   notes: string;

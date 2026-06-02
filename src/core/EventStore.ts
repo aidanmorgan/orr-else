@@ -379,6 +379,26 @@ export class EventStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Internal helpers – projection
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Builds an advanceOutcomes Set from config for threading into BeadStateProjection.
+   * Returns undefined when no statechart block is present so the projection falls
+   * back to its own DEFAULT_ADVANCE_OUTCOMES (['SUCCESS']) — byte-identical to
+   * the old behaviour.
+   *
+   * No import of FlowManager or ConfigLoader constants — purely a Set<string>
+   * extracted from the already-loaded config object (layering-safe).
+   */
+  private advanceOutcomesFromConfig(config: { statechart?: { advanceOutcomes?: string[] } }): Set<string> | undefined {
+    const outcomes = config.statechart?.advanceOutcomes;
+    if (!outcomes) return undefined;
+    // Store upper-cased to match the predicate's .toUpperCase() comparison.
+    return new Set(outcomes.map(o => o.toUpperCase()));
+  }
+
+  // ---------------------------------------------------------------------------
   // Public API – projections
   // ---------------------------------------------------------------------------
 
@@ -387,7 +407,9 @@ export class EventStore {
     return this.projection.projectBeadStateChartFromEvents(
       beadId,
       await this.eventsForBead(beadId),
-      config.settings.workflowVersion
+      config.settings.workflowVersion,
+      {},
+      this.advanceOutcomesFromConfig(config)
     );
   }
 
@@ -400,7 +422,8 @@ export class EventStore {
       beadId,
       await this.eventsForBead(beadId),
       config.settings.workflowVersion,
-      options
+      options,
+      this.advanceOutcomesFromConfig(config)
     );
   }
 
@@ -413,11 +436,12 @@ export class EventStore {
     if (ids.length === 0) return projections;
 
     const config = await this.configLoader.load();
+    const advanceOutcomes = this.advanceOutcomesFromConfig(config);
     const groupedEvents = await this.eventsForBeads(ids);
     for (const beadId of ids) {
       projections.set(
         beadId,
-        this.projection.projectBeadFromEvents(beadId, groupedEvents.get(beadId) || [], config.settings.workflowVersion, options)
+        this.projection.projectBeadFromEvents(beadId, groupedEvents.get(beadId) || [], config.settings.workflowVersion, options, advanceOutcomes)
       );
     }
     return projections;

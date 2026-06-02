@@ -10,6 +10,7 @@ import { Logger } from './Logger.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import {
+  BeadStatus,
   Component,
   DEFAULT_OBSERVED_PI_TOOLS,
   DefaultModelName,
@@ -197,6 +198,84 @@ export class ConfigLoader {
     if (!valid) {
       const errors = validate.errors?.map(e => `${e.instancePath} ${e.message}`).join(', ');
       throw new Error(`Configuration validation failed: ${errors}`);
+    }
+
+    // ── Semantic validation (post-schema) ────────────────────────────────────
+    this.validateSemantics(config as HarnessConfig);
+  }
+
+  /**
+   * Post-schema semantic checks.
+   *
+   * When a `statechart` block is present (explicit opt-in):
+   *   - startState / statechart.initialState must exist in states.
+   *   - Every transition target must be a defined state OR a declared terminal state (throws).
+   *   - Warns when a transition outcome key is not in the declared vocabulary.
+   *
+   * When no `statechart` block is present (legacy / default config):
+   *   - startState existence is still validated.
+   *   - Transition target validation is SKIPPED (backward-safe: old configs freely
+   *     reference implicit terminals like 'done', 'completed', 'failed').
+   *   - No vocabulary warnings are emitted.
+   */
+  private validateSemantics(config: HarnessConfig): void {
+    const stateIds = new Set(Object.keys(config.states || {}));
+    const sc = config.statechart;
+    const hasStatechartBlock = !!sc;
+    const terminalStates = new Set<string>(
+      sc?.terminalStates ?? [BeadStatus.COMPLETED]
+    );
+    const knownTargets = new Set([...stateIds, ...terminalStates]);
+
+    // startState / statechart.initialState existence check.
+    // Only enforced when there are defined states (avoids false positives in
+    // test configs with empty states maps that only care about other features).
+    const startState = config.settings.startState || sc?.initialState;
+    if (startState && stateIds.size > 0 && !stateIds.has(startState) && !terminalStates.has(startState)) {
+      throw new Error(
+        `Configured startState "${startState}" does not exist in states. ` +
+        `Known states: ${[...stateIds].join(', ')}`
+      );
+    }
+
+    if (!hasStatechartBlock) {
+      // Legacy mode: skip transition-target and vocabulary validation for
+      // backward compatibility with configs that predate the statechart block.
+      return;
+    }
+
+    // Declared outcome vocabulary for warning (only when statechart block present)
+    const declaredOutcomes = new Set([
+      ...(sc.advanceOutcomes ?? ['SUCCESS']),
+      ...(sc.failedOutcomes ?? ['FAILURE']),
+      ...(sc.blockedOutcomes ?? ['BLOCKED']),
+      ...(sc.customOutcomes ?? []),
+      // Always include restart events which are harness-internal
+      EventName.HARNESS_RESTART,
+      EventName.CONTEXT_RESTART
+    ].map(o => o.toUpperCase()));
+
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      const allTransitions: Record<string, string> = {
+        ...(state.transitions || {}),
+        ...(state.on || {})
+      };
+      for (const [outcomeKey, targetState] of Object.entries(allTransitions)) {
+        if (!knownTargets.has(targetState)) {
+          throw new Error(
+            `State "${stateId}" has transition "${outcomeKey}" → "${targetState}" ` +
+            `but "${targetState}" is not a defined state or declared terminal state. ` +
+            `Defined states: ${[...stateIds].join(', ')}; terminal states: ${[...terminalStates].join(', ')}`
+          );
+        }
+        if (!declaredOutcomes.has(outcomeKey.toUpperCase())) {
+          Logger.warn(Component.CONFIG,
+            `State "${stateId}" uses transition outcome "${outcomeKey}" which is not declared ` +
+            `in statechart advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes. ` +
+            `Add it to customOutcomes to suppress this warning.`
+          );
+        }
+      }
     }
   }
 

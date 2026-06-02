@@ -12,9 +12,9 @@ import type { HarnessConfig } from '../core/ConfigLoader.js';
 import type { ChecklistItem } from '../core/ProtocolParser.js';
 import type { Bead } from '../types/index.js';
 import { SDLCState, TeammateAction } from '../core/domain/StateModels.js';
+import { outcomeCategory } from '../core/FlowManager.js';
 import {
   TeammateEventType,
-  EventName,
   BeadStatus,
   ActionRunContext,
   ActionContextMode,
@@ -106,13 +106,25 @@ export function dynamicChecklistItemsForRun(bead: Bead, stateId: string, actionI
 
 // ── teammate event type + bead status helpers ─────────────────────────────────
 
-export function teammateEventTypeForOutcome(outcome: string): TeammateEventType {
-  const normalized = outcome.toUpperCase();
-  if (normalized === EventName.FAILURE) return TeammateEventType.STATE_FAILED;
-  if (normalized === EventName.BLOCKED) return TeammateEventType.STATE_BLOCKED;
+/**
+ * Maps an outcome string to the correct TeammateEventType using the configured
+ * statechart vocabulary.  With no statechart block the defaults reproduce the
+ * old hard-coded literals exactly:
+ *   FAILURE → STATE_FAILED, BLOCKED → STATE_BLOCKED, anything else → STATE_TRANSITIONED.
+ */
+export function teammateEventTypeForOutcome(outcome: string, config: HarnessConfig): TeammateEventType {
+  const category = outcomeCategory(outcome, config);
+  if (category === 'failed') return TeammateEventType.STATE_FAILED;
+  if (category === 'blocked') return TeammateEventType.STATE_BLOCKED;
   return TeammateEventType.STATE_TRANSITIONED;
 }
 
-export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string): boolean {
-  return eventType === TeammateEventType.STATE_BLOCKED || nextState === BeadStatus.BLOCKED;
+export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string, _config: HarnessConfig): boolean {
+  // `eventType` is a TeammateEventType (e.g. 'STATE_BLOCKED'), not an outcome string.
+  // Passing it to outcomeCategory was dead code for default config and misleading.
+  // The existing checks are correct and sufficient:
+  //   - STATE_BLOCKED event type → always persist blocked status
+  //   - nextState === BLOCKED    → state machine landed in blocked state
+  return eventType === TeammateEventType.STATE_BLOCKED
+    || nextState === BeadStatus.BLOCKED;
 }

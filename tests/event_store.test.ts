@@ -846,4 +846,106 @@ settings:
     expect(bead?.restartFromState).toBeUndefined();
     expect(bead?.restartTargetState).toBeUndefined();
   });
+
+  // ── SHOULD-FIX 3: custom advanceOutcomes threading through EventStore ─────────
+
+  it('projectBead with custom advanceOutcomes in config records completion for the custom advance outcome', async () => {
+    // Override harness.yaml with a custom statechart using ADVANCE as the advance outcome
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+  advanceOutcomes: [ADVANCE]
+  failedOutcomes: [REWORK]
+  blockedOutcomes: [HALT]
+  customOutcomes: []
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
+`);
+    configLoader.reset();
+
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-custom',
+          fromState: 'Alpha',
+          nextState: 'done',
+          transitionEvent: 'ADVANCE',
+          actionId: 'do-work',
+          actionKey: 'do-work'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);
+
+    const bead = await eventStore.projectBead('bd-custom', { includeDetails: true });
+
+    // With ADVANCE threaded correctly, action completion must be recorded
+    expect(bead.completedActionIds).toContain('do-work');
+    expect(bead.status).toBe('done');
+  });
+
+  it('projectBead with default config still records completion for SUCCESS (byte-identical regression guard)', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-default',
+          fromState: 'Planning',
+          nextState: 'completed',
+          transitionEvent: 'SUCCESS',
+          actionId: 'formulate-plan',
+          actionKey: 'formulate-plan'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);
+
+    const bead = await eventStore.projectBead('bd-default', { includeDetails: true });
+
+    expect(bead.completedActionIds).toContain('formulate-plan');
+    expect(bead.status).toBe('completed');
+  });
+
+  it('projectBead does NOT record completion for missing transitionEvent (null-safety regression guard)', async () => {
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+    const records = [
+      {
+        id: 'e1',
+        type: DomainEventName.STATE_TRANSITION_APPLIED,
+        timestamp: '2026-01-01T00:00:01.000Z',
+        sessionId: 's1',
+        data: {
+          beadId: 'bd-legacy',
+          fromState: 'Planning',
+          nextState: 'Planning',
+          // transitionEvent is intentionally absent (legacy/replayed event)
+          actionId: 'formulate-plan',
+          actionKey: 'formulate-plan'
+        }
+      }
+    ];
+    fs.writeFileSync(eventsPath, `${records.map(r => JSON.stringify(r)).join('\n')}\n`);
+
+    const bead = await eventStore.projectBead('bd-legacy', { includeDetails: true });
+
+    // Missing transitionEvent must NOT record action completion — old semantics preserved
+    expect(bead.completedActionIds ?? []).not.toContain('formulate-plan');
+  });
 });

@@ -416,6 +416,49 @@
         ]
       }
     },
+    "statechart": {
+      "type": "object",
+      "required": ["terminalStates"],
+      "additionalProperties": false,
+      "description": "Statechart vocabulary configuration. All fields except terminalStates have defaults that reproduce the original SUCCESS/FAILURE/BLOCKED/completed literals.",
+      "properties": {
+        "initialState": {
+          "type": "string",
+          "description": "Override for the initial state (mirrors settings.startState; settings wins)."
+        },
+        "terminalStates": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "description": "State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent."
+        },
+        "advanceOutcomes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Outcome strings that trigger forward state advancement. Defaults to ['SUCCESS']."
+        },
+        "failedOutcomes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Outcome strings that map to STATE_FAILED. Defaults to ['FAILURE']."
+        },
+        "blockedOutcomes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Outcome strings that map to STATE_BLOCKED. Defaults to ['BLOCKED']."
+        },
+        "customOutcomes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional custom outcome strings beyond the named sets."
+        },
+        "customEvents": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Placeholder: custom event names whose behaviour is filled by a parallel bead."
+        }
+      }
+    },
     "validationGates": {
       "type": "array",
       "items": {

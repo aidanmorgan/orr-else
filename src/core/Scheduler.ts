@@ -5,6 +5,9 @@ import { Logger } from './Logger.js';
 import { App, BeadStatus, Component, SchedulerDefaults } from '../constants/index.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 
+/** Default terminal states when no statechart block is configured. */
+const DEFAULT_SCHEDULER_TERMINAL_STATES: readonly string[] = [BeadStatus.COMPLETED];
+
 export interface ScoredBead extends Bead {
   score: number;
 }
@@ -48,8 +51,16 @@ export class Scheduler {
       }
     }
     
-    const distances: Record<string, number> = { [BeadStatus.COMPLETED]: 0 };
-    const queue: string[] = [BeadStatus.COMPLETED];
+    // Seed BFS from ALL configured terminal states (default: ['completed']).
+    // This preserves existing scoring when no statechart block is present.
+    const terminalStates: readonly string[] =
+      config.statechart?.terminalStates ?? DEFAULT_SCHEDULER_TERMINAL_STATES;
+    const distances: Record<string, number> = {};
+    const queue: string[] = [];
+    for (const ts of terminalStates) {
+      distances[ts] = 0;
+      queue.push(ts);
+    }
     
     while (queue.length > 0) {
       const curr = queue.shift()!;
