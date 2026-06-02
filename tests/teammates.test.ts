@@ -700,6 +700,101 @@ states:
   });
 
   // ---------------------------------------------------------------------------
+  // Bootstrap digest — spawn records bootstrapDigestId on the TEAMMATE_SPAWN_STARTED event
+  // ---------------------------------------------------------------------------
+
+  it('(bootstrap-digest) spawn records a non-empty hex bootstrapDigestId on TEAMMATE_SPAWN_STARTED', async () => {
+    // The spawn-side bootstrapDigestId is a lightweight identity-only digest
+    // (no text rendering).  The full stable-block digest (identity + actual
+    // rendered text) is recorded by the worker on STATE_PROMPT_ASSEMBLED.
+    const records: Array<{ event: string; data: any }> = [];
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await factory.spawnTeammateInTmux('pi-experiment-digest' as any, 'Planning', worktreePath);
+
+    const spawnStarted = records.find(r => r.event === 'TEAMMATE_SPAWN_STARTED');
+    expect(spawnStarted).toBeDefined();
+    // bootstrapDigestId must be a non-empty hex string.
+    expect(typeof spawnStarted!.data.bootstrapDigestId).toBe('string');
+    expect(spawnStarted!.data.bootstrapDigestId.length).toBeGreaterThan(0);
+    expect(spawnStarted!.data.bootstrapDigestId).toMatch(/^[0-9a-f]+$/);
+    // The spawn event no longer carries estimatedTokens/overBudget (those belong
+    // on STATE_PROMPT_ASSEMBLED where the actual prompt text exists).
+    expect(spawnStarted!.data.bootstrapEstimatedTokens).toBeUndefined();
+    expect(spawnStarted!.data.bootstrapOverBudget).toBeUndefined();
+  });
+
+  it('(bootstrap-digest) identical spawns for different beads produce the same bootstrapDigestId', async () => {
+    // Two spawns with the same stateId, config, and tool/skill set but different
+    // beadIds must produce an identical bootstrapDigestId — proving the identity
+    // digest is independent of volatile bead-level data.
+    const recordsA: Array<{ event: string; data: any }> = [];
+    const recordsB: Array<{ event: string; data: any }> = [];
+
+    const factoryA = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => recordsA.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+    const factoryB = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => recordsB.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    await factoryA.spawnTeammateInTmux('bead-alpha' as any, 'Planning', worktreePath);
+    // Reset mock between spawns so split-window always returns a pane ID.
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(defaultTmuxResponse);
+    await factoryB.spawnTeammateInTmux('bead-beta' as any, 'Planning', worktreePath);
+
+    const eventA = recordsA.find(r => r.event === 'TEAMMATE_SPAWN_STARTED');
+    const eventB = recordsB.find(r => r.event === 'TEAMMATE_SPAWN_STARTED');
+    expect(eventA).toBeDefined();
+    expect(eventB).toBeDefined();
+
+    // Same stable inputs → identical identity digest → cache-eligible stable block.
+    expect(eventA!.data.bootstrapDigestId).toBe(eventB!.data.bootstrapDigestId);
+  });
+
+  it('(bootstrap-digest) no over-budget warning is emitted at spawn time (warning moved to worker side)', async () => {
+    // The over-budget check is now done by the WORKER in BEFORE_AGENT_START
+    // when it assembles the real prompt.  The coordinator spawn path does NOT
+    // emit an over-budget warning — it only records a lightweight identity digest.
+    const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
+    vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    await factory.spawnTeammateInTmux('bead-budget' as any, 'Planning', worktreePath);
+
+    // Neither the old "Bootstrap stable prefix exceeds token budget" message nor
+    // any new over-budget message should appear from the coordinator spawn path.
+    const overBudgetWarning = warnCalls.find(([, msg]) =>
+      typeof msg === 'string' && (
+        msg.includes('Bootstrap stable prefix exceeds token budget') ||
+        msg.includes('stable block exceeds token budget')
+      )
+    );
+    expect(overBudgetWarning).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
   // WI-18 — ensureAgentsWindow catch: warn logged, spawn return value unchanged
   // ---------------------------------------------------------------------------
   it('(WI-18) warns when set-window-option fails but spawn still succeeds', async () => {

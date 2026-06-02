@@ -105,7 +105,8 @@ import { Supervisor } from './core/Supervisor.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
-import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/PiIntegration.js';
+import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState } from './core/PiIntegration.js';
+import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { PathContext } from './core/PathContext.js';
@@ -186,6 +187,12 @@ interface ExtensionSession {
    */
   toolBreakerFailures: Map<string, number>;
   /**
+   * Digest IDs already recorded as STATE_PROMPT_ASSEMBLED in the current run.
+   * Dedups the record+warn so each unique stable-block digest is emitted at most
+   * once per run.  Cleared on initializeWorkerRun alongside toolBreakerFailures.
+   */
+  recordedPromptDigestIds: Set<string>;
+  /**
    * In-session result memoisation for cacheable project tools.
    * Key: `${toolName}|${JSON.stringify(params)}`.
    * Cleared on fresh worker run and after any non-cacheable tool call.
@@ -224,6 +231,7 @@ function createExtensionSession(): ExtensionSession {
     stateCycleCounter: new Map(),
     toolBreakerFailures: new Map(),
     toolResultCache: new Map(),
+    recordedPromptDigestIds: new Set(),
     piToolObservability: null,
     observedPiTools: new Set(),
     blockedObservedPiToolCallIds: new Set(),
@@ -1880,6 +1888,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   // that ended the prior run.
   session.toolBreakerFailures.clear();
   session.toolResultCache.clear();
+  session.recordedPromptDigestIds.clear();
 
   const config = await services.configLoader.load();
   const state = config.states[stateId];
@@ -1933,23 +1942,78 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   });
 }
 
-function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices, session: ExtensionSession): string {
+interface StateSystemPromptResult {
+  /** Fully assembled worker system prompt: stable block + volatile suffix. */
+  prompt: string;
+  /** Leading, cache-eligible span of the prompt. Byte-identical across same-identity runs. */
+  stableBlock: string;
+  /**
+   * The volatile suffix rendered by ContextInjector: beadId, workdir, run paths, checklist.
+   * Exposed so the BEFORE_AGENT_START handler can compose the final worker prompt as
+   * stableBlock + Pi-base-prompt + volatileSuffix, ensuring stableBlock leads contiguously.
+   */
+  volatileSuffix: string;
+  /** Deterministic digest over the stable identity + stableBlock text. */
+  digestId: string;
+  /** Rough token estimate for the stable block. */
+  estimatedTokens: number;
+  /** True when estimatedTokens exceeds the default budget. */
+  overBudget: boolean;
+}
+
+/**
+ * Assembles the worker system prompt and computes the stable-block digest.
+ *
+ * The returned prompt is exactly [stableBlock]+[volatileSuffix].  The stableBlock
+ * is the leading, cache-eligible span — byte-identical across any two runs that
+ * share the same (projectRoot, configPath, stateId, toolNames, skillNames,
+ * rulePaths) but differ only in beadId/worktreePath.  The digest is computed
+ * by digestStableBlock() over the ACTUAL assembled stableBlock text (no duplicate
+ * rendering of tool/skill/rule guidance).
+ *
+ * Callers (BEFORE_AGENT_START) should record digestId + estimatedTokens +
+ * overBudget on the STATE_RUN_INITIALIZED event and Logger.warn when overBudget.
+ */
+function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices, session: ExtensionSession): StateSystemPromptResult | null {
   const activeRun = session.activeRun;
-  if (!activeRun) return '';
+  if (!activeRun) return null;
   const stateInstructions = services.instructionLoader.assemble(activeRun.state, config);
   const protocol = services.protocolInjector.inject(activeRun.state, config);
   const checklistProtocol = services.protocolParser.generatePrompt(activeRun.requiredItems);
   const projectTools = describeConfiguredProjectTools(config);
   const actionPrompt = activeRun.action.prompt || '';
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
+  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+  const configPath = services.configLoader.getConfigPath();
+  const rulePaths = services.instructionLoader.compatibilityPaths(config);
 
-  return services.contextInjector.inject(
+  // Resolve skill names for the stable identity — best-effort; empty on error.
+  let skillNames: string[] = [];
+  try {
+    skillNames = resolvePiSkillPathsForState(config, projectRoot, activeRun.stateId).map(s => s.name);
+  } catch {
+    skillNames = [];
+  }
+
+  // Build the stable identity for digest computation.  Arrays are sorted inside
+  // digestStableBlock / canonicalise so insertion order is irrelevant.
+  const identity: StableBootstrapInputs = {
+    projectRoot,
+    configIdentity: configPath,
+    stateId: activeRun.stateId,
+    toolNames: getConfiguredPiToolNames(config),
+    skillNames,
+    ruleCategories: rulePaths,
+    protocolLabel: 'ORR_ELSE_PROTOCOL_v1'
+  };
+
+  const injected = services.contextInjector.injectWithDigest(
     [stateInstructions, protocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),
     {
       beadId: activeRun.beadId,
-      projectRoot: process.env[EnvVars.PROJECT_ROOT] || services.projectRoot,
+      projectRoot,
       workdir: activeRun.worktreePath || process.cwd(),
-      configPath: services.configLoader.getConfigPath(),
+      configPath,
       actionId: activeRun.action.id,
       identity: activeRun.state.identity.role,
       phase: activeRun.stateId,
@@ -1960,10 +2024,20 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
       compatibilityMode: config.settings.compatibilityMode || 'none',
       progressPath: activeRun.worktreePath ? path.join(activeRun.worktreePath, 'PROGRESS.md') : undefined,
       historyPath: activeRun.worklogManager.getWorklogPath(activeRun.beadId),
-      rulePaths: services.instructionLoader.compatibilityPaths(config),
+      rulePaths,
       outstandingChecklist: checklistProtocol
-    }
+    },
+    identity
   );
+
+  return {
+    prompt: injected.prompt,
+    stableBlock: injected.stableBlock,
+    volatileSuffix: injected.volatileSuffix,
+    digestId: injected.digestId,
+    estimatedTokens: injected.estimatedTokens,
+    overBudget: injected.overBudget
+  };
 }
 
 async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices, session: ExtensionSession) {
@@ -2585,9 +2659,47 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     if (!isWorkerMode()) return;
     const config = await services.configLoader.load();
     if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
-    const statePrompt = buildStateSystemPrompt(config, services, session);
-    if (!statePrompt) return;
-    return { systemPrompt: `${event.systemPrompt}\n\n${statePrompt}` };
+    const promptResult = buildStateSystemPrompt(config, services, session);
+    if (!promptResult) return;
+
+    // Record the stable-block digest once per (run, digestId) — not on every turn.
+    // BEFORE_AGENT_START fires on every user/agent turn; the stable block is typically
+    // identical within a run, so we dedup by digestId to avoid per-turn event spam.
+    // When the digest changes (e.g. config/state rebuilt the stable block) a new record
+    // is emitted; repeated turns with the same digest emit nothing.
+    if (!session.recordedPromptDigestIds.has(promptResult.digestId)) {
+      session.recordedPromptDigestIds.add(promptResult.digestId);
+      await services.eventStore.record(DomainEventName.STATE_PROMPT_ASSEMBLED, {
+        beadId: session.activeRun?.beadId,
+        stateId: session.activeRun?.stateId,
+        stableBlockDigestId: promptResult.digestId,
+        stableBlockEstimatedTokens: promptResult.estimatedTokens,
+        stableBlockOverBudget: promptResult.overBudget
+      }).catch(() => {});
+
+      if (promptResult.overBudget) {
+        Logger.warn(Component.ORR_ELSE, 'Worker stable block exceeds token budget — consider reducing role/protocol guidance', {
+          beadId: session.activeRun?.beadId,
+          stateId: session.activeRun?.stateId,
+          stableBlockDigestId: promptResult.digestId,
+          stableBlockEstimatedTokens: promptResult.estimatedTokens
+        });
+      }
+    }
+
+    // Compose the final worker prompt so stableBlock is the CONTIGUOUS LEADING prefix.
+    // Ordering: stableBlock → Pi base prompt (contains Pi's volatile date/cwd trailer)
+    //           → volatileSuffix (beadId, workdir, run paths, checklist).
+    //
+    // This ensures the provider's prompt cache reuses the stableBlock prefix across
+    // any two spawns that share the same (project/config/state/tools/skills/rules)
+    // but differ only in bead/task/worktree/date.  Pi's volatile date/cwd trailer
+    // sits in the middle — after the cache breakpoint — so it never pollutes it.
+    const piBase = event.systemPrompt;
+    const finalPrompt = piBase
+      ? `${promptResult.stableBlock}\n\n${piBase}\n\n${promptResult.volatileSuffix}`
+      : `${promptResult.stableBlock}\n\n${promptResult.volatileSuffix}`;
+    return { systemPrompt: finalPrompt };
   });
 
   pi.on(PiEventName.RESOURCES_DISCOVER, async () => {

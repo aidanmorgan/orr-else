@@ -17,6 +17,7 @@ import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/Runtime
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
+import { digestIdentity } from '../core/BootstrapDigest.js';
 import {
   Component,
   EnvVars,
@@ -497,6 +498,23 @@ export class TeammateFactory {
 
       const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
       const skillNames = resolvedSkills.map(s => s.name);
+
+      // Compute a lightweight identity digest for spawn-time audit.  This is
+      // derived ONLY from the canonical stable identity (no text rendering) so
+      // it is deterministic and cache-eligible across beads in the same state.
+      // The full stable-block digest (identity + actual rendered text) is
+      // recorded on the worker-side STATE_PROMPT_ASSEMBLED event after the
+      // worker assembles its real prompt in BEFORE_AGENT_START.
+      const spawnDigestId = digestIdentity({
+        projectRoot,
+        configIdentity: configPath,
+        stateId,
+        toolNames: [...workerExtensions].sort(),
+        skillNames: [...skillNames].sort(),
+        ruleCategories: [],
+        protocolLabel: 'ORR_ELSE_PROTOCOL_v1'
+      });
+
       Logger.info(Component.FACTORY, 'Spawning Orr Else teammate in tmux', {
         beadId,
         stateId,
@@ -507,7 +525,8 @@ export class TeammateFactory {
         skillNames,
         workerExtensionCount: workerExtensions.length,
         workerArgsCount: workerArgs.length,
-        runDir
+        runDir,
+        spawnIdentityDigestId: spawnDigestId
       });
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWN_STARTED, {
         beadId,
@@ -521,7 +540,11 @@ export class TeammateFactory {
         skillPaths,
         workerExtensions,
         workerArgs,
-        buildProvenance: spawnProvenance
+        buildProvenance: spawnProvenance,
+        // Lightweight identity digest for audit — derived from canonical identity
+        // inputs only (no text rendering).  The full digest (identity + rendered
+        // stable block text) is recorded by the worker on STATE_PROMPT_ASSEMBLED.
+        bootstrapDigestId: spawnDigestId
       });
 
       const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
