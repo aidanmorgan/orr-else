@@ -19,7 +19,7 @@ import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../../constants/index.js';
 import { ProjectToolFailureCategory, isInfrastructureProjectToolFailure } from './failureCategory.js';
 import { ProjectToolResultKey } from './constants.js';
-import { summarizeToolResult, attachFailureCategory, attachProjectToolSteering } from './resultEnvelope.js';
+import { summarizeToolResult, attachFailureCategory, attachProjectToolSteering, transferResultAccounting } from './resultEnvelope.js';
 import { reserveProjectToolCall, projectToolBackpressureResult } from './contextHelpers.js';
 import type { ProjectToolExecutionContext, ProjectToolFailureLimitResult } from './types.js';
 import { isJsonRecord } from './utils.js';
@@ -78,17 +78,25 @@ export function attachProjectToolFailureLimit(
 ): unknown {
   const limit = failureLimitResult.failureLimit;
   if (!isJsonRecord(result)) {
-    return {
+    const newResult = {
       ...failureLimitResult,
       result
     };
+    // (9g8z) Preserve accounting across the spread — re-register on the new object.
+    // See NOTE (9g8z fragility) in resultEnvelope.ts: every pipeline spread site must
+    // call transferResultAccounting to keep the WeakMap entry reachable.
+    transferResultAccounting(result, newResult);
+    return newResult;
   }
 
-  return {
+  const newResult = {
     ...result,
     message: typeof result.message === 'string' ? result.message : failureLimitResult.message,
     failureLimit: limit
   };
+  // (9g8z) Preserve accounting across the spread — re-register on the new object.
+  transferResultAccounting(result, newResult);
+  return newResult;
 }
 
 // ---- failure window boundary helpers ----

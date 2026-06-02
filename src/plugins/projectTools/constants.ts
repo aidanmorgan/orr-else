@@ -160,6 +160,30 @@ export const HIGH_VOLUME_NARROW_RERUN_RECOVERY =
   + 'or operation argument. Do not read outputArchive.artifactRef directly — '
   + 'use the narrow-rerun / selector path to fetch only the named missing fact.';
 
+// (wp8h) Recovery guidance for FAILED command results with an archived failure output.
+// The model must re-read the archived output (via query_artifact / artifactRef handle)
+// rather than re-running the expensive command (tests/build/etc.).
+// This is distinct from the SUCCESS-path guidance which steers toward preview/structuredResult.
+export const FAILURE_REREAD_ARCHIVE_RECOVERY =
+  'The command failed and the full failure output is preserved in outputArchive. '
+  + 'Re-read the archived failure output via query_artifact using the outputArchive.artifactRef handle '
+  + 'to diagnose the root cause before deciding on a fix. '
+  + 'Do NOT re-run the command until the failure is understood — '
+  + 're-running an expensive failed build or test suite without first reading the archived output '
+  + 'wastes time and compute.';
+
+// (9g8z) Divisor for converting model-facing byte count to approximate token estimate (chars/4).
+// GPT-4 / Claude tokenizer approximation: ~4 chars per token on average for mixed code+prose.
+export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
+
+// (9g8z) Raw-output budget: the byte threshold for the RAW (pre-bounding) serialized
+// result above which a tool is flagged as a heavy/leaky producer (rawExceededBudget=true).
+// Aligned with ProjectToolDefaults.INLINE_RESULT_BYTES (~4 KiB) — tools whose raw output
+// exceeds this threshold required the harness to truncate/bound their result, which is
+// the meaningful signal for per-result accounting.  modelFacingBytes is hard-clamped to
+// <= this value, so a modelFacingBytes-based check would be permanently dead.
+export const MODEL_FACING_RESULT_BUDGET_BYTES = 4 * 1024; // 4 KiB
+
 export const UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS = new Set<string>([
   '--output-limit'
 ]);

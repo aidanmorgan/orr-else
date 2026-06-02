@@ -9,7 +9,10 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
-import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, HIGH_VOLUME_NARROW_RERUN_RECOVERY } from '../src/plugins/projectTools/constants.js';
+import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, MODEL_FACING_RESULT_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
+import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
+import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
+import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -4604,5 +4607,868 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(recoveryText).not.toMatch(/read .*archive first|read .*archive before/i);
     // Must mention rerunning narrower (from the wired constant)
     expect(recoveryText).toMatch(/rerun.*narrower|narrow.*rerun/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bead 4eqg: genericHighVolumeSummarizer emits omissions
+// ---------------------------------------------------------------------------
+describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-4eqg-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-4eqg-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('high-volume tool result → genericHighVolumeSummarizer sets omissions when lines are truncated', async () => {
+    // Generate a large ast_grep MCP result with many lines (> HIGH_VOLUME_SAMPLE_COUNT)
+    const matchLines = Array.from({ length: 200 }, (_, i) =>
+      `packages/module_${i % 20}/file_${i}.ts:${10 + (i % 50)}:class AstGrepMatch_${i} { value = ${i}; }`
+    );
+    const largeText = matchLines.join('\n');
+    const mcpContent = { content: [{ type: 'text', text: largeText }] };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'ast_grep',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'ast_grep',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const structuredResult = (result as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+
+    // (4eqg) omissions must be populated when lines were truncated
+    expect(typeof structuredResult.omissions).toBe('string');
+    expect(structuredResult.omissions.length).toBeGreaterThan(0);
+    // omissions should mention the omitted line count
+    expect(structuredResult.omissions).toContain('lines omitted');
+    // omissions should mention the archive
+    expect(structuredResult.omissions).toContain('outputArchive');
+
+    // counts must reflect the truncation
+    expect(typeof structuredResult.counts.omittedLines).toBe('number');
+    expect(structuredResult.counts.omittedLines).toBeGreaterThan(0);
+  });
+
+  it('high-volume tool result with omissions → projectToolSteering routes use_result (not fetch_named_omission)', async () => {
+    // The generic high-volume summarizer now sets omissions, but steering must
+    // still route use_result (with HIGH_VOLUME_NARROW_RERUN_RECOVERY) for high-volume
+    // tools — the "named re-fetch" = rerun narrower, not archive section fetch.
+    const matchLines = Array.from({ length: 150 }, (_, i) =>
+      `src/module_${i}/index.ts:${i + 1}: match_result_${i}`
+    );
+    const largeText = matchLines.join('\n');
+    const mcpContent = { content: [{ type: 'text', text: largeText }] };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'codemap',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'codemap',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const structuredResult = (result as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    // omissions set (4eqg ensures this)
+    expect(typeof structuredResult.omissions).toBe('string');
+
+    // Steering must be use_result (not fetch_named_omission)
+    expect(result.nextAction).toBe('use_result');
+    expect(result.nextAction).not.toBe('fetch_named_omission');
+
+    // Recovery must include HIGH_VOLUME_NARROW_RERUN_RECOVERY
+    const recovery = (result as any).recovery as string[] | undefined;
+    expect(Array.isArray(recovery)).toBe(true);
+    const recoveryText = (recovery ?? []).join('\n');
+    expect(recoveryText).toContain(HIGH_VOLUME_NARROW_RERUN_RECOVERY);
+    // And the omissions text must be surfaced in recovery
+    expect(recoveryText).toContain('lines omitted');
+  });
+
+  it('high-volume tool result with exactly HIGH_VOLUME_SAMPLE_COUNT lines → no omissions (all inlined)', async () => {
+    // If the number of lines is <= HIGH_VOLUME_SAMPLE_COUNT, nothing is omitted.
+    // Use very long lines to make the payload large (> 4 KiB trigger) but few lines.
+    const longLine = 'x'.repeat(600); // 600 chars each
+    const matchLines = Array.from({ length: 8 }, (_, i) => `line_${i}: ${longLine}`);
+    const largeText = matchLines.join('\n');
+    const mcpContent = { content: [{ type: 'text', text: largeText }] };
+    expect(Buffer.byteLength(largeText)).toBeGreaterThan(4 * 1024);
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'ast_grep',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({
+          tool: 'ast_grep',
+          status: 'PASSED',
+          result: ${JSON.stringify(mcpContent)}
+        }))`
+      ],
+      cwd: CwdMode.WORKTREE,
+      inlineResultBytes: 1000,
+      maxOutputBytes: 500_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'analyze'
+    }, {} as any, undefined, new Map());
+
+    const structuredResult = (result as any).structuredResult as any;
+    // If the generic summarizer fired (payloadBytes present), omissions should be absent.
+    if (structuredResult && typeof structuredResult.counts?.payloadBytes === 'number') {
+      expect(structuredResult.omissions).toBeUndefined();
+      expect(structuredResult.counts.omittedLines).toBeUndefined();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bead wp8h: failure-gated 're-read don't re-run' steering
+// ---------------------------------------------------------------------------
+describe('failure-gated re-read steering (wp8h)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-wp8h-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-wp8h-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('FAILED command with archive → recovery steers to re-read archive (not re-run)', async () => {
+    // Generate a large pytest-style failure to push result over inline limit (archive present)
+    const failureLines = Array.from({ length: 100 }, (_, i) => [
+      `_____________________________ test_case_${i} _____________________________`,
+      `E       AssertionError: assert ${i + 1} == ${i}`,
+      `FAILED tests/test_module.py::test_case_${i} - AssertionError`
+    ].join('\n')).join('\n');
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(failureLines)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 200_000,
+      inlineResultBytes: 1000  // Low inline limit to force archive
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    expect(result.exitCode).toBe(1);
+
+    // Archive must be present (failure detail exceeded inline limit)
+    expect(result.outputArchive).toBeDefined();
+    expect(result.outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+
+    // (wp8h) Recovery must steer to re-read the archive (not re-run)
+    const recovery = (result as any).recovery as string[] | undefined;
+    expect(Array.isArray(recovery)).toBe(true);
+    const recoveryText = (recovery ?? []).join('\n');
+    expect(recoveryText).toContain(FAILURE_REREAD_ARCHIVE_RECOVERY);
+    expect(recoveryText).toMatch(/re-read.*archived.*failure|query_artifact/i);
+    expect(recoveryText).toMatch(/do not re-run|do NOT re-run/i);
+  });
+
+  it('SUCCESS result with archive → steering is use_result (success path unchanged by wp8h)', async () => {
+    // A passing command that produces enough output to force archive but is PASSED.
+    // The wp8h branch must NOT fire — success path is intentionally unchanged.
+    const successContent = Array.from({ length: 50 }, (_, i) => `PASSED test_case_${i}`).join('\n');
+    const payload = JSON.stringify({ tool: 'run_tests', status: 'PASSED', stdout: successContent });
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stdout.write(${JSON.stringify(payload)});`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 200_000,
+      inlineResultBytes: 200  // Very low to force archive on success path
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // (wp8h) Success path must NOT include FAILURE_REREAD_ARCHIVE_RECOVERY
+    const recovery = (result as any).recovery as string[] | undefined;
+    const recoveryText = (recovery ?? []).join('\n');
+    expect(recoveryText).not.toContain(FAILURE_REREAD_ARCHIVE_RECOVERY);
+    expect(recoveryText).not.toMatch(/do NOT re-run the command/i);
+  });
+
+  it('FAILED command without archive → no re-read recovery (small inline failure)', async () => {
+    // A small failure that stays inline (no archive forced).
+    // wp8h branch requires BOTH failure AND archive — without archive, no special recovery.
+    const smallFailure = 'FAILED test_case_0 - AssertionError: assert 1 == 0';
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `process.stderr.write(${JSON.stringify(smallFailure)}); process.exitCode = 1;`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+      // No inlineResultBytes override — default is large, no archive forced
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // Without archive, the wp8h recovery must NOT fire
+    if (!result.outputArchive) {
+      const recovery = (result as any).recovery as string[] | undefined;
+      const recoveryText = (recovery ?? []).join('\n');
+      expect(recoveryText).not.toContain(FAILURE_REREAD_ARCHIVE_RECOVERY);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bead 9g8z: per-tool-result token accounting + leak flag
+// ---------------------------------------------------------------------------
+describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-9g8z-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-9g8z-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('_accounting is ABSENT from the model-facing result the agent receives', async () => {
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({ tool: 'run_tests', status: 'PASSED', message: 'all ok' }));`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // _accounting must NOT appear in the serialized model-facing payload.
+    // JSON.stringify skips non-enumerable properties, which is how we keep it clean.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('_accounting');
+
+    // _accounting must NOT appear as an enumerable own-property key.
+    expect(Object.keys(result as object)).not.toContain('_accounting');
+  });
+
+  it('_accounting IS present in the event-store summary produced by summarizeToolResult', async () => {
+    // persistAndBoundResult registers accounting in a module-level WeakMap.
+    // attachProjectToolSteering re-registers on any new spread object it creates.
+    // summarizeToolResult reads from the WeakMap and copies _accounting into the
+    // event-store summary as an enumerable field.
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({ tool: 'run_tests', status: 'PASSED', message: 'all ok' }));`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // summarizeToolResult reads accounting from the WeakMap registry.
+    const summary = summarizeToolResult(result) as Record<string, unknown>;
+    const accounting = summary['_accounting'] as ResultAccounting;
+    expect(accounting).toBeDefined();
+    expect(typeof accounting.rawBytes).toBe('number');
+    expect(typeof accounting.modelFacingBytes).toBe('number');
+    expect(typeof accounting.tokenEstimate).toBe('number');
+    expect(typeof accounting.reductionRatio).toBe('number');
+    expect(typeof accounting.rawExceededBudget).toBe('boolean');
+    expect(typeof accounting.tool).toBe('string');
+    expect(typeof accounting.resultBudgetBytes).toBe('number');
+
+    expect(accounting.rawBytes).toBeGreaterThan(0);
+    expect(accounting.modelFacingBytes).toBeGreaterThan(0);
+    expect(accounting.tokenEstimate).toBe(Math.ceil(accounting.modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+    expect(accounting.reductionRatio).toBeCloseTo(accounting.modelFacingBytes / accounting.rawBytes, 5);
+    expect(accounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(accounting.tool).toBe('run_tests');
+  });
+
+  it('rawExceededBudget is false for small rawBytes (raw did not exceed budget)', () => {
+    // Pure structural test: ResultAccounting.rawExceededBudget is based on rawBytes,
+    // not modelFacingBytes.  A small raw result should produce false.
+    const smallAccounting: ResultAccounting = {
+      rawBytes: 500,
+      modelFacingBytes: 400,
+      tokenEstimate: Math.ceil(400 / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+      reductionRatio: 400 / 500,
+      rawExceededBudget: 500 > MODEL_FACING_RESULT_BUDGET_BYTES,
+      tool: 'run_tests',
+      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+    };
+    expect(smallAccounting.rawExceededBudget).toBe(false);
+    expect(smallAccounting.rawBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(smallAccounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+  });
+
+  it('rawExceededBudget is true for rawBytes exceeding MODEL_FACING_RESULT_BUDGET_BYTES', () => {
+    // Pure structural test: rawExceededBudget fires when the RAW result exceeds budget.
+    // modelFacingBytes can be <= budget (bounding succeeded) while rawExceededBudget is true —
+    // this is the normal, expected scenario when the pipeline truncates a large result.
+    const largeRawBytes = MODEL_FACING_RESULT_BUDGET_BYTES + 5_000;
+    const boundedModelFacingBytes = MODEL_FACING_RESULT_BUDGET_BYTES - 100; // bounding succeeded
+    const largeAccounting: ResultAccounting = {
+      rawBytes: largeRawBytes,
+      modelFacingBytes: boundedModelFacingBytes,
+      tokenEstimate: Math.ceil(boundedModelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+      reductionRatio: boundedModelFacingBytes / largeRawBytes,
+      rawExceededBudget: largeRawBytes > MODEL_FACING_RESULT_BUDGET_BYTES,
+      tool: 'run_checks',
+      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+    };
+    expect(largeAccounting.rawExceededBudget).toBe(true);
+    expect(largeAccounting.rawBytes).toBeGreaterThan(MODEL_FACING_RESULT_BUDGET_BYTES);
+    // modelFacingBytes is within budget — bounding worked, yet flag is still true
+    expect(largeAccounting.modelFacingBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(largeAccounting.resultBudgetBytes).toBe(MODEL_FACING_RESULT_BUDGET_BYTES);
+  });
+
+  it('ResultAccounting has only the expected compact fields (no large payloads)', () => {
+    // Verify the shape and size of a well-formed ResultAccounting record.
+    const accounting: ResultAccounting = {
+      rawBytes: 5_000,
+      modelFacingBytes: 1_200,
+      tokenEstimate: Math.ceil(1_200 / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
+      reductionRatio: 1_200 / 5_000,
+      rawExceededBudget: false,
+      tool: 'run_checks',
+      resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+    };
+
+    // Accounting must serialize to under 512 bytes (a few numbers + tool name + boolean)
+    const accountingJson = JSON.stringify(accounting);
+    expect(accountingJson.length).toBeLessThan(512);
+
+    // Only the named compact fields are present — no large payloads
+    const accountingKeys = Object.keys(accounting);
+    const allowedKeys: (keyof ResultAccounting)[] = [
+      'rawBytes', 'modelFacingBytes', 'tokenEstimate', 'reductionRatio',
+      'rawExceededBudget', 'tool', 'resultBudgetBytes'
+    ];
+    for (const key of accountingKeys) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+
+  it('summarizeResultAccounting ranks tools by leakiness (rawExceededBudgetCount then reductionRatio)', () => {
+    const records: ResultAccounting[] = [
+      // Tool A: well-behaved, no exceedance, good reduction
+      { tool: 'tool_a', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false, resultBudgetBytes: 3_000 },
+      { tool: 'tool_a', rawBytes: 8_000, modelFacingBytes: 900, tokenEstimate: 225, reductionRatio: 0.1125, rawExceededBudget: false, resultBudgetBytes: 3_000 },
+      // Tool B: leaky — raw exceeds budget on both samples, poor reduction
+      { tool: 'tool_b', rawBytes: 12_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.233, rawExceededBudget: true, resultBudgetBytes: 3_000 },
+      { tool: 'tool_b', rawBytes: 15_000, modelFacingBytes: 2_900, tokenEstimate: 725, reductionRatio: 0.193, rawExceededBudget: true, resultBudgetBytes: 3_000 },
+      // Tool C: moderate — 1 raw exceedance out of 2 samples
+      { tool: 'tool_c', rawBytes: 6_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.467, rawExceededBudget: true, resultBudgetBytes: 3_000 },
+      { tool: 'tool_c', rawBytes: 2_000, modelFacingBytes: 1_500, tokenEstimate: 375, reductionRatio: 0.75, rawExceededBudget: false, resultBudgetBytes: 3_000 }
+    ];
+
+    const report = summarizeResultAccounting(records);
+
+    // Must return 3 entries (one per tool)
+    expect(report).toHaveLength(3);
+
+    // tool_b must rank first: 2 raw exceedances
+    expect(report[0].tool).toBe('tool_b');
+    expect(report[0].rawExceededBudgetCount).toBe(2);
+
+    // tool_c must rank second: 1 raw exceedance
+    expect(report[1].tool).toBe('tool_c');
+    expect(report[1].rawExceededBudgetCount).toBe(1);
+
+    // tool_a must rank last: 0 raw exceedances
+    expect(report[2].tool).toBe('tool_a');
+    expect(report[2].rawExceededBudgetCount).toBe(0);
+
+    // Verify aggregation correctness for tool_b
+    expect(report[0].sampleCount).toBe(2);
+    expect(report[0].avgReductionRatio).toBeCloseTo((0.233 + 0.193) / 2, 2);
+    expect(report[0].avgModelFacingBytes).toBeCloseTo((2_800 + 2_900) / 2, 0);
+    expect(report[0].avgTokenEstimate).toBeCloseTo((700 + 725) / 2, 0);
+  });
+
+  it('summarizeResultAccounting returns empty array for empty input', () => {
+    expect(summarizeResultAccounting([])).toEqual([]);
+  });
+
+  it('summarizeResultAccounting ranks by reductionRatio when rawExceededBudgetCount are equal', () => {
+    const records: ResultAccounting[] = [
+      // Two tools with 0 raw exceedances — rank by avgReductionRatio descending (worse = higher ratio)
+      { tool: 'leaky', rawBytes: 10_000, modelFacingBytes: 8_000, tokenEstimate: 2_000, reductionRatio: 0.8, rawExceededBudget: false, resultBudgetBytes: 10_000 },
+      { tool: 'efficient', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false, resultBudgetBytes: 10_000 }
+    ];
+
+    const report = summarizeResultAccounting(records);
+    expect(report).toHaveLength(2);
+    // 'leaky' has worse (higher) reduction ratio → ranks first
+    expect(report[0].tool).toBe('leaky');
+    expect(report[1].tool).toBe('efficient');
+  });
+
+  it('_accounting IS present in summarizeToolResult on the failure-limit path (attachProjectToolFailureLimit spreads)', async () => {
+    // Regression test for the bug where attachProjectToolFailureLimit created a new
+    // spread object without re-registering the WeakMap accounting entry.  On this path
+    // the accounting was silently dropped from the event-store summary (_accounting
+    // absent from summarizeToolResult output even though the tool executed successfully).
+    //
+    // The failure-limit path triggers when: result is REJECTED, not an infrastructure
+    // failure, maxFailuresPerState > 0, and failureCount + 1 >= maxFailures.
+    // With maxFailuresPerState: 1 the very first non-infra failure hits the limit.
+    const tool: ProjectCommandToolConfig = {
+      name: 'run_tests',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'process.exit(1);'],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000,
+      failureLimit: {
+        maxFailuresPerState: 1,
+        suggestedOutcome: 'BLOCKED',
+        terminal: true
+      }
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    // Confirm we are on the failure-limit path: result must carry a failureLimit field.
+    expect(result.failureLimit).toBeDefined();
+    expect(result.failureLimit.suggestedOutcome).toBe('BLOCKED');
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+
+    // _accounting must NOT appear in the serialized model-facing payload.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('_accounting');
+
+    // _accounting MUST be present in the event-store summary produced by summarizeToolResult.
+    const summary = summarizeToolResult(result) as Record<string, unknown>;
+    const accounting = summary['_accounting'] as ResultAccounting;
+    expect(accounting).toBeDefined();
+    expect(typeof accounting.rawBytes).toBe('number');
+    expect(typeof accounting.modelFacingBytes).toBe('number');
+    expect(typeof accounting.tokenEstimate).toBe('number');
+    expect(typeof accounting.reductionRatio).toBe('number');
+    expect(typeof accounting.rawExceededBudget).toBe('boolean');
+    expect(typeof accounting.tool).toBe('string');
+    expect(accounting.tool).toBe('run_tests');
+    expect(accounting.rawBytes).toBeGreaterThan(0);
+    expect(accounting.modelFacingBytes).toBeGreaterThan(0);
+  });
+
+  it('_accounting rawBytes and pipeline propagation are correct for a large result (M3 end-to-end)', async () => {
+    // End-to-end proof that the accounting pipeline is correctly wired for large
+    // results and that rawExceededBudget is NOW REACHABLE (the fix from dead-flag bug).
+    // The tool produces output whose raw serialized size exceeds
+    // MODEL_FACING_RESULT_BUDGET_BYTES; the bounding pipeline compresses the
+    // model-facing result to a compact summary.  We assert:
+    //   (a) _accounting IS present in summarizeToolResult output (accounting
+    //       survives persistAndBoundResult → attachFailureCategory →
+    //       attachProjectToolSteering → summarizeToolResult);
+    //   (b) rawBytes reflects the large raw payload (> MODEL_FACING_RESULT_BUDGET_BYTES);
+    //   (c) modelFacingBytes < rawBytes (bounding reduced the result);
+    //   (d) rawExceededBudget is TRUE — the flag is NOW REACHABLE because it checks
+    //       rawBytes (not the hard-clamped modelFacingBytes).  This is the end-to-end
+    //       proof that the metric actually fires for a tool with large raw output;
+    //   (e) _accounting is absent from the model-facing JSON (M1 still holds).
+    //
+    // Contrast with old (dead) flag: modelFacingBytes was hard-clamped to <= 4 KiB by
+    // inlineResultLimit, so modelFacingBytes > budget was always false.  rawBytes has
+    // no such cap, so rawBytes > budget is true whenever the tool over-produces.
+    const largePayload = 'x'.repeat(MODEL_FACING_RESULT_BUDGET_BYTES * 4); // ~16 KiB raw
+    const tool: ProjectCommandToolConfig = {
+      name: 'large_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({ tool: 'large_tool', status: 'PASSED', stdout: ${JSON.stringify(largePayload)} }));`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 200_000
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    // (e) _accounting must NOT appear in the serialized model-facing payload.
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('_accounting');
+
+    // (a)(b)(c)(d) summarizeToolResult must surface _accounting with correct fields.
+    const summary = summarizeToolResult(result) as Record<string, unknown>;
+    const accounting = summary['_accounting'] as ResultAccounting;
+    expect(accounting).toBeDefined();
+    // (b) rawBytes reflects the large serialized payload (> budget)
+    expect(accounting.rawBytes).toBeGreaterThan(MODEL_FACING_RESULT_BUDGET_BYTES);
+    // (c) bounding reduced the model-facing result
+    expect(accounting.modelFacingBytes).toBeLessThan(accounting.rawBytes);
+    // (d) rawExceededBudget is TRUE — this is the key fix proving the flag is now reachable.
+    // Raw output exceeded the budget so the harness had to bound it, making the flag fire.
+    expect(accounting.rawExceededBudget).toBe(true);
+    expect(accounting.tool).toBe('large_tool');
+    expect(accounting.tokenEstimate).toBe(Math.ceil(accounting.modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+    expect(accounting.reductionRatio).toBeCloseTo(accounting.modelFacingBytes / accounting.rawBytes, 5);
+  });
+
+  it('rawExceededBudget is FALSE for a small result that fits within the budget (end-to-end)', async () => {
+    // Complement to the large-result test: a small tool result that fits within
+    // MODEL_FACING_RESULT_BUDGET_BYTES raw should produce rawExceededBudget=false.
+    const tool: ProjectCommandToolConfig = {
+      name: 'small_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: [
+        '-e',
+        `console.log(JSON.stringify({ tool: 'small_tool', status: 'PASSED', message: 'ok' }));`
+      ],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'test'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+
+    const summary = summarizeToolResult(result) as Record<string, unknown>;
+    const accounting = summary['_accounting'] as ResultAccounting;
+    expect(accounting).toBeDefined();
+    // Raw payload is tiny — well within budget, so flag must be false.
+    expect(accounting.rawBytes).toBeLessThan(MODEL_FACING_RESULT_BUDGET_BYTES);
+    expect(accounting.rawExceededBudget).toBe(false);
+    expect(accounting.tool).toBe('small_tool');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bead 5fij: structured-invocation registry integration (S1)
+//
+// Verifies the full commandExecutor → resolveStructuredInvocation path using
+// real shell-script stubs so spawnArgs order is observable end-to-end.
+// ---------------------------------------------------------------------------
+describe('structured-invocation registry integration (5fij)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-5fij-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-5fij-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  // (a) Unknown tool: spawnArgs are BYTE-IDENTICAL to finalArgs — no injection.
+  it('leaves spawnArgs byte-identical to finalArgs for an unknown tool (no injection)', async () => {
+    // Write a Node script that emits the args it received as JSON, then invoke it
+    // via a command name that is not in the registry ('unknown_linter').
+    // The resolver must leave the args unchanged.
+    const argEchoScript = [
+      'process.stdout.write(JSON.stringify({ argv: process.argv.slice(1) }));'
+    ].join('');
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'unknown_linter',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      // defaultArgs become finalArgs — the registry must not touch them.
+      defaultArgs: ['-e', argEchoScript],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 10_000
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'lint'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    // The spawned process sees exactly defaultArgs — no extra flags injected.
+    const argv = JSON.parse(result.stdout).argv as string[];
+    // argv[0] = '-e', argv[1] = script — no output-format flags injected
+    expect(argv).not.toContain('--format');
+    expect(argv).not.toContain('--output-format');
+    expect(argv).not.toContain('--json');
+    expect(argv).not.toContain('--out-format');
+    expect(argv).not.toContain('--pretty');
+  });
+
+  // (b) ruff: injected flag appears AFTER the subcommand (exact index assertion).
+  // This is the assertion that catches M2 (the prepend-flags bug).
+  it('appends the injected flag AFTER the subcommand for ruff (exact augmentedArgs order)', () => {
+    const handler = resolveStructuredInvocation('ruff', ['check', '.']);
+    expect(handler).not.toBeNull();
+    const argv: string[] = handler!.augmentedArgs;
+    // Exact expected order: check . --output-format json
+    // If flags were prepended it would be: --output-format json check .  (WRONG)
+    expect(argv).toEqual(['check', '.', '--output-format', 'json']);
+    // Belt-and-suspenders index check: subcommand 'check' precedes injected flag
+    const checkIdx = argv.indexOf('check');
+    const flagIdx = argv.indexOf('--output-format');
+    expect(checkIdx).toBeGreaterThanOrEqual(0);
+    expect(flagIdx).toBeGreaterThan(checkIdx);
+  });
+
+  // (b2) golangci-lint: injected flag appears AFTER the subcommand (exact order).
+  it('appends the injected flag AFTER the subcommand for golangci-lint (exact augmentedArgs order)', () => {
+    const handler = resolveStructuredInvocation('golangci-lint', ['run']);
+    expect(handler).not.toBeNull();
+    const argv: string[] = handler!.augmentedArgs;
+    // Exact expected order: run --out-format json
+    expect(argv).toEqual(['run', '--out-format', 'json']);
+    const runIdx = argv.indexOf('run');
+    const flagIdx = argv.indexOf('--out-format');
+    expect(runIdx).toBeGreaterThanOrEqual(0);
+    expect(flagIdx).toBeGreaterThan(runIdx);
+  });
+
+  // (c) Matched handler's parse result lands in structuredResult via the executor.
+  it('places the parse result from a matched semgrep handler into structuredResult', async () => {
+    // Emit valid semgrep JSON from a Node subprocess. The command is named via the
+    // definition's name field, but resolveStructuredInvocation looks up by the
+    // `command` field value. We use a wrapper: write a stub script named 'semgrep'
+    // into tempRoot/bin, add it to PATH so execa can find it.
+    const binDir = path.join(tempRoot, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const semgrepPayload = JSON.stringify({
+      results: [
+        { check_id: 'test.rule', path: 'src/a.py', start: { line: 5 }, extra: { severity: 'ERROR', message: 'test finding' } }
+      ],
+      errors: [],
+      paths: { scanned: ['src/a.py', 'src/b.py'] }
+    });
+    // Write a stub script that emits the semgrep payload and exits 1 (findings found)
+    const stubScript = path.join(binDir, 'semgrep');
+    fs.writeFileSync(stubScript, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(semgrepPayload)});\nprocess.exit(1);\n`, { mode: 0o755 });
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'semgrep_stub',
+      type: ProjectToolType.COMMAND,
+      command: 'semgrep',
+      defaultArgs: ['--config=auto', '.'],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 50_000,
+      env: { PATH: `${binDir}:${process.env.PATH ?? ''}` }
+    }, {
+      beadId: 'bd-1',
+      stateId: 'AdversarialPostReview',
+      actionId: 'adversarial-code-review'
+    }, {} as any, undefined, new Map()) as any;
+
+    // (c) parse result present in structuredResult
+    expect(result.structuredResult).toBeDefined();
+    const sr = result.structuredResult as any;
+    expect(sr.status).toBe('ok');
+    expect(sr.counts?.findings).toBe(1);
+    expect(sr.counts?.scannedTargetCount).toBe(2);
+  });
+
+  // (d) A passing run is unaffected by injection — status remains PASSED.
+  it('does not flip a passing run to REJECTED when injection injects flags for a known tool', async () => {
+    // Write a stub named 'mypy' that ignores its args and exits 0 with valid mypy JSON.
+    const binDir = path.join(tempRoot, 'bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const mypyLine = JSON.stringify({ file: 'src/ok.py', line: 1, message: 'ok', code: 'none', severity: 'note' });
+    const stubScript = path.join(binDir, 'mypy');
+    fs.writeFileSync(stubScript, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(mypyLine)});\nprocess.exit(0);\n`, { mode: 0o755 });
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'mypy_stub',
+      type: ProjectToolType.COMMAND,
+      command: 'mypy',
+      defaultArgs: ['src/'],
+      cwd: CwdMode.WORKTREE,
+      maxOutputBytes: 10_000,
+      env: { PATH: `${binDir}:${process.env.PATH ?? ''}` }
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Implementation',
+      actionId: 'type-check'
+    }, {} as any, undefined, new Map()) as any;
+
+    // (d) injection of --output json must not flip the passing run
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    // structuredResult is populated from the mypy parse
+    expect(result.structuredResult).toBeDefined();
+    expect((result.structuredResult as any).counts?.notes).toBe(1);
   });
 });

@@ -63,7 +63,10 @@ import {
   WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES,
   GIT_HISTORY_TOOL_NAME,
   REFERENCE_DOCS_TOOL_NAME,
-  WORKFLOW_PARITY_TOOL_NAME
+  WORKFLOW_PARITY_TOOL_NAME,
+  FAILURE_REREAD_ARCHIVE_RECOVERY,
+  TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  MODEL_FACING_RESULT_BUDGET_BYTES
 } from './constants.js';
 import {
   classifyProjectToolFailure,
@@ -101,6 +104,38 @@ import {
 } from './commandExecutor.js';
 import { outputArtifactRef } from './contextHelpers.js';
 import { pathArgumentRootKind, pathArgumentEscapeGuidance, resolvePathArgumentRoot } from './pathNormalization.js';
+
+// ---- (9g8z) Module-level accounting registry ----
+//
+// WeakMap keyed on the model-facing result object so accounting survives identity
+// changes from object spreading in attachProjectToolSteering.  persistAndBoundResult
+// registers the accounting; any pipeline function that spreads the result into a new
+// object must call transferResultAccounting(oldResult, newResult) to preserve the entry;
+// summarizeToolResult reads and surfaces it into the event-store summary.
+// The WeakMap holds no strong references — entries are GC-eligible once the result
+// object is no longer reachable.  Typed as WeakMap<object, unknown>; call sites cast
+// to ResultAccounting after the interface is declared below.
+//
+// NOTE (9g8z fragility): each pipeline function that creates a new object via spread
+// must explicitly re-register using transferResultAccounting.  Currently:
+//   - attachFailureCategory (resultEnvelope.ts)
+//   - attachProjectToolSteering (resultEnvelope.ts)
+//   - attachProjectToolFailureLimit (preflight.ts)
+// A future spread at a new pipeline stage must add the same call to remain correct.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const resultAccountingRegistry = new WeakMap<object, any>();
+
+/**
+ * (9g8z) Transfer the accounting entry from one result object to another.
+ * Call this whenever a pipeline function spreads the result into a new object
+ * so that summarizeToolResult can still find the accounting entry.
+ * No-op when `from` has no accounting entry or is not an object.
+ */
+export function transferResultAccounting(from: unknown, to: object): void {
+  if (typeof from !== 'object' || from === null) return;
+  const accounting = resultAccountingRegistry.get(from as object);
+  if (accounting !== undefined) resultAccountingRegistry.set(to, accounting);
+}
 
 // ---- Public types ----
 
@@ -1003,19 +1038,27 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
 
       let representativeSamples: unknown[] | undefined;
 
+      // (4eqg) omissions string that names the sections/fields NOT inlined.
+      // For high-volume tools this is embedded in the recovery guidance and causes
+      // projectToolSteering to route USE_RESULT + HIGH_VOLUME_NARROW_RERUN_RECOVERY
+      // (not FETCH_NAMED_OMISSION — the named re-fetch for high-volume is a narrower
+      // rerun of the same tool with tighter arguments, not an archive section fetch).
+      let omissionsText: string | undefined;
+
       if (text && text.trim().length > 0) {
         const lines = splitIntoLines(text);
         counts.lines = lines.length;
         const sampleLines = lines.slice(0, HIGH_VOLUME_SAMPLE_COUNT);
-        // Note: we do NOT set `omissions` here.  Setting omissions would trigger
-        // fetch_named_omission routing, but for a high-volume bulk output the
-        // structuredResult IS sufficient decision evidence (counts/samples/preview)
-        // and the agent should use_result rather than fetch a specific named omission.
-        // The sample + compact preview gives enough orientation; if a specific line
-        // or entry is needed, the agent reruns the tool with narrower arguments.
         counts.sampleLines = sampleLines.length;
-        if (lines.length > sampleLines.length) {
-          counts.omittedLines = lines.length - sampleLines.length;
+        const omittedLineCount = lines.length - sampleLines.length;
+        if (omittedLineCount > 0) {
+          counts.omittedLines = omittedLineCount;
+          // Populate omissions: name the sections NOT inlined so the model can
+          // request a narrower rerun via HIGH_VOLUME_NARROW_RERUN_RECOVERY guidance.
+          omissionsText = `${omittedLineCount} lines omitted from inline summary`
+            + ` (${sampleLines.length} of ${lines.length} lines shown);`
+            + ` full matches / entries preserved in outputArchive.`
+            + ` To retrieve a specific section, rerun with a narrower path, range, symbol, or operation argument.`;
         }
         const compactPreview = genericHighVolumePreview(toolName, sampleLines, lines.length, budget);
         counts.previewBytes = compactPreview.length;
@@ -1030,7 +1073,12 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
       if (representativeSamples && representativeSamples.length > 0) {
         result.representativeSamples = representativeSamples;
       }
-      // No omissions field — see comment above.  Use counts.omittedLines instead.
+      // (4eqg) Set omissions when lines were truncated.  projectToolSteering embeds
+      // the omissions text in the HIGH_VOLUME_NARROW_RERUN_RECOVERY guidance and
+      // routes USE_RESULT; it does NOT route FETCH_NAMED_OMISSION for high-volume tools.
+      if (omissionsText) {
+        result.omissions = omissionsText;
+      }
 
       return result;
     } catch {
@@ -1401,20 +1449,26 @@ export function attachFailureCategory(definition: ProjectToolConfig, result: unk
       (result as Record<string, unknown>)[ProjectToolResultKey.REMEDIATION],
       projectToolRemediation(definition, failureCategory, result)
     );
-    return withoutUndefined({
+    const newResult = withoutUndefined({
       ...(result as Record<string, unknown>),
       [ProjectToolResultKey.FAILURE_CATEGORY]: failureCategory,
       [ProjectToolResultKey.REMEDIATION]: remediation
     });
+    // (9g8z) Preserve accounting across the spread — re-register on the new object.
+    transferResultAccounting(result, newResult as object);
+    return newResult;
   }
   const remediation = projectToolRemediation(definition, failureCategory, result);
-  return {
+  const newResult = {
     status: ToolResultStatus.REJECTED,
     tool: definition.name,
     [ProjectToolResultKey.FAILURE_CATEGORY]: failureCategory,
     [ProjectToolResultKey.REMEDIATION]: remediation,
     result
   };
+  // (9g8z) Preserve accounting across the spread — re-register on the new object.
+  transferResultAccounting(result, newResult as object);
+  return newResult;
 }
 
 // ---- Steering ----
@@ -1526,6 +1580,24 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
       const omissions = isJsonRecord(structuredResultValue) && typeof structuredResultValue.omissions === 'string'
         ? structuredResultValue.omissions
         : undefined;
+
+      // (4eqg) High-volume tools (genericHighVolumeSummarizer) now set omissions to name
+      // the sections that were NOT inlined.  For these tools the "named re-fetch" is
+      // accomplished by rerunning with narrower args (not a literal archive section fetch),
+      // so we route USE_RESULT + HIGH_VOLUME_NARROW_RERUN_RECOVERY even when omissions
+      // is set — the omissions text is already embedded in the recovery so the model
+      // can request a specific section via a narrower rerun.
+      // Diagnostics and other summarizers that set omissions still get FETCH_NAMED_OMISSION.
+      if (isHighVolumeTool(definition) && isGenericHighVolumeSummarizerResult(record)) {
+        const highVolumeRecovery = omissions
+          ? [`${HIGH_VOLUME_NARROW_RERUN_RECOVERY} Omitted sections: ${omissions}`]
+          : [HIGH_VOLUME_NARROW_RERUN_RECOVERY];
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
+          [ProjectToolResultKey.RECOVERY]: highVolumeRecovery
+        };
+      }
+
       if (omissions) {
         return {
           [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FETCH_NAMED_OMISSION,
@@ -1544,12 +1616,6 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
               'Raw diagnostic lines are omitted from resultPreview when a summary is available; they remain in outputArchive.',
               'Rerun diagnostics narrowly (single file or operation) only when representative locations in the summary are insufficient for a specific fix decision.'
             ]
-          };
-        }
-        if (isHighVolumeTool(definition) && isGenericHighVolumeSummarizerResult(record)) {
-          return {
-            [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-            [ProjectToolResultKey.RECOVERY]: [HIGH_VOLUME_NARROW_RERUN_RECOVERY]
           };
         }
         return {
@@ -1589,6 +1655,25 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
     };
   }
 
+  // (wp8h) Failure-gated 're-read don't re-run' steering.
+  // For ANY failed command (non-zero exit / REJECTED status) where the failure
+  // detail exceeds the inline summary (archive present), steer the model to
+  // RE-READ the archived failure output via query_artifact / artifactRef handle
+  // rather than RE-RUNNING the command.  Re-running an expensive failed build or
+  // test suite without first reading the archived output wastes time and compute.
+  //
+  // This branch fires BEFORE the failure-category switch so it applies to all
+  // failure categories that have an archive (verifier_failed, unclassified, etc.).
+  // Failure categories with their own specific recovery (backpressure, transient,
+  // tool_input_error, unavailable, worktree_state_error, terminal_gate) are
+  // handled in the switch below — those are NOT the expensive-command-rerun cases.
+  //
+  // SUCCESS-path steering is intentionally unchanged — the success path returns
+  // above at `if (status === ToolResultStatus.PASSED)` and never reaches here.
+  const hasArchive = Boolean(record[ProjectToolResultKey.OUTPUT_ARCHIVE]);
+  const hasNonZeroExit = typeof record.exitCode === 'number' && record.exitCode !== 0;
+  const isExpensiveCommandFailureWithArchive = hasArchive && hasNonZeroExit;
+
   const failureCategory = classifyProjectToolFailure(definition, record);
   switch (failureCategory) {
     case ProjectToolFailureCategory.BACKPRESSURE:
@@ -1604,8 +1689,22 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
     case ProjectToolFailureCategory.WORKTREE_STATE_ERROR:
       return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_WORKTREE_STATE };
     case ProjectToolFailureCategory.VERIFIER_FAILED:
+      if (isExpensiveCommandFailureWithArchive) {
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_OR_ROUTE_FAILURE,
+          [ProjectToolResultKey.RECOVERY]: [FAILURE_REREAD_ARCHIVE_RECOVERY]
+        };
+      }
       return { [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_OR_ROUTE_FAILURE };
     default:
+      // For unclassified failures with an archive and non-zero exit, apply the
+      // re-read recovery to avoid expensive re-runs.
+      if (isExpensiveCommandFailureWithArchive) {
+        return {
+          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FIX_OR_ROUTE_FAILURE,
+          [ProjectToolResultKey.RECOVERY]: [FAILURE_REREAD_ARCHIVE_RECOVERY]
+        };
+      }
       return {};
   }
 }
@@ -1614,17 +1713,23 @@ export function attachProjectToolSteering(definition: ProjectToolConfig, result:
   const steering = projectToolSteering(definition, result);
   if (Object.keys(steering).length === 0) return result;
   if (isJsonRecord(result)) {
-    return withoutUndefined({
+    const newResult = withoutUndefined({
       ...(result as Record<string, unknown>),
       ...steering
     });
+    // (9g8z) Preserve accounting across the spread — re-register on the new object.
+    transferResultAccounting(result, newResult as object);
+    return newResult;
   }
-  return withoutUndefined({
+  const newResult = withoutUndefined({
     tool: definition.name,
     status: ToolResultStatus.REJECTED,
     result,
     ...steering
   });
+  // (9g8z) Preserve accounting across the spread — re-register on the new object.
+  transferResultAccounting(result, newResult as object);
+  return newResult;
 }
 
 // ---- Model-facing envelope ----
@@ -1878,7 +1983,148 @@ export function summarizeToolResult(result: unknown): unknown {
       }
     }
   }
+  // (9g8z) Read accounting from the module-level WeakMap registry and surface it
+  // into the event-store summary as an enumerable field.  This is the ONLY place
+  // _accounting is written into a serializable record; it never appears on the
+  // model-facing result because persistAndBoundResult only registers it in the
+  // WeakMap (not as any property on the result object).  attachProjectToolSteering
+  // and attachFailureCategory re-register accounting on any new spread object they
+  // create so the entry survives through the steering pipeline to this call site.
+  // As a fallback, also check for a direct _accounting property (enumerable or not)
+  // on the record — this handles synthetic test objects and any path that attaches
+  // accounting directly rather than via the WeakMap.
+  const accountingValue = typeof result === 'object' && result !== null
+    ? (resultAccountingRegistry.get(result as object) ?? (result as Record<string, unknown>)['_accounting'])
+    : undefined;
+  if (accountingValue !== undefined) {
+    summary['_accounting'] = accountingValue;
+  }
   return summary;
+}
+
+// ---- (9g8z) Per-tool-result token accounting + leak flag ----
+//
+// Accounting lives exclusively on the harness/event side:
+//   - persistAndBoundResult computes it and registers it in resultAccountingRegistry
+//     (a module-level WeakMap) keyed on the model-facing result object.  No property
+//     is added to the result, so the model-facing payload is unchanged.
+//   - attachProjectToolSteering re-registers accounting on any new object it creates
+//     via spread so the WeakMap entry survives through the steering pipeline.
+//   - summarizeToolResult reads from the WeakMap and copies _accounting into the
+//     event-store summary as an enumerable field for harness-internal aggregation.
+//   - rawExceededBudget compares the RAW (pre-bounding) serialized bytes to
+//     MODEL_FACING_RESULT_BUDGET_BYTES (4 KiB) — it fires when the tool produced more
+//     data than the budget and the harness had to truncate/bound the output.  This is
+//     the meaningful, reachable signal; modelFacingBytes is hard-clamped so a
+//     modelFacingBytes-based check would be permanently dead.
+// A future leak-report tool can aggregate these records to identify hot spots.
+
+export interface ResultAccounting {
+  /** Byte length of the serialized full result before bounding. */
+  rawBytes: number;
+  /** Byte length of the final model-facing serialized result. */
+  modelFacingBytes: number;
+  /** Approximate token estimate: modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN. */
+  tokenEstimate: number;
+  /** Ratio: modelFacingBytes / rawBytes.  Lower is better (more reduction). */
+  reductionRatio: number;
+  /** True when the RAW (pre-bounding) result exceeded MODEL_FACING_RESULT_BUDGET_BYTES,
+   *  meaning the harness had to truncate/bound the output.  This is the meaningful leak
+   *  signal: the tool produced more data than the budget and the pipeline had to intervene.
+   *  Based on rawBytes (reachable), NOT modelFacingBytes (which is hard-clamped to <= budget). */
+  rawExceededBudget: boolean;
+  /** Tool name for aggregation. */
+  tool: string;
+  /** The raw-output budget threshold used for the rawExceededBudget flag computation. */
+  resultBudgetBytes: number;
+}
+
+export interface ResultAccountingLeakReport {
+  /** Tool name. */
+  tool: string;
+  /** Number of results sampled for this tool. */
+  sampleCount: number;
+  /** Average reduction ratio across samples (lower is worse). */
+  avgReductionRatio: number;
+  /** Number of samples where the raw result exceeded the budget (rawExceededBudget was true). */
+  rawExceededBudgetCount: number;
+  /** Average model-facing bytes across samples. */
+  avgModelFacingBytes: number;
+  /** Average token estimate across samples. */
+  avgTokenEstimate: number;
+}
+
+/**
+ * (9g8z) Pure helper: given a set of ResultAccounting records, return tools
+ * ranked by leakiness (poor reduction ratio + budget exceedance).
+ * Ready for a future leak-discovery report tool; no event/OTEL wiring in this bead.
+ */
+export function summarizeResultAccounting(records: ResultAccounting[]): ResultAccountingLeakReport[] {
+  if (records.length === 0) return [];
+
+  // Group by tool name
+  const byTool = new Map<string, ResultAccounting[]>();
+  for (const record of records) {
+    const existing = byTool.get(record.tool);
+    if (existing) {
+      existing.push(record);
+    } else {
+      byTool.set(record.tool, [record]);
+    }
+  }
+
+  const reports: ResultAccountingLeakReport[] = [];
+  for (const [tool, toolRecords] of byTool) {
+    const sampleCount = toolRecords.length;
+    const avgReductionRatio = toolRecords.reduce((sum, r) => sum + r.reductionRatio, 0) / sampleCount;
+    const rawExceededBudgetCount = toolRecords.filter(r => r.rawExceededBudget).length;
+    const avgModelFacingBytes = toolRecords.reduce((sum, r) => sum + r.modelFacingBytes, 0) / sampleCount;
+    const avgTokenEstimate = toolRecords.reduce((sum, r) => sum + r.tokenEstimate, 0) / sampleCount;
+    reports.push({
+      tool,
+      sampleCount,
+      avgReductionRatio,
+      rawExceededBudgetCount,
+      avgModelFacingBytes,
+      avgTokenEstimate
+    });
+  }
+
+  // Rank by leakiness: highest rawExceededBudgetCount first (tools that most frequently
+  // produced raw output beyond the budget), then worst (highest) avgReductionRatio as
+  // tiebreaker (a ratio closer to 1.0 means less compression was achieved).
+  reports.sort((a, b) => {
+    if (b.rawExceededBudgetCount !== a.rawExceededBudgetCount) {
+      return b.rawExceededBudgetCount - a.rawExceededBudgetCount;
+    }
+    return b.avgReductionRatio - a.avgReductionRatio;
+  });
+
+  return reports;
+}
+
+function computeResultAccounting(
+  toolName: string,
+  rawBytes: number,
+  modelFacingBytes: number
+): ResultAccounting {
+  const tokenEstimate = Math.ceil(modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+  const reductionRatio = rawBytes > 0 ? modelFacingBytes / rawBytes : 1;
+  // rawExceededBudget: true when the RAW (pre-bounding) result exceeded the budget,
+  // meaning the harness had to truncate it.  Based on rawBytes, NOT modelFacingBytes —
+  // modelFacingBytes is hard-clamped to <= INLINE_RESULT_BYTES so it can NEVER exceed
+  // MODEL_FACING_RESULT_BUDGET_BYTES, making a modelFacingBytes-based check permanently
+  // dead.  The raw check is the meaningful, reachable signal for leaky tool producers.
+  const rawExceededBudget = rawBytes > MODEL_FACING_RESULT_BUDGET_BYTES;
+  return {
+    rawBytes,
+    modelFacingBytes,
+    tokenEstimate,
+    reductionRatio,
+    rawExceededBudget,
+    tool: toolName,
+    resultBudgetBytes: MODEL_FACING_RESULT_BUDGET_BYTES
+  };
 }
 
 // ---- applyHighVolumeModelSummary ----
@@ -1955,9 +2201,30 @@ export async function persistAndBoundResult(
     context
   );
   const record = resultRecord(modelResult);
+
+  let modelFacingResult: ModelFacingProjectToolResult;
   if (serialized.length <= maxInlineBytes) {
-    return attachArchiveIfNeeded(modelFacingInlineResult(modelResult), context, serialized.length, false);
+    modelFacingResult = attachArchiveIfNeeded(modelFacingInlineResult(modelResult), context, serialized.length, false);
+  } else {
+    modelFacingResult = modelFacingTruncatedResult(definition, record, context, serialized, maxInlineBytes);
   }
 
-  return modelFacingTruncatedResult(definition, record, context, serialized, maxInlineBytes);
+  // (9g8z) Compute lightweight token accounting and register it in the module-level
+  // WeakMap (resultAccountingRegistry) keyed on the returned model-facing result object.
+  // The WeakMap holds no strong reference — the entry is GC-eligible when the result is
+  // no longer reachable.  No accounting key is added to modelFacingResult, so the
+  // model-facing payload is byte-identical to before 9g8z.
+  // attachProjectToolSteering re-registers the accounting on any new spread object it
+  // creates so the entry survives through the steering pipeline.
+  // summarizeToolResult reads from the registry and writes _accounting into the
+  // event-store summary, keeping it exclusively on the harness/event side.
+  const modelFacingJson = JSON.stringify(modelFacingResult);
+  const accounting = computeResultAccounting(
+    definition.name,
+    serialized.length,
+    modelFacingJson.length
+  );
+  resultAccountingRegistry.set(modelFacingResult as object, accounting);
+
+  return modelFacingResult;
 }
