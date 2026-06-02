@@ -1390,4 +1390,153 @@ describe('Supervisor', () => {
     // Records are not involved in this check — this is a unit-level guard.
     expect(records.some(r => r.event === DomainEventName.TEAMMATE_EVENT)).toBe(false);
   });
+
+  // ---------------------------------------------------------------------------
+  // requestedBeadId already-started short-circuit (coordinator AC)
+  //
+  // Note: general slot-replenishment / capacity invariants are already covered
+  // extensively in tests/supervisor_capacity.test.ts (capacity pause, live-pane
+  // counting, backoff exclusion, preflight, quarantine, etc.).  This block adds
+  // only the UNIQUELY-MISSING coverage: the case where the operator launched
+  // `/orr-else --bead <id>` but that bead is already running — the coordinator
+  // must spawn nothing further, preventing a duplicate spawn of the same bead.
+  // ---------------------------------------------------------------------------
+
+  it('(requestedBeadId) scanAndSpawn spawns nothing when the requested bead is already started', async () => {
+    // Scenario: `/orr-else --bead pi-experiment-xyz` was called and `pi-experiment-xyz`
+    // is already tracked as a live teammate pane.  On the next supervisor poll,
+    // Orchestrator.selectAssignments receives `alreadyStarted = { pi-experiment-xyz }`
+    // and `requestedBeadId = 'pi-experiment-xyz'`.  The short-circuit at
+    // Orchestrator.ts line ~104 (`if (requestedBeadId && alreadyStarted.has(requestedBeadId)) return []`)
+    // means selectAssignments returns [], so scanAndSpawn claims and spawns nothing.
+    //
+    // This is the historical "replenishes unrelated ready Beads" bug — proving that
+    // the fix is in place: a targeted single-bead run does NOT accidentally re-spawn
+    // the same bead when it is already running.
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%5' }));
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
+
+    const REQUESTED_BEAD_ID = 'pi-experiment-already-started';
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        // The bead is live — it has an active pane.
+        getLiveTeammateBeadIds: vi.fn(async () => new Set([REQUESTED_BEAD_ID])),
+        getAvailableSlots: vi.fn(async () => 1),
+        getActiveTeammateCount: vi.fn(async () => 1),
+        spawnTeammateInTmux
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        eventStore: {
+          record: vi.fn(async () => {}),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        beadsPort: fakeBeadsPort({ claim, release }),
+        worktreePort: { createWorktree },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      {
+        maxSlots: 1,
+        // requestedBeadId wires the coordinator to target a specific bead.
+        requestedBeadId: REQUESTED_BEAD_ID,
+        clock: createFakeClock()
+      }
+    );
+
+    // Mark the bead as already started in the in-process tracking map.
+    (supervisor as any).startedBeads.add(REQUESTED_BEAD_ID);
+    (supervisor as any).startedBeadAtMs.set(REQUESTED_BEAD_ID, NOW_MS);
+
+    await (supervisor as any).scanAndSpawn();
+
+    // The short-circuit in Orchestrator.selectAssignments must prevent any claim
+    // or spawn when the requested bead is already in the live set.
+    expect(claim).not.toHaveBeenCalled();
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(spawnTeammateInTmux).not.toHaveBeenCalled();
+    expect(release).not.toHaveBeenCalled();
+
+    // The bead must remain tracked (it was not released by this scan).
+    expect((supervisor as any).startedBeads.has(REQUESTED_BEAD_ID)).toBe(true);
+  });
+
+  it('(requestedBeadId) scanAndSpawn spawns the requested bead when it is NOT yet started', async () => {
+    // Complementary guard: when the requested bead is NOT yet live, the coordinator
+    // must proceed with claim + worktree + spawn.  Without this test the passing
+    // guard above might give false confidence (what if nothing ever spawns?).
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id } as any));
+    const release = vi.fn(async () => {});
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%6' }));
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree-new' }));
+
+    const REQUESTED_BEAD_ID = 'pi-experiment-not-yet-started';
+
+    const getBead = vi.fn(async (id: string) => ({
+      id,
+      status: 'ready',
+      stateId: 'Planning',
+      score: 1,
+      lastActivity: new Date(0).toISOString()
+    } as any));
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        // No live panes for the requested bead yet.
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        getAvailableSlots: vi.fn(async () => 1),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {},
+            states: { Planning: {} }
+          })
+        },
+        eventStore: {
+          record: vi.fn(async () => {}),
+          eventsForBeads: vi.fn(async () => new Map())
+        },
+        beadsPort: {
+          ...fakeBeadsPort({ claim, release }),
+          getBead
+        } as any,
+        worktreePort: { createWorktree },
+        scheduler: {
+          sortBacklog: async (beads: any[]) => beads.map((b: any) => ({ ...b, score: 1 }))
+        },
+        flowManager: {
+          stateForBead: (_bead: any, config: any) => 'Planning'
+        }
+      } as any,
+      {
+        maxSlots: 1,
+        requestedBeadId: REQUESTED_BEAD_ID,
+        clock: createFakeClock()
+      }
+    );
+
+    // startedBeads is empty — bead is not yet started.
+    await (supervisor as any).scanAndSpawn();
+
+    // The coordinator must proceed: getBead was called to fetch the targeted bead.
+    expect(getBead).toHaveBeenCalledWith(REQUESTED_BEAD_ID);
+    // claim, worktree, and spawn must all fire.
+    expect(claim).toHaveBeenCalledTimes(1);
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+    expect(spawnTeammateInTmux).toHaveBeenCalledTimes(1);
+  });
 });
