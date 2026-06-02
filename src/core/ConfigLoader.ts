@@ -19,6 +19,7 @@ import {
   EventName,
   LLMProviderName,
   ModelProviderKey,
+  RECOGNIZED_COARSE_SINK_STATUSES,
   SchedulerDefaults,
   SubscriptionProviderToken,
   ThinkingLevel
@@ -209,7 +210,9 @@ export class ConfigLoader {
    *
    * When a `statechart` block is present (explicit opt-in):
    *   - startState / statechart.initialState must exist in states.
-   *   - Every transition target must be a defined state OR a declared terminal state (throws).
+   *   - Every transition target must be a defined state, a declared terminal state,
+   *     OR a recognized coarse sink status (completed / blocked / deferred) (throws otherwise).
+   *     Coarse sink targets exit the active statechart flow without spawning a worker.
    *   - Warns when a transition outcome key is not in the declared vocabulary.
    *
    * When no `statechart` block is present (legacy / default config):
@@ -225,7 +228,11 @@ export class ConfigLoader {
     const terminalStates = new Set<string>(
       sc?.terminalStates ?? [BeadStatus.COMPLETED]
     );
-    const knownTargets = new Set([...stateIds, ...terminalStates]);
+    // knownTargets = defined states ∪ declared terminal states ∪ recognized
+    // coarse sink statuses (completed / blocked / deferred).  A transition
+    // whose target is a coarse sink status is valid: the bead leaves the active
+    // statechart flow rather than being spawned into a new worker state.
+    const knownTargets = new Set([...stateIds, ...terminalStates, ...RECOGNIZED_COARSE_SINK_STATUSES]);
 
     // startState / statechart.initialState existence check.
     // Only enforced when there are defined states (avoids false positives in
@@ -264,8 +271,9 @@ export class ConfigLoader {
         if (!knownTargets.has(targetState)) {
           throw new Error(
             `State "${stateId}" has transition "${outcomeKey}" → "${targetState}" ` +
-            `but "${targetState}" is not a defined state or declared terminal state. ` +
-            `Defined states: ${[...stateIds].join(', ')}; terminal states: ${[...terminalStates].join(', ')}`
+            `but "${targetState}" is not a defined state, declared terminal state, or recognized coarse sink status. ` +
+            `Defined states: ${[...stateIds].join(', ')}; terminal states: ${[...terminalStates].join(', ')}; ` +
+            `coarse sink statuses: ${[...RECOGNIZED_COARSE_SINK_STATUSES].join(', ')}`
           );
         }
         if (!declaredOutcomes.has(outcomeKey.toUpperCase())) {

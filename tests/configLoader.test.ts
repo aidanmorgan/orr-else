@@ -353,6 +353,150 @@ states:
   });
 });
 
+describe('ConfigLoader coarse-sink transition targets', () => {
+  const tempConfigPath = path.join(process.cwd(), 'temp_coarse_sink_test.yaml');
+
+  afterEach(() => {
+    if (fs.existsSync(tempConfigPath)) fs.unlinkSync(tempConfigPath);
+  });
+
+  it('loads a statechart config with a transition target of "blocked" without throwing', () => {
+    const configContent = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [EXTERNAL_BLOCKER]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: completed
+      FAILURE: Alpha
+      EXTERNAL_BLOCKER: blocked
+`;
+    fs.writeFileSync(tempConfigPath, configContent);
+    expect(() => new ConfigLoader().load(tempConfigPath)).not.toThrow();
+    const cfg = new ConfigLoader().load(tempConfigPath);
+    expect(cfg.states['Alpha'].transitions['EXTERNAL_BLOCKER']).toBe('blocked');
+  });
+
+  it('loads a statechart config with a transition target of "deferred" without throwing', () => {
+    const configContent = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [EXTERNAL_BLOCKER]
+  customOutcomes: [DEFER]
+scheduler:
+  weights: { waitTime: 1, executionSize: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: completed
+      FAILURE: Alpha
+      DEFER: deferred
+`;
+    fs.writeFileSync(tempConfigPath, configContent);
+    expect(() => new ConfigLoader().load(tempConfigPath)).not.toThrow();
+    const cfg = new ConfigLoader().load(tempConfigPath);
+    expect(cfg.states['Alpha'].transitions['DEFER']).toBe('deferred');
+  });
+
+  it('still throws when a transition target is genuinely unknown (not a state, terminal, or coarse sink)', () => {
+    const configContent = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [EXTERNAL_BLOCKER]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: totally_unknown_state
+      FAILURE: Alpha
+`;
+    fs.writeFileSync(tempConfigPath, configContent);
+    expect(() => new ConfigLoader().load(tempConfigPath)).toThrow(/not a defined state, declared terminal state, or recognized coarse sink status/);
+  });
+
+  it('GOLDEN (cerdiwen-style): AdversarialPostReview --EXTERNAL_BLOCKER--> blocked loads without throwing', () => {
+    const configContent = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Planning
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [EXTERNAL_BLOCKER]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Planning:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: Implementation
+      FAILURE: Planning
+  Implementation:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: AdversarialPostReview
+      FAILURE: Implementation
+  AdversarialPostReview:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions:
+      SUCCESS: completed
+      FAILURE: Implementation
+      EXTERNAL_BLOCKER: blocked
+`;
+    fs.writeFileSync(tempConfigPath, configContent);
+    expect(() => new ConfigLoader().load(tempConfigPath)).not.toThrow();
+    const cfg = new ConfigLoader().load(tempConfigPath);
+    // The EXTERNAL_BLOCKER transition routes to the coarse sink 'blocked'
+    expect(cfg.states['AdversarialPostReview'].transitions['EXTERNAL_BLOCKER']).toBe('blocked');
+    // blockedOutcomes includes EXTERNAL_BLOCKER → outcomeCategory would return 'blocked'
+    // → shouldPersistBlockedBeadStatus would set BLOCKED coarse status
+    expect(cfg.statechart?.blockedOutcomes).toContain('EXTERNAL_BLOCKER');
+  });
+});
+
 describe('resolveProviderName', () => {
   it('routes a string containing "codex" to the openai-codex subscription provider', () => {
     expect(resolveProviderName('codex')).toBe('openai-codex');

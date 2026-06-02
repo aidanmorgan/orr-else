@@ -125,6 +125,39 @@ describe('Scheduler', () => {
     expect(sorted[0].score).toBeGreaterThan(sorted[1].score);
   });
 
+  it('produces finite non-NaN scores when a coarse-sink "blocked" target appears in transitions', async () => {
+    // Robustness: 'blocked' is not a defined state but IS a valid coarse-sink
+    // transition target. The Scheduler's BFS graph must not crash or emit NaN.
+    const cfgWithSink = {
+      scheduler: { weights: { waitTime: 1.0, executionTime: 0.5, progress: 2.0, penalty: 1.0 } },
+      settings: { startState: 'Planning' },
+      statechart: { terminalStates: ['completed'] },
+      states: {
+        Planning: {
+          transitions: { SUCCESS: 'Implementation', EXTERNAL_BLOCKER: 'blocked' },
+          on: {}
+        },
+        Implementation: {
+          transitions: { SUCCESS: 'completed', FAILURE: 'Planning', EXTERNAL_BLOCKER: 'blocked' },
+          on: {}
+        }
+      }
+    };
+    const sched = new Scheduler({ load: () => cfgWithSink } as any, new FlowManager());
+    const beads: any[] = [
+      { id: 'p', status: 'Planning', lastActivity: new Date().toISOString() },
+      { id: 'i', status: 'Implementation', lastActivity: new Date().toISOString() }
+    ];
+    const sorted = await sched.sortBacklog(beads);
+    for (const b of sorted) {
+      expect(typeof b.score).toBe('number');
+      expect(isFinite(b.score)).toBe(true);
+      expect(isNaN(b.score)).toBe(false);
+    }
+    // Implementation is closer to 'completed' → higher score
+    expect(sorted[0].id).toBe('i');
+  });
+
   it('(BEAD-C) stateForBead returns the projection-sourced bead.status, not any metadata fallback', async () => {
     // Direct proof: FlowManager.stateForBead(bead, config) reads bead.status
     // (already the projection output). A bead whose .status == "Implementation"

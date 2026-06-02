@@ -283,7 +283,7 @@ states:
     transitions: { ADVANCE: "Nonexistent", REWORK: "Alpha" }
 `;
     fs.writeFileSync(tempPath, yaml);
-    expect(() => new ConfigLoader().load(tempPath)).toThrow(/not a defined state or declared terminal state/);
+    expect(() => new ConfigLoader().load(tempPath)).toThrow(/not a defined state, declared terminal state, or recognized coarse sink status/);
   });
 
   it('accepts valid generic config (Alpha→Bravo→done)', () => {
@@ -441,6 +441,119 @@ describe('null-safety: falsy/missing transitionEvent', () => {
 
   it('teammateEventTypeForOutcome("") → STATE_TRANSITIONED', () => {
     expect(teammateEventTypeForOutcome('' as any, defaultCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  });
+});
+
+// ── Coarse-sink transition targets ────────────────────────────────────────────
+
+describe('Coarse-sink transition targets: ConfigLoader + shouldPersistBlockedBeadStatus', () => {
+  /**
+   * Config with a 'blocked' coarse-sink transition target, matching the real
+   * cerdiwen pattern: AdversarialPostReview --EXTERNAL_BLOCKER--> blocked.
+   */
+  function makeCoarseSinkConfig(): HarnessConfig {
+    return {
+      settings: {
+        maxConcurrentSlots: 2,
+        handoverTemplate: 'test',
+        agentTurnTimeoutMs: 3600000,
+        processReapIntervalMs: 60000,
+        startState: 'Planning',
+        harnessRestartEvent: EventName.HARNESS_RESTART,
+        contextRestartEvent: EventName.CONTEXT_RESTART,
+        defaultModel: 'gpt-4',
+        defaultProvider: 'openai',
+        modelProviders: {},
+        stateContextRotThreshold: 10,
+        harnessContextRotThreshold: 5
+      },
+      scheduler: { weights: { waitTime: 1, executionTime: 0.5, progress: 2, penalty: 1 } },
+      statechart: {
+        initialState: 'Planning',
+        terminalStates: ['completed'],
+        advanceOutcomes: ['SUCCESS'],
+        failedOutcomes: ['FAILURE'],
+        blockedOutcomes: ['EXTERNAL_BLOCKER'],
+        customOutcomes: []
+      },
+      states: {
+        Planning: { transitions: { SUCCESS: 'AdversarialPostReview', FAILURE: 'Planning' }, on: {} } as any,
+        AdversarialPostReview: {
+          transitions: { SUCCESS: 'completed', FAILURE: 'Planning', EXTERNAL_BLOCKER: 'blocked' },
+          on: {}
+        } as any
+      }
+    } as unknown as HarnessConfig;
+  }
+
+  it('outcomeCategory of EXTERNAL_BLOCKER is "blocked" (declared in blockedOutcomes)', () => {
+    const cfg = makeCoarseSinkConfig();
+    expect(outcomeCategory('EXTERNAL_BLOCKER', cfg)).toBe('blocked');
+  });
+
+  it('shouldPersistBlockedBeadStatus with STATE_BLOCKED + "blocked" nextState → true', () => {
+    const cfg = makeCoarseSinkConfig();
+    expect(shouldPersistBlockedBeadStatus(TeammateEventType.STATE_BLOCKED, BeadStatus.BLOCKED, cfg)).toBe(true);
+  });
+
+  it('shouldPersistBlockedBeadStatus with STATE_BLOCKED event type (any nextState) → true', () => {
+    const cfg = makeCoarseSinkConfig();
+    expect(shouldPersistBlockedBeadStatus(TeammateEventType.STATE_BLOCKED, 'AdversarialPostReview', cfg)).toBe(true);
+  });
+
+  it('shouldPersistBlockedBeadStatus with nextState === "blocked" (any event type) → true', () => {
+    const cfg = makeCoarseSinkConfig();
+    // Even if event type is STATE_FAILED, nextState === 'blocked' triggers BLOCKED coarse status
+    expect(shouldPersistBlockedBeadStatus(TeammateEventType.STATE_FAILED, BeadStatus.BLOCKED, cfg)).toBe(true);
+  });
+});
+
+// ── Scheduler robustness with non-state transition targets ────────────────────
+
+describe('Scheduler robustness with coarse-sink transition targets', () => {
+  function makeSchedulerWithBlockedTarget(): Scheduler {
+    const cfg = {
+      scheduler: { weights: { waitTime: 1.0, executionTime: 0.5, progress: 2.0, penalty: 1.0 } },
+      settings: { startState: 'Planning' },
+      statechart: { terminalStates: ['completed'] },
+      states: {
+        Planning: {
+          transitions: { SUCCESS: 'Implementation', EXTERNAL_BLOCKER: 'blocked' },
+          on: {}
+        },
+        Implementation: {
+          transitions: { SUCCESS: 'completed', FAILURE: 'Planning', EXTERNAL_BLOCKER: 'blocked' },
+          on: {}
+        }
+      }
+    };
+    const configLoader = { load: () => cfg };
+    return new Scheduler(configLoader as any, new FlowManager());
+  }
+
+  it('sortBacklog produces finite non-NaN scores for real states when a "blocked" coarse-sink target exists in transitions', async () => {
+    const sched = makeSchedulerWithBlockedTarget();
+    const beads: any[] = [
+      { id: 'b-planning', status: 'Planning', lastActivity: new Date().toISOString() },
+      { id: 'b-impl', status: 'Implementation', lastActivity: new Date().toISOString() }
+    ];
+    const sorted = await sched.sortBacklog(beads);
+
+    for (const bead of sorted) {
+      expect(typeof bead.score).toBe('number');
+      expect(isFinite(bead.score)).toBe(true);
+      expect(isNaN(bead.score)).toBe(false);
+    }
+  });
+
+  it('Implementation (closer to completed) scores higher than Planning even when "blocked" is a transition target', async () => {
+    const sched = makeSchedulerWithBlockedTarget();
+    const beads: any[] = [
+      { id: 'b-planning', status: 'Planning', lastActivity: new Date().toISOString() },
+      { id: 'b-impl', status: 'Implementation', lastActivity: new Date().toISOString() }
+    ];
+    const sorted = await sched.sortBacklog(beads);
+    expect(sorted[0].id).toBe('b-impl');
   });
 });
 

@@ -287,7 +287,7 @@ describe('AC-1: ConfigLoader accepts and validates the non-SDLC incident config'
     const badPath = path.join(tempDir, 'bad.yaml');
     fs.writeFileSync(badPath, badYaml);
     expect(() => new ConfigLoader().load(badPath))
-      .toThrow(/not a defined state or declared terminal state/);
+      .toThrow(/not a defined state, declared terminal state, or recognized coarse sink status/);
   });
 });
 

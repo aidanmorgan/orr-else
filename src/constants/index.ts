@@ -88,6 +88,26 @@ export const TERMINAL_BEAD_STATUSES = new Set<string>([
 ]);
 
 /**
+ * Coarse sink statuses that a statechart transition may legally target.
+ *
+ * When a transition target equals one of these values the bead leaves the
+ * active statechart flow (it is not spawned as a worker) and is coerced to the
+ * corresponding BeadStatus.  This is distinct from a defined state (which
+ * spawns a worker) or a declared terminal state (which merges/closes the bead).
+ *
+ * Valid coarse-sink targets:
+ *   'completed' — success terminal; bead is merged and closed.
+ *   'blocked'   — bead is paused; coordinator emits STATE_BLOCKED and sets
+ *                 BLOCKED coarse status via shouldPersistBlockedBeadStatus.
+ *   'deferred'  — bead is shelved; similar routing to DEFERRED coarse status.
+ */
+export const RECOGNIZED_COARSE_SINK_STATUSES = new Set<string>([
+  BeadStatus.COMPLETED,
+  BeadStatus.BLOCKED,
+  BeadStatus.DEFERRED
+]);
+
+/**
  * Standard State Machine Events / Outcomes
  */
 export enum EventName {
