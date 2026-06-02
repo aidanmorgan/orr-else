@@ -51,6 +51,7 @@ import {
   normalizeConfiguredCliFlag
 } from './pathNormalization.js';
 import { projectToolEnvironment } from './contextHelpers.js';
+import { resolveStructuredInvocation } from './structuredInvocation.js';
 
 // ---- Argument normalization ----
 
@@ -600,8 +601,15 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
     Object.entries(definition.env || {}).map(([key, value]) => [key, resolveTemplateString(value, templateContext)])
   );
 
+  // --- Structured invocation: inject machine-readable output flag if known tool ---
+  // resolveStructuredInvocation returns null when the tool is unknown OR when an
+  // output-format flag is already present — in both cases we leave finalArgs unchanged
+  // and fall back to the existing text summarizers after the process completes.
+  const structuredHandler = resolveStructuredInvocation(command, finalArgs);
+  const spawnArgs = structuredHandler ? structuredHandler.augmentedArgs : finalArgs;
+
   try {
-    const result = await execa(command, finalArgs, {
+    const result = await execa(command, spawnArgs, {
       cwd: context.cwd,
       env: { ...context.hostEnv, ...env, ...projectToolEnvironment(context) },
       stdout: { file: stdoutFile },
@@ -612,9 +620,18 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
     const boundedStdout = await boundedCommandFile(stdoutFile, returnBytes);
     const boundedStderr = await boundedCommandFile(stderrFile, returnBytes);
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
-    const structuredSummary = structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined;
-    const toolCalls = structuredStdout ? toolCallsFromRecord(structuredStdout) : undefined;
     const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined;
+
+    // If a structured handler is active, parse the process output into a compact
+    // structuredResult.  If parse() returns null (malformed/empty JSON), fall back
+    // to the existing structuredPayloadSummary path — no regression.
+    const parsedStructuredResult = structuredHandler
+      ? structuredHandler.parse(boundedStdout.text, boundedStderr.text, exitCode)
+      : null;
+    const structuredSummary = parsedStructuredResult
+      ?? (structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined);
+
+    const toolCalls = structuredStdout ? toolCallsFromRecord(structuredStdout) : undefined;
     const acceptedExitCode = isSuccessfulCommandExitCode(definition, exitCode);
     const acceptedNonZeroExitCode = exitCode !== CommandExitCode.SUCCESS
       && acceptedExitCode
@@ -651,9 +668,17 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
     const boundedStdout = fileStdout.bytes > 0 ? fileStdout : boundedCommandText(error.stdout, returnBytes);
     const boundedStderr = fileStderr.bytes > 0 ? fileStderr : boundedCommandText(error.stderr || (acceptedExitCode ? '' : error.message), returnBytes);
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
-    const structuredSummary = structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined;
-    const toolCalls = structuredStdout ? toolCallsFromRecord(structuredStdout) : undefined;
     const exitCode = typeof error.code === 'number' ? error.code : undefined;
+
+    // Same fallback logic as in the success path: structured parse takes precedence,
+    // null parse falls through to the existing structuredPayloadSummary.
+    const parsedStructuredResult = structuredHandler
+      ? structuredHandler.parse(boundedStdout.text, boundedStderr.text, exitCode)
+      : null;
+    const structuredSummary = parsedStructuredResult
+      ?? (structuredStdout ? structuredPayloadSummary(structuredStdout) : undefined);
+
+    const toolCalls = structuredStdout ? toolCallsFromRecord(structuredStdout) : undefined;
 
     return buildCommandResult({
       definition,
