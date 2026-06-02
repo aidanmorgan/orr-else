@@ -87,6 +87,11 @@ export function resolvePathArgumentRoot(config: ProjectToolPathArgumentConfig, t
     }
     return { path: resolvePathAgainst(templateContext.projectRoot, workspaceRoot, templateContext), kind: rootKind };
   }
+  // Named root: check if rootKind matches a key in namedRoots (generic project-defined roots).
+  if (templateContext.namedRoots && Object.prototype.hasOwnProperty.call(templateContext.namedRoots, rootKind)) {
+    const namedRootPath = templateContext.namedRoots[rootKind]!;
+    return { path: namedRootPath, kind: rootKind };
+  }
   return {
     path: resolveCwdValue(config[PathArgumentConfigKey.ROOT] || CwdMode.WORKTREE, templateContext),
     kind: 'configured'

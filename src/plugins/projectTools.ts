@@ -35,6 +35,7 @@ import {
   beadIdFromArgs,
   executionContext,
   frameworkRootFromConfig,
+  namedRootsFromConfig,
   projectToolRunEventData,
   releaseProjectToolCall
 } from './projectTools/contextHelpers.js';
@@ -366,11 +367,13 @@ export function registerConfiguredProjectTools(
       execute: async (params: unknown, ctx: ExtensionContext) => {
         const hiddenContext = runtimeContext?.() || {};
         const configuredFrameworkRoot = frameworkRootFromConfig(config, env, injectedRoot);
+        const configuredNamedRoots = namedRootsFromConfig(config, env, injectedRoot);
         const paramsRecord = params && typeof params === 'object' && !Array.isArray(params) ? params as Record<string, unknown> : {};
         return await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
           ...paramsRecord,
           ...hiddenContext,
-          ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {})
+          ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {}),
+          ...(configuredNamedRoots ? { namedRoots: configuredNamedRoots } : {})
         }, ctx, env, backpressure, injectedRoot);
       }
     }));
