@@ -957,6 +957,8 @@ function rawPayloadBytes(record: Record<string, unknown>): number {
   }
   if (typeof record.stdoutBytes === 'number') total = Math.max(total, record.stdoutBytes);
   if (typeof record.stderrBytes === 'number') total += record.stderrBytes;
+  // s3wp.26: for MCP tools, rawBytes is the byte count of the persisted mcp-raw.json file.
+  if (typeof record.rawBytes === 'number') total = Math.max(total, record.rawBytes);
   return total;
 }
 

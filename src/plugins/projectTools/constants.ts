@@ -9,6 +9,12 @@ export const LEGACY_MCP_SERVER_CONFIG_KEY = 'mcp-servers';
 export const MCP_SSE_TRANSPORT = 'sse';
 export const COMMAND_STDOUT_FILE_NAME = 'stdout.log';
 export const COMMAND_STDERR_FILE_NAME = 'stderr.log';
+// s3wp.26: raw MCP call-tool result (complete client.callTool payload) is written
+// to this file under context.outputDir before the model-facing compact result is built.
+export const MCP_RAW_FILE_NAME = 'mcp-raw.json';
+// s3wp.26: raw plugin-tool result (complete execute() return value) persisted by the
+// wrapPluginTool hook in extension.ts to the per-invocation tool-calls directory.
+export const PLUGIN_RAW_FILE_NAME = 'plugin-raw.json';
 
 export const ProjectToolResultKey = {
   TOOL_CALLS: 'toolCalls',
@@ -289,6 +295,12 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
 //   outputFile: internal harness reference, always hidden.
 //   outputTruncated, outputPreview, outputAccess, outputArchive: forbidden per the
 //     minimal-schema contract (docs/raw-output-contract.md).
+// s3wp.26:
+//   result: raw MCP callTool payload — always hidden.  Complete payload is persisted
+//     to mcp-raw.json; the model sees only rawFile/rawBytes/rawChecksum references.
+//     Previously only suppressed when hasStructuredModelSummary was true (via
+//     MODEL_RAW_SUPPRESSED_KEYS); now always hidden so no raw MCP content leaks to
+//     the model regardless of whether a semantic summarizer produced a structuredResult.
 export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'outputFile',
   'outputBytes',
@@ -298,7 +310,8 @@ export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,
   ProjectToolResultKey.OUTPUT_ARCHIVE,
-  ProjectToolResultKey.FRAMEWORK_TOOL_CALLS
+  ProjectToolResultKey.FRAMEWORK_TOOL_CALLS,
+  'result' // s3wp.26: raw MCP callTool payload — always hidden; see mcp-raw.json
 ]);
 
 export const MODEL_RAW_SUPPRESSED_KEYS = new Set<string>([

@@ -15,6 +15,8 @@ import { Type } from "@earendil-works/pi-ai";
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { createHash } from 'node:crypto';
+import { v7 as uuidv7 } from 'uuid';
 import { computeBuildProvenance, runStalenessPreflightWarn } from './core/BuildProvenance.js';
 import { Command } from 'commander';
 import { parse as parseShellCommand } from 'shell-quote';
@@ -31,6 +33,7 @@ import {
   projectToolFailureLimitSuggestedOutcome,
   registerConfiguredProjectTools
 } from './plugins/projectTools.js';
+import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer } from './core/SignalingServer.js';
@@ -97,6 +100,7 @@ import {
   ReviewArtifactKind,
   ReviewArtifactStore,
   ToolDefaults,
+  ProjectToolDefaults,
   LLMProviderName,
   OtelAttr,
   PathContextDefaults,
@@ -580,6 +584,81 @@ async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn:
   }
 }
 
+// ---- Raw plugin-tool result persistence (s3wp.26) ----
+//
+// Every plugin tool wrapped by wrapPluginTool (built-in control-plane tools,
+// bundled runtime plugin tools) must have its complete raw execute() return value
+// written to harness-managed storage BEFORE compaction.  This is the generic
+// archival invariant from docs/raw-output-contract.md.
+//
+// The call dir follows the same CALL_DIR_TEMPLATE as projectTools (command/MCP)
+// so all tool-call archives live in a single consistent tree.  Errors here are
+// swallowed — a persistence failure must never prevent the model from receiving
+// its result.
+//
+// Native Pi tools observed through Orr Else policy are NOT wrapped via this path
+// (they are registered by the Pi runtime, not by wrapPluginTool).  The Pi runtime
+// emits ToolCallEvent / ToolResultEvent which are observed by registerPiToolObservers.
+// Those events carry the full result payload in the event data.  Raw archival for
+// native Pi tools is therefore handled at the event-observer level (pi tool
+// observer), not here.  This note documents explicitly that the observe-only path
+// cannot use the wrapPluginTool hook.
+async function persistPluginToolRawResult(
+  toolName: string,
+  beadId: string | undefined,
+  stateId: string | undefined,
+  actionId: string | undefined,
+  projectRoot: string,
+  payload: unknown
+): Promise<void> {
+  try {
+    const sanitize = (v: string | undefined, fallback: string): string => {
+      const s = ((v || fallback)
+        .replace(ProjectToolDefaults.UNSAFE_PATH_SEGMENT_PATTERN, '-')
+        .replace(/^-+|-+$/g, '') || fallback);
+      return (s === '.' || s === '..') ? fallback : s;
+    };
+    const invocationId = uuidv7();
+    const templateContext = {
+      beadId: sanitize(beadId, ProjectToolDefaults.UNASSIGNED_BEAD_ID),
+      stateId: sanitize(stateId, ProjectToolDefaults.UNSPECIFIED_STATE_ID),
+      actionId: sanitize(actionId, ProjectToolDefaults.UNSPECIFIED_ACTION_ID),
+      toolName: sanitize(toolName, toolName),
+      toolInvocationId: invocationId,
+      projectRoot,
+      worktreePath: projectRoot
+    };
+    // Resolve the call-dir template the same way ToolCallPathFactory does.
+    const callDirTemplate = ProjectToolDefaults.CALL_DIR_TEMPLATE;
+    const callDirRel = callDirTemplate
+      .replace(/\{\{beadId\}\}/g, templateContext.beadId)
+      .replace(/\{\{stateId\}\}/g, templateContext.stateId)
+      .replace(/\{\{actionId\}\}/g, templateContext.actionId)
+      .replace(/\{\{toolName\}\}/g, templateContext.toolName)
+      .replace(/\{\{toolInvocationId\}\}/g, templateContext.toolInvocationId);
+    const outputDir = path.join(projectRoot, callDirRel, ProjectToolDefaults.OUTPUT_DIR_NAME);
+    await fs.promises.mkdir(outputDir, { recursive: true });
+
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(payload);
+    } catch {
+      serialized = JSON.stringify({ serializationError: 'payload could not be JSON-serialized', toolName });
+    }
+    const rawFile = path.join(outputDir, PLUGIN_RAW_FILE_NAME);
+    await fs.promises.writeFile(rawFile, serialized);
+    const rawBytes = Buffer.byteLength(serialized, 'utf8');
+    const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
+    Logger.debug(Component.PROJECT_TOOLS, 'Persisted plugin tool raw result', {
+      tool: toolName, rawFile, rawBytes, rawChecksum
+    });
+  } catch (error) {
+    Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist plugin tool raw result', {
+      tool: toolName, error: String(error)
+    });
+  }
+}
+
 function wrapPluginTool(
   tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> },
   runtimeObservability: Observability,
@@ -728,8 +807,15 @@ function wrapPluginTool(
         spanCompletionForToolResult
       );
 
+      const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+      const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
+      const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
+
       try {
         const result = await tracedExecute(params, ctx);
+        // s3wp.26: persist complete raw result to the harness-managed tool-calls dir
+        // before the model receives it.  Fire-and-forget — never blocks the result.
+        void persistPluginToolRawResult(tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result);
         return toolResult(result);
       } catch (error) {
         if (breakerEnabled) {
@@ -744,6 +830,12 @@ function wrapPluginTool(
           ctx.ui.setWorkingMessage(undefined);
           ctx.ui.notify(`Tool ${tool.name} error: ${String(error)}`, 'error');
         }
+        // s3wp.26: persist the thrown error as an error envelope on failure.
+        void persistPluginToolRawResult(tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, {
+          error: String(error),
+          errorType: error instanceof Error ? error.constructor.name : typeof error,
+          tool: tool.name
+        });
         return toolResult(`Error: ${String(error)}`);
       }
     }

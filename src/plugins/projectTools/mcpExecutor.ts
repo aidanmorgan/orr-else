@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { mkdir, open, readFile } from 'fs/promises';
+import { mkdir, open, readFile, writeFile } from 'fs/promises';
 import lockfile from 'proper-lockfile';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { resolveTemplateString } from '../../core/PiIntegration.js';
@@ -20,6 +20,7 @@ import { Component, Defaults, ToolResultStatus } from '../../constants/index.js'
 import {
   DEFAULT_MCP_CONFIG_PATH,
   LEGACY_MCP_SERVER_CONFIG_KEY,
+  MCP_RAW_FILE_NAME,
   MCP_SERVER_CONFIG_KEY,
   MCP_SSE_TRANSPORT,
   SERIAL_MCP_LOCK_REASON,
@@ -339,6 +340,39 @@ function unavailable(name: string, message: string) {
   };
 }
 
+// ---- Raw MCP result persistence (s3wp.26) ----
+
+/**
+ * Persist the complete raw client.callTool result (or error envelope) to
+ * context.outputDir/mcp-raw.json BEFORE the compact model-facing result is
+ * built.  This is the generic archival the raw-output contract mandates.
+ *
+ * Returns { rawFile, rawBytes, rawChecksum } for inclusion in the model-facing
+ * result so the model can reference the archive if needed.
+ *
+ * Errors here are swallowed (logged only) so a persistence failure never
+ * prevents the model from receiving its result.
+ */
+async function persistMcpRawResult(
+  outputDir: string,
+  payload: unknown
+): Promise<{ rawFile: string; rawBytes: number; rawChecksum: string } | undefined> {
+  try {
+    const rawFile = path.join(outputDir, MCP_RAW_FILE_NAME);
+    const serialized = JSON.stringify(payload);
+    await writeFile(rawFile, serialized);
+    const rawBytes = Buffer.byteLength(serialized, 'utf8');
+    const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
+    return { rawFile, rawBytes, rawChecksum };
+  } catch (error) {
+    Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist raw MCP result', {
+      outputDir,
+      error: String(error)
+    });
+    return undefined;
+  }
+}
+
 // ---- executeMcpTool ----
 
 export async function executeMcpTool(definition: ProjectMcpToolConfig, args: any, ctx: ExtensionContext, context: ProjectToolExecutionContext) {
@@ -405,12 +439,18 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         toolArguments,
         templateContext
       );
-      const result = await client.callTool({
+      const callToolResult = await client.callTool({
         name: operation,
         arguments: normalizedArguments.arguments
       }, undefined, mcpToolRequestOptions(definition));
 
-      if ((result as { isError?: boolean }).isError) {
+      // s3wp.26: persist the COMPLETE raw client.callTool payload to mcp-raw.json
+      // BEFORE building the compact model-facing result.  The model never receives
+      // the full callTool payload; it receives only the compact schema fields plus
+      // rawFile/rawBytes/rawChecksum references.
+      const rawArchive = await persistMcpRawResult(context.outputDir, callToolResult);
+
+      if ((callToolResult as { isError?: boolean }).isError) {
         return {
           tool: definition.name,
           status: ToolResultStatus.REJECTED,
@@ -418,7 +458,7 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
           operation,
           droppedArguments,
           normalizedPathArguments: normalizedArguments.normalizedPathArguments,
-          result
+          ...rawArchive
         };
       }
 
@@ -429,7 +469,7 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         operation,
         droppedArguments,
         normalizedPathArguments: normalizedArguments.normalizedPathArguments,
-        result
+        ...rawArchive
       };
     } finally {
       await client.close().catch((error: unknown) => {
@@ -442,12 +482,24 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
   } catch (error) {
     const message = String(error);
     if (definition.optional) return unavailable(definition.name, message);
+    // s3wp.26: persist a raw error envelope on transport/connection failures so
+    // the complete error metadata is archived even when client.callTool never ran.
+    const errorEnvelope = {
+      tool: definition.name,
+      server: definition.server,
+      operation,
+      error: message,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      errorStack: error instanceof Error ? error.stack : undefined
+    };
+    const rawArchive = await persistMcpRawResult(context.outputDir, errorEnvelope).catch(() => undefined);
     return {
       tool: definition.name,
       status: ToolResultStatus.REJECTED,
       server: definition.server,
       operation,
-      message
+      message,
+      ...rawArchive
     };
   }
 }
