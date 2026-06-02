@@ -99,13 +99,14 @@ import {
   ToolDefaults,
   LLMProviderName,
   OtelAttr,
-  PathContextDefaults
+  PathContextDefaults,
+  PromptProvenanceDefaults
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
-import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState } from './core/PiIntegration.js';
+import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -398,6 +399,9 @@ interface GateReadiness {
   writeSetReason?: string;
   transactionalValid: boolean | null;
   transactionalReason?: string;
+  /** Provenance dimension: false when provenance is missing or stale. */
+  provenanceValid: boolean;
+  provenanceReason?: string;
   blockingEvidence: string[];
 }
 
@@ -549,6 +553,86 @@ async function evaluateGateReadiness(
     );
   }
 
+  // ── 7. Prompt provenance ──────────────────────────────────────────────────
+  // Re-derive this run's prompt/config hashes and compare against the snapshot
+  // recorded at STATE_RUN_INITIALIZED to detect drift since run-start.
+  //
+  // Two distinct NOT-OK cases are handled with different policy:
+  //   STALE   — provenance was recorded at init AND a prompt/config hash has
+  //             since changed.  HARD-REJECT: the agent is completing from a
+  //             different prompt baseline than it started on.
+  //   MISSING — no provenance was recorded at all (not because resolution failed,
+  //             but because the init event is absent, which should not happen in
+  //             normal operation).  HARD-REJECT: we cannot verify the prompt
+  //             baseline at all.
+  //   RESOLUTION-FAILED — provenance resolution threw at init time (recorded via
+  //             `promptProvenanceResolutionFailed: true` on the init event).
+  //             WARN-ONLY: the agent should not be penalised for a harness-level
+  //             resolution problem; completion is allowed.
+  //
+  // Performance: eventsForBead loads the bead's full event history (O(n) in the
+  // number of events for this bead) to find the latest STATE_RUN_INITIALIZED.
+  // This is acceptable because: (a) the completion path is not on the hot turn
+  // loop — it fires once per run; (b) typical bead event counts are bounded by
+  // the number of actions + turns, not total project events.  A dedicated
+  // projection/index for "latest init event for bead+state" would reduce this
+  // to O(1) if the event store ever grows to support it.
+  //
+  // Local reason constants for the two distinct failure modes.
+  const REJECT_REASON_RESOLUTION_FAILED =
+    'Prompt provenance could not be resolved at run start (harness error; warn only — completion allowed)';
+
+  let provenanceValid = true;
+  let provenanceReason: string | undefined;
+
+  if (outcome === EventName.SUCCESS) {
+    const beadEvents = await services.eventStore.eventsForBead(activeRun.beadId);
+    const initEvent = [...beadEvents]
+      .reverse()
+      .find(e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === activeRun.stateId);
+
+    // If resolution failed at init, warn but do not block completion.
+    const resolutionFailed = initEvent?.data?.promptProvenanceResolutionFailed === true;
+    if (resolutionFailed) {
+      // Warn via provenanceReason but leave provenanceValid = true (allow completion).
+      provenanceReason = REJECT_REASON_RESOLUTION_FAILED;
+      // Do NOT push to blockingEvidence — this is a warn-only path.
+    } else {
+      const recorded = initEvent?.data?.promptProvenance as
+        | { entries: PromptProvenanceEntry[]; harnessConfigVersion?: string }
+        | undefined;
+
+      if (!recorded || !Array.isArray(recorded.entries) || recorded.entries.length === 0) {
+        // No provenance recorded and no resolution-failed marker → init event is
+        // missing or was never written.  Hard-reject.
+        provenanceValid = false;
+        provenanceReason = PromptProvenanceDefaults.REJECT_REASON_MISSING;
+        blockingEvidence.push(`${PromptProvenanceDefaults.REJECT_REASON_MISSING}.`);
+      } else {
+        // Check for stale file-backed entries (non-blocking and state-config entries
+        // are automatically excluded by detectStaleProvenanceEntries).
+        const staleIdentifiers: string[] = detectStaleProvenanceEntries(recorded.entries);
+
+        // Separately check the state-config-subtree hash: re-derive the current
+        // raw-YAML subtree hash and compare with the init-time hash.
+        const stateConfigEntry = recorded.entries.find(e => e.kind === 'stateConfig');
+        if (stateConfigEntry) {
+          const fresh = computeCurrentStateConfigHash(services.configLoader.getConfigPath(), activeRun.stateId);
+          if (fresh.sha256 !== stateConfigEntry.sha256) {
+            staleIdentifiers.push(stateConfigEntry.path);
+          }
+        }
+
+        if (staleIdentifiers.length > 0) {
+          provenanceValid = false;
+          const fileList = staleIdentifiers.map(p => `\`${p}\``).join(', ');
+          provenanceReason = `${PromptProvenanceDefaults.REJECT_REASON_STALE}: ${fileList}`;
+          blockingEvidence.push(`${provenanceReason}.`);
+        }
+      }
+    }
+  }
+
   return {
     ready: blockingEvidence.length === 0,
     transitionValid,
@@ -563,6 +647,8 @@ async function evaluateGateReadiness(
     writeSetReason,
     transactionalValid,
     transactionalReason,
+    provenanceValid,
+    provenanceReason,
     blockingEvidence
   };
 }
@@ -1931,6 +2017,38 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
 
   await progressManager?.ensureExists(beadId, `Started ${stateId}/${action.id}.`);
   await worklogManager.appendEntry(beadId, stateId, 'State started', `Action: ${action.id}`);
+
+  // Resolve prompt provenance: file-level path + SHA-256 for each source prompt/config
+  // file at run-start time. The completion gate re-hashes these files to detect drift.
+  //
+  // Resolution is throw-safe: resolvePromptProvenance guards each entry individually
+  // so a bad compat path or missing skill directory degrades to a missing entry rather
+  // than aborting the whole resolution.  We additionally guard the outer call so that
+  // any unforeseen error never breaks run initialization.
+  //
+  // If resolution fails (resolutionFailed: true or caught exception), we record a
+  // `promptProvenanceResolutionFailed: true` marker on the event so the completion gate
+  // can distinguish "resolution failed at init (warn, do NOT hard-block)" from
+  // "provenance recorded and a prompt file later drifted (block)".  Blocking a run
+  // whose provenance could not be resolved at init would punish the agent for a
+  // harness-level problem, so we deliberately do not hard-reject in that case.
+  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+  const configPath = services.configLoader.getConfigPath();
+  let promptProvenance: { entries: PromptProvenanceEntry[]; harnessConfigVersion: string | undefined } | undefined;
+  let promptProvenanceResolutionFailed = false;
+  try {
+    promptProvenance = resolvePromptProvenance(config, projectRoot, stateId, configPath);
+    if ((promptProvenance as any).resolutionFailed) {
+      promptProvenanceResolutionFailed = true;
+      Logger.warn(Component.ORR_ELSE, 'Prompt provenance resolution reported failure; provenance gate will warn-only for this run.');
+    }
+  } catch (err) {
+    // resolvePromptProvenance should not throw (all internal errors are caught),
+    // but guard defensively in case something slips through.
+    promptProvenanceResolutionFailed = true;
+    Logger.warn(Component.ORR_ELSE, `Prompt provenance resolution threw unexpectedly: ${String(err)}. Gate will warn-only for this run.`);
+  }
+
   await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
     beadId,
     stateId,
@@ -1938,7 +2056,24 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     actionKey: actionCompletionKey(config, stateId, action.id),
     workflowVersion: config.settings.workflowVersion,
     worktreePath,
-    requiredChecklistItems: requiredItems.map(item => item.text)
+    requiredChecklistItems: requiredItems.map(item => item.text),
+    // Prompt provenance: complementary to STATE_PROMPT_ASSEMBLED (which records an
+    // assembled-prompt digest). This records the SOURCE file paths + hashes.
+    promptProvenance: promptProvenance
+      ? {
+          entries: promptProvenance.entries,
+          harnessConfigVersion: promptProvenance.harnessConfigVersion
+        }
+      : undefined,
+    // Set when provenance resolution itself failed at init time — signals the
+    // completion gate to warn only rather than hard-reject (the agent should not
+    // be penalised for a harness resolution error).
+    promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined,
+    // Placeholder for project-level workflow_parity result. The parity tool is
+    // a project-level semantic check whose result is LINKED here when available;
+    // it is NOT replaced by provenance (they are complementary). Stored as null
+    // (rather than undefined) so the field survives JSON serialization.
+    workflowParityResult: null
   });
 }
 
@@ -3164,6 +3299,10 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
           if (!gateReadiness.writeSetValid) {
             return `REJECTED: Plan write-set preflight failed.\n${gateReadiness.writeSetReason}\nRevise the plan contract before signaling SUCCESS.`;
+          }
+
+          if (!gateReadiness.provenanceValid) {
+            return `REJECTED: ${gateReadiness.provenanceReason}. Re-run the harness so a fresh run is initialized with current prompt/config hashes before signaling SUCCESS.`;
           }
 
           // For the transactional state gate at signal time, call validateSuccess

@@ -279,7 +279,16 @@ export const TmuxFormat = {
   PANE_CURRENT_COMMAND: '#{pane_current_command}',
   PANE_START_COMMAND: '#{pane_start_command}',
   PANE_CURRENT_PATH: '#{pane_current_path}',
-  PANE_DEAD: '#{pane_dead}'
+  PANE_DEAD: '#{pane_dead}',
+  /**
+   * Expands to the value of the @orr_worker pane user-option, which stores the
+   * durable Orr Else worker identity string set at spawn time.  Pi cannot clobber
+   * this because Pi only emits terminal escape sequences (which update pane_title),
+   * not tmux set-option calls.  Including this field in list-panes output allows
+   * isTeammatePane() and beadIdFromPane() to recover identity even when Pi has
+   * overwritten the visible pane title.
+   */
+  PANE_ORR_WORKER: '#{@orr_worker}'
 } as const;
 
 export const TmuxCommand = {
@@ -292,17 +301,39 @@ export const TmuxCommand = {
   NEW_WINDOW: 'new-window',
   SELECT_LAYOUT: 'select-layout',
   SELECT_PANE: 'select-pane',
+  SET_OPTION: 'set-option',
   SET_WINDOW_OPTION: 'set-window-option',
   SPLIT_WINDOW: 'split-window'
 } as const;
 
 export const TmuxOption = {
-  REMAIN_ON_EXIT: 'remain-on-exit'
+  REMAIN_ON_EXIT: 'remain-on-exit',
+  /**
+   * Pane user-option that stores the Orr Else worker identity string.
+   * Set at spawn time and never modified by Pi, so it survives Pi overwriting
+   * the visible pane title (pane_title / #{pane_title}).
+   * Read by pane-border-format to provide durable operator observability.
+   */
+  ORR_WORKER_PANE_OPTION: '@orr_worker',
+  /**
+   * tmux window/pane option controlling the format of the pane border status bar.
+   * Set per-pane (-p) to display the ORR_WORKER_PANE_OPTION value for each pane.
+   */
+  PANE_BORDER_FORMAT: 'pane-border-format',
+  /**
+   * tmux window option enabling the pane border status bar.
+   * When set to 'top', a status line appears above each pane showing the
+   * pane-border-format string. Pi cannot overwrite this because it only
+   * emits terminal escape sequences that update pane_title, not tmux options.
+   */
+  PANE_BORDER_STATUS: 'pane-border-status'
 } as const;
 
 export const TmuxOptionValue = {
   OFF: 'off',
-  ON: 'on'
+  ON: 'on',
+  /** Enables pane border status lines drawn above each pane. */
+  PANE_BORDER_STATUS_TOP: 'top'
 } as const;
 
 export const TeammatePaneCleanupReason = {
@@ -1186,4 +1217,33 @@ export const Defaults = {
   AGENT_PANE_PREFIX: 'orr-else-agent:',
   NODE_PROCESS_COMMAND: 'node',
   PROJECT_EXTENSION_PATH: '.pi/extensions/orr-else.ts'
+} as const;
+
+/**
+ * Kinds of prompt/config files tracked in run provenance.
+ * Each entry in a PromptProvenanceRecord corresponds to one of these kinds.
+ */
+export enum PromptProvenanceKind {
+  GOAL_PROMPT = 'goalPrompt',
+  STATE_PROMPT = 'statePrompt',
+  COMPATIBILITY_PROMPT = 'compatibilityPrompt',
+  SKILL_PROMPT = 'skillPrompt',
+  CUSTOM_AGENT_PROMPT = 'customAgentPrompt',
+  HARNESS_CONFIG = 'harnessConfig'
+}
+
+/**
+ * Named constants for the prompt provenance subsystem.
+ */
+export const PromptProvenanceDefaults = {
+  /** Hash algorithm used for all provenance sha256 entries. */
+  HASH_ALGORITHM: 'sha256',
+  /** Encoding used when producing the hex digest string. */
+  HASH_ENCODING: 'hex' as const,
+  /** Placeholder hash emitted when a referenced file is missing from disk. */
+  MISSING_HASH: '',
+  /** Rejection reason prefix for a missing provenance record. */
+  REJECT_REASON_MISSING: 'Prompt provenance was never recorded for this run',
+  /** Rejection reason prefix for a stale provenance entry (hash mismatch or file now missing). */
+  REJECT_REASON_STALE: 'Prompt provenance is stale — prompt/config file changed since run started',
 } as const;
