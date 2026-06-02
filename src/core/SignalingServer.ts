@@ -21,6 +21,12 @@ type AsyncRoute = (req: Request, res: Response) => Promise<void> | void;
 export interface SignalingServerOptions {
   port?: number;
   runtimeEnvironment?: RuntimeEnvironment;
+  /**
+   * Custom event type names declared in `statechart.customEvents` of the
+   * harness config.  When provided, validateTeammateEvent will accept these
+   * names in addition to the built-in TeammateEventType enum values.
+   */
+  allowedCustomEvents?: readonly string[];
 }
 
 function asyncRoute(route: AsyncRoute) {
@@ -51,6 +57,7 @@ export class SignalingServer {
   private readonly heartbeatDetails = new Map<string, HeartbeatSnapshot>();
   private readonly lastRecordedHeartbeatMs = new Map<string, number>();
   private readonly port: number;
+  private readonly allowedCustomEvents: ReadonlySet<string>;
 
   constructor(
     private readonly onSignal: SignalHandler,
@@ -59,6 +66,10 @@ export class SignalingServer {
     portOrOptions: number | RuntimeEnvironment | SignalingServerOptions = {}
   ) {
     this.port = resolvePort(portOrOptions);
+    const customEvents = typeof portOrOptions === 'object' && !isRuntimeEnvironment(portOrOptions)
+      ? (portOrOptions as SignalingServerOptions).allowedCustomEvents
+      : undefined;
+    this.allowedCustomEvents = new Set(customEvents ?? []);
   }
 
   public async start(): Promise<number> {
@@ -77,7 +88,7 @@ export class SignalingServer {
       });
 
       app.post([ApiPath.SIGNAL, ApiPath.SIGNALS, ApiPath.EVENTS], asyncRoute(async (req, res) => {
-        const validation = validateTeammateEvent(req.body || {});
+        const validation = validateTeammateEvent(req.body || {}, this.allowedCustomEvents);
         if (!validation.ok || !validation.event) {
           Logger.warn(Component.SIGNALING, 'Invalid teammate event received', { error: validation.error, body: req.body });
           res.status(HttpStatus.BAD_REQUEST).json({ error: validation.error || 'invalid teammate event' });

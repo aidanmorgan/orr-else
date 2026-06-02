@@ -141,4 +141,93 @@ describe('TeammateEvents', () => {
 
     expect(applied?.type).toBe(DomainEventName.STATE_TRANSITION_APPLIED);
   });
+
+  describe('custom event taxonomy (yaml-event-taxonomy)', () => {
+    function customEvent(type: string, overrides: Record<string, unknown> = {}) {
+      const base = {
+        type,
+        beadId: 'pi-experiment-proof',
+        workerId: 'worker-1',
+        stateId: 'Implementation',
+        timestamp: 1_779_000_000_000
+      };
+      return {
+        ...base,
+        idempotencyKey: createTeammateEventIdempotencyKey(base),
+        ...overrides
+      };
+    }
+
+    it('accepts a declared custom event type when allowedCustomEvents includes it', () => {
+      const allowed = new Set(['DOMAIN_CHECK']);
+      const result = validateTeammateEvent(customEvent('DOMAIN_CHECK'), allowed);
+
+      expect(result.ok).toBe(true);
+      expect(result.event?.type).toBe('DOMAIN_CHECK');
+    });
+
+    it('rejects an undeclared custom event type when allowedCustomEvents is empty', () => {
+      const result = validateTeammateEvent(customEvent('DOMAIN_CHECK'), new Set());
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Invalid event type');
+      expect(result.error).toContain('DOMAIN_CHECK');
+    });
+
+    it('rejects an unknown event type when no allowedCustomEvents set is provided (default / backward-compat)', () => {
+      // Omitting the second argument must behave byte-identically to today:
+      // only TeammateEventType enum values are accepted.
+      const result = validateTeammateEvent(customEvent('DOMAIN_CHECK'));
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Invalid event type');
+    });
+
+    it('accepts all existing TeammateEventType enum values regardless of allowedCustomEvents (backward-compat)', () => {
+      const enumTypes = [
+        'TEAMMATE_STARTED',
+        'STATE_STARTED',
+        'CHECKPOINT_ACCEPTED',
+        'STATE_TRANSITIONED',
+        'STATE_FAILED',
+        'STATE_BLOCKED',
+        'CONTEXT_RESTART_REQUESTED',
+        'HARNESS_RESTART_REQUESTED',
+        'HEARTBEAT',
+        'TEAMMATE_EXITED'
+      ];
+
+      for (const type of enumTypes) {
+        // Build a minimal valid body for each type.
+        const base = customEvent(type);
+        // Status-mutating types require extra fields; provide them for completeness.
+        const body = [
+          'STATE_TRANSITIONED', 'STATE_FAILED', 'STATE_BLOCKED',
+          'CONTEXT_RESTART_REQUESTED', 'HARNESS_RESTART_REQUESTED'
+        ].includes(type)
+          ? { ...base, actionId: 'act', transitionEvent: 'SUCCESS', summary: 's', evidence: 'e', handover: 'h' }
+          : type === 'CHECKPOINT_ACCEPTED'
+          ? { ...base, actionId: 'act' }
+          : base;
+
+        const result = validateTeammateEvent(body);
+        expect(result.ok, `Expected ok for enum type ${type}`).toBe(true);
+      }
+    });
+
+    it('accepts a custom event declared as a plain array (allowedCustomEvents?: readonly string[])', () => {
+      // The parameter also accepts arrays (e.g., direct config.statechart.customEvents).
+      const result = validateTeammateEvent(customEvent('PIPELINE_VERIFIED'), ['PIPELINE_VERIFIED', 'OTHER']);
+
+      expect(result.ok).toBe(true);
+      expect(result.event?.type).toBe('PIPELINE_VERIFIED');
+    });
+
+    it('rejects a custom event not in the declared array', () => {
+      const result = validateTeammateEvent(customEvent('ROGUE_EVENT'), ['PIPELINE_VERIFIED']);
+
+      expect(result.ok).toBe(false);
+      expect(result.error).toContain('Invalid event type');
+    });
+  });
 });

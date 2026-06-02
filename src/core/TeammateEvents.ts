@@ -277,7 +277,7 @@ function requireStrings(obj: Record<string, unknown>, keys: string[]): string | 
   return undefined;
 }
 
-export function validateTeammateEvent(value: unknown): TeammateEventValidationResult {
+export function validateTeammateEvent(value: unknown, allowedCustomEvents?: ReadonlySet<string> | readonly string[]): TeammateEventValidationResult {
   if (!value || typeof value !== 'object') return { ok: false, error: 'Event must be an object' };
 
   const obj = value as Record<string, unknown>;
@@ -285,7 +285,14 @@ export function validateTeammateEvent(value: unknown): TeammateEventValidationRe
   if (baseError) return { ok: false, error: baseError };
 
   if (typeof obj.timestamp !== 'number') return { ok: false, error: 'timestamp must be a number' };
-  if (!Object.values(TeammateEventType).includes(obj.type as TeammateEventType)) return { ok: false, error: `Invalid event type: ${obj.type}` };
+
+  const isKnownEnumType = Object.values(TeammateEventType).includes(obj.type as TeammateEventType);
+  const isCustomType = !isKnownEnumType && allowedCustomEvents !== undefined && (
+    Array.isArray(allowedCustomEvents)
+      ? (allowedCustomEvents as readonly string[]).includes(obj.type as string)
+      : (allowedCustomEvents as ReadonlySet<string>).has(obj.type as string)
+  );
+  if (!isKnownEnumType && !isCustomType) return { ok: false, error: `Invalid event type: ${obj.type}` };
 
   const type = obj.type as TeammateEventType;
 

@@ -1764,7 +1764,10 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     buildProvenance
   });
 
-  const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore);
+  const startupConfig = await services.configLoader.load();
+  const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore, {
+    allowedCustomEvents: startupConfig.statechart?.customEvents
+  });
   const apiPort = await server.start();
   const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
   await services.eventStore.record(DomainEventName.HARNESS_API_BOUND, {

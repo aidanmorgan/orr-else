@@ -419,7 +419,22 @@ export enum ApiPath {
 }
 
 /**
- * Teammate Event Types (Signals)
+ * Immutable generic framework lifecycle event taxonomy.
+ *
+ * These values form the GENERIC CORE contract for teammate signals — they map
+ * to well-known framework semantics and are processed by the coordinator
+ * without any configuration.  Do NOT add domain-specific event names here;
+ * use `statechart.customEvents` in harness.yaml instead.
+ *
+ * Categories:
+ *   Worker lifecycle  — TEAMMATE_STARTED, TEAMMATE_EXITED
+ *   State entry/exit  — STATE_STARTED
+ *   Checkpoint        — CHECKPOINT_ACCEPTED
+ *   Transition        — STATE_TRANSITIONED
+ *   Terminal failed   — STATE_FAILED
+ *   Terminal blocked  — STATE_BLOCKED
+ *   Restart signals   — CONTEXT_RESTART_REQUESTED, HARNESS_RESTART_REQUESTED
+ *   Heartbeat         — HEARTBEAT
  */
 export enum TeammateEventType {
   TEAMMATE_STARTED = 'TEAMMATE_STARTED',

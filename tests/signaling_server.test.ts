@@ -231,4 +231,97 @@ states:
       server.stop();
     }
   });
+
+  describe('custom event taxonomy via config.statechart.customEvents', () => {
+    function customEventBody(type: string, overrides: Record<string, unknown> = {}) {
+      const base = {
+        type,
+        beadId: 'pi-experiment-proof',
+        workerId: 'worker-1',
+        stateId: 'Done',
+        timestamp: Date.now()
+      };
+      return {
+        ...base,
+        idempotencyKey: createTeammateEventIdempotencyKey(base),
+        ...overrides
+      };
+    }
+
+    it('accepts a custom event type when allowedCustomEvents includes it', async () => {
+      const events: any[] = [];
+      // Simulate config.statechart.customEvents = ['DOMAIN_CHECK']
+      const server = new SignalingServer(event => {
+        events.push(event);
+      }, observability, eventStore, {
+        port: 39600 + (process.pid % 1000),
+        allowedCustomEvents: ['DOMAIN_CHECK']
+      });
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(customEventBody('DOMAIN_CHECK'))
+        });
+
+        expect(response.ok).toBe(true);
+        await waitFor(() => expect(events).toHaveLength(1));
+        expect(events[0].type).toBe('DOMAIN_CHECK');
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('rejects an undeclared custom event type when no allowedCustomEvents are configured', async () => {
+      const events: any[] = [];
+      // No allowedCustomEvents — mirrors a config without statechart.customEvents
+      const server = new SignalingServer(event => {
+        events.push(event);
+      }, observability, eventStore, 39700 + (process.pid % 1000));
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(customEventBody('DOMAIN_CHECK'))
+        });
+
+        expect(response.status).toBe(400);
+        const body = await response.json() as { error?: string };
+        expect(body.error).toContain('Invalid event type');
+        expect(events).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+
+    it('rejects a custom event not present in the allowedCustomEvents list', async () => {
+      const events: any[] = [];
+      const server = new SignalingServer(event => {
+        events.push(event);
+      }, observability, eventStore, {
+        port: 39800 + (process.pid % 1000),
+        allowedCustomEvents: ['PIPELINE_VERIFIED']
+      });
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(customEventBody('ROGUE_EVENT'))
+        });
+
+        expect(response.status).toBe(400);
+        const body = await response.json() as { error?: string };
+        expect(body.error).toContain('Invalid event type');
+        expect(events).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+  });
 });
