@@ -6,6 +6,26 @@ import { EventStore } from '../src/core/EventStore.js';
 import type { Observability } from '../src/core/Observability.js';
 import { App, BeadsDefaults, DomainEventName, SpanName, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
 
+// --- fs/promises mock ---
+// BD_EXPORT_JSONL writes to a file and reads it back to compute count + checksum.
+// Tests stub mkdir and readFile — all other fs/promises exports remain real so
+// BeadsClient's lock operations (open, etc.) continue to work.
+const fsMock = vi.hoisted(() => ({
+  mkdir: vi.fn(async () => undefined),
+  readFile: vi.fn(async (_path: string, _enc: string) => '{"id":"bd-1","title":"Exported"}\n'),
+  writeFile: vi.fn(async () => undefined)
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    mkdir: fsMock.mkdir,
+    readFile: fsMock.readFile,
+    writeFile: fsMock.writeFile
+  };
+});
+
 const execaMock = vi.hoisted(() => {
   function bdOutput(args: string[], options: any) {
     expect(options.maxBuffer).toBeGreaterThan(1024 * 1024);
@@ -16,8 +36,8 @@ const execaMock = vi.hoisted(() => {
    Assignee: Aidan Morgan
 `;
     if (args.includes('list')) return '○ bd-1 [● P1] [task] @Aidan Morgan - Ready\n';
-    if (args.includes('export') && args.includes('--all')) return `${'x'.repeat(210000)}\n`;
-    if (args.includes('export')) return '{"id":"bd-1","title":"Exported"}\n';
+    if (args.includes('export') && args.includes('--all')) return '';
+    if (args.includes('export')) return '';
     if (args.includes('import')) {
       expect(options.input).toBe('{"title":"Imported"}\n');
       return '{"created":1,"updated":0}';
@@ -52,25 +72,62 @@ describe('Beads JSONL compatibility tools', () => {
   beforeEach(() => {
     bdPlugin = createBdPlugin(new EventStore(new ConfigLoader()));
     vi.mocked(execa).mockClear();
+    fsMock.mkdir.mockReset().mockResolvedValue(undefined as never);
+    fsMock.readFile.mockReset().mockResolvedValue('{"id":"bd-1","title":"Exported"}\n' as never);
+    fsMock.writeFile.mockReset().mockResolvedValue(undefined as never);
   });
 
-  it('exports JSONL without adding JSON output mode', async () => {
-    const result = await tool('bd_export_jsonl').execute({ includeMemories: true });
-    expect(result).toBe('{"id":"bd-1","title":"Exported"}');
+  it('exports JSONL to a file and returns path + record count + checksum (no inline content)', async () => {
+    const result = await tool('bd_export_jsonl').execute({ includeMemories: true }) as any;
+
+    // Minimal schema: path + recordCount + sha256 — never raw JSONL content.
+    expect(typeof result.outputPath).toBe('string');
+    expect(result.outputPath).toMatch(/bd-export-\d+\.jsonl$/);
+    expect(result.recordCount).toBe(1);
+    expect(typeof result.sha256).toBe('string');
+    expect(result.sha256.length).toBeGreaterThan(0);
+    // No inline JSONL blob, no preview, no byte-cap fields.
+    expect(result.message).toBeUndefined();
+    expect(result.preview).toBeUndefined();
+    expect(result.bytes).toBeUndefined();
 
     const call = vi.mocked(execa).mock.calls[0];
     expect(call[0]).toBe('bd');
     expect(call[1]).toContain('export');
     expect(call[1]).toContain('--include-memories');
     expect(call[1]).not.toContain('--json');
+    // Always passes --output (writes to file).
+    expect(call[1]).toContain('--output');
   });
 
-  it('bounds large inline JSONL exports and asks callers to use outputPath', async () => {
-    const result = await tool('bd_export_jsonl').execute({ all: true });
+  it('uses caller-supplied outputPath when provided', async () => {
+    const callerPath = '/tmp/my-export.jsonl';
+    const result = await tool('bd_export_jsonl').execute({ outputPath: callerPath }) as any;
 
-    expect(result.message).toContain('too large to return inline');
-    expect(result.bytes).toBe(210000);
-    expect(result.preview.length).toBe(4096);
+    expect(result.outputPath).toBe(callerPath);
+    expect(result.recordCount).toBe(1);
+    expect(typeof result.sha256).toBe('string');
+
+    const call = vi.mocked(execa).mock.calls[0];
+    expect(call[1]).toContain('--output');
+    expect(call[1]).toContain(callerPath);
+  });
+
+  it('exports with --all flag and returns compact schema (no byte-cap or preview fields)', async () => {
+    fsMock.readFile.mockResolvedValue('{"id":"bd-1"}\n{"id":"bd-2"}\n{"id":"bd-3"}\n' as never);
+    const result = await tool('bd_export_jsonl').execute({ all: true }) as any;
+
+    expect(result.recordCount).toBe(3);
+    expect(typeof result.outputPath).toBe('string');
+    expect(typeof result.sha256).toBe('string');
+    // No byte-cap / preview / truncated fields.
+    expect(result.message).toBeUndefined();
+    expect(result.preview).toBeUndefined();
+    expect(result.bytes).toBeUndefined();
+    expect(result.truncated).toBeUndefined();
+
+    const call = vi.mocked(execa).mock.calls[0];
+    expect(call[1]).toContain('--all');
   });
 
   it('imports JSONL through stdin with bd import upsert semantics', async () => {
@@ -522,7 +579,7 @@ describe('Beads JSONL compatibility tools', () => {
       if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
       if (args.includes('export')) {
         exportCallCount++;
-        return { stdout: `{"id":"bd-1","count":${exportCallCount}}`, stderr: '' };
+        return { stdout: '', stderr: '' };
       }
       return { stdout: '{}', stderr: '' };
     });
@@ -534,18 +591,21 @@ describe('Beads JSONL compatibility tools', () => {
 
     // Both calls must have triggered bd export (no caching).
     expect(exportCallCount).toBe(2);
-    // Results must differ (fresh from bd each time), proving no stale cache hit.
+    // Both return compact schema with the explicit output path.
     expect(result1.outputPath).toBe(outputPath);
     expect(result2.outputPath).toBe(outputPath);
+    // Compact schema: no inline content, no byte-cap fields.
+    expect(result1.message).toBeUndefined();
+    expect(result1.preview).toBeUndefined();
   });
 
-  it('(FIX-2) BD_EXPORT_JSONL inline (no outputPath) always runs bd export', async () => {
+  it('(FIX-2) BD_EXPORT_JSONL without outputPath always runs bd export (never cached)', async () => {
     let exportCallCount = 0;
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'bd') throw new Error(`unexpected binary: ${bin}`);
       if (args.includes('export')) {
         exportCallCount++;
-        return { stdout: `{"id":"bd-${exportCallCount}"}`, stderr: '' };
+        return { stdout: '', stderr: '' };
       }
       return { stdout: '{}', stderr: '' };
     });
@@ -553,10 +613,14 @@ describe('Beads JSONL compatibility tools', () => {
     const result1 = await tool('bd_export_jsonl').execute({}) as any;
     const result2 = await tool('bd_export_jsonl').execute({}) as any;
 
-    // Both calls must have triggered bd export.
+    // Both calls must have triggered bd export (no caching).
     expect(exportCallCount).toBe(2);
-    // The two inline results must differ (fresh bd output each time).
-    expect(result1).not.toBe(result2);
+    // Both return compact schema: path + recordCount + sha256 — never inline content.
+    expect(typeof result1.outputPath).toBe('string');
+    expect(typeof result2.outputPath).toBe('string');
+    expect(result1.message).toBeUndefined();
+    expect(result1.preview).toBeUndefined();
+    expect(result1.bytes).toBeUndefined();
   });
 
   // ---------------------------------------------------------------------------
