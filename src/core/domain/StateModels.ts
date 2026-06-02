@@ -194,7 +194,7 @@ export type ActionDefinition = TeammateAction;
 export interface SDLCState {
   id: string;
   identity: AgentIdentity;
-  baseInstructions: string;
+  baseInstructions?: string;
   harnessRestartPrompt?: string;
   contextRestartPrompt?: string;
   ruleCategories?: string[]; // Folders in .pi/rules to load

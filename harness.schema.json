@@ -523,7 +523,7 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["identity", "baseInstructions", "actions", "transitions"],
+        "required": ["identity", "actions", "transitions"],
         "additionalProperties": false,
         "properties": {
           "identity": {

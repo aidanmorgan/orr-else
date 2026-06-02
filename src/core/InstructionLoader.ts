@@ -46,7 +46,7 @@ export class InstructionLoader {
   constructor(private readonly projectRoot: string = process.cwd()) {}
 
   public loadBaseInstructions(state: SDLCState): string {
-    return state.baseInstructions;
+    return state.baseInstructions ?? '';
   }
 
   private markdownFiles(dir: string): string[] {
@@ -226,16 +226,18 @@ export class InstructionLoader {
       rules += `### COMPATIBILITY MODE FILES\n${compatibilityDocs.join('\n\n')}\n\n`;
     }
 
+    const baseInstructions = (state.baseInstructions ?? '').trim();
+    const baseInstructionsBlock = baseInstructions
+      ? `\nBASE INSTRUCTIONS:\n${baseInstructions}\n`
+      : '';
+
     return `
 ${state.identity.role.toUpperCase()} IDENTITY:
 ${state.identity.expertise}
 
 CONSTRAINTS:
 ${state.identity.constraints.map(c => `- ${c}`).join('\n')}
-
-BASE INSTRUCTIONS:
-${state.baseInstructions}
-
+${baseInstructionsBlock}
 ${rules}
 `.trim();
   }

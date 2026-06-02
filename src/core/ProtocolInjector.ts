@@ -52,9 +52,6 @@ ${mcpPolicy}
 - **Pre-Signal Gate Audit**: Call \`${BuiltInToolName.PRE_SIGNAL_AUDIT}\` BEFORE \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` or \`${BuiltInToolName.SIGNAL_COMPLETION}\` to confirm gate readiness. It returns required tools (with pass/fail/never_invoked state), terminal failure-limit state, missing checklist items, checkpoint status, and exact blocking evidence so you can address all blockers before attempting the terminal signal.
 - **Completion Gate**: \`${BuiltInToolName.SIGNAL_COMPLETION} SUCCESS\` is programmatically rejected until mandatory checklist items and required tools pass.
 - **No Shell Fallback**: Do not use \`${NativePiToolName.BASH}\` for \`pwd\`, \`ls\`, \`find\`, \`grep\`, \`wc\`, \`cmp\`, \`cp\`, \`git\`, Python snippets, or configured project-tool capability. Use native Pi tools, \`${BuiltInToolName.GET_ARTIFACT_PATHS}\`, \`${PluginToolName.BD_GET_STATE_CHART}\`, \`git_history\`, \`codemap\`, \`ast_grep\`, and the configured project tools. If no configured tool exists, record a blocker rather than improvising a shell command.
-
-#### PHASE INSTRUCTIONS:
-${state.baseInstructions}
 `.trim();
   }
 }
