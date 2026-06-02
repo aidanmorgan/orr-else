@@ -830,6 +830,156 @@ states:
 });
 
 // ---------------------------------------------------------------------------
+// teammatePlugin — no-cap minimal schema fixture (s3wp.27e)
+//
+// Verifies that the SPAWN_TEAMMATE tool result is always a compact structured
+// schema with no inline content, preview, or byte-cap fields, even when the
+// spawn targets a bead with many files in its worktree.
+// ---------------------------------------------------------------------------
+
+import { teammatePlugin } from '../src/plugins/teammates.js';
+import { PluginToolName } from '../src/constants/index.js';
+
+describe('teammatePlugin — no-cap minimal schema (s3wp.27e)', () => {
+  const root = path.join(os.tmpdir(), 'orr-else-teammate-nocap-test');
+  const worktreePath = path.join(root, 'worktrees', 'nocap-bead');
+  const configPath = path.join(root, 'harness.yaml');
+  const currentExtensionPath = path.join(root, 'orr-else-ext.ts');
+
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let observability: Observability;
+  let previousProjectRoot: string | undefined;
+
+  beforeEach(async () => {
+    fs.mkdirSync(path.join(root, 'state', 'logs'), { recursive: true });
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.writeFileSync(currentExtensionPath, 'export default {};\n');
+    previousProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    fs.writeFileSync(configPath, `
+settings:
+  maxConcurrentSlots: 6
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    actions: []
+    transitions: { SUCCESS: completed }
+`);
+    configLoader = new ConfigLoader(undefined, root);
+    configLoader.setConfigPath(configPath);
+    eventStore = new EventStore(configLoader, undefined, undefined, root);
+    observability = new Observability(configLoader, undefined, root);
+    await observability.initialize();
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '%55\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+  });
+
+  afterEach(() => {
+    observability.shutdown();
+    configLoader.reset();
+    if (previousProjectRoot === undefined) {
+      delete process.env[EnvVars.PROJECT_ROOT];
+    } else {
+      process.env[EnvVars.PROJECT_ROOT] = previousProjectRoot;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('SPAWN_TEAMMATE result returns only { success, paneId } with no inline content or preview fields', async () => {
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const plugin = teammatePlugin(factory);
+    const spawnTool = plugin.tools.find(tool => tool.name === PluginToolName.SPAWN_TEAMMATE)!;
+    expect(spawnTool).toBeDefined();
+
+    const result = await spawnTool.execute({
+      beadId: 'nocap-bead',
+      stateId: 'Planning',
+      worktreePath
+    }) as Record<string, unknown>;
+
+    expect(result.success).toBe(true);
+    expect(typeof result.paneId).toBe('string');
+
+    // Must NOT contain any inline content, preview, truncation, or byte-cap fields
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('diagnosticPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('stdoutTruncated');
+    expect(result).not.toHaveProperty('stderrTruncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+    expect(result).not.toHaveProperty('byteCap');
+    expect(result).not.toHaveProperty('outputLimit');
+
+    // Only allowed keys: success, paneId, optional error
+    const allowedKeys = new Set(['success', 'paneId', 'error']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+
+  it('SPAWN_TEAMMATE result on failure returns only { success, error } with no preview fields', async () => {
+    // Simulate no available slots by mocking with many active panes
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) {
+        // Return 6 active panes to fill all slots
+        const panes = Array.from({ length: 6 }, (_, i) =>
+          `%${i + 1}\tAgent:bead-${i}\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=bead-${i} pi\t${path.join(root, 'worktrees', `bead-${i}`)}\t0`
+        ).join('\n');
+        return { stdout: panes, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const plugin = teammatePlugin(factory);
+    const spawnTool = plugin.tools.find(tool => tool.name === PluginToolName.SPAWN_TEAMMATE)!;
+
+    const result = await spawnTool.execute({
+      beadId: 'nocap-bead',
+      stateId: 'Planning',
+      worktreePath
+    }) as Record<string, unknown>;
+
+    expect(result.success).toBe(false);
+    expect(typeof result.error).toBe('string');
+
+    // Must NOT contain any preview/truncation/cap fields
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+
+    // Only allowed keys: success, paneId (absent on failure), optional error
+    const allowedKeys = new Set(['success', 'paneId', 'error']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Pane observability — command construction, env propagation, round-trip
 // (pi-experiment-teammate-bootstrap-monitoring)
 // ---------------------------------------------------------------------------

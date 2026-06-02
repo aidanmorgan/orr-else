@@ -645,3 +645,123 @@ describe('git plugin — BEAD_MERGE_CLOSE span', () => {
     expect(result).toMatchObject({ success: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// git plugin — no-cap minimal schema fixture (s3wp.27e)
+//
+// Verifies that all git tool results are compact structured schemas with no
+// inline diffs, no preview/truncation/byte-cap fields, regardless of how many
+// files are changed or how large the repo diff is.
+// ---------------------------------------------------------------------------
+
+describe('git plugin — no-cap minimal schema (s3wp.27e)', () => {
+  let tempRoot: string;
+  let previousCwd: string;
+
+  beforeEach(() => {
+    previousCwd = process.cwd();
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-git-nocap-')));
+    makeRepo(tempRoot);
+    process.chdir(tempRoot);
+  });
+
+  afterEach(() => {
+    process.chdir(previousCwd);
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('merge result for large-diff operation returns only { success } with no inline content or preview fields', async () => {
+    // Create many files with large content to produce a large diff
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-large-diff');
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-large-diff', worktreePath, 'main']);
+
+    // Write 20 large files to simulate a large diff operation
+    for (let i = 0; i < 20; i++) {
+      const content = `File ${i}\n` + 'x'.repeat(2000) + '\n';
+      fs.writeFileSync(path.join(worktreePath, `large-file-${i}.txt`), content);
+    }
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot);
+    const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    const result = await mergeTool.execute({ beadId: 'bd-large-diff', message: 'Large diff merge' }) as Record<string, unknown>;
+
+    // Must succeed
+    expect(result.success).toBe(true);
+
+    // Must NOT contain any inline diff, preview, truncation, or byte-cap fields
+    expect(result).not.toHaveProperty('diff');
+    expect(result).not.toHaveProperty('diffPreview');
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('diagnosticPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('stdoutTruncated');
+    expect(result).not.toHaveProperty('stderrTruncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+    expect(result).not.toHaveProperty('byteCap');
+    expect(result).not.toHaveProperty('outputLimit');
+
+    // Only allowed keys: success and optional error
+    const allowedKeys = new Set(['success', 'error']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+
+  it('create_worktree result returns only { success, path } with no preview fields', async () => {
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot);
+    const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_WORKTREE)!;
+
+    const result = await createTool.execute({ beadId: 'bd-schema-check' }) as Record<string, unknown>;
+
+    expect(result.success).toBe(true);
+    expect(typeof result.path).toBe('string');
+
+    // No preview/truncation/cap fields
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('stdoutTruncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+
+    // Only allowed keys: success, path, optional error
+    const allowedKeys = new Set(['success', 'path', 'error']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+
+  it('remove_worktree result returns only { success } with no preview fields', async () => {
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-remove-check');
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-remove-check', worktreePath, 'main']);
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(eventStore, configLoader, undefined, tempRoot);
+    const removeTool = plugin.tools.find(tool => tool.name === PluginToolName.REMOVE_WORKTREE)!;
+
+    const result = await removeTool.execute({ beadId: 'bd-remove-check', force: true }) as Record<string, unknown>;
+
+    expect(result.success).toBe(true);
+
+    // No preview/truncation/cap fields
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+
+    // Only allowed keys: success, optional error
+    const allowedKeys = new Set(['success', 'error']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
+  });
+});

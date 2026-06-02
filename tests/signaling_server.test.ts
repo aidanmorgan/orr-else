@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,8 +7,12 @@ import { Observability } from '../src/core/Observability.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import { EnvVars } from '../src/constants/index.js';
+import { EnvVars, BuiltInToolName } from '../src/constants/index.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
+
+vi.mock('../src/core/HarnessApiClient.js', () => ({
+  postHarnessSignal: vi.fn().mockResolvedValue({ ok: true })
+}));
 
 function eventBody(overrides: Record<string, unknown> = {}) {
   const base = {
@@ -323,5 +327,65 @@ states:
         server.stop();
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// signalingPlugin — no-cap minimal schema fixture (s3wp.27e)
+//
+// Verifies that the SIGNAL_COMPLETION tool result is always a compact
+// structured schema with no inline content, preview, or byte-cap fields.
+// ---------------------------------------------------------------------------
+
+import { signalingPlugin } from '../src/plugins/signaling.js';
+import { postHarnessSignal } from '../src/core/HarnessApiClient.js';
+
+describe('signalingPlugin — no-cap minimal schema (s3wp.27e)', () => {
+  it('SIGNAL_COMPLETION result returns only { ok } with no preview/cap fields', async () => {
+    vi.mocked(postHarnessSignal).mockResolvedValue({ ok: true });
+
+    const tool = signalingPlugin.tools.find(t => t.name === BuiltInToolName.SIGNAL_COMPLETION)!;
+    expect(tool).toBeDefined();
+
+    const testEvent = {
+      type: 'STATE_TRANSITIONED' as const,
+      beadId: 'test-bead',
+      workerId: 'worker-1',
+      stateId: 'Planning',
+      timestamp: Date.now(),
+      actionId: 'test-action',
+      transitionEvent: 'SUCCESS',
+      summary: 'done',
+      evidence: 'evidence',
+      handover: 'handover',
+      idempotencyKey: 'test-key'
+    };
+
+    const result = await tool.execute(testEvent) as Record<string, unknown>;
+
+    // Must be a structured result, not null
+    expect(result).not.toBeNull();
+    expect(typeof result).toBe('object');
+
+    // The returned shape is { ok: boolean }
+    expect(result.ok).toBe(true);
+
+    // Must NOT contain any inline content, preview, truncation, or byte-cap fields
+    expect(result).not.toHaveProperty('outputPreview');
+    expect(result).not.toHaveProperty('resultPreview');
+    expect(result).not.toHaveProperty('diagnosticPreview');
+    expect(result).not.toHaveProperty('truncated');
+    expect(result).not.toHaveProperty('stdoutTruncated');
+    expect(result).not.toHaveProperty('stderrTruncated');
+    expect(result).not.toHaveProperty('outputArchive');
+    expect(result).not.toHaveProperty('structuredResult');
+    expect(result).not.toHaveProperty('byteCap');
+    expect(result).not.toHaveProperty('outputLimit');
+
+    // Only allowed key: ok
+    const allowedKeys = new Set(['ok']);
+    for (const key of Object.keys(result)) {
+      expect(allowedKeys).toContain(key);
+    }
   });
 });

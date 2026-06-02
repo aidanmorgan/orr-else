@@ -5,6 +5,13 @@ import { EventStore } from '../core/EventStore.js';
 import { DomainEventName, PluginToolName } from '../constants/index.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
+export interface CreatePluginResult {
+  success: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
+}
+
 export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
   return {
   name: 'meta-plugin-manager',
@@ -16,7 +23,7 @@ export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
         name: Type.String({ description: 'The name of the plugin file (e.g., custom-tool.ts)' }),
         content: Type.String({ description: 'The full TypeScript code for the plugin' })
       }),
-      execute: async (params: unknown) => {
+      execute: async (params: unknown): Promise<CreatePluginResult> => {
         const { name, content } = (params && typeof params === 'object' ? params : {}) as { name: string; content: string };
         try {
           const safeName = path.basename(name);
@@ -29,9 +36,9 @@ export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
             pluginName: safeName,
             path: pluginPath
           });
-          return `Plugin ${safeName} created successfully at ${pluginPath}. You may need to restart the harness to load it.`;
+          return { success: true, name: safeName, path: pluginPath };
         } catch (error) {
-          return `Error creating plugin: ${error}`;
+          return { success: false, error: String(error) };
         }
       }
     }
