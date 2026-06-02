@@ -678,7 +678,7 @@ describe('ArtifactQuery', () => {
     expect(resolution.missingArtifacts).not.toContain('requirementsAnalysis');
   });
 
-  it('(g) ArtifactPaths.resolve content preview still works correctly', async () => {
+  it('(g) ArtifactPaths.resolve returns deterministic metadata (bytes + sha256), not inlined content', async () => {
     const resolution = await artifactPaths.resolve({
       beadId: 'bd-1',
       stateId: 'RequirementsAnalysis',
@@ -686,8 +686,13 @@ describe('ArtifactQuery', () => {
       includeContent: true
     });
 
+    // Minimal schema: exists, bytes, sha256 — no inlined text
     expect(resolution.artifactContents.planContract.exists).toBe(true);
-    expect(resolution.artifactContents.planContract.text).toContain('writeSet');
+    expect(typeof resolution.artifactContents.planContract.bytes).toBe('number');
+    expect((resolution.artifactContents.planContract.bytes as number)).toBeGreaterThan(0);
+    expect(typeof resolution.artifactContents.planContract.sha256).toBe('string');
+    expect(resolution.artifactContents.planContract.text).toBeUndefined();
+    // Use query_artifact to read content
   });
 });
 

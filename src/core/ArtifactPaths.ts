@@ -1,18 +1,22 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { createHash } from 'node:crypto';
 import { ConfigLoader } from './ConfigLoader.js';
 import { resolveProjectFrom } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { ArtifactPathDefaults, EnvVars } from '../constants/index.js';
+import { EnvVars } from '../constants/index.js';
 
 export interface ArtifactPathContext {
   beadId: string;
   stateId?: string;
   actionId?: string;
   artifactId?: string;
+  /**
+   * When true (default), include deterministic file metadata (bytes, sha256) for existing
+   * artifacts. Content is never inlined — use query_artifact with a selector or projection to
+   * read artifact content.
+   */
   includeContent?: boolean;
-  maxInlineBytes?: number;
-  maxTotalInlineBytes?: number;
 }
 
 const DEFAULT_TEMPLATES: Record<string, string> = {};
@@ -23,14 +27,20 @@ const ArtifactPathResultKey = {
   CONTENTS: 'artifactContents'
 } as const;
 
+/**
+ * Deterministic file metadata for an artifact.
+ * Content is never inlined here — use query_artifact selectors to read content.
+ */
 export interface ArtifactContentPreview {
+  /** Resolved absolute path to the artifact. */
   path: string;
+  /** Whether the artifact exists on disk. */
   exists: boolean;
+  /** File size in bytes. Present when the artifact exists and is a regular file. */
   bytes?: number;
-  text?: string;
-  inlineBytes?: number;
-  truncated?: boolean;
-  previewOmitted?: string;
+  /** SHA-256 hex digest (first 16 hex chars) of the file. Present when the artifact exists and is a regular file. */
+  sha256?: string;
+  /** Error message if stat/hash failed. */
   error?: string;
 }
 
@@ -39,10 +49,6 @@ export interface ArtifactPathResolution {
   artifactExists: Record<string, boolean>;
   missingArtifacts: string[];
   artifactContents: Record<string, ArtifactContentPreview>;
-  nextAction?: string;
-  recovery?: string[];
-  truncatedArtifacts?: string[];
-  omittedArtifacts?: string[];
   [key: string]: string | Record<string, string> | Record<string, boolean> | string[] | Record<string, ArtifactContentPreview> | undefined;
 }
 
@@ -65,13 +71,7 @@ export class ArtifactPaths {
     const existence: Record<string, boolean> = {};
     const contents: Record<string, ArtifactContentPreview> = {};
     const missing: string[] = [];
-    const truncatedArtifacts: string[] = [];
-    const omittedArtifacts: string[] = [];
     const includeContent = context.includeContent ?? true;
-    const requestedMaxInlineBytes = Math.max(0, Math.floor(context.maxInlineBytes ?? ArtifactPathDefaults.DEFAULT_INLINE_BYTES));
-    const requestedMaxTotalInlineBytes = Math.max(0, Math.floor(context.maxTotalInlineBytes ?? ArtifactPathDefaults.DEFAULT_TOTAL_INLINE_BYTES));
-    const maxInlineBytes = Math.min(requestedMaxInlineBytes, ArtifactPathDefaults.MAX_INLINE_BYTES);
-    let remainingInlineBytes = Math.min(requestedMaxTotalInlineBytes, ArtifactPathDefaults.MAX_TOTAL_INLINE_BYTES);
     const templateEntries = Object.entries(templates);
     const selectedTemplateEntries = context.artifactId && Object.prototype.hasOwnProperty.call(templates, context.artifactId)
       ? [[context.artifactId, templates[context.artifactId]] as const]
@@ -93,30 +93,18 @@ export class ArtifactPaths {
       existence[name] = fs.existsSync(resolved);
       if (!existence[name]) missing.push(name);
       if (includeContent) {
-        contents[name] = this.readArtifactPreview(resolved, existence[name], Math.min(maxInlineBytes, remainingInlineBytes));
-        if (contents[name].truncated === true && contents[name].text !== undefined) {
-          truncatedArtifacts.push(name);
-        }
-        if (contents[name].previewOmitted === 'artifact inline content budget exhausted') {
-          omittedArtifacts.push(name);
-        }
-        remainingInlineBytes = Math.max(0, remainingInlineBytes - (contents[name].inlineBytes || 0));
+        contents[name] = this.readArtifactMetadata(resolved, existence[name]);
       } else {
         contents[name] = { path: resolved, exists: existence[name] };
       }
     }
-
-    const focusedFetchGuidance = this.focusedFetchGuidance([...truncatedArtifacts, ...omittedArtifacts]);
 
     return {
       ...paths,
       [ArtifactPathResultKey.PATHS]: paths,
       [ArtifactPathResultKey.EXISTS]: existence,
       [ArtifactPathResultKey.MISSING]: missing,
-      [ArtifactPathResultKey.CONTENTS]: contents,
-      ...(truncatedArtifacts.length > 0 ? { truncatedArtifacts } : {}),
-      ...(omittedArtifacts.length > 0 ? { omittedArtifacts } : {}),
-      ...focusedFetchGuidance
+      [ArtifactPathResultKey.CONTENTS]: contents
     };
   }
 
@@ -124,67 +112,23 @@ export class ArtifactPaths {
     return template.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_match, key) => values[key] || '');
   }
 
-  private readArtifactPreview(pathName: string, exists: boolean, maxInlineBytes: number): ArtifactContentPreview {
+  /**
+   * Read deterministic file metadata (size + sha256) for an artifact.
+   * Content is never inlined — callers should use query_artifact selectors.
+   */
+  private readArtifactMetadata(pathName: string, exists: boolean): ArtifactContentPreview {
     if (!exists) return { path: pathName, exists };
 
     try {
       const stat = fs.statSync(pathName);
       if (!stat.isFile()) {
-        return {
-          path: pathName,
-          exists,
-          bytes: stat.size,
-          inlineBytes: 0,
-          truncated: false,
-          previewOmitted: 'artifact path is not a regular file'
-        };
+        return { path: pathName, exists, bytes: stat.size };
       }
-      if (maxInlineBytes <= 0) {
-        return {
-          path: pathName,
-          exists,
-          bytes: stat.size,
-          inlineBytes: 0,
-          truncated: stat.size > 0,
-          previewOmitted: 'artifact inline content budget exhausted'
-        };
-      }
-
-      const bytesToRead = Math.min(stat.size, maxInlineBytes);
-      const file = fs.openSync(pathName, 'r');
-      try {
-        const buffer = Buffer.alloc(bytesToRead);
-        fs.readSync(file, buffer, 0, bytesToRead, 0);
-        return {
-          path: pathName,
-          exists,
-          bytes: stat.size,
-          text: buffer.toString('utf8'),
-          inlineBytes: bytesToRead,
-          truncated: stat.size > bytesToRead
-        };
-      } finally {
-        fs.closeSync(file);
-      }
+      const raw = fs.readFileSync(pathName);
+      const sha256 = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+      return { path: pathName, exists, bytes: stat.size, sha256 };
     } catch (error) {
-      return {
-        path: pathName,
-        exists,
-        error: String(error)
-      };
+      return { path: pathName, exists, error: String(error) };
     }
-  }
-
-  private focusedFetchGuidance(artifactIds: string[]): Pick<ArtifactPathResolution, 'nextAction' | 'recovery'> {
-    const uniqueArtifactIds = [...new Set(artifactIds)];
-    if (uniqueArtifactIds.length === 0) return {};
-
-    return {
-      nextAction: 'rerun_with_artifactId',
-      recovery: [
-        `Rerun get_artifact_paths with artifactId set to one of: ${uniqueArtifactIds.join(', ')}.`,
-        'Request only the needed artifact content and keep maxInlineBytes/maxTotalInlineBytes bounded to the evidence required.'
-      ]
-    };
   }
 }

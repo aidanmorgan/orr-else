@@ -4,7 +4,6 @@ import * as os from 'os';
 import * as path from 'path';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { ArtifactPathDefaults } from '../src/constants/index.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-artifact-paths-test');
 
@@ -68,60 +67,63 @@ states:
     expect(result.artifactExists.existingArtifact).toBe(true);
     expect(result.artifactExists.missingArtifact).toBe(false);
     expect(result.missingArtifacts).toContain('missingArtifact');
+    // Minimal metadata only — no inlined content, no byte-capped text
     expect(result.artifactContents.existingArtifact).toMatchObject({
       path: result.existingArtifact,
       exists: true,
-      bytes: 2,
-      text: '{}',
-      truncated: false
+      bytes: 2
     });
+    expect(result.artifactContents.existingArtifact.text).toBeUndefined();
+    expect(result.artifactContents.existingArtifact.truncated).toBeUndefined();
+    expect(typeof result.artifactContents.existingArtifact.sha256).toBe('string');
     expect(result.artifactContents.missingArtifact).toMatchObject({
       path: result.missingArtifact,
       exists: false
     });
-    expect(result.nextAction).toBeUndefined();
-    expect(result.recovery).toBeUndefined();
+    // No byte-budget guidance fields
+    expect((result as any).nextAction).toBeUndefined();
+    expect((result as any).recovery).toBeUndefined();
+    expect((result as any).truncatedArtifacts).toBeUndefined();
+    expect((result as any).omittedArtifacts).toBeUndefined();
   });
 
-  it('returns bounded previews without reading whole large artifacts into memory', async () => {
+  it('returns compact metadata (bytes + sha256) for any file size — no content inlining', async () => {
     writeFile('.pi/artifacts/bd-1/existing.json', 'abcdef');
 
     const result = await artifactPaths.resolve({
       beadId: 'bd-1',
-      stateId: 'RequirementsAnalysis',
-      maxInlineBytes: 3
+      stateId: 'RequirementsAnalysis'
     });
 
-    expect(result.artifactContents.existingArtifact).toMatchObject({
-      bytes: 6,
-      text: 'abc',
-      truncated: true
-    });
-    expect(result.truncatedArtifacts).toEqual(['existingArtifact']);
-    expect(result.nextAction).toBe('rerun_with_artifactId');
-    expect(result.recovery?.[0]).toContain('existingArtifact');
+    // Metadata only — no text inlining regardless of file size
+    expect(result.artifactContents.existingArtifact.bytes).toBe(6);
+    expect(result.artifactContents.existingArtifact.text).toBeUndefined();
+    expect(result.artifactContents.existingArtifact.truncated).toBeUndefined();
+    expect(result.artifactContents.existingArtifact.previewOmitted).toBeUndefined();
+    expect(typeof result.artifactContents.existingArtifact.sha256).toBe('string');
+    // No byte-budget guidance
+    expect((result as any).truncatedArtifacts).toBeUndefined();
+    expect((result as any).nextAction).toBeUndefined();
   });
 
-  it('guides focused retrieval when aggregate inline budget is exhausted', async () => {
+  it('returns metadata for multiple artifacts without any inline budget tracking', async () => {
     writeFile('.pi/artifacts/bd-1/existing.json', 'abcdef');
     writeFile('.pi/artifacts/bd-1/missing.json', 'uvwxyz');
 
     const result = await artifactPaths.resolve({
       beadId: 'bd-1',
-      stateId: 'RequirementsAnalysis',
-      maxInlineBytes: 6,
-      maxTotalInlineBytes: 6
+      stateId: 'RequirementsAnalysis'
     });
 
-    expect(result.artifactContents.existingArtifact.text).toBe('abcdef');
-    expect(result.artifactContents.missingArtifact).toMatchObject({
-      previewOmitted: 'artifact inline content budget exhausted',
-      inlineBytes: 0,
-      truncated: true
-    });
-    expect(result.omittedArtifacts).toEqual(['missingArtifact']);
-    expect(result.nextAction).toBe('rerun_with_artifactId');
-    expect(result.recovery?.[0]).toContain('missingArtifact');
+    // Both artifacts get metadata — no budget-exhausted omission
+    expect(result.artifactContents.existingArtifact.bytes).toBe(6);
+    expect(result.artifactContents.existingArtifact.text).toBeUndefined();
+    expect(result.artifactContents.missingArtifact.bytes).toBe(6);
+    expect(result.artifactContents.missingArtifact.text).toBeUndefined();
+    // No omittedArtifacts / truncatedArtifacts fields
+    expect((result as any).omittedArtifacts).toBeUndefined();
+    expect((result as any).truncatedArtifacts).toBeUndefined();
+    expect((result as any).nextAction).toBeUndefined();
   });
 
   it('returns only the requested configured artifact when artifactId matches a template key', async () => {
@@ -133,46 +135,48 @@ states:
 
     expect(Object.keys(result.artifactPaths)).toEqual(['existingArtifact']);
     expect(result.existingArtifact).toBe(path.join(root, '.pi/artifacts/bd-1/existing.json'));
+    // Metadata only — no text content inlining
     expect(result.artifactContents.existingArtifact).toMatchObject({
       path: result.existingArtifact,
       exists: true,
-      text: '{}'
+      bytes: 2
     });
+    expect(result.artifactContents.existingArtifact.text).toBeUndefined();
+    expect(typeof result.artifactContents.existingArtifact.sha256).toBe('string');
   });
 
-  it('honors larger bounded previews for a requested artifact without loading unrelated artifacts', async () => {
-    const largeContent = 'x'.repeat(5000);
-    writeFile('.pi/artifacts/bd-1/existing.json', largeContent);
-
-    const result = await artifactPaths.resolve({
-      beadId: 'bd-1',
-      stateId: 'RequirementsAnalysis',
-      artifactId: 'existingArtifact',
-      maxInlineBytes: 5000,
-      maxTotalInlineBytes: 5000
-    });
-
-    expect(result.artifactContents.existingArtifact.text).toHaveLength(5000);
-    expect(result.artifactContents.existingArtifact.truncated).toBe(false);
-    expect(result.artifactContents.missingArtifact).toBeUndefined();
-    expect(result.nextAction).toBeUndefined();
-  });
-
-  it('caps excessive inline preview requests to protect teammate context', async () => {
+  it('returns compact metadata for large artifacts without any content inlining', async () => {
     const largeContent = 'x'.repeat(70000);
     writeFile('.pi/artifacts/bd-1/existing.json', largeContent);
 
     const result = await artifactPaths.resolve({
       beadId: 'bd-1',
       stateId: 'RequirementsAnalysis',
-      artifactId: 'existingArtifact',
-      maxInlineBytes: 90000,
-      maxTotalInlineBytes: 90000
+      artifactId: 'existingArtifact'
     });
 
-    expect(result.artifactContents.existingArtifact.text).toHaveLength(ArtifactPathDefaults.MAX_INLINE_BYTES);
-    expect(result.artifactContents.existingArtifact.truncated).toBe(true);
-    expect(result.truncatedArtifacts).toEqual(['existingArtifact']);
-    expect(result.nextAction).toBe('rerun_with_artifactId');
+    // Bytes reflects true file size; no text, no truncated, no nextAction
+    expect(result.artifactContents.existingArtifact.bytes).toBe(70000);
+    expect(result.artifactContents.existingArtifact.text).toBeUndefined();
+    expect(result.artifactContents.existingArtifact.truncated).toBeUndefined();
+    expect(result.artifactContents.missingArtifact).toBeUndefined();
+    expect((result as any).truncatedArtifacts).toBeUndefined();
+    expect((result as any).nextAction).toBeUndefined();
+  });
+
+  it('includeContent:false returns only path and existence flags', async () => {
+    const result = await artifactPaths.resolve({
+      beadId: 'bd-1',
+      stateId: 'RequirementsAnalysis',
+      artifactId: 'existingArtifact',
+      includeContent: false
+    });
+
+    expect(result.artifactContents.existingArtifact).toEqual({
+      path: result.existingArtifact,
+      exists: true
+    });
+    expect(result.artifactContents.existingArtifact.bytes).toBeUndefined();
+    expect(result.artifactContents.existingArtifact.sha256).toBeUndefined();
   });
 });
