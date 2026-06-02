@@ -1,4 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
+import { createHash } from 'node:crypto';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { Bead, BeadId, BeadsIssueRecord, HarnessBeadMetadata } from '../types/index.js';
 import { Logger } from '../core/Logger.js';
@@ -17,6 +19,7 @@ import {
   EnvVars,
   Defaults,
   MUTATING_BEADS_COMMANDS,
+  OperationalArtifactPath,
   TeammateEventType,
   PluginToolName,
   StateChartToolDefaults,
@@ -34,6 +37,33 @@ function resolveProjectRoot(env: RuntimeEnvironment, injectedRoot: string): stri
 
 function issuesJsonlPath(root: string): string {
   return path.join(root, '.beads', 'issues.jsonl');
+}
+
+/**
+ * Resolve the output path for a bd_export_jsonl invocation.
+ *
+ * Priority:
+ *  1. Caller-supplied outputPath (explicit override).
+ *  2. PI_TOOL_OUTPUT_DIR env var (harness-injected per-invocation dir), read
+ *     via the injected RuntimeEnvironment.
+ *  3. Project-level .pi/tool-output/ directory (fallback).
+ *
+ * The filename is always bd-export-<timestamp>.jsonl to avoid collisions.
+ */
+async function resolveExportOutputPath(callerOutputPath: string | undefined, root: string, env: RuntimeEnvironment): Promise<string> {
+  if (callerOutputPath) return callerOutputPath;
+  const baseDir = env.env(EnvVars.TOOL_OUTPUT_DIR)
+    ?? path.join(root, OperationalArtifactPath.PI_TOOL_OUTPUT_DIR);
+  await mkdir(baseDir, { recursive: true });
+  const ts = Date.now();
+  return path.join(baseDir, `bd-export-${ts}.jsonl`);
+}
+
+/**
+ * Count JSONL records in a string (one non-empty line = one record).
+ */
+function countJsonlRecords(content: string): number {
+  return content.split('\n').filter(line => line.trim().length > 0).length;
 }
 
 interface HarnessHeartbeatParams {
@@ -622,30 +652,35 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       }),
       execute: async (params: unknown) => {
         const { outputPath, all, includeInfra, includeMemories, scrub } = (params && typeof params === 'object' ? params : {}) as { outputPath?: string; all?: boolean; includeInfra?: boolean; includeMemories?: boolean; scrub?: boolean };
-        const args = ['export'];
-        if (outputPath) args.push('--output', outputPath);
+
+        // Resolve the output file path — always write to a file; never return
+        // inline JSONL content (per raw-output-contract.md, no byte-cap inline).
+        const resolvedOutputPath = await resolveExportOutputPath(outputPath, root, env);
+
+        const args = ['export', '--output', resolvedOutputPath];
         if (all) args.push('--all');
         if (includeInfra) args.push('--include-infra');
         if (includeMemories) args.push('--include-memories');
         if (scrub) args.push('--scrub');
 
-        // FIX-2: bd export writes a file (when --output is given) and must ALWAYS
-        // run — route through client.mutate() so it is never served from the read
-        // cache and so it serializes with other mutations.  The internal
-        // exportJsonlAfterMutation already uses mutate(); this aligns the
-        // user-facing export tool with the same guarantee.
+        // FIX-2: bd export writes a file and must ALWAYS run — route through
+        // client.mutate() so it is never served from the read cache and so it
+        // serializes with other mutations.
         const finalArgs = ['-C', root, ...args];
-        const { stdout } = await client.mutate(finalArgs, { root });
-        const output = stdout.trim();
-        return outputPath
-          ? { outputPath, message: output || `Exported Beads JSONL to ${outputPath}.` }
-          : output.length > BeadsDefaults.INLINE_JSONL_EXPORT_PREVIEW_BYTES
-            ? {
-              message: `Beads export is ${output.length} bytes, which is too large to return inline. Re-run bd_export_jsonl with outputPath, or use bd_get_bead/bd_list for targeted reads.`,
-              bytes: output.length,
-              preview: output.slice(0, BeadsDefaults.INLINE_JSONL_EXPORT_PREVIEW_BYTES)
-            }
-          : output;
+        await client.mutate(finalArgs, { root });
+
+        // Read the written file to compute count and checksum.
+        let recordCount = 0;
+        let sha256 = '';
+        try {
+          const content = await readFile(resolvedOutputPath, 'utf8');
+          recordCount = countJsonlRecords(content);
+          sha256 = createHash('sha256').update(content).digest('hex');
+        } catch {
+          // File may not exist if bd export produced no output.
+        }
+
+        return { outputPath: resolvedOutputPath, recordCount, sha256 };
       }
     },
     {
@@ -669,7 +704,18 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         if (dryRun) args.push('--dry-run');
         if (dedup) args.push('--dedup');
 
-        return await runBd(client, eventStore, args, { input: jsonl, env, root });
+        const raw = await runBd(client, eventStore, args, { input: jsonl, env, root });
+        // Return structured import counts (minimal schema).
+        // bd import returns JSON with created/updated/skipped counts.
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          const { created, updated, skipped } = raw as Record<string, unknown>;
+          return {
+            created: typeof created === 'number' ? created : 0,
+            updated: typeof updated === 'number' ? updated : 0,
+            ...(typeof skipped === 'number' ? { skipped } : {})
+          };
+        }
+        return raw;
       }
     },
     {
@@ -778,13 +824,24 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
           restartFromState: restartRequested ? bead.restartFromState : undefined,
           restartTargetState: restartRequested ? bead.restartTargetState : undefined
         });
-        const result = await normalizeIssue(eventStore, await getIssue(client, eventStore, id, env, root));
 
         if (ui?.hasUI) {
           ui.ui?.notify(`Claimed Bead ${id}`, 'info');
           ui.ui?.setWorkingMessage(undefined);
         }
-        return result;
+        // Minimal ack — full record available via bd_get_bead / bd_get_state_chart.
+        return {
+          id,
+          status: bead.status,
+          lease,
+          ...(restartRequested ? {
+            restartRequested,
+            restartKind: bead.restartKind,
+            restartEvent: bead.restartEvent,
+            restartFromState: bead.restartFromState,
+            restartTargetState: bead.restartTargetState
+          } : {})
+        };
       }
     },
     {
@@ -811,8 +868,8 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
           await runBd(client, eventStore, ['update', id, '--status', BeadsIssueStatus.OPEN], { env, root });
         }
         await eventStore.record(DomainEventName.BEAD_RELEASED, { beadId: id });
-        const result = await normalizeIssue(eventStore, await getIssue(client, eventStore, id, env, root));
-        return result;
+        // Minimal ack — full record available via bd_get_bead / bd_get_state_chart.
+        return { id, status: BeadStatus.READY };
       }
     },
     {
@@ -842,7 +899,9 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
             `Runtime statechart state (e.g. "Planning") must NOT be written to Beads — it lives only in the event store.`
           );
         }
-        return updateIssueStatus(client, eventStore, id, status as BeadStatus, notes, env, root);
+        const bead = await updateIssueStatus(client, eventStore, id, status as BeadStatus, notes, env, root);
+        // Minimal ack — full record available via bd_get_bead / bd_get_state_chart.
+        return { id, status: bead?.status ?? status };
       }
     },
     {
@@ -870,7 +929,9 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
           ...event,
           idempotencyKey: createTeammateEventIdempotencyKey(event)
         };
-        return await postHarnessSignal(signal);
+        await postHarnessSignal(signal);
+        // Minimal ack.
+        return { workerId: params.workerId, beadId: params.beadId, accepted: true };
       }
     },
     {
