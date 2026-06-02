@@ -562,7 +562,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       description: 'List Beads via `bd list`. Returns compact records by default; use status for native Beads statuses and stateId for Orr Else statechart states.',
       parameters: Type.Object({
         status: Type.Optional(Type.String({ description: 'Optional native Beads status filter: open, in_progress, blocked, deferred, closed, or done. Statechart states are treated as stateId for compatibility.' })),
-        stateId: Type.Optional(Type.String({ description: 'Optional Orr Else statechart state filter, for example RequirementsAnalysis or Planning.' })),
+        stateId: Type.Optional(Type.String({ description: 'Optional Orr Else statechart state filter. Accepts any state name declared in harness.yaml (e.g. RequirementsAnalysis — illustrative only; actual names come from your config).' })),
         limit: Type.Optional(Type.Number({ description: `Maximum compact records to return. Defaults to ${BeadsDefaults.LIST_DEFAULT_LIMIT}.` })),
         includeProjection: Type.Optional(Type.Boolean({ description: 'Include Orr Else event-store projection metadata in native status records.' })),
         includeNotesPreview: Type.Optional(Type.Boolean({ description: 'Include a short notes preview. Full notes require bd_get_bead.' }))

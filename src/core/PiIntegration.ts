@@ -576,7 +576,7 @@ export function detectStaleProvenanceEntries(entries: PromptProvenanceEntry[]): 
  * @param stateId     The state whose config subtree to hash.
  *
  * Returns `{ sha256, identifier }` where `identifier` is the logical path
- * key used in the provenance entry (e.g. `stateConfig:Planning`).
+ * key used in the provenance entry (e.g. `stateConfig:<stateId>` where stateId comes from harness.yaml config, not any built-in name).
  */
 export function computeCurrentStateConfigHash(
   configPath: string,

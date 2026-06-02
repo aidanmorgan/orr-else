@@ -42,7 +42,7 @@ export interface StableBootstrapInputs {
   projectRoot: string;
   /** Opaque identity string for the workflow/harness config (e.g. configPath). */
   configIdentity: string;
-  /** The SDLC state identifier (e.g. "Planning", "Implementing"). */
+  /** The state identifier as declared in harness.yaml (any arbitrary name; no built-in vocabulary is assumed). */
   stateId: string;
   /** Sorted list of resolved tool names available in this spawn. */
   toolNames: string[];

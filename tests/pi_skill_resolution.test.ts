@@ -253,4 +253,91 @@ describe('resolvePiSkillPathsForState', () => {
 
     expect(result).toEqual([globalPath]);
   });
+
+  // -------------------------------------------------------------------------
+  // Genericity: arbitrary state names — no role inference
+  // -------------------------------------------------------------------------
+
+  it('arbitrary state name "Zephyr" with skills:[custom-skill-x] resolves to EXACTLY that skill — no planner/reviewer/implementer appended', () => {
+    // Only create the skill that is explicitly configured.
+    const customSkillPath = makeSkillFile(root, 'custom-skill-x');
+    // Deliberately create planner/reviewer/implementer skill dirs to confirm
+    // they are NOT picked up by the resolution logic.
+    makeSkillFile(root, 'planner');
+    makeSkillFile(root, 'reviewer');
+    makeSkillFile(root, 'implementer');
+
+    const config = baseConfig();
+    (config.states as any)['Zephyr'] = { skills: ['custom-skill-x'] };
+
+    const result = resolvePiSkillPathsForState(config, root, 'Zephyr');
+
+    // Exactly one skill, the configured one.
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({ name: 'custom-skill-x', path: customSkillPath });
+
+    // None of the SDLC role-named skills appear.
+    const names = result.map(s => s.name);
+    expect(names).not.toContain('planner');
+    expect(names).not.toContain('reviewer');
+    expect(names).not.toContain('implementer');
+  });
+
+  it('"Zephyr" state with multiple custom skills resolves all of them in order, driven purely by config', () => {
+    const alpha = makeSkillFile(root, 'alpha-skill');
+    const beta  = makeSkillFile(root, 'beta-skill');
+    const gamma = makeSkillFile(root, 'gamma-skill');
+
+    const config = baseConfig();
+    (config.states as any)['Zephyr'] = { skills: ['alpha-skill', 'beta-skill', 'gamma-skill'] };
+
+    const result = resolvePiSkillPathsForState(config, root, 'Zephyr');
+
+    expect(result).toHaveLength(3);
+    expect(result[0]).toEqual({ name: 'alpha-skill', path: alpha });
+    expect(result[1]).toEqual({ name: 'beta-skill',  path: beta });
+    expect(result[2]).toEqual({ name: 'gamma-skill', path: gamma });
+  });
+
+  it('"Zephyr" state resolution is purely keyed on stateId: a different arbitrary state gets its own skills', () => {
+    const zephyrSkill  = makeSkillFile(root, 'zephyr-only');
+    const auroraSkill  = makeSkillFile(root, 'aurora-only');
+
+    const config = baseConfig();
+    (config.states as any)['Zephyr'] = { skills: ['zephyr-only'] };
+    (config.states as any)['Aurora'] = { skills: ['aurora-only'] };
+
+    const zephyrResult = resolvePiSkillPathsForState(config, root, 'Zephyr');
+    const auroraResult = resolvePiSkillPathsForState(config, root, 'Aurora');
+
+    expect(zephyrResult).toHaveLength(1);
+    expect(zephyrResult[0]).toEqual({ name: 'zephyr-only', path: zephyrSkill });
+
+    expect(auroraResult).toHaveLength(1);
+    expect(auroraResult[0]).toEqual({ name: 'aurora-only', path: auroraSkill });
+
+    // Cross-contamination guard: Zephyr result must not contain Aurora's skill and vice versa.
+    expect(zephyrResult.map(s => s.name)).not.toContain('aurora-only');
+    expect(auroraResult.map(s => s.name)).not.toContain('zephyr-only');
+  });
+
+  it('"Zephyr" state with custom skills + global skillPaths returns state skills first, then global, no role inference', () => {
+    const customSkill  = makeSkillFile(root, 'zephyr-tool');
+    const globalSkill  = makeGlobalSkillFile(root, 'global/shared-guide/SKILL.md');
+
+    const config = baseConfig({ skillPaths: ['global/shared-guide/SKILL.md'] });
+    (config.states as any)['Zephyr'] = { skills: ['zephyr-tool'] };
+
+    const result = resolvePiSkillPathsForState(config, root, 'Zephyr');
+
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ name: 'zephyr-tool', path: customSkill });
+    expect(result[1].path).toBe(globalSkill);
+
+    // No role-inferred names.
+    const names = result.map(s => s.name);
+    expect(names).not.toContain('planner');
+    expect(names).not.toContain('reviewer');
+    expect(names).not.toContain('implementer');
+  });
 });
