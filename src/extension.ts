@@ -1316,13 +1316,24 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const logDuplicateDecision = decision.action === TeammateEventDecisionAction.DUPLICATE
       ? Logger.info.bind(Logger)
       : Logger.warn.bind(Logger);
+    // Enrich the log with outcome/failure context so operators can distinguish
+    // a benign idempotency duplicate from a repeated terminal failure signal.
+    const anyEvent = event as unknown as Record<string, unknown>;
     logDuplicateDecision(Component.ORR_ELSE, 'Ignoring teammate signal after durable processing decision', {
       beadId,
       type: event.type,
       stateId: event.stateId,
       idempotencyKey: event.idempotencyKey,
       decision: decision.action,
-      reason: decision.reason
+      reason: decision.reason,
+      // Outcome/failure routing context — present on status-mutating events.
+      transitionEvent: anyEvent.transitionEvent,
+      summary: anyEvent.summary,
+      actionId: anyEvent.actionId,
+      // The bead's current projected state (may differ from signal's stateId if out-of-order).
+      currentStateId,
+      // Applied event that triggered the DUPLICATE decision (if projection-derived).
+      appliedEventType: appliedEvent?.type
     });
     return;
   }

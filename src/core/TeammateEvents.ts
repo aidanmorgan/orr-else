@@ -249,10 +249,12 @@ export function decideTeammateEventProcessing(
     return { action: TeammateEventDecisionAction.ACCEPT };
   }
 
-  // Phase signals must match the expected coordinator state for that Bead
+  // Phase signals must match the expected coordinator state for that Bead.
+  // Categorized as OUT_OF_ORDER (not plain IGNORE) so operators can distinguish
+  // a stale/superseded signal from an unrelated ignore decision.
   if (currentStateId && currentStateId !== event.stateId) {
     return {
-      action: TeammateEventDecisionAction.IGNORE,
+      action: TeammateEventDecisionAction.OUT_OF_ORDER,
       reason: `Out-of-order teammate event for ${event.stateId}; current Bead state is ${currentStateId}`
     };
   }

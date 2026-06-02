@@ -224,7 +224,8 @@ export enum DomainEventName {
   RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
   PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED',
-  PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED'
+  PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED',
+  SIGNAL_INTENT_RECONCILED = 'SIGNAL_INTENT_RECONCILED'
 }
 
 export enum BeadsCliCommand {
@@ -436,7 +437,9 @@ export enum TeammateEventType {
 export enum TeammateEventDecisionAction {
   ACCEPT = 'accept',
   IGNORE = 'ignore',
-  DUPLICATE = 'duplicate'
+  DUPLICATE = 'duplicate',
+  /** Signal's stateId does not match the current bead state — it arrived out of order or is stale. */
+  OUT_OF_ORDER = 'out_of_order'
 }
 
 /**

@@ -63,10 +63,27 @@ describe('TeammateEvents', () => {
     });
 
     const outOfOrder = decideTeammateEventProcessing(event as any, new Set(), 'AdversarialPostReview');
-    expect(outOfOrder.action).toBe('ignore');
+    // Out-of-order signals are categorized as OUT_OF_ORDER (distinct from plain IGNORE),
+    // so operators can tell a stale/superseded signal from an unrelated ignore decision.
+    expect(outOfOrder.action).toBe('out_of_order');
     expect(outOfOrder.reason).toContain('Out-of-order');
 
     expect(decideTeammateEventProcessing(event as any, new Set(), 'Implementation')).toEqual({ action: 'accept' });
+  });
+
+  it('categorizes an out-of-order signal as OUT_OF_ORDER (not IGNORE or DUPLICATE)', () => {
+    // A signal whose stateId does not match the current coordinator bead state
+    // must be categorized as OUT_OF_ORDER, which is a distinct value from IGNORE
+    // and DUPLICATE.  This allows operators to distinguish stale/superseded
+    // signals from other decisions without changing the no-double-mutation guarantee.
+    const event = transitionedEvent({ stateId: 'PlanningPhase' });
+    const decision = decideTeammateEventProcessing(event as any, new Set(), 'ImplementationPhase');
+
+    expect(decision.action).toBe('out_of_order');
+    expect(decision.action).not.toBe('ignore');
+    expect(decision.action).not.toBe('duplicate');
+    expect(decision.reason).toContain('PlanningPhase');
+    expect(decision.reason).toContain('ImplementationPhase');
   });
 
   it('builds semantic idempotency keys that are stable across retry timestamps', () => {

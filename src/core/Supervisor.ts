@@ -141,6 +141,17 @@ export class Supervisor {
 
   public async start() {
     await this.restoreCapacityPauseFromEventStore();
+    // Single readAll() pass: fetch the full event log once and share it with
+    // both startup helpers so coordinator boot makes exactly one O(events) scan
+    // instead of two.
+    let startupEvents: DomainEvent[] = [];
+    try {
+      startupEvents = await this.services.eventStore.readAll();
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to read event store on startup; signal-state restore skipped', { error: String(error) });
+    }
+    await this.rebuildProcessedSignalsFromEvents(startupEvents);
+    await this.reconcileUnacknowledgedSignalIntents(startupEvents);
 
     this.interval = setInterval(() => {
       this.step().catch(error => Logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
@@ -211,6 +222,117 @@ export class Supervisor {
       pauseUntil: this.pausedUntilIso(),
       reason: this.schedulingPausedReason
     });
+  }
+
+  /**
+   * Rebuilds `processedSignals` from durable TEAMMATE_EVENT records so that
+   * idempotency survives a coordinator restart.  Replays all TEAMMATE_EVENT
+   * events whose processingDecision is ACCEPT and adds their idempotencyKey to
+   * the in-memory set — identical to what markSignalProcessed() does on the
+   * happy path.  Called once during start(), before the first supervisor step,
+   * so re-delivered signals are recognized as duplicates even after a restart.
+   *
+   * Accepts an optional pre-fetched `events` array so that start() can share
+   * a single readAll() pass with reconcileUnacknowledgedSignalIntents().  When
+   * called without arguments (e.g. directly in tests) it fetches events itself.
+   */
+  private async rebuildProcessedSignalsFromEvents(events?: DomainEvent[]): Promise<void> {
+    let rebuilt = 0;
+    try {
+      const allEvents = events ?? await this.services.eventStore.readAll();
+      for (const event of allEvents) {
+        if (event.type !== DomainEventName.TEAMMATE_EVENT) continue;
+        const data = event.data || {};
+        if (data.processingDecision !== TeammateEventDecisionAction.ACCEPT) continue;
+        const key = String(data.idempotencyKey || '');
+        if (!key) continue;
+        this.processedSignals.add(key);
+        rebuilt++;
+      }
+      if (rebuilt > 0) {
+        Logger.info(Component.SUPERVISOR, 'Rebuilt processed-signal idempotency set from event store', { rebuilt });
+      }
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to rebuild processed-signal set from event store; idempotency layer is in-memory only this session', { error: String(error) });
+    }
+  }
+
+  /**
+   * Reconciles SIGNAL_INTENT_RECORDED events that have no corresponding
+   * processed TEAMMATE_EVENT (by idempotencyKey).  An intent without a matching
+   * accepted decision means the coordinator crashed or the POST failed after the
+   * intent was written — the signal was never applied.  Emits a
+   * SIGNAL_INTENT_RECONCILED event so operators can detect unacknowledged intents
+   * without silently losing them.  The reconciliation itself is idempotent: an
+   * intent that already has a SIGNAL_INTENT_RECONCILED event is skipped.
+   *
+   * Accepts an optional pre-fetched `events` array so that start() can share
+   * a single readAll() pass with rebuildProcessedSignalsFromEvents().  When
+   * called without arguments (e.g. directly in tests) it fetches events itself.
+   */
+  private async reconcileUnacknowledgedSignalIntents(events?: DomainEvent[]): Promise<void> {
+    try {
+      const allEvents = events ?? await this.services.eventStore.readAll();
+
+      // Build the set of idempotency keys already processed (ACCEPT decision) or
+      // already reconciled (a prior startup already emitted SIGNAL_INTENT_RECONCILED).
+      const processedKeys = new Set<string>();
+      const reconciledKeys = new Set<string>();
+      const intentsByKey = new Map<string, DomainEvent>();
+
+      for (const event of allEvents) {
+        const data = event.data || {};
+        const key = String(data.idempotencyKey || '');
+        if (!key) continue;
+
+        if (event.type === DomainEventName.SIGNAL_INTENT_RECORDED) {
+          // Keep the first recorded intent per key (earliest write).
+          if (!intentsByKey.has(key)) intentsByKey.set(key, event);
+          continue;
+        }
+        if (event.type === DomainEventName.TEAMMATE_EVENT && data.processingDecision === TeammateEventDecisionAction.ACCEPT) {
+          processedKeys.add(key);
+          continue;
+        }
+        if (event.type === DomainEventName.SIGNAL_ACKNOWLEDGED) {
+          processedKeys.add(key);
+          continue;
+        }
+        if (event.type === DomainEventName.SIGNAL_INTENT_RECONCILED) {
+          reconciledKeys.add(key);
+        }
+      }
+
+      // Identify intents that were recorded but never applied and not yet reconciled.
+      const unacknowledgedKeys = [...intentsByKey.keys()].filter(
+        key => !processedKeys.has(key) && !reconciledKeys.has(key)
+      );
+
+      for (const key of unacknowledgedKeys) {
+        const intentEvent = intentsByKey.get(key)!;
+        const intentData = intentEvent.data || {};
+        Logger.warn(Component.SUPERVISOR, 'Reconciling unacknowledged signal intent on startup', {
+          idempotencyKey: key,
+          beadId: intentData.beadId,
+          type: intentData.type,
+          stateId: intentData.stateId
+        });
+        await this.services.eventStore.record(DomainEventName.SIGNAL_INTENT_RECONCILED, {
+          idempotencyKey: key,
+          beadId: intentData.beadId,
+          type: intentData.type,
+          stateId: intentData.stateId,
+          intentTimestamp: intentEvent.timestamp,
+          reason: 'No processed TEAMMATE_EVENT or SIGNAL_ACKNOWLEDGED found for this intent after coordinator restart'
+        }).catch(() => {});
+      }
+
+      if (unacknowledgedKeys.length > 0) {
+        Logger.info(Component.SUPERVISOR, 'Signal intent reconciliation complete', { unacknowledgedCount: unacknowledgedKeys.length });
+      }
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to reconcile unacknowledged signal intents', { error: String(error) });
+    }
   }
 
   private isSchedulingPaused(): boolean {
