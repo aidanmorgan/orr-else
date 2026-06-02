@@ -140,6 +140,11 @@
             }
           }
         },
+        "roots": {
+          "type": "object",
+          "description": "Named path roots resolved at runtime and injected as {{roots.NAME}} template variables into tool env, prompt variables, and path normalization virtualRoots. Values are absolute paths or paths relative to projectRoot. Keys are generic identifiers — project-specific names stay in project config, not harness defaults.",
+          "additionalProperties": { "type": "string" }
+        },
         "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
         "defaultModel": { "type": "string" },
         "defaultProvider": { "type": "string" },
@@ -266,7 +271,7 @@
                 "additionalProperties": false,
 	                "properties": {
 	                  "root": { "type": "string" },
-	                  "rootKind": { "type": "string", "enum": ["worktree", "project", "framework", "workspace"] },
+	                  "rootKind": { "type": "string", "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root." },
 	                  "workspaceRoot": { "type": "string" },
 	                  "virtualRoots": { "type": "array", "items": { "type": "string" } },
 	                  "mustStayInsideRoot": { "type": "boolean" },
@@ -361,7 +366,7 @@
                     "additionalProperties": false,
 	                    "properties": {
 	                      "root": { "type": "string" },
-	                      "rootKind": { "type": "string", "enum": ["worktree", "project", "framework", "workspace"] },
+	                      "rootKind": { "type": "string", "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root." },
 	                      "workspaceRoot": { "type": "string" },
 	                      "virtualRoots": { "type": "array", "items": { "type": "string" } },
 	                      "mustStayInsideRoot": { "type": "boolean" }

@@ -99,6 +99,52 @@ export function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvir
   return path.isAbsolute(resolved) ? resolved : path.resolve(projectRoot, resolved);
 }
 
+/**
+ * Resolve `settings.roots` entries from the loaded harness config into
+ * absolute paths.  Each value is resolved relative to `projectRoot` when it
+ * is not already absolute.  Returns undefined when no roots are configured.
+ *
+ * This function is intentionally generic — it reads whatever named roots the
+ * project has declared without requiring the harness to know their semantics.
+ */
+export function namedRootsFromConfig(
+  config: HarnessConfig,
+  env: RuntimeEnvironment = nodeRuntimeEnvironment,
+  injectedRoot: string = process.cwd()
+): Record<string, string> | undefined {
+  const configuredRoots = config.settings.roots;
+  if (!configuredRoots || Object.keys(configuredRoots).length === 0) return undefined;
+  const projectRoot = env.env(EnvVars.PROJECT_ROOT) || injectedRoot;
+  const baseContext: TemplateContext = {
+    projectRoot,
+    worktreePath: env.env(EnvVars.WORKTREE_PATH) || projectRoot
+  };
+  const resolved: Record<string, string> = {};
+  for (const [name, value] of Object.entries(configuredRoots)) {
+    if (typeof value !== 'string' || !value.trim()) continue;
+    const expandedValue = resolveTemplateString(value, baseContext);
+    resolved[name] = path.isAbsolute(expandedValue)
+      ? expandedValue
+      : path.resolve(projectRoot, expandedValue);
+  }
+  return Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
+/**
+ * Extract namedRoots from tool invocation args (injected as a hidden context
+ * parameter by the plugin layer when the config has settings.roots).
+ */
+function namedRootsFromArgs(args: any): Record<string, string> | undefined {
+  const value = args?.namedRoots;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  // Ensure all values are strings (filter out any non-string entries defensively).
+  const result: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v === 'string') result[k] = v;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function baseTemplateContext(definition: ProjectToolConfig, args: any, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): TemplateContext {
   const projectRoot = env.env(EnvVars.PROJECT_ROOT) || injectedRoot;
   const worktreeRoot = env.env(EnvVars.WORKTREE_PATH) || projectRoot;
@@ -107,6 +153,7 @@ function baseTemplateContext(definition: ProjectToolConfig, args: any, env: Runt
     projectRoot,
     worktreePath: worktreeRoot,
     frameworkRoot: frameworkRootFromArgs(args, projectRoot, env),
+    namedRoots: namedRootsFromArgs(args),
     beadId: pathSegment(beadIdFromArgs(args, env), ProjectToolDefaults.UNASSIGNED_BEAD_ID),
     stateId: pathSegment(stateIdFromArgs(args, env), ProjectToolDefaults.UNSPECIFIED_STATE_ID),
     actionId: pathSegment(actionIdFromArgs(args, env), ProjectToolDefaults.UNSPECIFIED_ACTION_ID),
@@ -156,6 +203,17 @@ export function executionContext(
 }
 
 export function projectToolEnvironment(context: ProjectToolExecutionContext): Record<string, string> {
+  // Build named-root env vars: each entry in namedRoots becomes
+  // HARNESS_ROOT_<UPPER_NAME> so project tools can reference them without
+  // hard-coding absolute paths.
+  const namedRootEnv: Record<string, string> = {};
+  if (context.templateContext.namedRoots) {
+    for (const [name, rootPath] of Object.entries(context.templateContext.namedRoots)) {
+      const envKey = `HARNESS_ROOT_${name.replace(/[^a-zA-Z0-9]/g, '_').toUpperCase()}`;
+      namedRootEnv[envKey] = rootPath;
+    }
+  }
+
   return {
     [EnvVars.PROJECT_ROOT]: context.templateContext.projectRoot,
     [EnvVars.WORKTREE_PATH]: context.templateContext.worktreePath,
@@ -170,6 +228,7 @@ export function projectToolEnvironment(context: ProjectToolExecutionContext): Re
     [EnvVars.TOOL_TMP_DIR]: context.tmpDir,
     [EnvVars.TOOL_WORKING_DIR]: context.cwd,
     ...(context.templateContext.frameworkRoot ? { [EnvVars.FRAMEWORK_ROOT]: context.templateContext.frameworkRoot } : {}),
+    ...namedRootEnv,
     TMPDIR: context.tmpDir,
     TMP: context.tmpDir,
     TEMP: context.tmpDir

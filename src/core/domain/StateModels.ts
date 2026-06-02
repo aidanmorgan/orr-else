@@ -248,6 +248,16 @@ export interface HarnessConfig {
       evidenceStore?: string;
     };
     artifacts?: ArtifactConfig;
+    /**
+     * Named path roots resolved at runtime and injected into template context,
+     * tool env, and prompt variables.  Keys are generic identifiers (e.g.
+     * "frameworkRoot", "artifactsDir"); values are absolute paths or paths
+     * relative to projectRoot.  Template variables use `{{roots.NAME}}`.
+     *
+     * Project-specific roots (e.g. Cerdiwen artifact dirs) stay here so the
+     * harness core remains generic — no hard-coded project paths in defaults.
+     */
+    roots?: Record<string, string>;
     defaultActionContextMode?: ConfiguredActionContextMode;
     defaultModel: string;
     defaultProvider: string;

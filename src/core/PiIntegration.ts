@@ -11,6 +11,8 @@ const TemplateToken = {
   PROJECT_ROOT: '{{projectRoot}}',
   WORKTREE_PATH: '{{worktreePath}}',
   FRAMEWORK_ROOT: '{{frameworkRoot}}',
+  /** @deprecated Use settings.roots + {{roots.NAME}} instead.
+   *  Kept for backward compatibility with existing project configs. */
   ORR_ELSE_FRAMEWORK_ROOT: '{{orrElseFrameworkRoot}}',
   BEAD_ID: '{{beadId}}',
   STATE_ID: '{{stateId}}',
@@ -22,6 +24,10 @@ const TemplateToken = {
   TOOL_OUTPUT_FILE: '{{toolOutputFile}}',
   TOOL_TMP_DIR: '{{toolTmpDir}}'
 } as const;
+
+/** Prefix used to form named-root template tokens: `{{roots.NAME}}` */
+export const NAMED_ROOT_TOKEN_PREFIX = '{{roots.';
+const NAMED_ROOT_TOKEN_SUFFIX = '}}';
 
 export interface TemplateContext {
   configPath?: string;
@@ -37,6 +43,13 @@ export interface TemplateContext {
   toolOutputDir?: string;
   toolOutputFile?: string;
   toolTmpDir?: string;
+  /**
+   * Named roots resolved from `settings.roots` in harness.yaml.
+   * Each entry maps a logical name to an absolute resolved path.  Template
+   * strings may reference any named root as `{{roots.NAME}}` — generic,
+   * with no project-specific names required in harness defaults.
+   */
+  namedRoots?: Record<string, string>;
 }
 
 function unique(values: string[]): string[] {
@@ -67,10 +80,22 @@ export function resolveTemplateString(value: string, context: TemplateContext): 
     [TemplateToken.TOOL_TMP_DIR, context.toolTmpDir]
   ];
 
-  return replacements.reduce(
-    (resolved, [token, replacement]) => replacement === undefined ? resolved : resolved.replaceAll(token, replacement),
+  let resolved = replacements.reduce(
+    (acc, [token, replacement]) => replacement === undefined ? acc : acc.replaceAll(token, replacement),
     value
   );
+
+  // Expand {{roots.NAME}} tokens from namedRoots
+  if (context.namedRoots && resolved.includes(NAMED_ROOT_TOKEN_PREFIX)) {
+    for (const [name, rootPath] of Object.entries(context.namedRoots)) {
+      const token = `${NAMED_ROOT_TOKEN_PREFIX}${name}${NAMED_ROOT_TOKEN_SUFFIX}`;
+      if (resolved.includes(token)) {
+        resolved = resolved.replaceAll(token, rootPath);
+      }
+    }
+  }
+
+  return resolved;
 }
 
 export function getConfiguredPiToolNames(config: HarnessConfig): string[] {
