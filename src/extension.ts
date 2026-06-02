@@ -201,6 +201,7 @@ interface ExtensionSession {
   queryArtifactToolRegistered: boolean;
   compatibilityContextToolRegistered: boolean;
   readPathContextToolRegistered: boolean;
+  preSignalAuditToolRegistered: boolean;
   piToolObserverRegistered: boolean;
   providerRequestCapRegistered: boolean;
   claudeCodeLoginRegistered: boolean;
@@ -231,6 +232,7 @@ function createExtensionSession(): ExtensionSession {
     queryArtifactToolRegistered: false,
     compatibilityContextToolRegistered: false,
     readPathContextToolRegistered: false,
+    preSignalAuditToolRegistered: false,
     piToolObserverRegistered: false,
     providerRequestCapRegistered: false,
     claudeCodeLoginRegistered: false,
@@ -259,7 +261,8 @@ const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
   BuiltInToolName.SUBMIT_REVIEW_ARTIFACT,
   BuiltInToolName.SIGNAL_COMPLETION,
   BuiltInToolName.REQUEST_CONTEXT_RESTART,
-  BuiltInToolName.REQUEST_HARNESS_RESTART
+  BuiltInToolName.REQUEST_HARNESS_RESTART,
+  BuiltInToolName.PRE_SIGNAL_AUDIT
 ]);
 
 interface FlowOptions {
@@ -351,6 +354,209 @@ function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {
     ...(run.action.requiredTools || [])
   ];
   return requiredTools.length > 0 ? requiredTools : undefined;
+}
+
+interface RequiredToolAuditEntry {
+  name: string;
+  state: 'passed' | 'failed' | 'never_invoked';
+}
+
+interface TerminalFailureLimitAudit {
+  reached: boolean;
+  failedTool?: string;
+  suggestedOutcome?: string;
+}
+
+/**
+ * Structured result returned by evaluateGateReadiness.
+ * All fields are read-only diagnostic data — the function never mutates state.
+ *
+ * toolAuditFailures contains the same per-tool failure strings that
+ * signal_completion builds for its REJECTED: Protocol Violation message, so
+ * that signal_completion can reuse them verbatim without re-examining results.
+ */
+interface GateReadiness {
+  ready: boolean;
+  transitionValid: boolean;
+  transitionError?: string;
+  requiredTools: RequiredToolAuditEntry[];
+  /** Verbatim per-tool failure strings used by signal_completion's REJECTED message. */
+  toolAuditFailures: string[];
+  terminalFailureLimit: TerminalFailureLimitAudit;
+  requiredOutcome: string | null;
+  missingChecklistItems: string[];
+  checkpointAccepted: boolean;
+  writeSetValid: boolean | null;
+  writeSetReason?: string;
+  transactionalValid: boolean | null;
+  transactionalReason?: string;
+  blockingEvidence: string[];
+}
+
+/**
+ * Shared gate predicate that evaluates whether signal_completion would ACCEPT
+ * or REJECT a given outcome. This is the single source of truth for the gate
+ * decision — both signal_completion and pre_signal_audit call this function so
+ * that audit.ready is guaranteed equivalent to the real gate accept condition.
+ *
+ * IMPORTANT: This function is read-only. It does NOT record domain events,
+ * does NOT auto-restore unapproved paths, does NOT post any signals, and does
+ * NOT modify any state. It calls validateSuccessReadOnly (not validateSuccess)
+ * on the transactional state guard so that no git restore side effects occur.
+ */
+async function evaluateGateReadiness(
+  activeRun: ActiveRun,
+  outcome: string,
+  services: RuntimeServices,
+  session: ExtensionSession,
+  obs: Observability,
+  config: import('./core/ConfigLoader.js').HarnessConfig
+): Promise<GateReadiness> {
+  const blockingEvidence: string[] = [];
+
+  // ── 1. nextState transition validity ─────────────────────────────────────
+  let transitionValid = true;
+  let transitionError: string | undefined;
+  try {
+    services.flowManager.nextState(activeRun.state, outcome);
+  } catch (error) {
+    transitionValid = false;
+    transitionError = String(error);
+    blockingEvidence.push(`Invalid transition: ${transitionError}`);
+  }
+
+  // ── 2. Terminal failure limit ─────────────────────────────────────────────
+  const terminal = await terminalFailureLimitContext(services, session);
+  const terminalFailureLimit: TerminalFailureLimitAudit = terminal
+    ? { reached: true, failedTool: terminal.failedTool, suggestedOutcome: terminal.suggestedOutcome }
+    : { reached: false };
+  if (terminal && outcome !== terminal.suggestedOutcome) {
+    blockingEvidence.push(
+      `Terminal failure limit reached for \`${terminal.failedTool}\`. ` +
+      `Required outcome: \`${terminal.suggestedOutcome}\`.`
+    );
+  }
+
+  // ── 3. SUCCESS-only: mandatory checklist + required tools ─────────────────
+  let missingChecklistItems: string[] = [];
+  let requiredToolEntries: RequiredToolAuditEntry[] = [];
+  const toolAuditFailures: string[] = [];
+
+  if (outcome === EventName.SUCCESS) {
+    const projection = await services.eventStore.projectBead(activeRun.beadId);
+    missingChecklistItems = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
+    if (missingChecklistItems.length > 0) {
+      blockingEvidence.push(
+        `Mandatory checklist items outstanding: ${missingChecklistItems.map(t => `\`${t}\``).join(', ')}.`
+      );
+    }
+
+    const requiredToolResolution = await services.requiredToolResolver.resolve(
+      requiredToolsForRun(activeRun),
+      {
+        beadId: activeRun.beadId,
+        stateId: activeRun.stateId,
+        worktreePath: activeRun.worktreePath,
+        projectRoot: services.projectRoot,
+        config
+      }
+    );
+    // Build the structured audit entries and collect tool failures in two
+    // complementary formats:
+    //  - toolAuditFailures: verbatim per-tool strings reused by signal_completion
+    //    for its "REJECTED: Protocol Violation" message (original exact wording).
+    //  - blockingEvidence: user-facing strings pushed into the audit result; uses
+    //    a consistent "Required tool `X` was never invoked / did not pass" form
+    //    that the existing pre_signal_audit tests assert against.
+    requiredToolEntries = requiredToolResolution.toolNames.map(toolName => {
+      const result = obs.getToolResult(toolName);
+      let state: 'passed' | 'failed' | 'never_invoked';
+      if (result === undefined) {
+        state = 'never_invoked';
+        toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
+        blockingEvidence.push(`Required tool \`${toolName}\` was never invoked.`);
+      } else if (resultIndicatesSuccess(result)) {
+        state = 'passed';
+      } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
+        state = 'failed';
+        toolAuditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
+        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
+      } else if (resultIndicatesFailure(result)) {
+        state = 'failed';
+        toolAuditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
+      } else {
+        state = 'failed';
+        toolAuditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
+        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
+      }
+      return { name: toolName, state };
+    });
+  }
+
+  // ── 4. SUCCESS-only: plan write-set preflight (read-only, pure) ───────────
+  let writeSetValid: boolean | null = null;
+  let writeSetReason: string | undefined;
+
+  if (outcome === EventName.SUCCESS) {
+    const planWriteSetPreflight = await services.planWriteSet.validatePlanContract({
+      beadId: activeRun.beadId,
+      stateId: activeRun.stateId,
+      worktreePath: activeRun.worktreePath || process.cwd(),
+      projectRoot: services.projectRoot
+    });
+    writeSetValid = planWriteSetPreflight.passed;
+    writeSetReason = planWriteSetPreflight.reason;
+    if (!planWriteSetPreflight.passed) {
+      blockingEvidence.push(
+        `Plan write-set preflight failed: ${planWriteSetPreflight.reason || 'write-set contract violation'}.`
+      );
+    }
+  }
+
+  // ── 5. SUCCESS-only: transactional state guard (read-only, no side effects) ─
+  let transactionalValid: boolean | null = null;
+  let transactionalReason: string | undefined;
+
+  if (outcome === EventName.SUCCESS) {
+    const transactionalState = await services.transactionalStateGuard.validateSuccessReadOnly(
+      activeRun.beadId,
+      activeRun.stateId,
+      activeRun.worktreePath || process.cwd()
+    );
+    transactionalValid = transactionalState.passed;
+    transactionalReason = transactionalState.reason;
+    if (!transactionalState.passed) {
+      blockingEvidence.push(
+        `Transactional state gate failed: ${transactionalState.reason || 'unapproved dirty paths'}.`
+      );
+    }
+  }
+
+  // ── 6. Checkpoint ─────────────────────────────────────────────────────────
+  const checkpointAccepted = activeRun.checkpointAccepted;
+  if (!checkpointAccepted) {
+    blockingEvidence.push(
+      `\`${BuiltInToolName.SUBMIT_CHECKPOINT}\` has not been called yet.`
+    );
+  }
+
+  return {
+    ready: blockingEvidence.length === 0,
+    transitionValid,
+    transitionError,
+    requiredTools: requiredToolEntries,
+    toolAuditFailures,
+    terminalFailureLimit,
+    requiredOutcome: terminal?.suggestedOutcome ?? null,
+    missingChecklistItems,
+    checkpointAccepted,
+    writeSetValid,
+    writeSetReason,
+    transactionalValid,
+    transactionalReason,
+    blockingEvidence
+  };
 }
 
 // summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
@@ -2524,6 +2730,74 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }) as any);
     }
 
+    if (!session.preSignalAuditToolRegistered) {
+      session.preSignalAuditToolRegistered = true;
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.PRE_SIGNAL_AUDIT,
+        description:
+          'Audit the current gate/checkpoint state BEFORE calling submit_checkpoint or signal_completion. ' +
+          'Returns required tools (with pass/fail/never_invoked state), terminal failure-limit state, ' +
+          'required outcome, and exact blocking evidence. Use this to confirm readiness and surface blockers ' +
+          'without waiting for a REJECTED signal. Read-only and best-effort — safe to call at any time. ' +
+          'Pass the optional outcome parameter (default: SUCCESS) to evaluate readiness for a specific ' +
+          'outcome — non-SUCCESS outcomes skip the SUCCESS-only gates (checklist, required tools, ' +
+          'write-set, transactional state) so ready:true accurately reflects what signal_completion ' +
+          'would accept for that outcome.',
+        parameters: Type.Object({
+          outcome: Type.Optional(Type.String({
+            description: 'Outcome to evaluate readiness for (e.g. SUCCESS, FAILURE, BLOCKED). Defaults to SUCCESS.'
+          }))
+        }),
+        execute: async ({ outcome: auditOutcome }: { outcome?: string }) => {
+          try {
+            const activeRun = session.activeRun;
+            if (!activeRun) {
+              return { status: 'unavailable', reason: 'No active run.' };
+            }
+
+            const obs = session.piToolObservability || getObservability(services);
+            const config = await services.configLoader.load();
+            const outcome = auditOutcome || EventName.SUCCESS;
+
+            // ── evaluate gate readiness using the shared predicate ────────────
+            // This is the SAME function signal_completion uses for its gate
+            // decision, guaranteeing audit.ready == real gate accept condition.
+            const gate = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config);
+
+            // ── domain event (best-effort) ────────────────────────────────────
+            services.eventStore.record(DomainEventName.PRE_SIGNAL_AUDIT_PERFORMED, {
+              beadId: activeRun.beadId,
+              stateId: activeRun.stateId,
+              actionId: activeRun.action.id,
+              outcome,
+              ready: gate.ready,
+              blockingCount: gate.blockingEvidence.length
+            }).catch(() => {});
+
+            return {
+              ready: gate.ready,
+              outcome,
+              requiredTools: gate.requiredTools,
+              terminalFailureLimit: gate.terminalFailureLimit,
+              requiredOutcome: gate.requiredOutcome,
+              missingChecklistItems: gate.missingChecklistItems,
+              checkpointAccepted: gate.checkpointAccepted,
+              writeSetValid: gate.writeSetValid,
+              transactionalValid: gate.transactionalValid,
+              blockingEvidence: gate.blockingEvidence
+            };
+          } catch (err) {
+            // Best-effort: never throw from the audit tool
+            return {
+              ready: false,
+              error: String(err),
+              blockingEvidence: [`Audit failed: ${String(err)}`]
+            };
+          }
+        }
+      }) as any);
+    }
+
     // Build the factory once and store it on the session so that startOrrElse
     // (coordinator path, which always runs AFTER SESSION_START) can reuse the
     // same instance rather than constructing a second one.  Worker processes
@@ -2731,63 +3005,46 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       execute: async ({ outcome, summary }: { outcome: string, summary: string }, ctx: ExtensionContext) => {
         const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
-        try {
-          services.flowManager.nextState(activeRun.state, outcome);
-        } catch (error) {
-          return `REJECTED: ${String(error)}`;
+
+        // ── Gate evaluation (shared predicate) ─────────────────────────────
+        // evaluateGateReadiness is the single source of truth for whether this
+        // outcome would be accepted. signal_completion calls it here and maps
+        // the result to its canonical REJECTED messages (behavior-preserving).
+        // NOTE: For the transactional state check, evaluateGateReadiness calls
+        // validateSuccessReadOnly (no auto-restore side effects). When the gate
+        // PASSES, we then call validateSuccess below so that the auto-restore
+        // logic fires exactly as it did before refactoring.
+        const obs = session.piToolObservability || getObservability(services);
+        const gateReadiness = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config);
+
+        if (!gateReadiness.transitionValid) {
+          // transitionError is set when transitionValid is false
+          return `REJECTED: ${gateReadiness.transitionError}`;
         }
 
-        const terminal = await terminalFailureLimitContext(services, session);
-        if (terminal && outcome !== terminal.suggestedOutcome) {
+        if (gateReadiness.terminalFailureLimit.reached && outcome !== gateReadiness.terminalFailureLimit.suggestedOutcome) {
+          const terminal = gateReadiness.terminalFailureLimit;
           return `REJECTED: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
-            `in ${terminal.stateId}/${terminal.actionId}. You MUST signal outcome ` +
+            `in ${activeRun.stateId}/${activeRun.action.id}. You MUST signal outcome ` +
             `\`${terminal.suggestedOutcome}\`; outcome \`${outcome}\` is not permitted after this terminal verifier failure.`;
         }
 
         if (outcome === EventName.SUCCESS) {
-          const projection = await services.eventStore.projectBead(activeRun.beadId);
-          const missing = missingMandatoryChecklistItems(activeRun.requiredItems, projection.checklists as any);
-          if (missing.length > 0) {
-             return `REJECTED: You cannot signal SUCCESS yet. The following mandatory checklist items are missing:\n${missing.map(m => `- ${m}`).join('\n')}\nUse the \`${BuiltInToolName.TICK_ITEMS}\` tool to complete them in a batch.`;
+          if (gateReadiness.missingChecklistItems.length > 0) {
+            return `REJECTED: You cannot signal SUCCESS yet. The following mandatory checklist items are missing:\n${gateReadiness.missingChecklistItems.map(m => `- ${m}`).join('\n')}\nUse the \`${BuiltInToolName.TICK_ITEMS}\` tool to complete them in a batch.`;
           }
 
-          const requiredToolResolution = await services.requiredToolResolver.resolve(requiredToolsForRun(activeRun), {
-            beadId: activeRun.beadId,
-            stateId: activeRun.stateId,
-            worktreePath: activeRun.worktreePath,
-            projectRoot: services.projectRoot,
-            config
-          });
-          const requiredTools = requiredToolResolution.toolNames;
-          const auditFailures: string[] = [];
-          for (const toolName of requiredTools) {
-            const result = runtimeObservability.getToolResult(toolName);
-            if (result === undefined) {
-              auditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
-            } else if (resultIndicatesSuccess(result)) {
-              continue;
-            } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
-              auditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
-            } else if (resultIndicatesFailure(result)) {
-              auditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-            } else {
-              auditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-            }
-          }
-          if (auditFailures.length > 0) {
-            return `REJECTED: Protocol Violation. Programmatic audit failed:\n${auditFailures.map(f => `- ${f}`).join('\n')}\nYou MUST satisfy all programmatic gates before signaling completion.`;
+          if (gateReadiness.toolAuditFailures.length > 0) {
+            return `REJECTED: Protocol Violation. Programmatic audit failed:\n${gateReadiness.toolAuditFailures.map(f => `- ${f}`).join('\n')}\nYou MUST satisfy all programmatic gates before signaling completion.`;
           }
 
-          const planWriteSetPreflight = await services.planWriteSet.validatePlanContract({
-            beadId: activeRun.beadId,
-            stateId: activeRun.stateId,
-            worktreePath: activeRun.worktreePath || process.cwd(),
-            projectRoot: services.projectRoot
-          });
-          if (!planWriteSetPreflight.passed) {
-            return `REJECTED: Plan write-set preflight failed.\n${planWriteSetPreflight.reason}\nRevise the plan contract before signaling SUCCESS.`;
+          if (!gateReadiness.writeSetValid) {
+            return `REJECTED: Plan write-set preflight failed.\n${gateReadiness.writeSetReason}\nRevise the plan contract before signaling SUCCESS.`;
           }
 
+          // For the transactional state gate at signal time, call validateSuccess
+          // (with auto-restore side effects) as the original code did. This is
+          // separate from evaluateGateReadiness which uses validateSuccessReadOnly.
           const transactionalState = await services.transactionalStateGuard.validateSuccess(
             activeRun.beadId,
             activeRun.stateId,

@@ -25,6 +25,73 @@ export class TransactionalStateGuard {
     private readonly planWriteSet: PlanWriteSet
   ) {}
 
+  /**
+   * Read-only variant of validateSuccess: performs the same structural checks
+   * (write-set preflight + unapproved-path detection) WITHOUT recording domain
+   * events or auto-restoring unapproved paths. Safe to call from audit-only
+   * paths where side effects must not occur.
+   */
+  public async validateSuccessReadOnly(
+    beadId: BeadId,
+    stateId: string,
+    worktreePath: string
+  ): Promise<TransactionalStateValidation> {
+    const config = await this.configLoader.load();
+    const settings = config.settings.transactionalState;
+    if (!settings?.enabled || !settings.requireWriteSet) {
+      return this.pass();
+    }
+    if (this.isPrePlanContractState(stateId)) {
+      return this.pass();
+    }
+
+    const writeSetPreflight = await this.planWriteSet.validatePlanContract({ beadId, stateId, worktreePath });
+    const planContractPath = writeSetPreflight.planContractPath;
+    const allowedWriteSet = writeSetPreflight.allowedWriteSet;
+    const ignoredWriteSetPaths = writeSetPreflight.ignoredWriteSetPaths.map(entry => entry.path);
+    if (!writeSetPreflight.passed) {
+      const reason = writeSetPreflight.reason || [
+        'Approved plan write set contains ignored paths that Git will not merge.',
+        `Ignored write set paths: ${ignoredWriteSetPaths.join(', ')}`,
+        'Choose tracked paths, update the repository ignore rules in the approved write set, or remove these paths from the plan.'
+      ].join(' ');
+      return {
+        passed: false,
+        dirtyPaths: [],
+        allowedWriteSet,
+        unapprovedPaths: [],
+        ignoredWriteSetPaths,
+        planContractPath,
+        reason
+      };
+    }
+
+    const dirtyPaths = await this.changedWorktreePaths(worktreePath);
+    if (dirtyPaths.length === 0) return this.pass([], allowedWriteSet, planContractPath);
+
+    const unapprovedPaths = dirtyPaths.filter(dirtyPath => !this.planWriteSet.isAllowedPath(dirtyPath, allowedWriteSet));
+    if (unapprovedPaths.length === 0) {
+      return this.pass(dirtyPaths, allowedWriteSet, planContractPath);
+    }
+
+    const reason = [
+      'Dirty worktree paths are outside the approved plan write set.',
+      `Unapproved paths: ${unapprovedPaths.join(', ')}`,
+      allowedWriteSet.length > 0
+        ? `Approved write set: ${allowedWriteSet.join(', ')}`
+        : `Approved write set is empty or missing in ${planContractPath || 'plan contract'}.`
+    ].join(' ');
+
+    return {
+      passed: false,
+      dirtyPaths,
+      allowedWriteSet,
+      unapprovedPaths,
+      planContractPath,
+      reason
+    };
+  }
+
   public async validateSuccess(
     beadId: BeadId,
     stateId: string,

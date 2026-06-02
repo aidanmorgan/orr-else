@@ -222,7 +222,8 @@ export enum DomainEventName {
   WORKLOG_ENTRY_APPENDED = 'WORKLOG_ENTRY_APPENDED',
   RETENTION_CLEANUP_COMPLETED = 'RETENTION_CLEANUP_COMPLETED',
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
-  PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED'
+  PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED',
+  PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED'
 }
 
 export enum BeadsCliCommand {
@@ -603,7 +604,8 @@ export enum BuiltInToolName {
   QUERY_ARTIFACT = 'query_artifact',
   GET_COMPATIBILITY_CONTEXT = 'get_compatibility_context',
   READ_PATH_CONTEXT = 'read_path_context',
-  HARNESS_STATUS = 'harness_status'
+  HARNESS_STATUS = 'harness_status',
+  PRE_SIGNAL_AUDIT = 'pre_signal_audit'
 }
 
 /**
