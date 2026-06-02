@@ -166,6 +166,32 @@ const PROJECTION_REGISTRY: Record<string, Record<string, ProjectionEntry>> = {
   requirementsAnalysis: REQUIREMENTS_ANALYSIS_PROJECTIONS
 } as const;
 
+// ─── JSON Pointer normalization ───────────────────────────────────────────────
+
+/**
+ * Normalize a selector to dot-path form.
+ *
+ * Accepts:
+ *   - JSON Pointer (RFC 6901): "/foo/bar/0" → "foo.bar.0"
+ *     Only the slash-separated form is recognized; the `~0` / `~1` escape
+ *     sequences are decoded to their literal equivalents.
+ *   - Plain dot-path: returned as-is after trimming.
+ *
+ * This is a light normalization pass — it does NOT validate the selector
+ * further; safeSelectPath handles the actual traversal + safety checks.
+ */
+export function normalizeSelectorToDotPath(selector: string): string {
+  const trimmed = selector.trim();
+  if (!trimmed.startsWith('/')) return trimmed;
+
+  // JSON Pointer: strip leading slash, split on '/', decode escapes.
+  return trimmed
+    .slice(1) // drop the leading '/'
+    .split('/')
+    .map(segment => segment.replace(/~1/g, '/').replace(/~0/g, '~'))
+    .join('.');
+}
+
 // ─── Safe dot-path traversal ──────────────────────────────────────────────────
 
 /**
@@ -212,12 +238,43 @@ export function safeSelectPath(root: unknown, selector: string): unknown {
   return current;
 }
 
+// ─── Size estimate helpers ────────────────────────────────────────────────────
+
+/**
+ * Estimate the token count for a serialized JSON string using the
+ * TOKEN_ESTIMATE_CHARS_PER_TOKEN heuristic (chars / 4 for mixed text/code).
+ * This is intentionally a fast approximation — agents use it to gauge whether
+ * a projection fits their context budget BEFORE expanding it inline.
+ */
+function estimateTokens(byteLength: number): number {
+  return Math.ceil(byteLength / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+}
+
+/** Serialize `value` to a string for byte/token measurement. */
+function serializeForMeasure(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** Compute byteCount + tokenEstimate for an already-serialized string. */
+function sizeEstimate(serialized: string): { byteCount: number; tokenEstimate: number } {
+  const byteCount = Buffer.byteLength(serialized, 'utf8');
+  return {
+    byteCount,
+    tokenEstimate: estimateTokens(byteCount)
+  };
+}
+
 // ─── Too-much-data guard (req 4) ──────────────────────────────────────────────
 
 interface TooMuchDataResult {
   tooMuchData: true;
   itemCount?: number;
   byteCount: number;
+  tokenEstimate: number;
   representativeSamples: unknown[];
   narrowerSelectorHint: string;
   nextAction: 'rerun_with_narrower_selector';
@@ -226,19 +283,16 @@ interface TooMuchDataResult {
 
 /**
  * Checks whether `value` serializes beyond RESULT_MAX_BYTES.
- * If so, returns a TooMuchDataResult with counts + representative samples.
+ * If so, returns a TooMuchDataResult with counts + representative samples
+ * + size estimates (byteCount + tokenEstimate) so agents can gauge the cost.
  * Returns null when the value is within the cap.
  */
 function tooMuchDataGuard(value: unknown, selector: string, artifactId: string): TooMuchDataResult | null {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    serialized = String(value);
-  }
+  const serialized = serializeForMeasure(value);
 
-  if (serialized.length <= ArtifactQueryDefaults.RESULT_MAX_BYTES) return null;
+  if (Buffer.byteLength(serialized, 'utf8') <= ArtifactQueryDefaults.RESULT_MAX_BYTES) return null;
 
+  const { byteCount, tokenEstimate } = sizeEstimate(serialized);
   const itemCount = Array.isArray(value) ? value.length : undefined;
   const samples = Array.isArray(value)
     ? value.slice(0, ArtifactQueryDefaults.SAMPLE_MAX_ITEMS)
@@ -257,12 +311,13 @@ function tooMuchDataGuard(value: unknown, selector: string, artifactId: string):
   return {
     tooMuchData: true,
     itemCount,
-    byteCount: serialized.length,
+    byteCount,
+    tokenEstimate,
     representativeSamples: Array.isArray(samples) ? samples : [samples],
     narrowerSelectorHint: exampleNarrowing !== selector ? exampleNarrowing : `${selector}.<key>`,
     nextAction: 'rerun_with_narrower_selector',
     recovery: [
-      `The selected value from artifact "${artifactId}" at selector "${selector}" is ${serialized.length} bytes (cap: ${ArtifactQueryDefaults.RESULT_MAX_BYTES} bytes).`,
+      `The selected value from artifact "${artifactId}" at selector "${selector}" is ${byteCount} bytes (~${tokenEstimate} tokens, cap: ${ArtifactQueryDefaults.RESULT_MAX_BYTES} bytes).`,
       `Rerun query_artifact with a narrower selector such as "${exampleNarrowing !== selector ? exampleNarrowing : `${selector}.<specific-key-or-index>`}" to get an in-cap result.`,
       `Use a named projection (see validProjections) if available for this artifact type, as projections are pre-scoped to stay within the cap.`
     ]
@@ -298,13 +353,31 @@ export interface ArtifactQueryInput {
    */
   projection?: string;
   /**
-   * Dot-path selector for ad-hoc subtree extraction.
-   * Syntax: "foo.bar.0" selects root.foo.bar[0].
+   * Dot-path or JSON Pointer selector for ad-hoc subtree extraction.
+   *
+   * Dot-path syntax: "foo.bar.0" selects root.foo.bar[0].
+   * JSON Pointer syntax (RFC 6901): "/foo/bar/0" — normalized automatically
+   * to the equivalent dot-path before traversal, so "/writeSet/0" and
+   * "writeSet.0" are equivalent.
    * Empty string or omitted selector returns the artifact root (subject to
    * the too-much-data cap).
    * Mutually exclusive with `projection`.
    */
   selector?: string;
+  /**
+   * When true, return a schema-aware summary of the artifact's available
+   * projections (or top-level keys for unknown artifact types) with size
+   * estimates (byteCount + tokenEstimate) per projection/key — WITHOUT the
+   * full content.  Use this BEFORE requesting a large projection inline so
+   * agents can decide what to fetch within their context budget.
+   *
+   * When combined with `artifactId`, the summary is schema-aware (lists
+   * named projections for planContract/requirementsAnalysis).  With
+   * `artifactPath` or unknown artifactId, lists top-level keys.
+   *
+   * Mutually exclusive with `projection` and `selector`.
+   */
+  summary?: boolean;
 }
 
 export interface ArtifactQueryRejection {
@@ -315,15 +388,58 @@ export interface ArtifactQueryRejection {
   exists: boolean;
 }
 
+/** Size estimate attached to every successful projection/selector result. */
+export interface SizeEstimate {
+  /** JSON-serialized byte count of the returned result. */
+  byteCount: number;
+  /**
+   * Estimated token count (byteCount / TOKEN_ESTIMATE_CHARS_PER_TOKEN).
+   * Heuristic approximation — use to gauge context-budget cost before
+   * requesting a projection inline.
+   */
+  tokenEstimate: number;
+}
+
 export interface ArtifactQuerySuccess {
   status: 'ok';
   artifactId: string;
   artifactPath: string;
   selector: string;
   result: unknown;
+  /** Size of the returned `result` — use to gauge context cost. */
+  sizeEstimate: SizeEstimate;
 }
 
-export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection | TooMuchDataResult;
+/** One entry in a schema-aware or generic artifact summary. */
+export interface ProjectionSummaryEntry {
+  /** Projection name (schema-aware) or top-level key name (generic). */
+  name: string;
+  /** Human-readable description (schema-aware only; absent for generic keys). */
+  description?: string;
+  /** Size estimate for the value at this projection/key. */
+  sizeEstimate: SizeEstimate;
+}
+
+export interface ArtifactSummary {
+  status: 'summary';
+  artifactId: string;
+  artifactPath: string;
+  /**
+   * Whether the summary is schema-aware (true) or generic top-level key
+   * enumeration (false).  Schema-aware summaries list the named projection
+   * registry entries even when the artifact doesn't contain every key.
+   */
+  schemaAware: boolean;
+  /** Total byte + token estimates for the ENTIRE artifact. */
+  totalSizeEstimate: SizeEstimate;
+  /**
+   * Per-projection or per-key size estimates WITHOUT content.
+   * Agents use this to pick which projections to fetch inline.
+   */
+  projections: ProjectionSummaryEntry[];
+}
+
+export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection | TooMuchDataResult | ArtifactSummary;
 
 // ─── ArtifactQuery class ──────────────────────────────────────────────────────
 
@@ -331,7 +447,7 @@ export class ArtifactQuery {
   constructor(private readonly artifactPaths: ArtifactPaths) {}
 
   public async query(input: ArtifactQueryInput): Promise<ArtifactQueryResult> {
-    // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector)
+    // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector / summary)
     if (input.artifactId && input.artifactPath) {
       return this.rejection(
         'Provide either "artifactId" (resolved via harness templates) or "artifactPath" (explicit path), not both.',
@@ -349,6 +465,13 @@ export class ArtifactQuery {
     if (input.projection && input.selector !== undefined && input.selector !== '') {
       return this.rejection(
         'Provide either "projection" (named schema-aware extraction) or "selector" (dot-path), not both.',
+        undefined,
+        false
+      );
+    }
+    if (input.summary && (input.projection || (input.selector !== undefined && input.selector !== ''))) {
+      return this.rejection(
+        'Provide either "summary" (size overview without content) or "projection"/"selector" (content extraction), not both.',
         undefined,
         false
       );
@@ -393,7 +516,12 @@ export class ArtifactQuery {
       );
     }
 
-    // 4. Resolve selector from projection or raw selector input
+    // 4. Summary mode — return schema-aware or generic size estimates without content
+    if (input.summary) {
+      return this.buildSummary(parsed, resolvedId, resolvedPath);
+    }
+
+    // 5. Resolve selector from projection or raw selector input
     let effectiveSelector: string;
     if (input.projection) {
       const projEntry = this.lookupProjection(resolvedId, input.projection);
@@ -409,10 +537,11 @@ export class ArtifactQuery {
       }
       effectiveSelector = projEntry.selector;
     } else {
-      effectiveSelector = input.selector ?? '';
+      // Normalize JSON Pointer ("/foo/bar/0") to dot-path ("foo.bar.0") if needed
+      effectiveSelector = normalizeSelectorToDotPath(input.selector ?? '');
     }
 
-    // 5. Apply safe dot-path traversal
+    // 6. Apply safe dot-path traversal
     const value = safeSelectPath(parsed, effectiveSelector);
     if (value === undefined && effectiveSelector) {
       const validProjections = this.validProjectionNames(resolvedId);
@@ -425,17 +554,70 @@ export class ArtifactQuery {
       };
     }
 
-    // 6. Too-much-data guard (req 4)
+    // 7. Too-much-data guard (req 4)
     const tooMuch = tooMuchDataGuard(value, effectiveSelector || '(root)', resolvedId);
     if (tooMuch) return tooMuch;
 
-    // 7. Return success
+    // 8. Return success with size estimate
+    const serialized = serializeForMeasure(value);
     return {
       status: 'ok',
       artifactId: resolvedId,
       artifactPath: resolvedPath,
       selector: effectiveSelector,
-      result: value
+      result: value,
+      sizeEstimate: sizeEstimate(serialized)
+    };
+  }
+
+  /**
+   * Build a schema-aware (or generic) summary of an artifact's projections
+   * with per-projection size estimates but WITHOUT returning any content.
+   *
+   * For known artifact types (planContract, requirementsAnalysis), lists each
+   * named projection from the registry — even when the artifact doesn't
+   * contain every key — so agents see the full menu and its cost.
+   * For unknown types, lists top-level JSON keys.
+   */
+  private buildSummary(parsed: unknown, artifactId: string, artifactPath: string): ArtifactSummary {
+    const totalSerialized = serializeForMeasure(parsed);
+    const totalSizeEstimate = sizeEstimate(totalSerialized);
+    const registry = PROJECTION_REGISTRY[artifactId];
+    const schemaAware = registry !== undefined;
+
+    let projections: ProjectionSummaryEntry[];
+
+    if (schemaAware) {
+      projections = Object.entries(registry).map(([name, entry]) => {
+        const value = safeSelectPath(parsed, entry.selector);
+        const serialized = serializeForMeasure(value);
+        return {
+          name,
+          description: entry.description,
+          sizeEstimate: sizeEstimate(serialized)
+        };
+      });
+    } else {
+      // Generic: enumerate top-level keys
+      const root = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : {};
+      projections = Object.entries(root).map(([name, value]) => {
+        const serialized = serializeForMeasure(value);
+        return {
+          name,
+          sizeEstimate: sizeEstimate(serialized)
+        };
+      });
+    }
+
+    return {
+      status: 'summary',
+      artifactId,
+      artifactPath,
+      schemaAware,
+      totalSizeEstimate,
+      projections
     };
   }
 

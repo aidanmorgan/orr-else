@@ -2642,14 +2642,20 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       session.artifactPathsToolRegistered = true;
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.GET_ARTIFACT_PATHS,
-        description: 'Resolve configured stable artifact paths and bounded artifact content previews for the current Bead/state/action. Use this instead of native reads for .pi/artifacts files.',
+        description:
+          'Resolve configured stable artifact paths and bounded artifact content previews for the current Bead/state/action. ' +
+          'Use this instead of native reads for .pi/artifacts files. ' +
+          'IMPORTANT: For large structured JSON artifacts (planContract, requirementsAnalysis) — which are commonly 30–60 KB — ' +
+          'do NOT request large maxInlineBytes budgets. Instead, use query_artifact with "summary":true first to see ' +
+          'per-projection size estimates (byteCount + tokenEstimate), then request only the named projections you need ' +
+          '(e.g. projection:"writeSet", projection:"verifierObligations"). This avoids the ~14k-token cost of inlining a full plan contract.',
         parameters: Type.Object({
           beadId: Type.String({ description: 'The Bead ID' }),
           stateId: Type.Optional(Type.String({ description: 'Optional state ID' })),
           actionId: Type.Optional(Type.String({ description: 'Optional action ID' })),
           artifactId: Type.Optional(Type.String({ description: 'Optional artifact ID for template expansion' })),
           includeContent: Type.Optional(Type.Boolean({ description: 'Include bounded content previews for existing artifacts. Defaults to true.' })),
-          maxInlineBytes: Type.Optional(Type.Number({ description: 'Requested bytes to inline per artifact preview; the framework applies a hard safety cap.' })),
+          maxInlineBytes: Type.Optional(Type.Number({ description: 'Requested bytes to inline per artifact preview; the framework applies a hard safety cap. For planContract/requirementsAnalysis prefer query_artifact instead of large inline budgets.' })),
           maxTotalInlineBytes: Type.Optional(Type.Number({ description: 'Requested aggregate bytes to inline across artifact previews; the framework applies a hard safety cap.' }))
         }),
         execute: async (params: any) => services.artifactPaths.resolve(params)
@@ -2663,9 +2669,14 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         name: BuiltInToolName.QUERY_ARTIFACT,
         description:
           'Query a structured JSON artifact and return ONLY the requested subtree or named projection — not the whole blob. ' +
-          'Use "projection" for schema-aware named extractions (planContract: writeSet, verifierObligations, implementationSteps, riskList, evidenceReferences, acceptanceCriteria; ' +
-          'requirementsAnalysis: requirementsInventory, traceabilityReferences, gapFlags, referenceCitations, unresolvedQuestions). ' +
-          'Use "selector" for dot-path ad-hoc access (e.g. "implementationSteps.0"). ' +
+          'PREFERRED over get_artifact_paths for large JSON artifacts (planContract, requirementsAnalysis). ' +
+          'WORKFLOW: (1) Call with "summary":true to get per-projection size estimates (byteCount + tokenEstimate) WITHOUT content — ' +
+          'use this to decide which projections fit your context budget. ' +
+          '(2) Call with "projection" for schema-aware named extractions: ' +
+          'planContract: writeSet, verifierObligations, implementationSteps, riskList, evidenceReferences, acceptanceCriteria; ' +
+          'requirementsAnalysis: requirementsInventory, traceabilityReferences, gapFlags, referenceCitations, unresolvedQuestions. ' +
+          '(3) Call with "selector" for dot-path or JSON Pointer ad-hoc access (e.g. "implementationSteps.0" or "/implementationSteps/0"). ' +
+          'Every successful result includes a sizeEstimate {byteCount, tokenEstimate} so you know the cost of what was returned. ' +
           'If the selected subtree exceeds the byte cap, the tool returns counts + representative samples + a narrower-selector hint instead of dumping the full subtree. ' +
           'Missing artifacts and invalid projections return structured rejections with validProjections and path/existence metadata.',
         parameters: Type.Object({
@@ -2674,8 +2685,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           actionId: Type.Optional(Type.String({ description: 'Optional action ID for artifact template resolution' })),
           artifactId: Type.Optional(Type.String({ description: 'Artifact identifier matching a harness.yaml template key (e.g. "planContract", "requirementsAnalysis"). Mutually exclusive with artifactPath.' })),
           artifactPath: Type.Optional(Type.String({ description: 'Explicit filesystem path to the artifact JSON. Mutually exclusive with artifactId.' })),
-          projection: Type.Optional(Type.String({ description: 'Named schema-aware projection (e.g. "writeSet", "implementationSteps" for planContract). Mutually exclusive with selector.' })),
-          selector: Type.Optional(Type.String({ description: 'Dot-path selector into the artifact JSON (e.g. "writeSet", "implementationSteps.0.description"). Mutually exclusive with projection. Empty string returns artifact root subject to byte cap.' }))
+          projection: Type.Optional(Type.String({ description: 'Named schema-aware projection (e.g. "writeSet", "implementationSteps" for planContract). Mutually exclusive with selector and summary.' })),
+          selector: Type.Optional(Type.String({ description: 'Dot-path or JSON Pointer selector into the artifact JSON (e.g. "writeSet", "implementationSteps.0.description", or "/writeSet/0"). Mutually exclusive with projection and summary. Empty string returns artifact root subject to byte cap.' })),
+          summary: Type.Optional(Type.Boolean({ description: 'When true, return per-projection size estimates (byteCount + tokenEstimate) WITHOUT content. Use this first to see what is available and how large each projection is before fetching inline. Mutually exclusive with projection and selector.' }))
         }),
         execute: async (params: any) => artifactQuery.query(params)
       }) as any);

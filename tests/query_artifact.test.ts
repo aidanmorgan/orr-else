@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ArtifactQuery, safeSelectPath } from '../src/core/ArtifactQuery.js';
+import { ArtifactQuery, safeSelectPath, normalizeSelectorToDotPath } from '../src/core/ArtifactQuery.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { ArtifactQueryDefaults, EnvVars } from '../src/constants/index.js';
@@ -589,6 +589,68 @@ describe('ArtifactQuery', () => {
     }
   });
 
+  // ── (security-summary) summary:true with out-of-scope artifactPath is rejected ──
+
+  it('(security-summary) summary:true with out-of-scope artifactPath is rejected', async () => {
+    // Write a JSON file OUTSIDE the test root
+    const outsideDir = path.join(os.tmpdir(), 'orr-else-security-summary-outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    const outsidePath = path.join(outsideDir, 'sensitive.json');
+    fs.writeFileSync(outsidePath, JSON.stringify({ secret: 'summary-should-never-appear' }));
+
+    try {
+      const result = await query.query({
+        beadId: 'bd-1',
+        artifactPath: outsidePath,
+        summary: true
+      });
+
+      // Must be rejected — summary mode must not bypass security scoping
+      expect(result.status).toBe('rejected');
+      if (result.status !== 'rejected') throw new Error('unexpected status');
+      expect(result.exists).toBe(false);
+      // Must NOT leak file content
+      expect(JSON.stringify(result)).not.toContain('summary-should-never-appear');
+      // Must name the scope violation
+      expect(result.reason).toContain('outside the allowed artifact and worktree roots');
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  // ── (multibyte) byteCount reflects UTF-8 byte length, not JS string length ──
+
+  it('(multibyte) byteCount equals Buffer.byteLength(serialized,"utf8") and exceeds .length for non-ASCII', async () => {
+    // Fixture with emoji (4 bytes each in UTF-8) and CJK (3 bytes each in UTF-8)
+    const multibyteFixture = {
+      emoji: '🚀🎯🔥',      // 3 emoji × 4 bytes = 12 UTF-8 bytes, but .length = 6 (surrogate pairs)
+      cjk: '中文测试',        // 4 CJK × 3 bytes = 12 UTF-8 bytes, but .length = 4
+      ascii: 'hello'
+    };
+    writeFile('.pi/artifacts/bd-1/multibyte.json', JSON.stringify(multibyteFixture));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/multibyte.json'),
+      selector: ''
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+
+    const serialized = JSON.stringify(multibyteFixture);
+    const expectedByteCount = Buffer.byteLength(serialized, 'utf8');
+
+    // FIX 1: byteCount must equal the true UTF-8 byte count
+    expect(result.sizeEstimate.byteCount).toBe(expectedByteCount);
+    // And it must be STRICTLY GREATER than string .length (non-ASCII makes this true)
+    expect(result.sizeEstimate.byteCount).toBeGreaterThan(serialized.length);
+    // tokenEstimate must be derived from the true UTF-8 byte count
+    expect(result.sizeEstimate.tokenEstimate).toBe(
+      Math.ceil(expectedByteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+    );
+  });
+
   // ── (g) get_artifact_paths behavior unchanged ─────────────────────────────
 
   it('(g) ArtifactPaths.resolve still returns correct paths/existence for both artifacts', async () => {
@@ -619,6 +681,531 @@ describe('ArtifactQuery', () => {
 
     expect(resolution.artifactContents.planContract.exists).toBe(true);
     expect(resolution.artifactContents.planContract.text).toContain('writeSet');
+  });
+});
+
+// ─── (h) Size estimates — byteCount + tokenEstimate on success ───────────────
+
+describe('ArtifactQuery — size estimates', () => {
+  let configLoader: ConfigLoader;
+  let artifactPaths: ArtifactPaths;
+  let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
+
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
+    query = new ArtifactQuery(artifactPaths);
+
+    writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
+    writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
+    writeFile('.pi/artifacts/bd-1/requirementsAnalysis.json', JSON.stringify(REQUIREMENTS_ANALYSIS_FIXTURE));
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
+    configLoader.reset();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('(h1) successful projection result includes sizeEstimate with byteCount and tokenEstimate', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      projection: 'writeSet'
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+
+    expect(result.sizeEstimate).toBeDefined();
+    const { byteCount, tokenEstimate } = result.sizeEstimate;
+
+    // byteCount must match the JSON-serialized length of the returned value
+    const expectedBytes = JSON.stringify(PLAN_CONTRACT_FIXTURE.writeSet).length;
+    expect(byteCount).toBe(expectedBytes);
+
+    // tokenEstimate must be approximately byteCount / TOKEN_ESTIMATE_CHARS_PER_TOKEN
+    expect(tokenEstimate).toBe(Math.ceil(byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+    expect(tokenEstimate).toBeGreaterThan(0);
+  });
+
+  it('(h2) successful selector result includes sizeEstimate', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: 'implementationSteps'
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+
+    const { byteCount, tokenEstimate } = result.sizeEstimate;
+    const expectedBytes = JSON.stringify(PLAN_CONTRACT_FIXTURE.implementationSteps).length;
+    expect(byteCount).toBe(expectedBytes);
+    expect(tokenEstimate).toBe(Math.ceil(byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+  });
+
+  it('(h3) whole-artifact root result includes sizeEstimate', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: ''
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+
+    const { byteCount, tokenEstimate } = result.sizeEstimate;
+    const expectedBytes = JSON.stringify(PLAN_CONTRACT_FIXTURE).length;
+    expect(byteCount).toBe(expectedBytes);
+    expect(tokenEstimate).toBe(Math.ceil(byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+  });
+
+  it('(h4) tooMuchData path includes tokenEstimate alongside byteCount', async () => {
+    // Build an artifact whose root array exceeds RESULT_MAX_BYTES
+    const largeArray = Array.from({ length: 500 }, (_, i) => ({
+      id: i,
+      description: `Item number ${i} with some padding text to ensure this is larger than the cap limit`,
+      tags: ['a', 'b', 'c'],
+      metadata: { created: '2025-01-01', author: 'test' }
+    }));
+    writeFile('.pi/artifacts/bd-1/largeArtifact.json', JSON.stringify({ writeSet: largeArray }));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/largeArtifact.json'),
+      selector: 'writeSet'
+    });
+
+    expect((result as any).tooMuchData).toBe(true);
+    const tmdResult = result as any;
+
+    // Both byteCount and tokenEstimate must be present
+    expect(typeof tmdResult.byteCount).toBe('number');
+    expect(tmdResult.byteCount).toBeGreaterThan(ArtifactQueryDefaults.RESULT_MAX_BYTES);
+    expect(typeof tmdResult.tokenEstimate).toBe('number');
+    expect(tmdResult.tokenEstimate).toBe(
+      Math.ceil(tmdResult.byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+    );
+    expect(tmdResult.tokenEstimate).toBeGreaterThan(0);
+    // recovery text must mention token estimate
+    const recoveryText = tmdResult.recovery.join(' ');
+    expect(recoveryText).toMatch(/~\d+ tokens/);
+  });
+});
+
+// ─── (i) Schema-aware summary mode ───────────────────────────────────────────
+
+describe('ArtifactQuery — summary mode', () => {
+  let configLoader: ConfigLoader;
+  let artifactPaths: ArtifactPaths;
+  let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
+
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
+    query = new ArtifactQuery(artifactPaths);
+
+    writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
+    writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
+    writeFile('.pi/artifacts/bd-1/requirementsAnalysis.json', JSON.stringify(REQUIREMENTS_ANALYSIS_FIXTURE));
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
+    configLoader.reset();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('(i1) summary:true on planContract returns schema-aware summary with all projection names', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      summary: true
+    });
+
+    expect(result.status).toBe('summary');
+    if (result.status !== 'summary') throw new Error('unexpected status');
+
+    // Must be schema-aware (has projection registry entry)
+    expect(result.schemaAware).toBe(true);
+    expect(result.artifactId).toBe('planContract');
+
+    // Must list ALL projection names from the registry
+    const projectionNames = result.projections.map(p => p.name);
+    expect(projectionNames).toContain('writeSet');
+    expect(projectionNames).toContain('verifierObligations');
+    expect(projectionNames).toContain('implementationSteps');
+    expect(projectionNames).toContain('riskList');
+    expect(projectionNames).toContain('evidenceReferences');
+    expect(projectionNames).toContain('acceptanceCriteria');
+
+    // Each projection must have sizeEstimate
+    for (const proj of result.projections) {
+      expect(typeof proj.sizeEstimate.byteCount).toBe('number');
+      expect(typeof proj.sizeEstimate.tokenEstimate).toBe('number');
+      expect(proj.sizeEstimate.tokenEstimate).toBe(
+        Math.ceil(proj.sizeEstimate.byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+      );
+    }
+
+    // Must NOT contain any content values (no actual field data)
+    const summaryJson = JSON.stringify(result);
+    expect(summaryJson).not.toContain('Create Foo class');
+    expect(summaryJson).not.toContain('tsc');
+    expect(summaryJson).not.toContain('Breaking change');
+  });
+
+  it('(i2) summary:true on requirementsAnalysis returns schema-aware summary with all projection names', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'requirementsAnalysis',
+      summary: true
+    });
+
+    expect(result.status).toBe('summary');
+    if (result.status !== 'summary') throw new Error('unexpected status');
+
+    expect(result.schemaAware).toBe(true);
+    const projectionNames = result.projections.map(p => p.name);
+    expect(projectionNames).toContain('requirementsInventory');
+    expect(projectionNames).toContain('traceabilityReferences');
+    expect(projectionNames).toContain('gapFlags');
+    expect(projectionNames).toContain('referenceCitations');
+    expect(projectionNames).toContain('unresolvedQuestions');
+
+    // No actual requirement content
+    const summaryJson = JSON.stringify(result);
+    expect(summaryJson).not.toContain('System must handle X');
+    expect(summaryJson).not.toContain('No 2FA requirement specified');
+  });
+
+  it('(i3) summary includes totalSizeEstimate for the whole artifact', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      summary: true
+    });
+
+    expect(result.status).toBe('summary');
+    if (result.status !== 'summary') throw new Error('unexpected status');
+
+    const { byteCount, tokenEstimate } = result.totalSizeEstimate;
+    const expectedBytes = JSON.stringify(PLAN_CONTRACT_FIXTURE).length;
+    expect(byteCount).toBe(expectedBytes);
+    expect(tokenEstimate).toBe(Math.ceil(byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN));
+  });
+
+  it('(i4) summary:true on unknown artifactId returns generic key summary (not schema-aware)', async () => {
+    // Write a generic artifact file via explicit path
+    const genericFixture = { alpha: [1, 2, 3], beta: { x: 1 }, gamma: 'hello' };
+    writeFile('.pi/artifacts/bd-1/generic.json', JSON.stringify(genericFixture));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/generic.json'),
+      summary: true
+    });
+
+    expect(result.status).toBe('summary');
+    if (result.status !== 'summary') throw new Error('unexpected status');
+
+    // Generic (not schema-aware)
+    expect(result.schemaAware).toBe(false);
+
+    const projectionNames = result.projections.map(p => p.name);
+    expect(projectionNames).toContain('alpha');
+    expect(projectionNames).toContain('beta');
+    expect(projectionNames).toContain('gamma');
+  });
+
+  it('(i5) summary with projection returns rejection (mutually exclusive)', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      summary: true,
+      projection: 'writeSet'
+    });
+
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('summary');
+    expect(result.reason).toContain('projection');
+  });
+
+  it('(i6) summary with selector returns rejection (mutually exclusive)', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      summary: true,
+      selector: 'writeSet'
+    });
+
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('summary');
+    expect(result.reason).toContain('selector');
+  });
+
+  it('(i7) schema-aware summary includes description for each projection', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      summary: true
+    });
+
+    expect(result.status).toBe('summary');
+    if (result.status !== 'summary') throw new Error('unexpected status');
+
+    const writeSetEntry = result.projections.find(p => p.name === 'writeSet');
+    expect(writeSetEntry).toBeDefined();
+    expect(typeof writeSetEntry!.description).toBe('string');
+    expect(writeSetEntry!.description!.length).toBeGreaterThan(0);
+  });
+});
+
+// ─── (j) JSON Pointer selector normalization ──────────────────────────────────
+
+describe('ArtifactQuery — JSON Pointer selector normalization', () => {
+  let configLoader: ConfigLoader;
+  let artifactPaths: ArtifactPaths;
+  let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
+
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
+    query = new ArtifactQuery(artifactPaths);
+
+    writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
+    writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
+    configLoader.reset();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('(j1) JSON Pointer "/writeSet" resolves same as dot-path "writeSet"', async () => {
+    const dotResult = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: 'writeSet'
+    });
+    const ptrResult = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: '/writeSet'
+    });
+
+    expect(dotResult.status).toBe('ok');
+    expect(ptrResult.status).toBe('ok');
+    if (dotResult.status !== 'ok' || ptrResult.status !== 'ok') throw new Error('unexpected status');
+    expect(ptrResult.result).toEqual(dotResult.result);
+  });
+
+  it('(j2) JSON Pointer "/implementationSteps/0" resolves to first element', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: '/implementationSteps/0'
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+    expect(result.result).toEqual(PLAN_CONTRACT_FIXTURE.implementationSteps[0]);
+  });
+
+  it('(j3) JSON Pointer "/verifierObligations/0/tool" resolves to nested scalar', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      selector: '/verifierObligations/0/tool'
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unexpected status');
+    expect(result.result).toBe('tsc');
+  });
+});
+
+// ─── (k) Bounded output when artifact exceeds inline budget ──────────────────
+
+describe('ArtifactQuery — bounded output (too-much-data path)', () => {
+  let configLoader: ConfigLoader;
+  let artifactPaths: ArtifactPaths;
+  let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
+
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
+    query = new ArtifactQuery(artifactPaths);
+
+    writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
+    configLoader.reset();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('(k1) querying writeSet on a large artifact returns count + samples + estimate, not full dump', async () => {
+    const largeWriteSet = Array.from({ length: 300 }, (_, i) => `src/generated/file-${i}.ts`);
+    const largeContract = { writeSet: largeWriteSet, verifierObligations: [{ tool: 'tsc', mustPass: true }] };
+    writeFile('.pi/artifacts/bd-1/largePc.json', JSON.stringify(largeContract));
+
+    const fullSize = JSON.stringify(largeWriteSet).length;
+    expect(fullSize).toBeGreaterThan(ArtifactQueryDefaults.RESULT_MAX_BYTES);
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/largePc.json'),
+      selector: 'writeSet'
+    });
+
+    expect((result as any).tooMuchData).toBe(true);
+    const tmd = result as any;
+    expect(tmd.itemCount).toBe(300);
+    expect(tmd.byteCount).toBeGreaterThan(ArtifactQueryDefaults.RESULT_MAX_BYTES);
+    expect(tmd.tokenEstimate).toBeGreaterThan(0);
+    expect(tmd.representativeSamples.length).toBeLessThanOrEqual(ArtifactQueryDefaults.SAMPLE_MAX_ITEMS);
+    // Does not contain all 300 items
+    expect(JSON.stringify(tmd.representativeSamples).length).toBeLessThan(fullSize);
+    // Hint references writeSet
+    expect(tmd.narrowerSelectorHint).toContain('writeSet');
+    expect(tmd.nextAction).toBe('rerun_with_narrower_selector');
+  });
+
+  it('(k2) querying verifierObligations on a large artifact returns bounded result', async () => {
+    const largeObligations = Array.from({ length: 500 }, (_, i) => ({
+      tool: `checker-${i}`,
+      mustPass: true,
+      description: `Obligation description with enough padding text to make each entry large enough`
+    }));
+    writeFile('.pi/artifacts/bd-1/largeVo.json', JSON.stringify({ verifierObligations: largeObligations }));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/largeVo.json'),
+      selector: 'verifierObligations'
+    });
+
+    expect((result as any).tooMuchData).toBe(true);
+    expect((result as any).itemCount).toBe(500);
+    expect((result as any).representativeSamples.length).toBeLessThanOrEqual(ArtifactQueryDefaults.SAMPLE_MAX_ITEMS);
+    expect(typeof (result as any).tokenEstimate).toBe('number');
+    expect((result as any).tokenEstimate).toBeGreaterThan(0);
+  });
+
+  it('(k3) querying requirementsInventory on large data returns bounded result with estimate', async () => {
+    const largeInventory = Array.from({ length: 400 }, (_, i) => ({
+      id: `REQ-${i}`,
+      description: `Requirement description ${i} with plenty of padding to exceed the byte cap for this test`,
+      priority: 'medium',
+      source: 'spec.md'
+    }));
+    writeFile('.pi/artifacts/bd-1/largeRa.json', JSON.stringify({ requirementsInventory: largeInventory }));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/largeRa.json'),
+      selector: 'requirementsInventory'
+    });
+
+    expect((result as any).tooMuchData).toBe(true);
+    expect((result as any).itemCount).toBe(400);
+    const tmd = result as any;
+    expect(tmd.tokenEstimate).toBe(
+      Math.ceil(tmd.byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+    );
+  });
+
+  it('(k4) querying traceabilityReferences on large data returns bounded result', async () => {
+    const largeRefs = Array.from({ length: 600 }, (_, i) => ({
+      reqId: `REQ-${i}`,
+      source: `spec-section-${i}.md`,
+      line: i * 10,
+      evidence: `Evidence text ${i} with enough padding to make the serialized total exceed the cap`
+    }));
+    writeFile('.pi/artifacts/bd-1/largeTr.json', JSON.stringify({ traceabilityReferences: largeRefs }));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/largeTr.json'),
+      selector: 'traceabilityReferences'
+    });
+
+    expect((result as any).tooMuchData).toBe(true);
+    expect((result as any).itemCount).toBe(600);
+    expect((result as any).representativeSamples.length).toBeLessThanOrEqual(ArtifactQueryDefaults.SAMPLE_MAX_ITEMS);
+  });
+});
+
+// ─── normalizeSelectorToDotPath unit tests ────────────────────────────────────
+
+describe('normalizeSelectorToDotPath', () => {
+  it('empty string returns empty string', () => {
+    expect(normalizeSelectorToDotPath('')).toBe('');
+  });
+
+  it('plain dot-path is returned as-is', () => {
+    expect(normalizeSelectorToDotPath('writeSet')).toBe('writeSet');
+    expect(normalizeSelectorToDotPath('foo.bar.0')).toBe('foo.bar.0');
+  });
+
+  it('JSON Pointer "/" (root) normalizes to empty string', () => {
+    expect(normalizeSelectorToDotPath('/')).toBe('');
+  });
+
+  it('JSON Pointer "/foo" normalizes to "foo"', () => {
+    expect(normalizeSelectorToDotPath('/foo')).toBe('foo');
+  });
+
+  it('JSON Pointer "/foo/bar" normalizes to "foo.bar"', () => {
+    expect(normalizeSelectorToDotPath('/foo/bar')).toBe('foo.bar');
+  });
+
+  it('JSON Pointer "/writeSet/0" normalizes to "writeSet.0"', () => {
+    expect(normalizeSelectorToDotPath('/writeSet/0')).toBe('writeSet.0');
+  });
+
+  it('JSON Pointer "/implementationSteps/0/description" normalizes correctly', () => {
+    expect(normalizeSelectorToDotPath('/implementationSteps/0/description'))
+      .toBe('implementationSteps.0.description');
+  });
+
+  it('JSON Pointer ~0 escape decodes to ~', () => {
+    expect(normalizeSelectorToDotPath('/a~0b')).toBe('a~b');
+  });
+
+  it('JSON Pointer ~1 escape decodes to /', () => {
+    expect(normalizeSelectorToDotPath('/a~1b')).toBe('a/b');
+  });
+
+  it('whitespace is trimmed before normalization', () => {
+    expect(normalizeSelectorToDotPath('  /foo/bar  ')).toBe('foo.bar');
+    expect(normalizeSelectorToDotPath('  foo.bar  ')).toBe('foo.bar');
   });
 });
 

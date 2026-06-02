@@ -619,7 +619,14 @@ export const ArtifactQueryDefaults = {
   RESULT_MAX_BYTES: 8 * 1024,
   /** Maximum number of representative array items returned when a result
    *  exceeds RESULT_MAX_BYTES. */
-  SAMPLE_MAX_ITEMS: 5
+  SAMPLE_MAX_ITEMS: 5,
+  /**
+   * Heuristic divisor for byte-to-token estimation.
+   * 4 bytes per token is the standard GPT/Claude approximation for mixed
+   * English/code content. Agents use this to decide whether a projection
+   * fits their context budget BEFORE expanding it inline.
+   */
+  TOKEN_ESTIMATE_CHARS_PER_TOKEN: 4
 } as const;
 
 export enum ReviewArtifactKind {
