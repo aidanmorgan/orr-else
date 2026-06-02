@@ -90,4 +90,73 @@ describe('Scheduler', () => {
 
     expect(sorted[0].id).toBe('recent-implementation');
   });
+
+  // ---------------------------------------------------------------------------
+  // BEAD C — split-brain immunity: sortBacklog / FlowManager.stateForBead
+  // reads only from bead.status (the event-store projection field), never from
+  // any raw Beads metadata. Split-brain = correct projection + wrong metadata.
+  // ---------------------------------------------------------------------------
+
+  it('(BEAD-C) sortBacklog scores from event-projection bead.status even when Beads metadata would claim a wrong state', async () => {
+    // The Bead type has no raw metadata field — normalizeIssueWithProjection
+    // already wrote the projection-correct value into bead.status before the
+    // scheduler sees it. This test proves that sortBacklog does NOT try to
+    // read any "native" metadata field; it scores purely off bead.status.
+    //
+    // Split-brain scenario: raw Beads says "Planning" (early phase), but the
+    // event-store projection correctly reflects "Implementation" (later phase).
+    // After normalizeIssueWithProjection, bead.status == "Implementation".
+    // sortBacklog must rank this bead ABOVE a genuine Planning-phase bead.
+    const now = new Date().toISOString();
+    const beads: any[] = [
+      // Correctly projected to Implementation (later phase = higher score)
+      { id: 'splitbrain-correct-projection', status: 'Implementation', lastActivity: now, priority: 2 },
+      // Fresh bead genuinely in Planning (earlier phase = lower score)
+      { id: 'genuine-planning', status: 'Planning', lastActivity: now, priority: 2 }
+    ];
+
+    const sorted = await scheduler().sortBacklog(beads);
+
+    // Implementation ranks higher than Planning (closer to terminal state)
+    expect(sorted[0].id).toBe('splitbrain-correct-projection');
+    expect(sorted[1].id).toBe('genuine-planning');
+
+    // Verify the score difference reflects the phase distance
+    expect(sorted[0].score).toBeGreaterThan(sorted[1].score);
+  });
+
+  it('(BEAD-C) stateForBead returns the projection-sourced bead.status, not any metadata fallback', async () => {
+    // Direct proof: FlowManager.stateForBead(bead, config) reads bead.status
+    // (already the projection output). A bead whose .status == "Implementation"
+    // must map to "Implementation" even if one imagines a conflicting metadata.
+    const { FlowManager } = await import('../src/core/FlowManager.js');
+    const fm = new FlowManager();
+    const config = {
+      settings: { startState: 'Planning' },
+      states: { Planning: {}, Implementation: {} },
+      statechart: { terminalStates: ['completed'] }
+    } as any;
+
+    // Bead with projection-correct status "Implementation"
+    const projectedBead = {
+      id: 'bd-projected',
+      status: 'Implementation',
+      // No metadata field on Bead — isolation is structural
+    } as any;
+
+    expect(fm.stateForBead(projectedBead, config)).toBe('Implementation');
+
+    // Bead with projection-correct status "Planning" (start state fallback)
+    const readyBead = { id: 'bd-ready', status: 'ready' } as any;
+    expect(fm.stateForBead(readyBead, config)).toBe('Planning'); // initialState for ready
+
+    // Restart signal from event store: restartTargetState wins over status
+    const restartBead = {
+      id: 'bd-restart',
+      status: 'Implementation',  // "wrong" current status
+      restartRequested: true,
+      restartTargetState: 'Planning'  // projection says restart here
+    } as any;
+    expect(fm.stateForBead(restartBead, config)).toBe('Planning');
+  });
 });

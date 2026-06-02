@@ -1,3 +1,20 @@
+# ---------------------------------------------------------------------------
+# bd tool group boundary (BEAD D contract)
+#
+# Beads (the bd CLI) holds task text, dependencies, and COARSE issue status
+# only: open, blocked, deferred, and closed (via `bd close`).
+#
+# Runtime statechart state (e.g. Planning, Implementation) lives EXCLUSIVELY
+# in the event store — it must NEVER be written to Beads native metadata.
+#
+# bd_update_status maps BeadStatus values to the coarse set:
+#   COMPLETED          → bd close
+#   BLOCKED / DEFERRED → bd update --status <blocked|deferred>
+#   READY / IN_PROGRESS / FAILED → bd update --status open
+#
+# Free-form statechart state names submitted to bd_update_status are rejected
+# at the tool boundary with a clear error.
+# ---------------------------------------------------------------------------
 settings:
   maxConcurrentSlots: 6
   agentTurnTimeoutMs: 3600000

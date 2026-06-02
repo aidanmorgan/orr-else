@@ -703,7 +703,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
     },
     {
       name: PluginToolName.BD_GET_BEAD,
-      description: 'Retrieve the task-facing Bead record by ID via `bd show --long --json`. Uses a fast native Beads view by default; pass includeDetails=true or use bd_get_state_chart for event-store checklist, handover, action, and transition details.',
+      description: 'Retrieve the task-facing Bead record by ID via `bd show --long --json`. Uses a fast native Beads view by default; pass includeDetails=true or use bd_get_state_chart for event-store checklist, handover, action, and transition details. NOTE: Bead.status reflects the event-store projection (runtime statechart state), NOT Beads-native metadata — the event store is the single source of truth for runtime state.',
       parameters: Type.Object({
         id: Type.String({ description: 'The ID of the Bead' }),
         includeDetails: Type.Optional(Type.Boolean({ description: 'Include derived event-store details. Default false; prefer bd_get_state_chart for targeted statechart details.' }))
@@ -817,15 +817,32 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
     },
     {
       name: PluginToolName.BD_UPDATE_STATUS,
-      description: 'Transition a Bead to a new status (e.g. ready, completed, blocked).',
+      // BEAD D boundary: Beads holds task text + dependencies + COARSE issue status only.
+      // Runtime statechart state lives ONLY in the event store — never in Beads metadata.
+      // Accepted inputs: BeadStatus values (ready/in_progress/completed/blocked/deferred/failed).
+      // Coarse Beads mapping: COMPLETED→bd close; BLOCKED/DEFERRED→bd update --status <value>;
+      // all others (READY/IN_PROGRESS/FAILED)→bd update --status open.
+      // Free-form statechart state names (e.g. "Planning", "Implementation") are REJECTED.
+      description: 'Transition a Bead to a coarse lifecycle status. Accepted values: ready, in_progress, completed, blocked, deferred, failed. BOUNDARY: only coarse BeadStatus values are accepted — never statechart state names (e.g. "Planning"). Runtime statechart state lives exclusively in the event store.',
       parameters: Type.Object({
         id: Type.String({ description: 'The ID of the Bead' }),
-        status: Type.String({ description: 'Target BeadStatus' }),
+        status: Type.String({ description: 'Coarse BeadStatus: ready, in_progress, completed, blocked, deferred, or failed. Statechart state names are rejected.' }),
         notes: Type.Optional(Type.String({ description: 'Transition notes' }))
       }),
       execute: async (params: unknown) => {
-        const { id, status, notes } = (params && typeof params === 'object' ? params : {}) as { id: string; status: BeadStatus; notes?: string };
-        return updateIssueStatus(client, eventStore, id, status, notes, env, root);
+        const { id, status, notes } = (params && typeof params === 'object' ? params : {}) as { id: string; status: string; notes?: string };
+        // BEAD D guard: reject free-form statechart state names at the tool boundary.
+        // Only coarse BeadStatus values are forwarded to bd to preserve the invariant
+        // that Beads never holds runtime statechart state.
+        const knownBeadStatuses = new Set<string>(Object.values(BeadStatus));
+        if (!knownBeadStatuses.has(status)) {
+          throw new Error(
+            `BD_UPDATE_STATUS boundary violation: "${status}" is not a valid coarse BeadStatus. ` +
+            `Accepted values: ${[...knownBeadStatuses].join(', ')}. ` +
+            `Runtime statechart state (e.g. "Planning") must NOT be written to Beads — it lives only in the event store.`
+          );
+        }
+        return updateIssueStatus(client, eventStore, id, status as BeadStatus, notes, env, root);
       }
     },
     {

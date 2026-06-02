@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
+import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
 
@@ -947,5 +948,148 @@ states:
 
     // Missing transitionEvent must NOT record action completion — old semantics preserved
     expect(bead.completedActionIds ?? []).not.toContain('formulate-plan');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BEAD B — Memory-bound index scan proof
+//
+// When a bead has a complete .ready marker (sources record the full byte size
+// of every primary JSONL file), eventsForBead must:
+//   - scan only the per-bead index file (by-bead/<beadId>.jsonl)
+//   - call scanFromOffset on the primary file only for the "tail" bytes beyond
+//     what was indexed (or not at all when the marker covers the whole file)
+//   - NEVER call the full scan() on the primary JSONL
+//
+// This proves the BeadEventIndex short-circuit: a single-bead projection reads
+// O(bead-events) not O(all-events).
+// ---------------------------------------------------------------------------
+
+describe('EventStore — memory-bound index scan (BEAD B)', () => {
+  let tempRoot: string;
+  let configLoader: ConfigLoader;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-es-bound-'));
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    fs.mkdirSync(path.join(tempRoot, '.pi/events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi/logs'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: {}
+`);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    configLoader.reset();
+    Logger.close();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('does not full-scan the primary JSONL when the bead index is complete', async () => {
+    // ── Setup: large multi-bead primary JSONL ────────────────────────────────
+    // Write 50 events belonging to OTHER beads into the primary file.
+    // bd-target has exactly 1 event, placed in its per-bead index.
+    // The ready marker records the FULL byte size of the primary file so there
+    // is no "tail" to catch up from — scanFromOffset should be called with an
+    // offset equal to the full file size (≥ currentSize check skips it).
+
+    const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
+
+    const otherBeadEvents = Array.from({ length: 50 }, (_, i) => ({
+      id: `other-evt-${i}`,
+      type: DomainEventName.BEAD_CLAIMED,
+      timestamp: `2026-01-01T00:00:${String(i).padStart(2, '0')}.000Z`,
+      sessionId: 's1',
+      data: { beadId: `bd-other-${i}`, stateId: 'Planning' }
+    }));
+
+    const primaryContent = `${otherBeadEvents.map(e => JSON.stringify(e)).join('\n')}\n`;
+    fs.writeFileSync(eventsPath, primaryContent);
+    const primaryByteSize = Buffer.byteLength(primaryContent);
+
+    // ── Per-bead index for bd-target ─────────────────────────────────────────
+    const indexDir = path.join(tempRoot, '.pi/events', EventStoreDefaults.BEAD_INDEX_DIR);
+    fs.mkdirSync(indexDir, { recursive: true });
+
+    const targetEvent = {
+      id: 'target-evt-1',
+      type: DomainEventName.BEAD_CLAIMED,
+      timestamp: '2026-01-01T00:01:00.000Z',
+      sessionId: 's1',
+      data: { beadId: 'bd-target', stateId: 'Planning' }
+    };
+
+    const indexPath = path.join(indexDir, `bd-target${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    fs.writeFileSync(indexPath, `${JSON.stringify(targetEvent)}\n`);
+
+    // Ready marker: sources records the full primary file size → no tail to read.
+    const markerPath = `${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+    fs.writeFileSync(markerPath, JSON.stringify({
+      sources: { 'project.jsonl': primaryByteSize }
+    }));
+
+    // ── Spy on JsonlEventLog ──────────────────────────────────────────────────
+    // We pass a real JsonlEventLog but spy on its methods to count calls.
+    const eventLog = new JsonlEventLog();
+
+    const scanSpy = vi.spyOn(eventLog, 'scan');
+    const scanFromOffsetSpy = vi.spyOn(eventLog, 'scanFromOffset');
+
+    // Construct EventStore with the spied eventLog.
+    const eventStore = new EventStore(configLoader, eventLog, undefined, tempRoot);
+    eventStore.setSessionId('test-bound');
+
+    // ── Exercise ─────────────────────────────────────────────────────────────
+    const events = await eventStore.eventsForBead('bd-target');
+
+    // ── Assert: correct result ────────────────────────────────────────────────
+    expect(events).toHaveLength(1);
+    expect(events[0].id).toBe('target-evt-1');
+
+    // ── Assert: scan() was NOT called on the primary file ────────────────────
+    // scan() delegates to scanFromOffset(path, 0, ...) — if it were called on
+    // the primary JSONL, that would be a full scan of all 50 other-bead events.
+    // The only scan() call allowed is on the per-bead index file itself.
+    const primaryScanCalls = scanSpy.mock.calls.filter(
+      ([filePath]) => filePath === eventsPath
+    );
+    expect(
+      primaryScanCalls.length,
+      'scan() must not be called on the primary JSONL when the bead index is complete — doing so would read all events regardless of bead'
+    ).toBe(0);
+
+    // ── Assert: scanFromOffset on the primary skips all bytes (offset ≥ size) ─
+    // When the ready marker records the full size, BeadEventIndex computes
+    // indexedSize >= currentSize → skips the scanFromOffset call entirely.
+    // Either it was not called at all, or if called, it must be with an offset
+    // >= primaryByteSize (meaning it reads nothing).
+    const primaryTailCalls = scanFromOffsetSpy.mock.calls.filter(
+      ([filePath]) => filePath === eventsPath
+    );
+    for (const [, offset] of primaryTailCalls) {
+      expect(
+        offset,
+        'scanFromOffset on the primary JSONL must start at or beyond the full file size (no tail to read)'
+      ).toBeGreaterThanOrEqual(primaryByteSize);
+    }
+
+    // ── Assert: the index file itself WAS scanned (proves the index path is used) ─
+    const indexScanCalls = [
+      ...scanSpy.mock.calls.filter(([fp]) => fp === indexPath),
+      ...scanFromOffsetSpy.mock.calls.filter(([fp]) => fp === indexPath)
+    ];
+    expect(
+      indexScanCalls.length,
+      'The per-bead index file must be scanned at least once to read the indexed events'
+    ).toBeGreaterThan(0);
   });
 });

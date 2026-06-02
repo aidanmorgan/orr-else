@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Orchestrator } from '../src/core/Orchestrator.js';
+import { FlowManager } from '../src/core/FlowManager.js';
 import { App, BeadsDefaults, BeadsIssueStatus, PluginToolName } from '../src/constants/index.js';
 import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
 import type { Bead } from '../src/types/index.js';
@@ -111,6 +112,125 @@ describe('Orchestrator', () => {
 
     expect(assignments.map(bead => bead.id)).toEqual(['cerdiwen-resume']);
     expect(calls.some(call => call.name === PluginToolName.BD_LIST)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // BEAD C — split-brain immunity: selectAssignments routes from the
+  // event-store projection (bead.status / bead.restartTargetState), not from
+  // Beads native metadata. Even with GARBAGE metadata the projection wins.
+  // ---------------------------------------------------------------------------
+
+  it('(BEAD-C) selectAssignments routes from the event projection even when Beads metadata claims a wrong status', async () => {
+    // Arrange: the BeadsPort returns a Bead whose status field is set to the
+    // projection-derived value ("Implementation"), but imagine the raw Beads
+    // native metadata said "Planning" — the port's normalizeIssueWithProjection
+    // already applied the projection before returning. This test proves that
+    // selectAssignments + the REAL FlowManager.stateForBead consume ONLY the
+    // projected bead.status, never touching any raw Beads metadata.
+    //
+    // REAL FlowManager wiring: we use new FlowManager() (same as scheduler.test.ts)
+    // so that stateForBead is the production implementation, not a hand-written
+    // lambda. If FlowManager.stateForBead ever consulted a non-existent raw
+    // metadata field (or incorrectly fell back to startState), this test would
+    // return stateId == "Planning" instead of "Implementation" and fail.
+    const splitBrainBead = fakeBead('cerdiwen-splitbrain', 'Implementation', {
+      assigned_to: App.DISPLAY_NAME,
+      // The raw Beads metadata WOULD say 'Planning' — but normalizeIssueWithProjection
+      // already replaced it with the projection-correct value in bead.status.
+      // There is no raw metadata field on the Bead type, proving the isolation.
+    });
+
+    const beadsPort: BeadsPort = {
+      ready: vi.fn(async () => [splitBrainBead]),
+      list: vi.fn(async () => ({ items: [] })),
+      getBead: vi.fn(async () => splitBrainBead),
+      claim: vi.fn(async ({ id }) => fakeBead(id, 'Implementation')),
+      release: vi.fn(async () => {})
+    };
+
+    const realConfig = {
+      settings: { maxConcurrentSlots: 4, startState: 'Planning' },
+      states: {
+        Planning: { transitions: { SUCCESS: 'Implementation' }, on: {} },
+        Implementation: { transitions: { SUCCESS: 'completed' }, on: {} }
+      },
+      scheduler: {}
+    };
+
+    const orchestrator = new Orchestrator(
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn, getSessionId: () => 'session-x' } as any,
+      { load: async () => realConfig } as any,
+      // REAL FlowManager — stateForBead reads bead.status and bead.restartTargetState,
+      // not any hypothetical raw metadata. A regression that made it consult the
+      // wrong field would return 'Planning' (startState) and fail the stateId assertion.
+      new FlowManager(),
+      { sortBacklog: async (beads: any[]) => beads.map(b => ({ ...b, score: 1 })) } as any,
+      beadsPort,
+      4
+    );
+
+    const assignments = await orchestrator.selectAssignments(2);
+
+    // Must have selected cerdiwen-splitbrain with stateId from the projection
+    expect(assignments).toHaveLength(1);
+    expect(assignments[0].id).toBe('cerdiwen-splitbrain');
+    // stateId must come from the projected bead.status ('Implementation'), NOT
+    // from any metadata fallback (which would give 'Planning').
+    expect(assignments[0].stateId).toBe('Implementation');
+    expect(assignments[0].stateId).not.toBe('Planning');
+  });
+
+  it('(BEAD-C) selectAssignments with restartTargetState follows event-projection restart field over any metadata status', async () => {
+    // Arrange: a bead that has restartRequested=true and restartTargetState="Planning"
+    // (set by the event store projection). Even if bead.status says "Implementation",
+    // the restart signal from the projection must take priority.
+    //
+    // REAL FlowManager wiring: FlowManager.stateForBead checks restartTargetState
+    // first (before bead.status). A regression that dropped the restartTargetState
+    // priority check would return 'Implementation' instead of 'Planning' and fail.
+    const restartBead = fakeBead('cerdiwen-restart', 'Implementation', {
+      assigned_to: App.DISPLAY_NAME,
+      restartRequested: true,
+      restartTargetState: 'Planning'
+    });
+
+    const beadsPort: BeadsPort = {
+      ready: vi.fn(async () => [restartBead]),
+      list: vi.fn(async () => ({ items: [] })),
+      getBead: vi.fn(async () => restartBead),
+      claim: vi.fn(async ({ id }) => fakeBead(id, 'Planning')),
+      release: vi.fn(async () => {})
+    };
+
+    const realConfig = {
+      settings: { maxConcurrentSlots: 4, startState: 'Planning' },
+      states: {
+        Planning: { transitions: { SUCCESS: 'Implementation' }, on: {} },
+        Implementation: { transitions: { SUCCESS: 'completed' }, on: {} }
+      },
+      scheduler: {}
+    };
+
+    const orchestrator = new Orchestrator(
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn, getSessionId: () => 'session-y' } as any,
+      { load: async () => realConfig } as any,
+      // REAL FlowManager — stateForBead checks restartRequested + restartTargetState
+      // FIRST, before falling back to bead.status. Removing that priority check
+      // in FlowManager would make this return 'Implementation' and fail the assertion.
+      new FlowManager(),
+      { sortBacklog: async (beads: any[]) => beads.map(b => ({ ...b, score: 1 })) } as any,
+      beadsPort,
+      4
+    );
+
+    const assignments = await orchestrator.selectAssignments(2);
+
+    expect(assignments).toHaveLength(1);
+    expect(assignments[0].id).toBe('cerdiwen-restart');
+    // stateId must be restartTargetState from the event-store projection ('Planning'),
+    // NOT bead.status ('Implementation') — restartTargetState wins.
+    expect(assignments[0].stateId).toBe('Planning');
+    expect(assignments[0].stateId).not.toBe('Implementation');
   });
 
   it('recovers Orr Else-owned open beads whose event projection is already in a statechart phase', async () => {

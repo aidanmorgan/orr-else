@@ -559,6 +559,142 @@ describe('Beads JSONL compatibility tools', () => {
     expect(result1).not.toBe(result2);
   });
 
+  // ---------------------------------------------------------------------------
+  // BEAD C — split-brain immunity: normalizeIssueWithProjection ignores
+  // issue.metadata entirely. The event-store projection ALWAYS wins.
+  // ---------------------------------------------------------------------------
+
+  it('(BEAD-C) normalizeIssueWithProjection ignores issue.metadata — projection wins over conflicting native Beads metadata', async () => {
+    // Arrange: the raw Beads issue record has metadata.orr_else claiming a
+    // WRONG status ("Implementation") and a wrong assignee. The event-store
+    // projection says the bead is in "Planning" and assigned to "correct-owner".
+    // normalizeIssueWithProjection must use the projection, never issue.metadata.
+    vi.mocked(execa).mockImplementationOnce(async (_bin: string, args: string[]) => {
+      if (args.includes('show')) {
+        return {
+          stdout: JSON.stringify([{
+            id: 'bd-splitbrain',
+            title: 'Split-Brain Test',
+            status: 'open',
+            priority: 2,
+            metadata: {
+              orr_else: {
+                // WRONG — conflicts with the projection below
+                status: 'Implementation',
+                assigned_to: 'wrong-owner'
+              }
+            }
+          }]),
+          stderr: ''
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    });
+
+    // The event store projection returns the CORRECT state
+    const correctProjection = {
+      status: 'Planning',
+      assigned_to: 'correct-owner',
+      retryCount: 1,
+      compactionCount: 0,
+      totalExecutionTimeMs: 500,
+      lastActivity: '2026-01-01T00:00:00.000Z'
+    };
+    const splitBrainPlugin = createBdPlugin({
+      projectBead: vi.fn(async () => correctProjection),
+      projectBeads: vi.fn(async () => new Map([['bd-splitbrain', correctProjection]]))
+    } as any);
+    const getTool = splitBrainPlugin.tools.find(t => t.name === 'bd_get_bead');
+    if (!getTool) throw new Error('missing bd_get_bead');
+
+    const result = await getTool.execute({ id: 'bd-splitbrain', includeDetails: true }) as any;
+
+    // Projection MUST win — issue.metadata.orr_else is completely ignored
+    expect(result.status).toBe('Planning');
+    expect(result.assigned_to).toBe('correct-owner');
+    expect(result.retryCount).toBe(1);
+    // The wrong values from issue.metadata must NOT appear
+    expect(result.status).not.toBe('Implementation');
+    expect(result.assigned_to).not.toBe('wrong-owner');
+  });
+
+  // ---------------------------------------------------------------------------
+  // BEAD D — coarse-status boundary guard: BD_UPDATE_STATUS only sends the
+  // coarse set {open, blocked, deferred} (+ bd close for completed) to bd.
+  // Statechart state names (e.g. "Planning") are REJECTED at the tool boundary.
+  // ---------------------------------------------------------------------------
+
+  it('(BEAD-D) BD_UPDATE_STATUS rejects free-form statechart state names at the boundary', async () => {
+    // Statechart state names must NEVER be forwarded to bd — this is the core
+    // invariant: Beads stores COARSE status only; runtime state lives in event store.
+    const updateTool = tool('bd_update_status');
+
+    await expect(updateTool.execute({ id: 'bd-1', status: 'Planning' }))
+      .rejects.toThrow('BD_UPDATE_STATUS boundary violation');
+    await expect(updateTool.execute({ id: 'bd-1', status: 'Implementation' }))
+      .rejects.toThrow('BD_UPDATE_STATUS boundary violation');
+    await expect(updateTool.execute({ id: 'bd-1', status: 'RequirementsAnalysis' }))
+      .rejects.toThrow('BD_UPDATE_STATUS boundary violation');
+    await expect(updateTool.execute({ id: 'bd-1', status: 'some_unknown_state' }))
+      .rejects.toThrow('BD_UPDATE_STATUS boundary violation');
+  });
+
+  it('(BEAD-D) BD_UPDATE_STATUS maps BeadStatus inputs to only coarse bd commands — never leaks statechart state names to bd', async () => {
+    // Spy on execa to capture the exact --status values sent to bd.
+    // Valid BeadStatus inputs must map to exactly: open, blocked, deferred
+    // (or bd close for COMPLETED). No statechart state name may appear.
+    const COARSE_BD_STATUSES = new Set(['open', 'blocked', 'deferred']);
+    const bdStatusArgs: string[] = [];
+    let closeCallCount = 0;
+
+    vi.mocked(execa).mockImplementation(async (_bin: string, args: string[]) => {
+      if (args.includes('close')) {
+        closeCallCount++;
+        return { stdout: '[{"id":"bd-1","title":"Done","status":"closed","priority":1}]', stderr: '' };
+      }
+      if (args.includes('update')) {
+        const statusIdx = args.indexOf('--status');
+        if (statusIdx !== -1) bdStatusArgs.push(args[statusIdx + 1]);
+        return { stdout: '[{"id":"bd-1","title":"Updated","status":"open","priority":1}]', stderr: '' };
+      }
+      if (args.includes('show')) {
+        return { stdout: '[{"id":"bd-1","title":"Shown","status":"open","priority":1}]', stderr: '' };
+      }
+      if (args.includes('export')) {
+        return { stdout: '{"id":"bd-1"}', stderr: '' };
+      }
+      return { stdout: '{}', stderr: '' };
+    });
+
+    const mockEventStore = {
+      record: vi.fn().mockResolvedValue(undefined),
+      projectBead: vi.fn().mockResolvedValue({}),
+      projectBeads: vi.fn().mockResolvedValue(new Map())
+    } as any;
+
+    const statusPlugin = createBdPlugin(mockEventStore);
+    const updateTool = statusPlugin.tools.find(t => t.name === 'bd_update_status');
+    if (!updateTool) throw new Error('missing bd_update_status');
+
+    // Exercise all valid BeadStatus inputs
+    await updateTool.execute({ id: 'bd-1', status: 'ready' });         // → open
+    await updateTool.execute({ id: 'bd-1', status: 'in_progress' });   // → open
+    await updateTool.execute({ id: 'bd-1', status: 'failed' });        // → open
+    await updateTool.execute({ id: 'bd-1', status: 'blocked' });       // → blocked
+    await updateTool.execute({ id: 'bd-1', status: 'deferred' });      // → deferred
+    await updateTool.execute({ id: 'bd-1', status: 'completed' });     // → bd close
+
+    // Every --status arg sent to bd must be from the coarse set
+    for (const sent of bdStatusArgs) {
+      expect(COARSE_BD_STATUSES).toContain(sent);
+    }
+    // COMPLETED must use bd close, not --status
+    expect(closeCallCount).toBe(1);
+    // No statechart state name (nor any other unexpected value) reached bd
+    const unexpectedStatuses = bdStatusArgs.filter(s => !COARSE_BD_STATUSES.has(s));
+    expect(unexpectedStatuses).toHaveLength(0);
+  });
+
   it('parses compact ready and list output without loading full JSON records', () => {
     expect(parseReadyPlainOutput(`
 📋 Ready work (1 issues with no active blockers):

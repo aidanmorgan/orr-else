@@ -390,3 +390,122 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
     expect(result.completedActionIds ?? []).not.toContain('formulate-plan');
   });
 });
+
+// ---------------------------------------------------------------------------
+// BEAD B — Replay-idempotency + out-of-order determinism proofs
+// ---------------------------------------------------------------------------
+
+describe('BeadStateProjection — replay idempotency and out-of-order determinism', () => {
+  const projection = new BeadStateProjection();
+
+  /**
+   * A representative event set that exercises most projection paths:
+   * BEAD_CLAIMED, STATE_TRANSITION_APPLIED (SUCCESS), CHECKLIST_ITEM_TICKED,
+   * WORKTREE_CREATED, CONTEXT_RESTART_REQUESTED.
+   */
+  function buildRepresentativeEvents(): DomainEvent[] {
+    return [
+      makeEvent(
+        DomainEventName.BEAD_CLAIMED,
+        { beadId: 'bd-idem', stateId: 'Planning', owner: 'Alice', lease: { owner: 'Alice', expiresAt: '2099-01-01' } },
+        { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z', sessionId: 's1' }
+      ),
+      makeEvent(
+        DomainEventName.WORKTREE_CREATED,
+        { beadId: 'bd-idem', path: '/tmp/worktree-bd-idem' },
+        { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z', sessionId: 's1' }
+      ),
+      makeEvent(
+        DomainEventName.STATE_TRANSITION_APPLIED,
+        {
+          beadId: 'bd-idem',
+          fromState: 'Planning',
+          nextState: 'Implementation',
+          transitionEvent: EventName.SUCCESS,
+          actionId: 'formulate-plan',
+          actionKey: 'formulate-plan',
+          handover: 'All planning done'
+        },
+        { id: 'e3', timestamp: '2026-01-01T00:00:03.000Z', sessionId: 's1' }
+      ),
+      makeEvent(
+        DomainEventName.CHECKLIST_ITEM_TICKED,
+        { beadId: 'bd-idem', text: 'Read project rules', evidence: 'CLAUDE.md' },
+        { id: 'e4', timestamp: '2026-01-01T00:00:04.000Z', sessionId: 's1' }
+      ),
+      makeEvent(
+        DomainEventName.CONTEXT_RESTART_REQUESTED,
+        {
+          beadId: 'bd-idem',
+          stateId: 'Implementation',
+          targetState: 'Implementation',
+          transitionEvent: EventName.CONTEXT_RESTART,
+          actionId: 'surgical-execution'
+        },
+        { id: 'e5', timestamp: '2026-01-01T00:00:05.000Z', sessionId: 's2' }
+      )
+    ];
+  }
+
+  it('replaying the same event set twice yields a byte-identical BeadStateChart projection', () => {
+    const events = buildRepresentativeEvents();
+
+    const resultA = projection.projectBeadStateChartFromEvents('bd-idem', events, undefined, { includeDetails: true });
+    const resultB = projection.projectBeadStateChartFromEvents('bd-idem', events, undefined, { includeDetails: true });
+
+    // JSON.stringify produces a canonical string; identical objects → identical strings.
+    expect(JSON.stringify(resultB)).toBe(JSON.stringify(resultA));
+  });
+
+  it('replaying the same event set twice yields a byte-identical BeadFromEvents projection', () => {
+    const events = buildRepresentativeEvents();
+
+    const resultA = projection.projectBeadFromEvents('bd-idem', events, undefined, { includeDetails: true });
+    const resultB = projection.projectBeadFromEvents('bd-idem', events, undefined, { includeDetails: true });
+
+    expect(JSON.stringify(resultB)).toBe(JSON.stringify(resultA));
+  });
+
+  it('out-of-order events produce the same deterministic BeadStateChart as the in-order sequence (compareEvents sort)', () => {
+    const inOrder = buildRepresentativeEvents();
+
+    // The projection is intentionally order-SENSITIVE: it iterates events as
+    // given and the EventStore is responsible for pre-sorting via compareEvents
+    // (timestamp ASC, then id ASC) before handing events to the projection.
+    //
+    // This test proves THREE things:
+    //   1. The projection IS order-sensitive: raw shuffled input → wrong result.
+    //   2. Applying the EventStore's compareEvents comparator (timestamp → id)
+    //      to shuffled events produces the canonical in-order result.
+    //   3. The test WOULD FAIL if someone made the projection sort internally
+    //      (assertion 1 would fire) or if the sort key diverged from compareEvents
+    //      (assertion 2 would fire).
+    //
+    // compareEvents (from EventStore, private) sorts by:
+    //   a.timestamp ASC, then a.id ASC (String.localeCompare)
+    // The representative events have unique, monotonically-increasing timestamps
+    // so sort-by-timestamp is sufficient to recover canonical ordering.
+    function compareEvents(a: DomainEvent, b: DomainEvent): number {
+      const byTime = Date.parse(a.timestamp) - Date.parse(b.timestamp);
+      return byTime !== 0 ? byTime : String(a.id || '').localeCompare(String(b.id || ''));
+    }
+
+    // Build two maximally-different orderings of the same events.
+    const shuffleA = [...inOrder].reverse();
+    const shuffleB = [inOrder[2], inOrder[0], inOrder[4], inOrder[1], inOrder[3]];
+
+    // 1. Unsorted shuffled events produce a DIFFERENT projection — the projection
+    //    is genuinely order-sensitive and relies on the EventStore's pre-sort.
+    const resultUnsorted = projection.projectBeadStateChartFromEvents('bd-idem', shuffleA, undefined, { includeDetails: true });
+    const resultInOrder  = projection.projectBeadStateChartFromEvents('bd-idem', inOrder, undefined, { includeDetails: true });
+    expect(JSON.stringify(resultUnsorted)).not.toBe(JSON.stringify(resultInOrder));
+
+    // 2. Applying the real compareEvents sort to any shuffle restores the
+    //    canonical in-order projection — byte-identical in all cases.
+    const resultFromA = projection.projectBeadStateChartFromEvents('bd-idem', [...shuffleA].sort(compareEvents), undefined, { includeDetails: true });
+    const resultFromB = projection.projectBeadStateChartFromEvents('bd-idem', [...shuffleB].sort(compareEvents), undefined, { includeDetails: true });
+
+    expect(JSON.stringify(resultFromA)).toBe(JSON.stringify(resultInOrder));
+    expect(JSON.stringify(resultFromB)).toBe(JSON.stringify(resultInOrder));
+  });
+});
