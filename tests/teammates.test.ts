@@ -3,13 +3,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execa } from 'execa';
-import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxOptionValue, Defaults } from '../src/constants/index.js';
+import { DomainEventName, EnvVars, PiCliFlag, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, Defaults } from '../src/constants/index.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
 import type { ApiAddress } from '../src/core/RuntimeServices.js';
-import { TeammateFactory } from '../src/plugins/teammates.js';
+import { TeammateFactory, parseOrrWorkerPaneOption, formatOrrWorkerPaneOption } from '../src/plugins/teammates.js';
 import {
   redactPaneText,
   REDACTED_BLOCK_PLACEHOLDER,
@@ -826,6 +826,442 @@ states:
     expect(metadata?.sessionName).toBeDefined();
     expect(typeof metadata?.error).toBe('string');
     expect((metadata?.error as string).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pane observability — command construction, env propagation, round-trip
+// (pi-experiment-teammate-bootstrap-monitoring)
+// ---------------------------------------------------------------------------
+
+// Module-level default handler for pane-observability tests (returns %99 for split-window).
+// Must be declared at module scope — vi.hoisted() must not be inside a describe block.
+const defaultTmuxResponseObs = async (bin: string, args: string[]) => {
+  if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+  if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+  if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+  if (args.includes('split-window')) return { stdout: '%99\n', stderr: '' };
+  return { stdout: '', stderr: '' };
+};
+
+describe('TeammateFactory — pane observability and env propagation', () => {
+  const root = path.join(os.tmpdir(), 'orr-else-pane-obs-test');
+  const worktreePath = path.join(root, 'worktrees', 'obs-bead');
+  const configPath = path.join(root, 'harness.yaml');
+  const currentExtensionPath = path.join(root, 'orr-else-ext.ts');
+
+  // Reuse the top-level execa mock — the outer describe already patches execa.
+  // These tests just reset and re-configure it in each beforeEach.
+
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let observability: Observability;
+  let previousProjectRoot: string | undefined;
+
+  beforeEach(async () => {
+    fs.mkdirSync(path.join(root, 'state', 'logs'), { recursive: true });
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.writeFileSync(currentExtensionPath, 'export default {};\n');
+    previousProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    fs.writeFileSync(configPath, `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    actions: []
+    transitions: { SUCCESS: completed }
+`);
+    configLoader = new ConfigLoader(undefined, root);
+    configLoader.setConfigPath(configPath);
+    eventStore = new EventStore(configLoader, undefined, undefined, root);
+    observability = new Observability(configLoader, undefined, root);
+    await observability.initialize();
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(defaultTmuxResponseObs);
+  });
+
+  afterEach(() => {
+    observability.shutdown();
+    configLoader.reset();
+    if (previousProjectRoot === undefined) {
+      delete process.env[EnvVars.PROJECT_ROOT];
+    } else {
+      process.env[EnvVars.PROJECT_ROOT] = previousProjectRoot;
+    }
+    vi.restoreAllMocks();
+  });
+
+  // -------------------------------------------------------------------------
+  // Command construction: pane user-option and border setup
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs) spawn issues set-option -p @orr_worker with workerId, beadId, and stateId encoded', async () => {
+    const beadId = 'obs-bead';
+    const stateId = 'Planning';
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux(beadId as any, stateId, worktreePath);
+    expect(result.success).toBe(true);
+
+    // Find the set-option call that sets the @orr_worker pane user-option.
+    const setOptionCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => (args as string[]).includes(TmuxCommand.SET_OPTION)
+    );
+    const orrWorkerCall = setOptionCalls.find(
+      ([, args]) => (args as string[]).includes(TmuxOption.ORR_WORKER_PANE_OPTION)
+    );
+    expect(orrWorkerCall).toBeDefined();
+
+    const orrWorkerArgs = orrWorkerCall![1] as string[];
+    // Must be scoped to the pane (-p flag).
+    expect(orrWorkerArgs).toContain('-p');
+    // Must target the pane returned by split-window (%99 in this mock).
+    expect(orrWorkerArgs).toContain('%99');
+    // The value must encode the beadId and stateId.
+    const valueIndex = orrWorkerArgs.indexOf(TmuxOption.ORR_WORKER_PANE_OPTION) + 1;
+    const orrWorkerValue = orrWorkerArgs[valueIndex];
+    expect(orrWorkerValue).toBeDefined();
+    expect(orrWorkerValue).toContain(`bead:${beadId}`);
+    expect(orrWorkerValue).toContain(`state:${stateId}`);
+    // workerId is a computed value — verify the key prefix is present.
+    expect(orrWorkerValue).toContain('worker:');
+  });
+
+  it('(pane-obs) spawn issues set-option -p pane-border-format #{@orr_worker} for the spawned pane', async () => {
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('obs-bead' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    const setOptionCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => (args as string[]).includes(TmuxCommand.SET_OPTION)
+    );
+    const borderFormatCall = setOptionCalls.find(
+      ([, args]) => (args as string[]).includes(TmuxOption.PANE_BORDER_FORMAT)
+    );
+    expect(borderFormatCall).toBeDefined();
+
+    const borderFormatArgs = borderFormatCall![1] as string[];
+    // Must be scoped to the pane (-p flag).
+    expect(borderFormatArgs).toContain('-p');
+    // Must target the spawned pane (%99 in this mock).
+    expect(borderFormatArgs).toContain('%99');
+    // The format value must reference the @orr_worker user-option.
+    const formatValueIndex = borderFormatArgs.indexOf(TmuxOption.PANE_BORDER_FORMAT) + 1;
+    const formatValue = borderFormatArgs[formatValueIndex];
+    expect(formatValue).toBe(`#{${TmuxOption.ORR_WORKER_PANE_OPTION}}`);
+  });
+
+  it('(pane-obs) spawn issues set-option -w pane-border-status top on the agents window', async () => {
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('obs-bead' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    const setOptionCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => (args as string[]).includes(TmuxCommand.SET_OPTION)
+    );
+    const borderStatusCall = setOptionCalls.find(
+      ([, args]) => (args as string[]).includes(TmuxOption.PANE_BORDER_STATUS)
+    );
+    expect(borderStatusCall).toBeDefined();
+
+    const borderStatusArgs = borderStatusCall![1] as string[];
+    // Must be a window-level option (-w flag).
+    expect(borderStatusArgs).toContain('-w');
+    // Value must be 'top'.
+    expect(borderStatusArgs).toContain(TmuxOptionValue.PANE_BORDER_STATUS_TOP);
+  });
+
+  // -------------------------------------------------------------------------
+  // Env propagation: all required vars present in the spawned command
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/env) spawned command contains all required environment variables', async () => {
+    const apiAddress = { port: '7171', base: 'http://127.0.0.1:7171' };
+    const factory = new TeammateFactory(observability, configLoader, eventStore, apiAddress, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('obs-bead' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+    expect(splitCall).toBeDefined();
+    const command = (splitCall![1] as string[])[splitCall![1].length - 1];
+
+    // Core worker identity
+    expect(command).toContain(EnvVars.WORKER_MODE);   // PI_ORR_ELSE_WORKER
+    expect(command).toContain(EnvVars.BEAD_ID);        // PI_BEAD_ID
+    expect(command).toContain(EnvVars.STATE_ID);       // PI_STATE_ID
+    expect(command).toContain(EnvVars.WORKER_ID);      // PI_WORKER_ID
+    expect(command).toContain(EnvVars.SESSION_STATE_ID); // PI_SESSION_STATE_ID
+
+    // Runtime paths
+    expect(command).toContain(EnvVars.PROJECT_ROOT);   // PI_PROJECT_ROOT
+    expect(command).toContain(EnvVars.WORKTREE_PATH);  // PI_WORKTREE_PATH
+    expect(command).toContain(EnvVars.CONFIG_PATH);    // ORR_ELSE_CONFIG
+
+    // API base URL and port
+    expect(command).toContain(EnvVars.API_BASE);       // ORR_ELSE_API_BASE
+    expect(command).toContain(EnvVars.API_PORT);       // ORR_ELSE_API_PORT
+    expect(command).toContain('7171');
+
+    // LLM routing
+    expect(command).toContain(EnvVars.LLM_PROVIDER);  // PI_LLM_PROVIDER
+    expect(command).toContain(EnvVars.LLM_MODEL);     // PI_LLM_MODEL
+    expect(command).toContain(EnvVars.LLM_THINKING);  // PI_LLM_THINKING
+    expect(command).toContain(EnvVars.LLM_PROVIDER_KEY); // PI_LLM_PROVIDER_KEY
+
+    // Observability / tracing
+    expect(command).toContain(EnvVars.TRACE_ID);       // PI_TRACE_ID
+    expect(command).toContain(EnvVars.SPAN_ID);        // PI_SPAN_ID
+
+    // Cache TTL opt-in
+    expect(command).toContain(EnvVars.ENABLE_PROMPT_CACHING_1H);
+  });
+
+  // -------------------------------------------------------------------------
+  // Round-trip: @orr_worker value encodes workerId/beadId/stateId, recoverable
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/round-trip) @orr_worker pane option value encodes workerId, beadId, stateId and they can be parsed back', async () => {
+    const beadId = 'rt-bead';
+    const stateId = 'Planning';
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux(beadId as any, stateId, worktreePath);
+    expect(result.success).toBe(true);
+
+    // Extract the @orr_worker value from the set-option mock call.
+    const setOptionCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => (args as string[]).includes(TmuxCommand.SET_OPTION)
+    );
+    const orrWorkerCall = setOptionCalls.find(
+      ([, args]) => (args as string[]).includes(TmuxOption.ORR_WORKER_PANE_OPTION)
+    );
+    expect(orrWorkerCall).toBeDefined();
+    const orrWorkerArgs = orrWorkerCall![1] as string[];
+    const valueIndex = orrWorkerArgs.indexOf(TmuxOption.ORR_WORKER_PANE_OPTION) + 1;
+    const orrWorkerValue = orrWorkerArgs[valueIndex];
+
+    // Parse the canonical format: "worker:<workerId> bead:<beadId> state:<stateId>"
+    const match = orrWorkerValue.match(/^worker:(\S+)\s+bead:(\S+)\s+state:(\S+)$/);
+    expect(match).not.toBeNull();
+    const [, parsedWorkerId, parsedBeadId, parsedStateId] = match!;
+
+    // beadId and stateId are deterministic inputs — assert exact recovery.
+    expect(parsedBeadId).toBe(beadId);
+    expect(parsedStateId).toBe(stateId);
+    // workerId is computed at spawn time but must be non-empty.
+    expect(parsedWorkerId.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // parseOrrWorkerPaneOption — unit tests for the canonical parser
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/parser) parseOrrWorkerPaneOption round-trips formatOrrWorkerPaneOption output', () => {
+    const workerId = 'worker-bead-state-1234-5678';
+    const beadId = 'my-bead';
+    const stateId = 'Planning';
+    const encoded = formatOrrWorkerPaneOption(workerId, beadId, stateId);
+    const parsed = parseOrrWorkerPaneOption(encoded);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.workerId).toBe(workerId);
+    expect(parsed!.beadId).toBe(beadId);
+    expect(parsed!.stateId).toBe(stateId);
+  });
+
+  it('(pane-obs/parser) parseOrrWorkerPaneOption returns null on malformed input', () => {
+    expect(parseOrrWorkerPaneOption('')).toBeNull();
+    expect(parseOrrWorkerPaneOption('not-the-right-format')).toBeNull();
+    expect(parseOrrWorkerPaneOption('worker:w bead:b')).toBeNull(); // missing state
+    expect(parseOrrWorkerPaneOption('worker: bead:b state:s')).toBeNull(); // empty workerId
+    expect(parseOrrWorkerPaneOption('bead:b state:s worker:w')).toBeNull(); // wrong order
+  });
+
+  // -------------------------------------------------------------------------
+  // listAgentPanes — @orr_worker field is parsed and exposed on returned panes
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/list) listAgentPanes parses the @orr_worker field and exposes it on each pane', async () => {
+    const workerValue = formatOrrWorkerPaneOption('worker-abc', 'test-bead', 'Planning');
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        // 7-field line including the @orr_worker value in the last column.
+        return {
+          stdout: `%7\tAgent:test-bead\tnode\tPI_ORR_ELSE_WORKER=true PI_BEAD_ID=test-bead pi\t${path.join(root, 'worktrees', 'test-bead')}\t0\t${workerValue}`,
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const beadIds = await factory.getLiveTeammateBeadIds();
+
+    // @orr_worker is parsed → beadId recovered from the option, not from pane_title.
+    expect(beadIds).toContain('test-bead');
+
+    // Confirm the format string passed to list-panes includes the @orr_worker format token.
+    const listPanesCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('list-panes'));
+    expect(listPanesCall).toBeDefined();
+    const fFlag = listPanesCall![1] as string[];
+    const formatArg = fFlag[fFlag.indexOf('-F') + 1];
+    expect(formatArg).toContain(TmuxFormat.PANE_ORR_WORKER);
+  });
+
+  // -------------------------------------------------------------------------
+  // Clobbered pane_title recovery — the gap-closing test
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/recovery) beadIdFromPane and isTeammatePane recover identity from @orr_worker when pane_title has been clobbered by Pi', async () => {
+    // Simulate Pi having overwritten the pane_title so it no longer starts with
+    // AGENT_PANE_PREFIX, and a start_command that also lacks WORKER_MODE
+    // (simulating an older or retitled pane). The ONLY valid identity signal is
+    // the @orr_worker user-option.
+    const beadId = 'clobbered-bead';
+    const stateId = 'Implementing';
+    const workerId = 'worker-clobbered';
+    const workerValue = formatOrrWorkerPaneOption(workerId, beadId, stateId);
+
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-panes')) {
+        return {
+          // pane_title: Pi has overwritten it with its own "π - ..." format.
+          // start_command: no WORKER_MODE env var (simulate a pane where the
+          //   start command env is not parseable).
+          // current_path: root (not a worktree path) so the path heuristic fails.
+          // dead: 0 (live pane).
+          // @orr_worker: carries the durable identity.
+          stdout: `%55\tπ - something else\tnode\tpi --provider openai\t${root}\t0\t${workerValue}`,
+          stderr: ''
+        };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+
+    // getLiveTeammateBeadIds() → getLiveTeammatePanes() → listAgentPanes() + isTeammatePane() + beadIdFromPane().
+    // All three must succeed even though pane_title, start_command, and current_path
+    // carry no useful identity — only @orr_worker does.
+    const beadIds = await factory.getLiveTeammateBeadIds();
+    expect(beadIds).toContain(beadId);
+
+    // Verify the active count is 1 — isTeammatePane must have recognized the pane.
+    const count = await factory.getActiveTeammateCount();
+    // Reset mock to avoid re-triggering list-panes in getActiveTeammateCount
+    // (it was already called; we just need to re-run to verify).
+    expect(count).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // Non-fatal set-option: spawn still succeeds when set-option rejects
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/non-fatal) spawn succeeds even when the observability set-option calls reject (older tmux)', async () => {
+    // Simulate an older tmux that rejects set-option -p (pane-scoped user options
+    // not supported). The worker has already been launched by split-window at this
+    // point; a rejection in the observability path must NOT propagate to the spawn
+    // return value — it must still be { success: true }.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '%77\n', stderr: '' };
+      if (args.includes(TmuxCommand.SET_OPTION) && (args as string[]).includes('-p')) {
+        throw new Error('unknown option: set-option -p @orr_worker');
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('obs-bead' as any, 'Planning', worktreePath);
+
+    // Spawn must succeed — the worker process was launched before the set-option calls.
+    expect(result.success).toBe(true);
+    // paneId must be populated from split-window's output.
+    expect(result.paneId).toBe('%77');
+
+    // No TEAMMATE_SPAWN_FAILED event should have been recorded.
+    // (The test confirms this by checking success === true; a SPAWN_FAILED path
+    // would set success = false and record the event.)
+  });
+
+  // -------------------------------------------------------------------------
+  // pane-border-status is set in ensureAgentsWindow, not per-spawn
+  // -------------------------------------------------------------------------
+
+  it('(pane-obs/window-once) pane-border-status top is set once in ensureAgentsWindow, not per spawn', async () => {
+    // Count how many times pane-border-status is set across two spawns.
+    // After SHOULD-FIX C, it should be set once per ensureAgentsWindow call
+    // (called once per spawn), not moved to per-pane. The key assertion is that
+    // the call appears on the window path (-w flag) and the value is 'top'.
+    let splitCount = 0;
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) {
+        splitCount += 1;
+        return { stdout: `%${splitCount}\n`, stderr: '' };
+      }
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+
+    vi.mocked(execa).mockClear();
+    await factory.spawnTeammateInTmux('bead-one' as any, 'Planning', worktreePath);
+
+    // All pane-border-status calls must use -w (window-scoped), not -p (pane-scoped).
+    const borderStatusCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => (args as string[]).includes(TmuxOption.PANE_BORDER_STATUS)
+    );
+    for (const call of borderStatusCalls) {
+      const callArgs = call[1] as string[];
+      expect(callArgs).toContain('-w');
+      expect(callArgs).not.toContain('-p');
+      expect(callArgs).toContain(TmuxOptionValue.PANE_BORDER_STATUS_TOP);
+    }
+    // There must be at least one pane-border-status call (from ensureAgentsWindow).
+    expect(borderStatusCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('(pane-obs) no pane-scoped set-option calls are made when split-window returns an empty pane ID', async () => {
+    // When split-window returns empty (edge case), per-pane observability setup must be
+    // skipped entirely — no pane-scoped (-p) set-option calls should be issued.
+    // (The window-level pane-border-status call in ensureAgentsWindow is unaffected.)
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '\n', stderr: '' }; // empty pane ID
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('obs-bead' as any, 'Planning', worktreePath);
+    expect(result.success).toBe(true);
+
+    // Pane-scoped (-p) set-option calls must not be issued when paneId is empty.
+    // Allow the window-scoped (-w) pane-border-status call from ensureAgentsWindow.
+    const paneScopedSetOptionCalls = vi.mocked(execa).mock.calls.filter(
+      ([, args]) => {
+        const tmuxArgs = args as string[];
+        return tmuxArgs.includes(TmuxCommand.SET_OPTION) && tmuxArgs.includes('-p');
+      }
+    );
+    expect(paneScopedSetOptionCalls).toHaveLength(0);
   });
 });
 

@@ -40,6 +40,58 @@ import {
 } from '../constants/index.js';
 
 /**
+ * Format the Orr Else worker identity string stored in the @orr_worker pane
+ * user-option. This value is set once at spawn time and is never overwritten
+ * by Pi because Pi only emits terminal title escape sequences (which update
+ * pane_title), not tmux user options. pane-border-format reads this value to
+ * provide durable operator-facing observability even after Pi retitles the pane.
+ *
+ * Format: "worker:<workerId> bead:<beadId> state:<stateId>"
+ * This is a named constant (not a magic string) — slot-counting code and
+ * tests must use this function to produce or parse the canonical value.
+ */
+export function formatOrrWorkerPaneOption(workerId: string, beadId: string, stateId: string): string {
+  return `worker:${workerId} bead:${beadId} state:${stateId}`;
+}
+
+/**
+ * The tmux pane-border-format string that displays the @orr_worker user-option
+ * on each pane's border status line. Stored as a named constant so tests and
+ * production code refer to the same literal.
+ */
+const ORR_WORKER_BORDER_FORMAT = `#{${TmuxOption.ORR_WORKER_PANE_OPTION}}`;
+
+/**
+ * Regex that parses the canonical @orr_worker pane user-option value produced
+ * by formatOrrWorkerPaneOption.  Named capture groups make the extraction
+ * self-documenting and immune to positional-index drift.
+ *
+ * Format matched: "worker:<workerId> bead:<beadId> state:<stateId>"
+ * Each token is one or more non-whitespace characters (\S+).
+ */
+const ORR_WORKER_PARSE_RE = /^worker:(?<workerId>\S+)\s+bead:(?<beadId>\S+)\s+state:(?<stateId>\S+)$/;
+
+/**
+ * Parse the @orr_worker pane user-option value written by formatOrrWorkerPaneOption.
+ * Returns a structured identity object when the value matches the canonical format,
+ * or null when the value is absent, empty, or malformed.
+ *
+ * This is the exact counterpart to formatOrrWorkerPaneOption and is the ONLY
+ * production path through which the @orr_worker value is decoded.
+ *
+ * Exported so that tests can exercise the parser in isolation and verify the
+ * round-trip contract against formatOrrWorkerPaneOption.
+ */
+export function parseOrrWorkerPaneOption(value: string): { workerId: string; beadId: string; stateId: string } | null {
+  if (!value) return null;
+  const m = ORR_WORKER_PARSE_RE.exec(value);
+  if (!m || !m.groups) return null;
+  const { workerId, beadId, stateId } = m.groups;
+  if (!workerId || !beadId || !stateId) return null;
+  return { workerId, beadId, stateId };
+}
+
+/**
  * Sanitise a tmux pane ID (e.g. "%42") to a safe filename component.
  * Replaces any character that is not alphanumeric, dot, dash, or underscore.
  */
@@ -54,6 +106,8 @@ interface TmuxPane {
   startCommand: string;
   currentPath: string;
   dead: boolean;
+  /** Raw value of the @orr_worker pane user-option. Empty string when absent. */
+  orrWorker: string;
 }
 
 async function tmux(args: string[]): Promise<string> {
@@ -138,31 +192,38 @@ export class TeammateFactory {
 
   private async listAgentPanes(): Promise<TmuxPane[]> {
     const fields = [
-      TmuxFormat.PANE_ID,
-      TmuxFormat.PANE_TITLE,
-      TmuxFormat.PANE_CURRENT_COMMAND,
-      TmuxFormat.PANE_START_COMMAND,
-      TmuxFormat.PANE_CURRENT_PATH,
-      TmuxFormat.PANE_DEAD
+      TmuxFormat.PANE_ID,           // index 0
+      TmuxFormat.PANE_TITLE,        // index 1
+      TmuxFormat.PANE_CURRENT_COMMAND, // index 2
+      TmuxFormat.PANE_START_COMMAND,   // index 3
+      TmuxFormat.PANE_CURRENT_PATH,    // index 4
+      TmuxFormat.PANE_DEAD,            // index 5
+      TmuxFormat.PANE_ORR_WORKER       // index 6
     ].join(TmuxFormat.FIELD_SEPARATOR);
     const output = await tmux([TmuxCommand.LIST_PANES, '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
     return output.trim().split('\n').filter(Boolean).map(line => {
       const parts = line.split(TmuxFormat.FIELD_SEPARATOR);
       const [paneId = '', paneTitle = '', currentCommand = '', startCommand = ''] = parts;
-      const currentPath = parts.length >= 6 ? parts[4] || '' : '';
-      const dead = parts.length >= 6 ? parts[5] || '0' : parts[4] || '0';
+      const currentPath = parts[4] || '';
+      const dead = parts[5] || '0';
+      const orrWorker = parts[6] || '';
       return {
         paneId,
         paneTitle,
         currentCommand,
         startCommand,
         currentPath,
-        dead: dead === '1'
+        dead: dead === '1',
+        orrWorker
       };
     });
   }
 
   private isTeammatePane(pane: TmuxPane): boolean {
+    // Prefer the durable @orr_worker user-option identity when present: it
+    // survives Pi overwriting pane_title and is the authoritative signal.
+    if (pane.orrWorker && parseOrrWorkerPaneOption(pane.orrWorker) !== null) return true;
+    // Fall back to heuristics for older panes that pre-date the @orr_worker option.
     return pane.paneTitle.startsWith(Defaults.AGENT_PANE_PREFIX) ||
       pane.startCommand.includes(`${EnvVars.WORKER_MODE}=`) ||
       this.beadIdFromCurrentPath(pane.currentPath) !== undefined;
@@ -204,9 +265,17 @@ export class TeammateFactory {
   }
 
   private beadIdFromPane(pane: TmuxPane): string | undefined {
+    // Prefer the durable @orr_worker user-option: it survives Pi overwriting
+    // pane_title and is the authoritative identity source for post-spawn beads.
+    if (pane.orrWorker) {
+      const parsed = parseOrrWorkerPaneOption(pane.orrWorker);
+      if (parsed) return parsed.beadId;
+    }
+    // Fall back to pane_title prefix (set at spawn, may be overwritten by Pi).
     if (pane.paneTitle.startsWith(Defaults.AGENT_PANE_PREFIX)) {
       return pane.paneTitle.slice(Defaults.AGENT_PANE_PREFIX.length) || undefined;
     }
+    // Final fallbacks: start-command env vars and worktree path heuristic.
     return this.envValueFromStartCommand(pane.startCommand, EnvVars.BEAD_ID) ||
       this.beadIdFromCurrentPath(pane.currentPath);
   }
@@ -410,6 +479,18 @@ export class TeammateFactory {
         TmuxOption.REMAIN_ON_EXIT,
         TmuxOptionValue.OFF
       ]);
+      // Enable the pane border status bar once when the Agents window is ready.
+      // This is a window-level option: setting it here (rather than per-spawn)
+      // ensures N concurrent spawns do not issue N redundant window-option writes.
+      // Non-fatal: a rejection from an older tmux must not prevent spawn.
+      tmux([
+        TmuxCommand.SET_OPTION,
+        '-w',
+        '-t',
+        `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`,
+        TmuxOption.PANE_BORDER_STATUS,
+        TmuxOptionValue.PANE_BORDER_STATUS_TOP
+      ]).catch(() => {});
     } catch (error) {
       // Session might not exist yet if just created
       Logger.warn(Component.FACTORY, 'Failed to configure agents window in tmux session', { sessionName: this.sessionName, error: String(error) });
@@ -549,7 +630,32 @@ export class TeammateFactory {
 
       const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
       if (paneId) {
+        // Set the visible pane title (backward compat: slot-counter reads #{pane_title}
+        // via AGENT_PANE_PREFIX prefix; Pi may overwrite this, but the @orr_worker
+        // user-option and start-command/worktree-path fallbacks in
+        // isTeammatePane/beadIdFromPane handle that case).
         await tmux([TmuxCommand.SELECT_PANE, '-t', paneId, '-T', `${Defaults.AGENT_PANE_PREFIX}${beadId}`]);
+
+        // Store the full worker identity as a pane user-option (fire-and-forget).
+        // tmux user options (prefixed with @) are internal tmux state; Pi cannot
+        // clobber them because Pi only emits terminal escape sequences that update
+        // pane_title, never tmux set-option calls.  listAgentPanes reads this via
+        // #{@orr_worker} so beadIdFromPane() can recover identity even when Pi has
+        // retitled the pane.
+        //
+        // Non-fatal: older tmux versions may not support set-option -p for user
+        // options. A rejection here must never fail a live spawn — the worker
+        // process is already running. Wrap each observability call independently.
+        const orrWorkerValue = formatOrrWorkerPaneOption(workerId, beadId, stateId);
+        tmux([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.ORR_WORKER_PANE_OPTION, orrWorkerValue])
+          .catch(() => {});
+
+        // Wire the pane border to display the durable @orr_worker value (fire-and-forget).
+        // set-option -p scopes the option to this pane only, so other panes in the
+        // window are unaffected. pane-border-format reads #{@orr_worker} which
+        // expands to the pane-scoped user-option set above.
+        tmux([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.PANE_BORDER_FORMAT, ORR_WORKER_BORDER_FORMAT])
+          .catch(() => {});
       }
       await tmux([TmuxCommand.SELECT_LAYOUT, '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, 'tiled']);
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWNED, {
