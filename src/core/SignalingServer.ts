@@ -58,6 +58,8 @@ export class SignalingServer {
   private readonly lastRecordedHeartbeatMs = new Map<string, number>();
   private readonly port: number;
   private readonly allowedCustomEvents: ReadonlySet<string>;
+  /** Actual bound port, populated after start() resolves. */
+  private boundPort?: number;
 
   constructor(
     private readonly onSignal: SignalHandler,
@@ -202,6 +204,7 @@ export class SignalingServer {
       this.server = app.listen(this.port, Defaults.API_HOST, () => {
         const address = this.server?.address();
         const actualPort = typeof address === 'object' && address ? address.port : this.port;
+        this.boundPort = actualPort;
         Logger.info(Component.SIGNALING, 'Orr Else signaling server started', { port: actualPort });
         resolve(actualPort);
       });
@@ -213,8 +216,19 @@ export class SignalingServer {
   public stop() {
     this.server?.close();
     this.server = undefined;
+    this.boundPort = undefined;
     this.heartbeats.clear();
     this.heartbeatDetails.clear();
+  }
+
+  /** Returns true if the HTTP server is currently listening. */
+  public isListening(): boolean {
+    return this.server?.listening === true;
+  }
+
+  /** Returns the actual bound port after start() resolves, or undefined if not started. */
+  public getListeningPort(): number | undefined {
+    return this.boundPort;
   }
 
   public getHeartbeatSnapshot(): HeartbeatSnapshot[] {

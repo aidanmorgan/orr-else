@@ -1588,6 +1588,16 @@ interface ProjectToolStatusSummary {
   nativeMcpFooterMeaning: string;
 }
 
+interface ActiveAssignmentSummary {
+  beadId: string;
+  stateId: string;
+}
+
+interface SignalingHealthSummary {
+  port: number | undefined;
+  healthy: boolean;
+}
+
 interface FlowStatusDetails {
   mode: 'teammate' | 'coordinator' | 'inactive';
   beadId?: string;
@@ -1610,6 +1620,12 @@ interface FlowStatusDetails {
   };
   configuredProjectTools?: ProjectToolStatusSummary;
   nextHarnessAction: string;
+  /** Per-teammate assignments (coordinator mode only). Sourced from event store — not Beads metadata. */
+  teammates?: ActiveAssignmentSummary[];
+  /** Most recent coordinator-level domain event (coordinator mode only). */
+  latestEvent?: { type: string; timestamp: string };
+  /** Signaling server health (coordinator mode only). */
+  signaling?: SignalingHealthSummary;
 }
 
 async function configuredProjectToolStatus(services: RuntimeServices): Promise<ProjectToolStatusSummary | undefined> {
@@ -1683,6 +1699,16 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
   }
 
   if (supervisor) {
+    const teammates = await supervisor.getActiveAssignments().catch(() => [] as Array<{ beadId: string; stateId: string }>);
+    const signaling = supervisor.getSignalingHealth();
+    let latestEvent: { type: string; timestamp: string } | undefined;
+    try {
+      const allEvents = await services.eventStore.readAll();
+      const last = allEvents.at(-1);
+      if (last) latestEvent = { type: last.type, timestamp: last.timestamp };
+    } catch {
+      // best-effort
+    }
     return {
       mode: 'coordinator',
       requestedBead: currentFlowOptions?.beadId || 'backlog',
@@ -1690,7 +1716,10 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
       autoContinue: currentFlowOptions?.autoContinue !== false,
       configPath: currentFlowOptions?.configPath || services.configLoader.getConfigPath(),
       configuredProjectTools: projectToolStatus,
-      nextHarnessAction: 'monitor active teammate slots and process teammate signals'
+      nextHarnessAction: 'monitor active teammate slots and process teammate signals',
+      teammates,
+      latestEvent,
+      signaling
     };
   }
 
@@ -1723,14 +1752,29 @@ function flowStatusText(details: FlowStatusDetails): string {
   }
 
   if (details.mode === 'coordinator') {
+    const teammateLines = (details.teammates ?? []).map(
+      (t, i) => `  [${i + 1}] ${t.beadId} — state: ${t.stateId}`
+    );
+    const signalingLine = details.signaling
+      ? `Signaling: ${details.signaling.healthy ? 'healthy' : 'not listening'} (port ${details.signaling.port ?? 'none'})`
+      : undefined;
+    const latestEventLine = details.latestEvent
+      ? `Latest event: ${details.latestEvent.type} at ${details.latestEvent.timestamp}`
+      : undefined;
+    const tmuxLine = 'Attach with: tmux attach -t orr-else';
     return [
       'Orr Else coordinator active.',
       `Requested bead: ${details.requestedBead}`,
       `Max slots: ${details.maxSlots}`,
       `Auto-continue: ${details.autoContinue ? 'yes' : 'no'}`,
       `Config: ${details.configPath}`,
+      `Active teammates: ${(details.teammates ?? []).length}/${details.maxSlots ?? 0}`,
+      ...teammateLines,
+      signalingLine,
+      latestEventLine,
       `Next harness action: ${details.nextHarnessAction}`,
-      projectToolStatus
+      projectToolStatus,
+      tmuxLine
     ].filter(Boolean).join('\n');
   }
 

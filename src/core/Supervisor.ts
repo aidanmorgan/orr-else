@@ -173,6 +173,37 @@ export class Supervisor {
     return await this.factory.getActiveTeammateCount();
   }
 
+  /** Returns signaling server health for status reporting. */
+  public getSignalingHealth(): { port: number | undefined; healthy: boolean } {
+    return {
+      port: this.server.getListeningPort(),
+      healthy: this.server.isListening()
+    };
+  }
+
+  /**
+   * Returns a snapshot of all beads currently tracked as started by this
+   * coordinator, paired with each bead's current stateId as projected from the
+   * event store.  This is the single source of truth for per-teammate state —
+   * it does NOT read Beads metadata.
+   */
+  public async getActiveAssignments(): Promise<Array<{ beadId: string; stateId: string }>> {
+    const beadIds = [...this.startedBeads];
+    if (beadIds.length === 0) return [];
+    const assignments: Array<{ beadId: string; stateId: string }> = [];
+    for (const beadId of beadIds) {
+      let stateId = 'unknown';
+      try {
+        const projection = await this.services.eventStore.projectBead(beadId, { includeDetails: false });
+        if (projection.status) stateId = String(projection.status);
+      } catch {
+        // best-effort — keep 'unknown'
+      }
+      assignments.push({ beadId, stateId });
+    }
+    return assignments;
+  }
+
   public isBeadStarted(id: string): boolean {
     return this.startedBeads.has(id);
   }
