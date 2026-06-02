@@ -15,7 +15,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { ArtifactQuery, safeSelectPath, normalizeSelectorToDotPath } from '../src/core/ArtifactQuery.js';
+import {
+  ArtifactQuery,
+  safeSelectPath,
+  normalizeSelectorToDotPath,
+  SCHEMA_MAX_DEPTH,
+  SCHEMA_MAX_KEYS_PER_LEVEL,
+  SCHEMA_MAX_BYTES
+} from '../src/core/ArtifactQuery.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { ArtifactQueryDefaults, EnvVars } from '../src/constants/index.js';
@@ -1264,5 +1271,391 @@ describe('safeSelectPath', () => {
 
   it('undefined root returns undefined', () => {
     expect(safeSelectPath(undefined, 'a')).toBeUndefined();
+  });
+});
+
+// ─── (l) Schema mode — recursive shape without values ────────────────────────
+
+describe('ArtifactQuery — schema mode', () => {
+  let configLoader: ConfigLoader;
+  let artifactPaths: ArtifactPaths;
+  let query: ArtifactQuery;
+  let savedProjectRoot: string | undefined;
+
+  const SCHEMA_FIXTURE = {
+    name: 'Alice',
+    age: 30,
+    active: true,
+    score: null,
+    tags: ['typescript', 'vitest'],
+    address: {
+      street: '123 Main St',
+      city: 'Springfield',
+      zip: '12345'
+    },
+    history: [
+      { date: '2025-01-01', action: 'login' },
+      { date: '2025-02-01', action: 'update' }
+    ]
+  };
+
+  beforeEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    savedProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    configLoader = new ConfigLoader(undefined, root);
+    artifactPaths = new ArtifactPaths(configLoader, undefined, root);
+    query = new ArtifactQuery(artifactPaths);
+
+    writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
+    writeFile('.pi/artifacts/bd-1/schema_fixture.json', JSON.stringify(SCHEMA_FIXTURE));
+    writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
+  });
+
+  afterEach(() => {
+    if (savedProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = savedProjectRoot;
+    configLoader.reset();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  // ── (l1) basic shape: keys + types, values dropped ───────────────────────
+
+  it('(l1) schema:true returns keys and types, values are dropped', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/schema_fixture.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    const { shape } = result;
+
+    // Root is an object
+    expect(shape.type).toBe('object');
+    expect(shape.properties).toBeDefined();
+
+    const props = shape.properties!;
+
+    // Each key's type is correct
+    expect(props['name']?.type).toBe('string');
+    expect(props['age']?.type).toBe('number');
+    expect(props['active']?.type).toBe('boolean');
+    expect(props['score']?.type).toBe('null');
+    expect(props['tags']?.type).toBe('array');
+    expect(props['address']?.type).toBe('object');
+    expect(props['history']?.type).toBe('array');
+
+    // Values are ABSENT — no actual content
+    const schemaJson = JSON.stringify(result);
+    expect(schemaJson).not.toContain('Alice');
+    expect(schemaJson).not.toContain('Springfield');
+    expect(schemaJson).not.toContain('typescript');
+    expect(schemaJson).not.toContain('login');
+    expect(schemaJson).not.toContain('123 Main St');
+  });
+
+  it('(l2) array length is present in schema, items shape is provided', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/schema_fixture.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    const props = result.shape.properties!;
+
+    // tags: array with length 2
+    expect(props['tags']?.type).toBe('array');
+    expect(props['tags']?.length).toBe(2);
+
+    // history: array with length 2, items has shape
+    expect(props['history']?.type).toBe('array');
+    expect(props['history']?.length).toBe(2);
+    expect(props['history']?.items).toBeDefined();
+    expect(props['history']?.items?.type).toBe('object');
+    // items' properties should have 'date' and 'action' keys
+    expect(props['history']?.items?.properties?.['date']?.type).toBe('string');
+    expect(props['history']?.items?.properties?.['action']?.type).toBe('string');
+  });
+
+  it('(l3) nested object keys are included recursively', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/schema_fixture.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    const addressShape = result.shape.properties?.['address'];
+    expect(addressShape?.type).toBe('object');
+    expect(addressShape?.properties?.['street']?.type).toBe('string');
+    expect(addressShape?.properties?.['city']?.type).toBe('string');
+    expect(addressShape?.properties?.['zip']?.type).toBe('string');
+
+    // Values dropped
+    const schemaJson = JSON.stringify(result);
+    expect(schemaJson).not.toContain('Springfield');
+    expect(schemaJson).not.toContain('12345');
+  });
+
+  // ── (l4) sizeEstimate is present ─────────────────────────────────────────
+
+  it('(l4) schema result includes sizeEstimate', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/schema_fixture.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    expect(typeof result.sizeEstimate.byteCount).toBe('number');
+    expect(result.sizeEstimate.byteCount).toBeGreaterThan(0);
+    expect(typeof result.sizeEstimate.tokenEstimate).toBe('number');
+    expect(result.sizeEstimate.tokenEstimate).toBeGreaterThan(0);
+    expect(result.sizeEstimate.tokenEstimate).toBe(
+      Math.ceil(result.sizeEstimate.byteCount / ArtifactQueryDefaults.TOKEN_ESTIMATE_CHARS_PER_TOKEN)
+    );
+  });
+
+  // ── (l5) bounds metadata is present ──────────────────────────────────────
+
+  it('(l5) schema result includes bounds reflecting named constants', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/schema_fixture.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    expect(result.bounds.maxDepth).toBe(SCHEMA_MAX_DEPTH);
+    expect(result.bounds.maxKeysPerLevel).toBe(SCHEMA_MAX_KEYS_PER_LEVEL);
+    expect(result.bounds.maxBytes).toBe(SCHEMA_MAX_BYTES);
+  });
+
+  // ── (l6) mutual exclusion: schema + projection ────────────────────────────
+
+  it('(l6) schema:true with projection returns rejection (mutually exclusive)', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      schema: true,
+      projection: 'writeSet'
+    });
+
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('schema');
+    expect(result.reason).toContain('projection');
+  });
+
+  // ── (l7) mutual exclusion: schema + selector ──────────────────────────────
+
+  it('(l7) schema:true with selector returns rejection (mutually exclusive)', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      schema: true,
+      selector: 'writeSet'
+    });
+
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('schema');
+    expect(result.reason).toContain('selector');
+  });
+
+  // ── (l8) mutual exclusion: schema + summary ───────────────────────────────
+
+  it('(l8) schema:true with summary:true returns rejection (mutually exclusive)', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      schema: true,
+      summary: true
+    });
+
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('schema');
+    expect(result.reason).toContain('summary');
+  });
+
+  // ── (l9) security: out-of-scope path in schema mode is rejected ───────────
+
+  it('(l9) schema:true with out-of-scope artifactPath returns scope rejection without content', async () => {
+    const outsideDir = path.join(os.tmpdir(), 'orr-else-schema-security-outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    const outsidePath = path.join(outsideDir, 'sensitive.json');
+    fs.writeFileSync(outsidePath, JSON.stringify({ secret: 'schema-should-never-appear' }));
+
+    try {
+      const result = await query.query({
+        beadId: 'bd-1',
+        artifactPath: outsidePath,
+        schema: true
+      });
+
+      expect(result.status).toBe('rejected');
+      if (result.status !== 'rejected') throw new Error('unexpected status');
+      expect(result.exists).toBe(false);
+      // Must NOT leak file content
+      expect(JSON.stringify(result)).not.toContain('schema-should-never-appear');
+      // Must name the scope violation
+      expect(result.reason).toContain('outside the allowed artifact and worktree roots');
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  // ── (l10) depth + key bounds ─────────────────────────────────────────────
+
+  it('(l10) schema is bounded: deep objects show truncated:true at depth limit', async () => {
+    // Build a deeply nested object beyond SCHEMA_MAX_DEPTH
+    let deep: Record<string, unknown> = { value: 'leaf' };
+    for (let i = 0; i < SCHEMA_MAX_DEPTH + 3; i++) {
+      deep = { nested: deep, level: i };
+    }
+    writeFile('.pi/artifacts/bd-1/deep.json', JSON.stringify({ root: deep }));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/deep.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    // Values are still dropped
+    expect(JSON.stringify(result)).not.toContain('"leaf"');
+  });
+
+  it('(l11) schema keys are bounded by SCHEMA_MAX_KEYS_PER_LEVEL', async () => {
+    // Object with more keys than the cap
+    const wideObject: Record<string, number> = {};
+    for (let i = 0; i < SCHEMA_MAX_KEYS_PER_LEVEL + 10; i++) {
+      wideObject[`key_${i}`] = i;
+    }
+    writeFile('.pi/artifacts/bd-1/wide.json', JSON.stringify(wideObject));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/wide.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    // Properties shown must not exceed the per-level cap
+    const propCount = Object.keys(result.shape.properties ?? {}).length;
+    expect(propCount).toBeLessThanOrEqual(SCHEMA_MAX_KEYS_PER_LEVEL);
+
+    // truncated flag must be set
+    expect(result.shape.truncated).toBe(true);
+
+    // Values are dropped (no numeric values in schema output)
+    const schemaJson = JSON.stringify(result);
+    // None of the actual numeric values (0 through cap+10) should appear as values
+    // The shape only has type strings, so no plain numbers like "42" in value positions
+    for (let i = SCHEMA_MAX_KEYS_PER_LEVEL + 1; i < SCHEMA_MAX_KEYS_PER_LEVEL + 10; i++) {
+      // Keys beyond the cap must NOT appear in properties
+      expect(result.shape.properties?.[`key_${i}`]).toBeUndefined();
+    }
+  });
+
+  // ── (l12) schema on planContract: all keys, values absent ────────────────
+
+  it('(l12) schema:true on planContract returns all top-level keys as types, values absent', async () => {
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactId: 'planContract',
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    const props = result.shape.properties!;
+
+    // All top-level keys of PLAN_CONTRACT_FIXTURE are present
+    expect(props['writeSet']?.type).toBe('array');
+    expect(props['verifierObligations']?.type).toBe('array');
+    expect(props['implementationSteps']?.type).toBe('array');
+    expect(props['riskList']?.type).toBe('array');
+    expect(props['evidenceReferences']?.type).toBe('array');
+    expect(props['acceptanceCriteria']?.type).toBe('array');
+
+    // None of the actual values appear
+    const schemaJson = JSON.stringify(result);
+    expect(schemaJson).not.toContain('Create Foo class');
+    expect(schemaJson).not.toContain('Breaking change');
+    expect(schemaJson).not.toContain('All tests pass');
+    expect(schemaJson).not.toContain('src/core/Foo.ts');
+  });
+
+  // ── N1: SCHEMA_FALLBACK_DEPTH behavioral test ─────────────────────────────
+  // When the full schema exceeds SCHEMA_MAX_BYTES the system rebuilds it at a
+  // shallower depth (SCHEMA_FALLBACK_DEPTH = 2). Verify:
+  //   a) the result is still returned (truncated: true)
+  //   b) the shape is shallower than SCHEMA_MAX_DEPTH — specifically the
+  //      fallback shows top-level keys but their children are truncated
+
+  it('(N1) over-SCHEMA_MAX_BYTES schema falls back to shallower depth (SCHEMA_FALLBACK_DEPTH=2) and sets truncated:true', async () => {
+    // Build a 3-level-deep object with SCHEMA_MAX_KEYS_PER_LEVEL (30) long-named
+    // keys at each level. The schema includes ALL key names (not values), so:
+    // 30 top-level × 30 mid-level × 30 leaf keys × ~45 chars/key ≈ 1.2MB of
+    // schema JSON — well above SCHEMA_MAX_BYTES (24KB).
+    const K = SCHEMA_MAX_KEYS_PER_LEVEL;
+    const mkKey = (prefix: string, i: number) =>
+      `${prefix}_longkeyname_to_bloat_schema_bytes_${String(i).padStart(2, '0')}`;
+
+    const obj: Record<string, unknown> = {};
+    for (let i = 0; i < K; i++) {
+      const mid: Record<string, unknown> = {};
+      for (let j = 0; j < K; j++) {
+        const leaf: Record<string, unknown> = {};
+        for (let k = 0; k < K; k++) {
+          leaf[mkKey('leaf', k)] = `v_${k}`;
+        }
+        mid[mkKey('mid', j)] = leaf;
+      }
+      obj[mkKey('top', i)] = mid;
+    }
+
+    writeFile('.pi/artifacts/bd-1/huge_schema.json', JSON.stringify(obj));
+
+    const result = await query.query({
+      beadId: 'bd-1',
+      artifactPath: path.join(root, '.pi/artifacts/bd-1/huge_schema.json'),
+      schema: true
+    });
+
+    expect(result.status).toBe('schema');
+    if (result.status !== 'schema') throw new Error('unexpected status');
+
+    // Must be flagged as truncated (was rebuilt at SCHEMA_FALLBACK_DEPTH=2)
+    expect(result.truncated).toBe(true);
+
+    // sizeEstimate is present and positive
+    expect(result.sizeEstimate.byteCount).toBeGreaterThan(0);
+    expect(result.sizeEstimate.tokenEstimate).toBeGreaterThan(0);
+
+    // Values must still be absent (shape only contains type labels)
+    const resultJson = JSON.stringify(result);
+    // Actual string values like 'v_0' must not appear in the schema
+    expect(resultJson).not.toContain('"v_0"');
+    expect(resultJson).not.toContain('"v_1"');
   });
 });

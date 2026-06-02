@@ -238,6 +238,111 @@ export function safeSelectPath(root: unknown, selector: string): unknown {
   return current;
 }
 
+// ─── Schema-mode constants (named — no magic numbers) ────────────────────────
+
+/** Maximum depth the schema extraction recurses into nested objects/arrays. */
+export const SCHEMA_MAX_DEPTH = 8;
+
+/**
+ * Fallback recursion depth used when the full-depth schema exceeds
+ * SCHEMA_MAX_BYTES. Shallow enough to always fit; deep enough to be useful.
+ */
+const SCHEMA_FALLBACK_DEPTH = 2;
+
+/** Maximum number of object keys enumerated per level in schema mode. */
+export const SCHEMA_MAX_KEYS_PER_LEVEL = 30;
+
+/** Maximum byte length of the schema output before truncation. */
+export const SCHEMA_MAX_BYTES = 24_000;
+
+// ─── Schema extraction ────────────────────────────────────────────────────────
+
+/**
+ * JSON-type names returned in schema mode.
+ * Values are dropped; only type labels and array lengths are kept.
+ */
+type JsonTypeName = 'string' | 'number' | 'boolean' | 'null' | 'object' | 'array';
+
+/**
+ * A single node in the recursive schema shape.
+ */
+export interface SchemaNode {
+  type: JsonTypeName;
+  /** Present on array nodes: number of elements in the array. */
+  length?: number;
+  /**
+   * Present on object nodes: record of key → SchemaNode for each enumerated
+   * key (up to SCHEMA_MAX_KEYS_PER_LEVEL keys; truncated with a sentinel entry
+   * when more exist).
+   */
+  properties?: Record<string, SchemaNode>;
+  /**
+   * Present on array nodes where the element type is object: a single
+   * representative SchemaNode for the first element, so agents can see the
+   * shape of array items without fetching all values.
+   */
+  items?: SchemaNode;
+  /**
+   * Set to true when the key count or recursion depth was capped.
+   * Signals that there are more keys/levels than shown.
+   */
+  truncated?: true;
+}
+
+/**
+ * Extract the recursive shape of `value` up to `maxDepth` levels deep,
+ * with up to `maxKeys` keys per object level.
+ * Values are always dropped — only types, key names, and array lengths remain.
+ *
+ * Prototype-polluting keys (__proto__, constructor, prototype) are skipped
+ * to preserve the same safety invariant as safeSelectPath.
+ */
+function extractSchema(
+  value: unknown,
+  depth: number,
+  maxDepth: number,
+  maxKeys: number
+): SchemaNode {
+  const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+  if (value === null) return { type: 'null' };
+  if (typeof value === 'string') return { type: 'string' };
+  if (typeof value === 'number') return { type: 'number' };
+  if (typeof value === 'boolean') return { type: 'boolean' };
+
+  if (Array.isArray(value)) {
+    const node: SchemaNode = { type: 'array', length: value.length };
+    if (depth < maxDepth && value.length > 0) {
+      // Provide a representative schema for the first element
+      node.items = extractSchema(value[0], depth + 1, maxDepth, maxKeys);
+    }
+    return node;
+  }
+
+  if (typeof value === 'object') {
+    const node: SchemaNode = { type: 'object' };
+    if (depth < maxDepth) {
+      const entries = Object.entries(value as Record<string, unknown>)
+        .filter(([k]) => !BLOCKED_KEYS.has(k));
+      const truncated = entries.length > maxKeys;
+      const sliced = truncated ? entries.slice(0, maxKeys) : entries;
+      const properties: Record<string, SchemaNode> = {};
+      for (const [k, v] of sliced) {
+        properties[k] = extractSchema(v, depth + 1, maxDepth, maxKeys);
+      }
+      node.properties = properties;
+      if (truncated) node.truncated = true;
+    } else {
+      // At depth limit: still report the type but no properties
+      node.truncated = true;
+    }
+    return node;
+  }
+
+  // Fallback for exotic types (Function, Symbol, etc.) — treat as string shape
+  return { type: 'string' };
+}
+
 // ─── Size estimate helpers ────────────────────────────────────────────────────
 
 /**
@@ -375,9 +480,27 @@ export interface ArtifactQueryInput {
    * named projections for planContract/requirementsAnalysis).  With
    * `artifactPath` or unknown artifactId, lists top-level keys.
    *
-   * Mutually exclusive with `projection` and `selector`.
+   * Mutually exclusive with `projection`, `selector`, and `schema`.
    */
   summary?: boolean;
+  /**
+   * When true, return the recursive SHAPE of the selected artifact/subtree:
+   * object keys + each value's TYPE + array LENGTHS, with VALUES DROPPED.
+   * This lets an agent navigate an unfamiliar large JSON cheaply before
+   * choosing a projection/selector.
+   *
+   * The shape is bounded by:
+   *   - SCHEMA_MAX_DEPTH: maximum recursion depth
+   *   - SCHEMA_MAX_KEYS_PER_LEVEL: max keys per object level (excess → truncated:true)
+   *   - SCHEMA_MAX_BYTES: total byte cap on the serialized schema
+   *
+   * Security: resolve/scope-check is performed BEFORE reading, identical to
+   * all other modes.
+   *
+   * Mutually exclusive with `projection`, `selector`, and `summary`.
+   * Composes with `artifactId` / `artifactPath` for path resolution.
+   */
+  schema?: boolean;
 }
 
 export interface ArtifactQueryRejection {
@@ -439,7 +562,37 @@ export interface ArtifactSummary {
   projections: ProjectionSummaryEntry[];
 }
 
-export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection | TooMuchDataResult | ArtifactSummary;
+/** Result returned by schema mode. */
+export interface ArtifactSchemaResult {
+  status: 'schema';
+  artifactId: string;
+  artifactPath: string;
+  /**
+   * The effective selector used (empty string = root of the artifact).
+   * Mirrors ArtifactQuerySuccess.selector so callers can correlate.
+   */
+  selector: string;
+  /**
+   * Recursive shape of the selected value: keys + types + array lengths,
+   * values dropped.
+   */
+  shape: SchemaNode;
+  /** Size estimate for the serialized schema shape itself. */
+  sizeEstimate: SizeEstimate;
+  /** Bounds applied during extraction — useful for understanding truncation. */
+  bounds: {
+    maxDepth: number;
+    maxKeysPerLevel: number;
+    maxBytes: number;
+  };
+  /**
+   * True when the serialized schema exceeded SCHEMA_MAX_BYTES and was
+   * truncated.  Use a narrower selector to see deeper structure.
+   */
+  truncated: boolean;
+}
+
+export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection | TooMuchDataResult | ArtifactSummary | ArtifactSchemaResult;
 
 // ─── ArtifactQuery class ──────────────────────────────────────────────────────
 
@@ -447,7 +600,7 @@ export class ArtifactQuery {
   constructor(private readonly artifactPaths: ArtifactPaths) {}
 
   public async query(input: ArtifactQueryInput): Promise<ArtifactQueryResult> {
-    // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector / summary)
+    // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector / summary / schema)
     if (input.artifactId && input.artifactPath) {
       return this.rejection(
         'Provide either "artifactId" (resolved via harness templates) or "artifactPath" (explicit path), not both.',
@@ -472,6 +625,20 @@ export class ArtifactQuery {
     if (input.summary && (input.projection || (input.selector !== undefined && input.selector !== ''))) {
       return this.rejection(
         'Provide either "summary" (size overview without content) or "projection"/"selector" (content extraction), not both.',
+        undefined,
+        false
+      );
+    }
+    if (input.schema && input.summary) {
+      return this.rejection(
+        'Provide either "schema" (recursive shape without values) or "summary" (size overview), not both.',
+        undefined,
+        false
+      );
+    }
+    if (input.schema && (input.projection || (input.selector !== undefined && input.selector !== ''))) {
+      return this.rejection(
+        'Provide either "schema" (recursive shape without values) or "projection"/"selector" (content extraction), not both.',
         undefined,
         false
       );
@@ -519,6 +686,11 @@ export class ArtifactQuery {
     // 4. Summary mode — return schema-aware or generic size estimates without content
     if (input.summary) {
       return this.buildSummary(parsed, resolvedId, resolvedPath);
+    }
+
+    // 4b. Schema mode — return recursive shape without values
+    if (input.schema) {
+      return this.buildSchemaResult(parsed, resolvedId, resolvedPath, '');
     }
 
     // 5. Resolve selector from projection or raw selector input
@@ -618,6 +790,66 @@ export class ArtifactQuery {
       schemaAware,
       totalSizeEstimate,
       projections
+    };
+  }
+
+  /**
+   * Build the recursive schema shape of `parsed` and return an ArtifactSchemaResult.
+   *
+   * schema+selector is rejected upstream (mutually exclusive), so selector is
+   * always '' here. The dead subtree-selection branch has been removed.
+   *
+   * Security: resolve/scope-check is always done BEFORE this method is called,
+   * so `parsed` is already read from a validated path.
+   */
+  private buildSchemaResult(
+    parsed: unknown,
+    artifactId: string,
+    artifactPath: string,
+    selector: string
+  ): ArtifactSchemaResult {
+    // selector is always '' (schema+selector is rejected before this is called)
+    const valueToSchema = parsed;
+
+    const shape = extractSchema(
+      valueToSchema,
+      0,
+      SCHEMA_MAX_DEPTH,
+      SCHEMA_MAX_KEYS_PER_LEVEL
+    );
+
+    const serialized = serializeForMeasure(shape);
+    const byteLength = Buffer.byteLength(serialized, 'utf8');
+    let finalShape = shape;
+    let truncated = false;
+
+    if (byteLength > SCHEMA_MAX_BYTES) {
+      // The schema itself is too large; rebuild with tighter depth.
+      // SCHEMA_FALLBACK_DEPTH is shallow enough to always fit within the cap.
+      const tightShape = extractSchema(
+        valueToSchema,
+        0,
+        SCHEMA_FALLBACK_DEPTH,
+        SCHEMA_MAX_KEYS_PER_LEVEL
+      );
+      finalShape = { ...tightShape, truncated: true };
+      truncated = true;
+    }
+
+    const finalSerialized = serializeForMeasure(finalShape);
+    return {
+      status: 'schema',
+      artifactId,
+      artifactPath,
+      selector,
+      shape: finalShape,
+      sizeEstimate: sizeEstimate(finalSerialized),
+      bounds: {
+        maxDepth: SCHEMA_MAX_DEPTH,
+        maxKeysPerLevel: SCHEMA_MAX_KEYS_PER_LEVEL,
+        maxBytes: SCHEMA_MAX_BYTES
+      },
+      truncated
     };
   }
 

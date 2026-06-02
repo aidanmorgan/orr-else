@@ -18,7 +18,8 @@ import * as path from 'path';
 import {
   PathContext,
   PATH_CONTEXT_MAX_NEAR_MATCHES,
-  PATH_CONTEXT_MAX_SLICE_LINES
+  PATH_CONTEXT_MAX_SLICE_LINES,
+  SKELETON_MAX_BYTES
 } from '../src/core/PathContext.js';
 import { EnvVars } from '../src/constants/index.js';
 
@@ -308,5 +309,429 @@ describe('PathContext', () => {
     for (const input of inputs) {
       expect(() => pathContext.resolve(input as any)).not.toThrow();
     }
+  });
+
+  // ── (h) Skeleton mode — TypeScript fixture ────────────────────────────────
+
+  it('(h1) skeleton:true on a .ts file returns signatures + imports + class names, bodies elided', () => {
+    const tsSource = [
+      `import { Foo } from './foo.js';`,
+      ``,
+      `export class MyService {`,
+      `  private count = 0;`,
+      ``,
+      `  constructor(private readonly dep: Foo) {`,
+      `    this.count = 42;`,
+      `    console.log('init');`,
+      `  }`,
+      ``,
+      `  public doWork(input: string): number {`,
+      `    const result = input.length * this.count;`,
+      `    return result;`,
+      `  }`,
+      ``,
+      `  private helper(): void {`,
+      `    console.log('secret logic here');`,
+      `  }`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/MyService.ts', tsSource);
+    const filePath = path.join(root, 'src/MyService.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonFallback).toBe(false);
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    // Import line must be present
+    expect(skeleton).toContain(`import { Foo } from './foo.js'`);
+
+    // Class declaration must be present
+    expect(skeleton).toContain('MyService');
+    expect(skeleton).toContain('class MyService');
+
+    // Signature lines must be present
+    expect(skeleton).toContain('doWork');
+    expect(skeleton).toContain('helper');
+
+    // Body content of doWork must be ABSENT
+    expect(skeleton).not.toContain('result = input.length * this.count');
+
+    // Body content of helper must be ABSENT
+    expect(skeleton).not.toContain('secret logic here');
+
+    // Body of constructor must be ABSENT (the 42 assignment)
+    expect(skeleton).not.toContain('this.count = 42');
+
+    // Elision placeholder must appear
+    expect(skeleton).toContain('{ ... }');
+  });
+
+  it('(h2) skeleton:true on a .ts file with arrow function export elides body', () => {
+    const tsSource = [
+      `export const transform = (x: number): string => {`,
+      `  const secret = x * 99;`,
+      `  return String(secret);`,
+      `};`,
+      ``,
+      `export interface Options {`,
+      `  verbose: boolean;`,
+      `  timeout: number;`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/transform.ts', tsSource);
+    const filePath = path.join(root, 'src/transform.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    // The interface and export symbol must appear
+    expect(skeleton).toContain('Options');
+    expect(skeleton).toContain('transform');
+
+    // Body of transform must be ABSENT
+    expect(skeleton).not.toContain('secret = x * 99');
+    expect(skeleton).not.toContain('String(secret)');
+  });
+
+  // ── (h) Skeleton mode — Python fixture ───────────────────────────────────
+
+  it('(h3) skeleton:true on a .py file returns def signatures + imports, bodies elided', () => {
+    const pySource = [
+      `import os`,
+      `from typing import List`,
+      ``,
+      `SECRET_KEY = 'do-not-expose'`,
+      ``,
+      `class DataProcessor:`,
+      `    """Process data."""`,
+      ``,
+      `    def __init__(self, path: str) -> None:`,
+      `        self.path = path`,
+      `        self._cache = {}`,
+      ``,
+      `    def process(self, items: List[str]) -> List[str]:`,
+      `        result = []`,
+      `        for item in items:`,
+      `            result.append(item.upper())`,
+      `        return result`,
+      ``,
+      `def standalone_helper(x: int) -> int:`,
+      `    hidden_logic = x ** 2`,
+      `    return hidden_logic`,
+    ].join('\n');
+
+    writeFile('src/processor.py', pySource);
+    const filePath = path.join(root, 'src/processor.py');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonFallback).toBe(false);
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    // Imports must be present
+    expect(skeleton).toContain('import os');
+    expect(skeleton).toContain('from typing import List');
+
+    // Class and def signatures must be present
+    expect(skeleton).toContain('DataProcessor');
+    expect(skeleton).toContain('def __init__');
+    expect(skeleton).toContain('def process');
+    expect(skeleton).toContain('def standalone_helper');
+
+    // Body content must be ABSENT
+    expect(skeleton).not.toContain('self._cache = {}');
+    expect(skeleton).not.toContain('hidden_logic = x ** 2');
+    expect(skeleton).not.toContain("result.append(item.upper())");
+  });
+
+  // ── (h) Skeleton mode — data-format fallback ─────────────────────────────
+
+  it('(h4) skeleton:true on a .json file is a no-op — skeletonFallback:true, body NOT stripped', () => {
+    const jsonContent = JSON.stringify({
+      name: 'test',
+      secret: 'do-not-strip',
+      nested: { a: 1, b: 2 }
+    }, null, 2);
+
+    writeFile('config.json', jsonContent);
+    const filePath = path.join(root, 'config.json');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+
+    // Skeleton must be flagged as a fallback (data format)
+    expect(result.skeletonFallback).toBe(true);
+    // skeletonContent must be null (no stripping happened)
+    expect(result.skeletonContent).toBeNull();
+  });
+
+  it('(h5) skeleton:true on a .yaml file is a no-op — skeletonFallback:true', () => {
+    const yamlContent = [
+      `settings:`,
+      `  model: gpt-5`,
+      `  secret: should-not-be-stripped`,
+    ].join('\n');
+
+    writeFile('config.yaml', yamlContent);
+    const filePath = path.join(root, 'config.yaml');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonFallback).toBe(true);
+    expect(result.skeletonContent).toBeNull();
+  });
+
+  it('(h6) skeleton:true on a .md file is a no-op — skeletonFallback:true', () => {
+    const mdContent = '# Title\n\nSome paragraph text.\n\nAnother paragraph.';
+    writeFile('README.md', mdContent);
+    const filePath = path.join(root, 'README.md');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonFallback).toBe(true);
+    expect(result.skeletonContent).toBeNull();
+  });
+
+  // ── (h) Skeleton mode — output bounded by SKELETON_MAX_BYTES ─────────────
+
+  it('(h7) skeleton output is bounded by SKELETON_MAX_BYTES', () => {
+    // Generate a TypeScript file with many functions
+    const lines: string[] = [];
+    lines.push(`import { something } from './other.js';`);
+    for (let i = 0; i < 200; i++) {
+      lines.push(`export function func${i}(a: string, b: number): boolean {`);
+      lines.push(`  const veryLongBodyVariable${i} = a.repeat(b);`);
+      lines.push(`  const anotherLongVar${i} = veryLongBodyVariable${i}.toLowerCase();`);
+      lines.push(`  return anotherLongVar${i}.length > 0;`);
+      lines.push(`}`);
+      lines.push('');
+    }
+    writeFile('src/bigFile.ts', lines.join('\n'));
+    const filePath = path.join(root, 'src/bigFile.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).not.toBeNull();
+
+    // The skeleton bytes must be at or below the cap
+    const byteLength = Buffer.byteLength(result.skeletonContent!, 'utf8');
+    expect(byteLength).toBeLessThanOrEqual(SKELETON_MAX_BYTES);
+  });
+
+  // ── (h) Skeleton mode — scope check still enforced ───────────────────────
+
+  it('(h8) skeleton:true with out-of-scope path still returns out_of_scope — no content leak', () => {
+    const outsidePath = path.join(os.tmpdir(), `outside-skeleton-test-${Date.now()}.ts`);
+
+    const result = pathContext.resolve({ filePath: outsidePath, skeleton: true });
+
+    expect(result.status).toBe('out_of_scope');
+    if (result.status !== 'out_of_scope') throw new Error('unexpected status');
+    // Must not have any skeleton/content fields
+    expect(Object.keys(result)).not.toContain('skeletonContent');
+    expect(Object.keys(result)).not.toContain('totalLines');
+    expect(result.reason).toBeTruthy();
+  });
+
+  // ── (h) Existing behavior unaffected when skeleton not set ────────────────
+
+  it('(h9) without skeleton flag, skeletonContent and skeletonFallback are null/false', () => {
+    writeFile('src/plain.ts', `export const x = 1;\n`);
+    const filePath = path.join(root, 'src/plain.ts');
+
+    const result = pathContext.resolve({ filePath });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).toBeNull();
+    expect(result.skeletonFallback).toBe(false);
+  });
+
+  // ── M1: single-line body elision ─────────────────────────────────────────
+
+  it('(M1) single-line function body is ABSENT and placeholder present', () => {
+    // Both open and close brace on the same signature line (net == 0).
+    // Methods inside a class use access modifiers so they match METHOD_RE.
+    const tsSource = [
+      `export function add(a: number, b: number): number { return a + b; }`,
+      ``,
+      `export function getSecret(): string { return 'do-not-expose'; }`,
+      ``,
+      `export class Calc {`,
+      `  public double(x: number): number { return x * 2; }`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/Calc.ts', tsSource);
+    const filePath = path.join(root, 'src/Calc.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    // Signatures must be present
+    expect(skeleton).toContain('add');
+    expect(skeleton).toContain('getSecret');
+    expect(skeleton).toContain('double');
+
+    // Bodies must be ABSENT
+    expect(skeleton).not.toContain('return a + b');
+    expect(skeleton).not.toContain('do-not-expose');
+    expect(skeleton).not.toContain('return x * 2');
+
+    // Elision placeholder must appear instead
+    expect(skeleton).toContain('{ ... }');
+  });
+
+  // ── M2: braces inside comments must not desync the counter ───────────────
+
+  it('(M2) braces inside // line comments do NOT break body elision', () => {
+    const tsSource = [
+      `export function process(x: number): number {`,
+      `  // closing } here should NOT exit the body`,
+      `  const inner = x + 1;`,
+      `  return inner;`,
+      `}`,
+      ``,
+      `export function safe(): void {`,
+      `  // opening { brace inside comment`,
+      `  console.log('real body');`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/CommentBraces.ts', tsSource);
+    const filePath = path.join(root, 'src/CommentBraces.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    // Signatures must be present
+    expect(skeleton).toContain('process');
+    expect(skeleton).toContain('safe');
+
+    // Body content must be ABSENT — if M2 is broken, 'inner' or 'real body'
+    // leaks because the comment brace triggers a premature stack pop
+    expect(skeleton).not.toContain('inner = x + 1');
+    expect(skeleton).not.toContain("real body");
+
+    // Placeholder must be present
+    expect(skeleton).toContain('{ ... }');
+  });
+
+  it('(M2) braces inside /* */ block comments do NOT break body elision', () => {
+    const tsSource = [
+      `export function compute(n: number): number {`,
+      `  /* the closing brace } here is inside a block comment */`,
+      `  const secret = n * 7;`,
+      `  /* another { open brace in a comment */`,
+      `  return secret;`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/BlockComment.ts', tsSource);
+    const filePath = path.join(root, 'src/BlockComment.ts');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+    expect(result.skeletonContent).not.toBeNull();
+
+    const skeleton = result.skeletonContent!;
+
+    expect(skeleton).toContain('compute');
+
+    // Body content must be ABSENT
+    expect(skeleton).not.toContain('secret = n * 7');
+    expect(skeleton).not.toContain('return secret');
+
+    expect(skeleton).toContain('{ ... }');
+  });
+
+  // ── S1/S2: unknown-language and no-extension files → skeletonFallback ────
+
+  it('(S1) Go source file (.go) → skeletonFallback:true, no body-assignment leaked', () => {
+    // A Go file with in-body variable assignments that must NOT appear in output
+    const goSource = [
+      `package main`,
+      ``,
+      `import "fmt"`,
+      ``,
+      `func main() {`,
+      `\tvar secret = "should-not-leak"`,
+      `\tfmt.Println(secret)`,
+      `}`,
+    ].join('\n');
+
+    writeFile('src/main.go', goSource);
+    const filePath = path.join(root, 'src/main.go');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+
+    // Unknown language → safe no-op
+    expect(result.skeletonFallback).toBe(true);
+    expect(result.skeletonContent).toBeNull();
+  });
+
+  it('(S2) no-extension file (Dockerfile) → skeletonFallback:true, no body content leaked', () => {
+    const dockerfileSource = [
+      `FROM node:20`,
+      ``,
+      `WORKDIR /app`,
+      ``,
+      `RUN npm install`,
+      ``,
+      `ENV SECRET_KEY=do-not-leak`,
+      ``,
+      `CMD ["node", "index.js"]`,
+    ].join('\n');
+
+    writeFile('Dockerfile', dockerfileSource);
+    const filePath = path.join(root, 'Dockerfile');
+
+    const result = pathContext.resolve({ filePath, skeleton: true });
+
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') throw new Error('unexpected status');
+
+    // No extension → unknown language → safe no-op
+    expect(result.skeletonFallback).toBe(true);
+    expect(result.skeletonContent).toBeNull();
   });
 });
