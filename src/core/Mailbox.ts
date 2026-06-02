@@ -22,6 +22,45 @@ export interface MailboxMessage {
   timestamp: string;
 }
 
+/**
+ * Routing metadata for a single mailbox message, without the body.
+ * Returned by list/peek/receive operations.
+ */
+export interface MailboxRoutingInfo {
+  id: string;
+  from: string;
+  to: string;
+  beadId: string;
+  type: MailboxMessageType;
+  timestamp: string;
+}
+
+/**
+ * Minimal schema returned by check_mailbox (list operation).
+ * Bodies are never inlined; use fetch_mailbox_message to retrieve a specific body.
+ */
+export interface MailboxListResult {
+  count: number;
+  messages: MailboxRoutingInfo[];
+}
+
+/**
+ * Minimal ack returned by send_mailbox_message.
+ */
+export interface MailboxSendAck {
+  messageId: string;
+  status: 'sent';
+}
+
+/**
+ * Result returned by fetch_mailbox_message for a single message body.
+ */
+export interface MailboxFetchResult {
+  messageId: string;
+  found: boolean;
+  message?: MailboxMessage;
+}
+
 export class NativeMailbox {
   private readonly baseDir: string;
 
@@ -66,16 +105,52 @@ export class NativeMailbox {
     try {
       const files = await readdirAsync(this.baseDir);
       const jsonFiles = files.filter(f => f.endsWith('.json'));
-      
+
       const messages = await Promise.all(jsonFiles.map(async f => {
         const content = await readFileAsync(path.join(this.baseDir, f), 'utf8');
         return JSON.parse(content) as MailboxMessage;
       }));
-      
+
       return messages.filter(m => m.to === to);
     } catch (error) {
       Logger.error(Component.CORE, `Failed to read mailbox messages`, { to, error: String(error) });
       return [];
+    }
+  }
+
+  /**
+   * List messages for a recipient without inlining body content.
+   * Returns routing metadata only (id, from, to, beadId, type, timestamp).
+   */
+  public async listMessagesFor(to: string): Promise<MailboxListResult> {
+    const messages = await this.readMessagesFor(to);
+    const routing: MailboxRoutingInfo[] = messages.map(m => ({
+      id: m.id,
+      from: m.from,
+      to: m.to,
+      beadId: m.beadId,
+      type: m.type,
+      timestamp: m.timestamp
+    }));
+    return { count: routing.length, messages: routing };
+  }
+
+  /**
+   * Fetch a single message by ID, returning its full content.
+   * Returns found:false if the message does not exist.
+   */
+  public async fetchMessage(id: string): Promise<MailboxFetchResult> {
+    const filePath = path.join(this.baseDir, `${id}.json`);
+    if (!existsSync(filePath)) {
+      return { messageId: id, found: false };
+    }
+    try {
+      const content = await readFileAsync(filePath, 'utf8');
+      const message = JSON.parse(content) as MailboxMessage;
+      return { messageId: id, found: true, message };
+    } catch (error) {
+      Logger.error(Component.CORE, `Failed to fetch mailbox message`, { id, error: String(error) });
+      return { messageId: id, found: false };
     }
   }
 
