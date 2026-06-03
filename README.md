@@ -835,6 +835,18 @@ worklogs/                     Per-Bead state worklogs
 worktrees/                    Per-Bead Git worktrees when created
 ```
 
+## Pi Host SDK: peer dependencies
+
+The orr-else harness is a Pi *plugin* — it runs inside the Pi host process. The Pi host platform packages are declared as `peerDependencies`:
+
+- `@earendil-works/pi-ai` (required at runtime — imported by `dist/extension.js`)
+- `@earendil-works/pi-coding-agent` (optional — type-only in source, host provides it)
+- `@earendil-works/pi-agent-core` (optional — type-only in source, host provides it)
+
+These packages are **not bundled** with the harness. The Pi host that loads the extension provides them in its own `node_modules/` tree. Consumer projects do not need to install them separately; they are resolved from the host's environment. With npm 7+, `npm install orr-else` will also auto-install them as peer deps.
+
+See `docs/harness-packaging.md` §3.0 for the full peer-dependency contract.
+
 ## Development
 
 Install dependencies:

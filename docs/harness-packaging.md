@@ -1,7 +1,7 @@
 # Harness Packaging Design
 
 **Bead**: pi-experiment-mynj  
-**Status**: Design (read-only exploration)  
+**Status**: Implemented  
 **Date**: 2026-06-03
 
 ---
@@ -83,6 +83,38 @@ This is a test-only hard-coding of an absolute local path. Not a runtime couplin
 ---
 
 ## 3. Recommended Packaging Approach
+
+### 3.0 Pi Host SDK: peerDependencies contract
+
+The orr-else harness is a **Pi plugin** — it runs *inside* the Pi host process. The Pi host platform (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-agent-core`) is **provided by the host at runtime**, not by the harness package.
+
+These packages must be declared as `peerDependencies`, not bundled:
+
+```json
+"peerDependencies": {
+  "@earendil-works/pi-ai": "^0.74.0",
+  "@earendil-works/pi-coding-agent": "^0.74.0",
+  "@earendil-works/pi-agent-core": "^0.74.0"
+},
+"peerDependenciesMeta": {
+  "@earendil-works/pi-coding-agent": { "optional": true },
+  "@earendil-works/pi-agent-core": { "optional": true }
+}
+```
+
+**Why peers, not bundled:**
+
+- `@earendil-works/pi-ai` is directly imported at runtime by `dist/extension.js` and the plugin modules. If this package is not present when the harness loads, Node.js throws `ERR_MODULE_NOT_FOUND`.
+- The Pi *host* (the process that loads the extension) already has `@earendil-works/pi-ai` in its own `node_modules`. Bundling a second copy would create a version split — the harness objects would not be instanceof-compatible with the host's objects.
+- `pi-coding-agent` and `pi-agent-core` are used only as TypeScript types (`import type`) in source files; the compiled JS does not contain runtime imports for them. They are declared as optional peers to document the host contract and to allow npm to warn consumers of version mismatches.
+
+**How the Pi host provides them:**
+
+When Pi loads the extension via its `packages` loader, it resolves `orr-else/dist/extension.js` from the consumer's `node_modules/orr-else/`. Node.js then resolves the `@earendil-works/pi-ai` import by walking up from `node_modules/orr-else/dist/` through the consumer's `node_modules/` until it finds `@earendil-works/pi-ai` — which the Pi host has already placed there.
+
+**Consumer projects do not need to install `@earendil-works/pi-ai` themselves** — the Pi host installs it. With npm 7+, declaring it as a `peerDependency` also causes npm to auto-install it when a consumer runs `npm install orr-else`.
+
+**Dependency-contract test:** `tests/packaging.test.ts` contains a static analysis test that walks `dist/**/*.js`, extracts all external import specifiers, and asserts each one is satisfied by either `dependencies/bundledDependencies` or `peerDependencies`. This test will fail if any runtime import falls through to `devDependencies` only — the exact bug described in the bead.
 
 ### 3.1 Primary recommendation: npm package with `bundledDependencies`
 

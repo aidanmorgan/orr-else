@@ -7,6 +7,11 @@
  * 3. The compiled dist/bin/init.js exists.
  * 4. Running the init command in a temp dir writes a checkout-free extension shim
  *    (no absolute path back to /Users/aidan/dev/pi-experiment or any orr-else checkout).
+ * 5. GENUINE dependency-contract test: every external module imported by dist/ is
+ *    satisfied by either dependencies/bundleDependencies or peerDependencies — NOT
+ *    only devDependencies. This catches the exact bug where dist/extension.js imported
+ *    @earendil-works/pi-ai which was only in devDependencies, causing ERR_MODULE_NOT_FOUND
+ *    in a fresh install.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -281,5 +286,170 @@ describe('orr-else init command writes a checkout-free shim', () => {
       }
     }
     checkDir(tmpDir);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Node built-in module prefix list (node: scheme + bare names without scheme)
+// ---------------------------------------------------------------------------
+const NODE_BUILTINS = new Set([
+  'assert', 'async_hooks', 'buffer', 'child_process', 'cluster', 'console',
+  'constants', 'crypto', 'dgram', 'diagnostics_channel', 'dns', 'domain',
+  'events', 'fs', 'http', 'http2', 'https', 'inspector', 'module', 'net',
+  'os', 'path', 'perf_hooks', 'process', 'punycode', 'querystring',
+  'readline', 'repl', 'stream', 'string_decoder', 'sys', 'timers', 'tls',
+  'trace_events', 'tty', 'url', 'util', 'v8', 'vm', 'wasi', 'worker_threads',
+  'zlib',
+]);
+
+function isBuiltin(specifier: string): boolean {
+  if (specifier.startsWith('node:')) return true;
+  const bare = specifier.split('/')[0];
+  return NODE_BUILTINS.has(bare);
+}
+
+function isRelative(specifier: string): boolean {
+  return specifier.startsWith('./') || specifier.startsWith('../');
+}
+
+/**
+ * Extract the bare package name (scope + name, no sub-path) from an import
+ * specifier such as '@foo/bar/baz/index.js' → '@foo/bar' or 'express/utils' → 'express'.
+ */
+function pkgName(specifier: string): string {
+  if (specifier.startsWith('@')) {
+    const parts = specifier.split('/');
+    return `${parts[0]}/${parts[1]}`;
+  }
+  return specifier.split('/')[0];
+}
+
+/**
+ * Walk all *.js files under dir and collect every static import/export/require
+ * specifier that resolves to an external (non-relative, non-builtin) package.
+ * Returns a Map from package-name → Set<source files that import it>.
+ */
+function collectExternalImports(dir: string): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>();
+
+  // Matches:
+  //   import { ... } from "pkg"   (named import)
+  //   import "pkg"                (side-effect import)
+  //   export { ... } from "pkg"   (re-export)
+  //   import("pkg")               (dynamic import)
+  //   require("pkg")              (CJS require)
+  const fromRe = /(?:import|export)\s+.*?from\s+['"]([^'"]+)['"]/g;
+  const sideEffectRe = /^\s*import\s+['"]([^'"]+)['"]\s*;/gm;
+  const dynRe = /(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+
+  function walk(current: string): void {
+    const entries = fs.readdirSync(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile() && entry.name.endsWith('.js')) {
+        const src = fs.readFileSync(full, 'utf8');
+        for (const re of [fromRe, sideEffectRe, dynRe]) {
+          re.lastIndex = 0;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(src)) !== null) {
+            const spec = m[1];
+            // Skip template literal interpolations (e.g. '${PACKAGE_NAME}/dist/...')
+            // and empty specifiers.
+            if (!spec || spec.includes('${')) continue;
+            if (!isRelative(spec) && !isBuiltin(spec)) {
+              const name = pkgName(spec);
+              if (!result.has(name)) result.set(name, new Set());
+              result.get(name)!.add(path.relative(dir, full));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  walk(dir);
+  return result;
+}
+
+describe('dependency contract: every runtime import is in dependencies or peerDependencies', () => {
+  it('all external packages imported by dist/ are declared in dependencies/bundledDependencies or peerDependencies', () => {
+    const pkg = readPackageJson();
+    const deps = Object.keys((pkg.dependencies ?? {}) as Record<string, string>);
+    const bundled = ((pkg.bundledDependencies ?? pkg.bundleDependencies ?? []) as string[]);
+    const peers = Object.keys((pkg.peerDependencies ?? {}) as Record<string, string>);
+
+    // Satisfied = appears in dependencies (which are all also bundled) or in peerDependencies.
+    const satisfied = new Set<string>([...deps, ...bundled, ...peers]);
+
+    const distDir = path.join(PROJECT_ROOT, 'dist');
+    const externalImports = collectExternalImports(distDir);
+
+    const missing: string[] = [];
+    for (const [name, files] of externalImports) {
+      if (!satisfied.has(name)) {
+        missing.push(`  ${name}  (imported by: ${[...files].join(', ')})`);
+      }
+    }
+
+    if (missing.length > 0) {
+      throw new Error(
+        `The following packages are imported at runtime in dist/ but are NOT declared in ` +
+        `dependencies/bundledDependencies or peerDependencies.\n` +
+        `A fresh install will throw ERR_MODULE_NOT_FOUND for each of these:\n\n` +
+        missing.join('\n') + '\n\n' +
+        `If the package is provided by the Pi host, declare it in peerDependencies.\n` +
+        `If the package must be bundled, add it to dependencies + bundleDependencies.`
+      );
+    }
+  });
+
+  it('no package that is ONLY in devDependencies is imported by dist/', () => {
+    const pkg = readPackageJson();
+    const deps = new Set(Object.keys((pkg.dependencies ?? {}) as Record<string, string>));
+    const bundled = new Set((pkg.bundledDependencies ?? pkg.bundleDependencies ?? []) as string[]);
+    const peers = new Set(Object.keys((pkg.peerDependencies ?? {}) as Record<string, string>));
+    const devDeps = new Set(Object.keys((pkg.devDependencies ?? {}) as Record<string, string>));
+
+    const satisfied = new Set<string>([...deps, ...bundled, ...peers]);
+
+    const distDir = path.join(PROJECT_ROOT, 'dist');
+    const externalImports = collectExternalImports(distDir);
+
+    const devOnly: string[] = [];
+    for (const [name] of externalImports) {
+      if (!satisfied.has(name) && devDeps.has(name)) {
+        devOnly.push(name);
+      }
+    }
+
+    if (devOnly.length > 0) {
+      throw new Error(
+        `The following packages are imported at runtime in dist/ but are ONLY in devDependencies — ` +
+        `they will NOT be present in a fresh install:\n\n` +
+        devOnly.map(n => `  ${n}`).join('\n') + '\n\n' +
+        `This is the exact bug described in pi-experiment-mynj: declare host-provided packages ` +
+        `in peerDependencies, or add them to dependencies + bundleDependencies if they must be bundled.`
+      );
+    }
+  });
+
+  it('peerDependencies declares @earendil-works/pi-ai (the only runtime Pi SDK import in dist/)', () => {
+    const pkg = readPackageJson();
+    const peers = (pkg.peerDependencies ?? {}) as Record<string, string>;
+    expect(peers['@earendil-works/pi-ai']).toBeDefined();
+  });
+
+  it('@earendil-works/pi-ai is NOT in bundledDependencies (must be provided by the Pi host)', () => {
+    const pkg = readPackageJson();
+    const bundled = (pkg.bundledDependencies ?? pkg.bundleDependencies ?? []) as string[];
+    expect(bundled).not.toContain('@earendil-works/pi-ai');
+  });
+
+  it('@earendil-works/pi-ai is NOT in dependencies (must be a peer not a bundled dep)', () => {
+    const pkg = readPackageJson();
+    const deps = (pkg.dependencies ?? {}) as Record<string, string>;
+    expect(deps['@earendil-works/pi-ai']).toBeUndefined();
   });
 });
