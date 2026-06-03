@@ -107,6 +107,7 @@ import {
   PromptProvenanceDefaults
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
+import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
@@ -2466,13 +2467,73 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             // checklistComplete as distinct dimensions, not inferred from presence alone.
             const artifactGateStatus = await resolveArtifactGateStatus(activeRun, services, obs);
 
+            // ── MCP bridge availability (s3wp.32 — 3rd required surface) ─────
+            // Check whether the MCP bridge is healthy for this state's required
+            // MCP-backed tools. When the bridge is down, mark those tools as
+            // 'unavailable' in the required-tools audit so the agent sees the
+            // infra blocker here rather than discovering it at call time.
+            // Uses the shared mcpBackedRequiredToolNames helper to avoid
+            // duplicating the Supervisor logic.
+            const stateRequiredToolNames: string[] = [
+              ...(activeRun.state.requiredTools || []).map(t =>
+                typeof t === 'string' ? t : t.name
+              ).filter((n): n is string => !!n),
+              ...(activeRun.action.requiredTools || []).map(t =>
+                typeof t === 'string' ? t : t.name
+              ).filter((n): n is string => !!n)
+            ];
+            const requiredMcpToolNames = mcpBackedRequiredToolNames(
+              stateRequiredToolNames,
+              (config.tools || []) as Array<{ name: string; type: string }>
+            );
+            let requiredToolsWithMcpStatus = gate.requiredTools;
+            const mcpBlockingEvidence: string[] = [];
+            if (requiredMcpToolNames.length > 0) {
+              const mcpHealth = await checkMcpBridgeHealth(
+                requiredMcpToolNames,
+                (data) => services.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
+              );
+              if (!mcpHealth.healthy) {
+                const unavailableSet = new Set(mcpHealth.affectedToolNames);
+                requiredToolsWithMcpStatus = gate.requiredTools.map(entry =>
+                  unavailableSet.has(entry.name)
+                    ? {
+                      ...entry,
+                      state: 'unavailable' as const,
+                      reason: `unavailable: MCP bridge down — ${mcpHealth.message ?? 'bridge module failed to load'}. ${mcpHealth.remediation ?? ''}`
+                    }
+                    : entry
+                );
+                // Also surface tool names that are MCP-required but not yet in
+                // gate.requiredTools (e.g. non-SUCCESS outcomes skip the tool audit).
+                const alreadyCovered = new Set(gate.requiredTools.map(e => e.name));
+                for (const toolName of mcpHealth.affectedToolNames) {
+                  if (!alreadyCovered.has(toolName)) {
+                    requiredToolsWithMcpStatus = [
+                      ...requiredToolsWithMcpStatus,
+                      {
+                        name: toolName,
+                        state: 'unavailable' as const,
+                        reason: `unavailable: MCP bridge down — ${mcpHealth.message ?? 'bridge module failed to load'}. ${mcpHealth.remediation ?? ''}`
+                      }
+                    ];
+                  }
+                  const evidenceMsg =
+                    `Required tool \`${toolName}\` is unavailable: MCP bridge down — ` +
+                    `${mcpHealth.message ?? 'bridge module failed to load'}. ` +
+                    `${mcpHealth.remediation ?? ''}`.trimEnd();
+                  mcpBlockingEvidence.push(evidenceMsg);
+                }
+              }
+            }
+
             // ── artifact-specific blocking evidence ───────────────────────────
             // Add named-gate blocking messages for artifacts that are present but
             // not yet validated or already rejected. These complement the
             // requiredTools check (which fires when artifact_validator is in
             // requiredTools) by surfacing the gap even when artifact_validator is
             // invoked as a non-required tool or not configured as a requiredTool.
-            const blockingEvidence = [...gate.blockingEvidence];
+            const blockingEvidence = [...gate.blockingEvidence, ...mcpBlockingEvidence];
             if (artifactGateStatus && isAdvanceOutcome(outcome, config)) {
               for (const a of artifactGateStatus.artifacts) {
                 if (!a.presence) continue; // absent artifact: covered by plan-write-set gate
@@ -2500,20 +2561,23 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
               }
             }
 
+            // ── final ready flag accounts for MCP blocking evidence ──────────
+            const ready = gate.ready && mcpBlockingEvidence.length === 0;
+
             // ── domain event (best-effort) ────────────────────────────────────
             services.eventStore.record(DomainEventName.PRE_SIGNAL_AUDIT_PERFORMED, {
               beadId: activeRun.beadId,
               stateId: activeRun.stateId,
               actionId: activeRun.action.id,
               outcome,
-              ready: gate.ready,
+              ready,
               blockingCount: blockingEvidence.length
             }).catch(() => {});
 
             return {
-              ready: gate.ready,
+              ready,
               outcome,
-              requiredTools: gate.requiredTools,
+              requiredTools: requiredToolsWithMcpStatus,
               terminalFailureLimit: gate.terminalFailureLimit,
               requiredOutcome: gate.requiredOutcome,
               missingChecklistItems: gate.missingChecklistItems,

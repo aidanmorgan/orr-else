@@ -9,6 +9,7 @@ import { FlowManager } from '../src/core/FlowManager.js';
 import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 import { BuiltInToolName, DomainEventName, EnvVars, NativePiToolName, PiEventName, PluginToolName, ProcessFlag } from '../src/constants/index.js';
+import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
 
 function fakePi() {
   const tools: any[] = [];
@@ -2095,6 +2096,212 @@ states:
       else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
       if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
       else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── s3wp.32 Part 3: pre_signal_audit MCP bridge unavailability surface ────────
+//
+// Acceptance criterion 3 of s3wp.32: pre_signal_audit must surface MCP bridge
+// unavailability for the active bead's required MCP-backed tools when the bridge
+// is down.  This mirrors the harness_status and scheduling surfaces (Parts 1+2).
+
+describe('pre_signal_audit — s3wp.32: MCP bridge unavailability (3rd required surface)', () => {
+  beforeEach(() => {
+    resetMcpBridgeHealthCache();
+    setBridgeProbeForTest(undefined);
+  });
+
+  afterEach(() => {
+    resetMcpBridgeHealthCache();
+    setBridgeProbeForTest(undefined);
+  });
+
+  it('marks required MCP-backed tools as unavailable when the bridge is down', async () => {
+    // Simulate missing @modelcontextprotocol/sdk bridge
+    setBridgeProbeForTest(async () => ({
+      ok: false as const,
+      errorMessage: "Cannot find module '@modelcontextprotocol/sdk/dist/cjs/dist/cjs/client/index.js'",
+      errorType: 'Error'
+    }));
+
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-psa-mcp-down-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // harness.yaml with an MCP-type required tool (codemap)
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: codemap
+    type: mcp
+    server: codemap-server
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: [codemap]
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-psa-mcp-down';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const preSignalAudit = harness.tools.find((t: any) => t.name === BuiltInToolName.PRE_SIGNAL_AUDIT);
+      expect(preSignalAudit).toBeDefined();
+
+      // Do NOT invoke codemap — audit should report it as unavailable (not never_invoked)
+      // because the MCP bridge is down
+      const auditResult = await preSignalAudit.execute('audit-mcp-down', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const audit = auditResult.details;
+
+      // ready must be false — MCP unavailability is a blocking infra condition
+      expect(audit.ready).toBe(false);
+
+      // The required tool entry for codemap must have state='unavailable'
+      const codemapEntry = audit.requiredTools?.find((t: any) => t.name === 'codemap');
+      expect(codemapEntry).toBeDefined();
+      expect(codemapEntry?.state).toBe('unavailable');
+      // reason must name the bridge failure
+      expect(codemapEntry?.reason).toContain('MCP bridge down');
+
+      // blockingEvidence must surface the infra blocker with tool name and remediation
+      expect(audit.blockingEvidence).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('codemap')
+        ])
+      );
+      expect(audit.blockingEvidence.some((e: string) => e.includes('MCP bridge down'))).toBe(true);
+      // remediation text should mention the fix
+      expect(audit.blockingEvidence.some((e: string) => e.includes('@modelcontextprotocol/sdk'))).toBe(true);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT mark required tools as unavailable when the MCP bridge is healthy', async () => {
+    // Bridge is healthy — no MCP unavailability signal should appear
+    setBridgeProbeForTest(async () => ({ ok: true as const }));
+
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-psa-mcp-healthy-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: codemap
+    type: mcp
+    server: codemap-server
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+    requiredTools: [codemap]
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-psa-mcp-healthy';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const preSignalAudit = harness.tools.find((t: any) => t.name === BuiltInToolName.PRE_SIGNAL_AUDIT);
+      expect(preSignalAudit).toBeDefined();
+
+      // codemap not invoked — bridge is healthy so state should be never_invoked (not unavailable)
+      const auditResult = await preSignalAudit.execute('audit-mcp-healthy', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const audit = auditResult.details;
+
+      // The codemap entry must be never_invoked (not unavailable)
+      const codemapEntry = audit.requiredTools?.find((t: any) => t.name === 'codemap');
+      expect(codemapEntry).toBeDefined();
+      expect(codemapEntry?.state).toBe('never_invoked');
+      expect(codemapEntry?.reason).toBeUndefined();
+
+      // blockingEvidence must NOT mention MCP bridge
+      expect(audit.blockingEvidence.some((e: string) => e.includes('MCP bridge down'))).toBe(false);
+      expect(audit.blockingEvidence.some((e: string) => e.includes('unavailable'))).toBe(false);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });

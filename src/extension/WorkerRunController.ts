@@ -187,7 +187,9 @@ export async function terminalFailureLimitRejection(
 
 export interface RequiredToolAuditEntry {
   name: string;
-  state: 'passed' | 'failed' | 'never_invoked';
+  state: 'passed' | 'failed' | 'never_invoked' | 'unavailable';
+  /** Set when state is 'unavailable'. Describes the infra blocker and remediation. */
+  reason?: string;
 }
 
 export interface TerminalFailureLimitAudit {
