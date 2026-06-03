@@ -1,0 +1,1398 @@
+{
+  "tool": "orr_else_framework_evidence",
+  "archivedAt": "2026-06-02T02:35:48.785Z",
+  "features": [
+    {
+      "key": "extensionLoading",
+      "title": "Pi extension loading",
+      "requirement": "Orr Else is loaded as a Pi extension from project-local package configuration rather than a Cerdiwen framework shim.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/PiIntegration.ts",
+          "relativePath": "src/core/PiIntegration.ts",
+          "purpose": "resolves configured Pi worker extension paths from project settings",
+          "symbols": [
+            "resolveWorkerExtensionPaths",
+            "configuredPaths",
+            "primaryExtensionPath"
+          ],
+          "snippets": [
+            {
+              "line": 87,
+              "text": ""
+            },
+            {
+              "line": 88,
+              "text": "export function resolveWorkerExtensionPaths("
+            },
+            {
+              "line": 89,
+              "text": "  config: HarnessConfig,"
+            },
+            {
+              "line": 90,
+              "text": "  projectRoot: string,"
+            },
+            {
+              "line": 91,
+              "text": "  primaryExtensionPath: string"
+            },
+            {
+              "line": 92,
+              "text": "): string[] {"
+            },
+            {
+              "line": 93,
+              "text": "  const configuredPaths = unique(["
+            },
+            {
+              "line": 94,
+              "text": "    primaryExtensionPath,"
+            },
+            {
+              "line": 95,
+              "text": "    ...(config.settings.pi?.workerExtensions || [])"
+            },
+            {
+              "line": 97,
+              "text": ""
+            }
+          ],
+          "basename": "PiIntegration.ts",
+          "totalLines": 589
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/teammates.ts",
+          "relativePath": "src/plugins/teammates.ts",
+          "purpose": "spawns worker Pi processes with configured extensions and worker args",
+          "symbols": [
+            "workerExtensions",
+            "workerArgs",
+            "--extension"
+          ],
+          "snippets": [
+            {
+              "line": 527,
+              "text": "      const llm = this.configLoader.resolveLLMConfig(stateId, config);"
+            },
+            {
+              "line": 528,
+              "text": "      const workerExtensions = resolveWorkerExtensionPaths(config, projectRoot, extensionPath);"
+            },
+            {
+              "line": 529,
+              "text": "      const resolvedSkills = resolvePiSkillPathsForState(config, projectRoot, stateId);"
+            },
+            {
+              "line": 531,
+              "text": "      const configPath = this.configLoader.getConfigPath();"
+            },
+            {
+              "line": 532,
+              "text": "      const workerArgs = resolveWorkerArgs(config, { configPath, projectRoot, worktreePath });"
+            },
+            {
+              "line": 533,
+              "text": "      const apiPort = this.apiAddress.port || Defaults.API_PORT;"
+            },
+            {
+              "line": 569,
+              "text": "        PiCliFlag.NO_EXTENSIONS,"
+            },
+            {
+              "line": 570,
+              "text": "        ...workerExtensions.flatMap(workerExtension => [PiCliFlag.EXTENSION, workerExtension]),"
+            },
+            {
+              "line": 571,
+              "text": "        ...skillPaths.flatMap(skillPath => [PiCliFlag.SKILL, skillPath]),"
+            },
+            {
+              "line": 575,
+              "text": "        PiCliFlag.NO_SESSION,"
+            }
+          ],
+          "basename": "teammates.ts",
+          "totalLines": 741
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/tests/teammates.test.ts",
+          "relativePath": "tests/teammates.test.ts",
+          "purpose": "regression coverage for teammate process extension command construction",
+          "symbols": [
+            "workerExtensions",
+            "extensionPath",
+            "TeammateFactory"
+          ],
+          "snippets": [
+            {
+              "line": 11,
+              "text": "import type { ApiAddress } from '../src/core/RuntimeServices.js';"
+            },
+            {
+              "line": 12,
+              "text": "import { TeammateFactory, parseOrrWorkerPaneOption, formatOrrWorkerPaneOption } from '../src/plugins/teammates.js';"
+            },
+            {
+              "line": 13,
+              "text": "import {"
+            },
+            {
+              "line": 32,
+              "text": ""
+            },
+            {
+              "line": 33,
+              "text": "describe('TeammateFactory', () => {"
+            },
+            {
+              "line": 34,
+              "text": "  const root = path.join(os.tmpdir(), 'orr-else-teammate-test');"
+            },
+            {
+              "line": 62,
+              "text": "      - skills/quality/SKILL.md"
+            },
+            {
+              "line": 63,
+              "text": "    workerExtensions:"
+            },
+            {
+              "line": 64,
+              "text": "      - configured-worker-extension.ts"
+            },
+            {
+              "line": 98,
+              "text": "  it('spawns Pi teammates in tmux with automatic teammate-mode environment', async () => {"
+            }
+          ],
+          "basename": "teammates.test.ts",
+          "totalLines": 1437
+        }
+      ]
+    },
+    {
+      "key": "statechartActions",
+      "title": "Statechart action sequencing",
+      "requirement": "The orchestrator selects state actions from YAML metadata and records action completion without hard-coded Cerdiwen transitions.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "selects active actions, runs parent sequence actions, and audits required tools before signal_completion",
+          "symbols": [
+            "selectActiveAction",
+            "nextSequencedAction",
+            "runParentSequenceActionsBeforeActive",
+            "signal_completion"
+          ],
+          "snippets": [
+            {
+              "line": 383,
+              "text": " * toolAuditFailures contains the same per-tool failure strings that"
+            },
+            {
+              "line": 384,
+              "text": " * signal_completion builds for its REJECTED: Protocol Violation message, so"
+            },
+            {
+              "line": 385,
+              "text": " * that signal_completion can reuse them verbatim without re-examining results."
+            },
+            {
+              "line": 386,
+              "text": " */"
+            },
+            {
+              "line": 391,
+              "text": "  requiredTools: RequiredToolAuditEntry[];"
+            },
+            {
+              "line": 392,
+              "text": "  /** Verbatim per-tool failure strings used by signal_completion's REJECTED message. */"
+            },
+            {
+              "line": 393,
+              "text": "  toolAuditFailures: string[];"
+            },
+            {
+              "line": 408,
+              "text": "/**"
+            },
+            {
+              "line": 409,
+              "text": " * Shared gate predicate that evaluates whether signal_completion would ACCEPT"
+            },
+            {
+              "line": 410,
+              "text": " * or REJECT a given outcome. This is the single source of truth for the gate"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/ChecklistRequirements.ts",
+          "relativePath": "src/core/ChecklistRequirements.ts",
+          "purpose": "derives and merges state/action checklist requirements",
+          "symbols": [
+            "deriveChecklistItems",
+            "mergeChecklistItems",
+            "missingMandatoryChecklistItems"
+          ],
+          "snippets": [
+            {
+              "line": 55,
+              "text": ""
+            },
+            {
+              "line": 56,
+              "text": "export function mergeChecklistItems("
+            },
+            {
+              "line": 57,
+              "text": "  requiredItems: ChecklistItem[],"
+            },
+            {
+              "line": 99,
+              "text": ""
+            },
+            {
+              "line": 100,
+              "text": "export function deriveChecklistItems("
+            },
+            {
+              "line": 101,
+              "text": "  state: Pick<SDLCState, 'checklist'> | undefined,"
+            },
+            {
+              "line": 116,
+              "text": ""
+            },
+            {
+              "line": 117,
+              "text": "export function missingMandatoryChecklistItems("
+            },
+            {
+              "line": 118,
+              "text": "  requiredItems: ChecklistItem[],"
+            }
+          ],
+          "basename": "ChecklistRequirements.ts",
+          "totalLines": 126
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/tests/checklist_requirements.test.ts",
+          "relativePath": "tests/checklist_requirements.test.ts",
+          "purpose": "regression coverage for checklist derivation and dynamic additions",
+          "symbols": [
+            "deriveChecklistItems",
+            "mergeChecklistItems",
+            "ProtocolInjector"
+          ],
+          "snippets": [
+            {
+              "line": 2,
+              "text": "import { BuiltInToolName } from '../src/constants/index.js';"
+            },
+            {
+              "line": 3,
+              "text": "import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, normalizeChecklistTickText, resolveChecklistTickText } from '../src/core/ChecklistRequirements.js';"
+            },
+            {
+              "line": 4,
+              "text": "import { ProtocolInjector } from '../src/core/ProtocolInjector.js';"
+            },
+            {
+              "line": 5,
+              "text": "import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';"
+            },
+            {
+              "line": 32,
+              "text": ""
+            },
+            {
+              "line": 33,
+              "text": "    expect(deriveChecklistItems(state, action).map(item => item.text)).toEqual(["
+            },
+            {
+              "line": 34,
+              "text": "      'Open specimen case',"
+            },
+            {
+              "line": 54,
+              "text": ""
+            },
+            {
+              "line": 55,
+              "text": "    const items = deriveChecklistItems(state, action);"
+            },
+            {
+              "line": 56,
+              "text": ""
+            }
+          ],
+          "basename": "checklist_requirements.test.ts",
+          "totalLines": 131
+        }
+      ]
+    },
+    {
+      "key": "eventSourcing",
+      "title": "Event-sourced bead projection",
+      "requirement": "Every mutating harness operation records an event so bead state can be reconstructed from the event store across sessions.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/EventStore.ts",
+          "relativePath": "src/core/EventStore.ts",
+          "purpose": "records domain events and projects bead state charts from stored events",
+          "symbols": [
+            "DomainEvent",
+            "projectBeadStateChart",
+            "projectBeadStateChartFromEvents",
+            "completedActionFromData"
+          ],
+          "snippets": [
+            {
+              "line": 12,
+              "text": "  Component,"
+            },
+            {
+              "line": 13,
+              "text": "  DomainEventName,"
+            },
+            {
+              "line": 14,
+              "text": "  EnvVars,"
+            },
+            {
+              "line": 22,
+              "text": "export type {"
+            },
+            {
+              "line": 23,
+              "text": "  DomainEvent,"
+            },
+            {
+              "line": 24,
+              "text": "  EventProjectionOptions,"
+            },
+            {
+              "line": 31,
+              "text": "import type {"
+            },
+            {
+              "line": 32,
+              "text": "  DomainEvent,"
+            },
+            {
+              "line": 33,
+              "text": "  LatestEventFilterOptions,"
+            },
+            {
+              "line": 125,
+              "text": ""
+            }
+          ],
+          "basename": "EventStore.ts",
+          "totalLines": 426
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/constants/index.ts",
+          "relativePath": "src/constants/index.ts",
+          "purpose": "defines domain event names and event-store defaults without magic strings",
+          "symbols": [
+            "DomainEventName",
+            "EventStoreDefaults"
+          ],
+          "snippets": [
+            {
+              "line": 142,
+              "text": ""
+            },
+            {
+              "line": 143,
+              "text": "export enum DomainEventName {"
+            },
+            {
+              "line": 144,
+              "text": "  AGENT_TURN_FAILED = 'AGENT_TURN_FAILED',"
+            },
+            {
+              "line": 841,
+              "text": ""
+            },
+            {
+              "line": 842,
+              "text": "export const EventStoreDefaults = {"
+            },
+            {
+              "line": 843,
+              "text": "  DIR: OperationalArtifactPath.PI_EVENTS_DIR,"
+            }
+          ],
+          "basename": "index.ts",
+          "totalLines": 1250
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "records action, checkpoint, checklist, transition, and tool events",
+          "symbols": [
+            "EventStore.record",
+            "ACTION_COMPLETED",
+            "CHECKPOINT_ACCEPTED",
+            "STATE_TRANSITIONED"
+          ],
+          "snippets": [
+            {
+              "line": 944,
+              "text": "  if (normalized === EventName.BLOCKED) return TeammateEventType.STATE_BLOCKED;"
+            },
+            {
+              "line": 945,
+              "text": "  return TeammateEventType.STATE_TRANSITIONED;"
+            },
+            {
+              "line": 946,
+              "text": "}"
+            },
+            {
+              "line": 1923,
+              "text": "    run.completedActionIds = completedActionIds;"
+            },
+            {
+              "line": 1924,
+              "text": "    await services.eventStore.record(DomainEventName.ACTION_COMPLETED, {"
+            },
+            {
+              "line": 1925,
+              "text": "      beadId: run.beadId,"
+            },
+            {
+              "line": 2250,
+              "text": ""
+            },
+            {
+              "line": 2251,
+              "text": "  if (event.type === TeammateEventType.STATE_TRANSITIONED) {"
+            },
+            {
+              "line": 2252,
+              "text": "    const state = config.states[event.stateId];"
+            },
+            {
+              "line": 3166,
+              "text": ""
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        }
+      ]
+    },
+    {
+      "key": "observability",
+      "title": "Session observability",
+      "requirement": "Each Pi session gets UUIDv7 trace identity, JSONL output by default, and optional OTEL collector export through configured observability.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/Observability.ts",
+          "relativePath": "src/core/Observability.ts",
+          "purpose": "implements JSONL tracing and optional collector export",
+          "symbols": [
+            "Observability",
+            "sessionId",
+            "jsonl",
+            "collector"
+          ],
+          "snippets": [
+            {
+              "line": 30,
+              "text": "import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';"
+            },
+            {
+              "line": 31,
+              "text": "import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OtelAttr, ToolResultStatus } from '../constants/index.js';"
+            },
+            {
+              "line": 32,
+              "text": ""
+            },
+            {
+              "line": 134,
+              "text": "function compactSpanString(value: string): string {"
+            },
+            {
+              "line": 135,
+              "text": "  if (value.length <= ObservabilityDefaults.SPAN_ATTRIBUTE_MAX_CHARS) return value;"
+            },
+            {
+              "line": 136,
+              "text": "  return `${value.slice(0, ObservabilityDefaults.SPAN_ATTRIBUTE_MAX_CHARS)}... [truncated; chars=${value.length}]`;"
+            },
+            {
+              "line": 137,
+              "text": "}"
+            },
+            {
+              "line": 155,
+              "text": " */"
+            },
+            {
+              "line": 156,
+              "text": "export class Observability {"
+            },
+            {
+              "line": 157,
+              "text": "  private readonly sessionId: string;"
+            }
+          ],
+          "basename": "Observability.ts",
+          "totalLines": 424
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/ConfigLoader.ts",
+          "relativePath": "src/core/ConfigLoader.ts",
+          "purpose": "loads observability defaults and YAML overrides",
+          "symbols": [
+            "observability",
+            "ObservabilityDefaults",
+            "fileName"
+          ],
+          "snippets": [
+            {
+              "line": 88,
+              "text": "    harnessContextRotThreshold: 5,"
+            },
+            {
+              "line": 89,
+              "text": "    observability: {"
+            },
+            {
+              "line": 90,
+              "text": "      enabled: true,"
+            }
+          ],
+          "basename": "ConfigLoader.ts",
+          "totalLines": 267
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "passes Observability through runtime tools and teammate execution",
+          "symbols": [
+            "runtimeObservability",
+            "startSpan",
+            "recordToolInvocation"
+          ],
+          "snippets": [
+            {
+              "line": 345,
+              "text": "async function initializeObservability(services: RuntimeServices): Promise<Observability> {"
+            },
+            {
+              "line": 346,
+              "text": "  const runtimeObservability = getObservability(services);"
+            },
+            {
+              "line": 347,
+              "text": "  await runtimeObservability.initialize();"
+            },
+            {
+              "line": 348,
+              "text": "  services.eventStore.setSessionId(runtimeObservability.getSessionId());"
+            },
+            {
+              "line": 349,
+              "text": "  return runtimeObservability;"
+            },
+            {
+              "line": 350,
+              "text": "}"
+            },
+            {
+              "line": 1061,
+              "text": "    if (!session.observedPiTools.has(event.toolName)) return;"
+            },
+            {
+              "line": 1062,
+              "text": "    const runtimeObservability = session.piToolObservability;"
+            },
+            {
+              "line": 1063,
+              "text": "    const toolCallId = eventToolCallId(event);"
+            },
+            {
+              "line": 1066,
+              "text": "    const beadId = beadIdFromToolParams(input, session);"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        }
+      ]
+    },
+    {
+      "key": "toolEnforcement",
+      "title": "Configured tool enforcement",
+      "requirement": "Project tools are registered from YAML, shell fallback is blocked, and SUCCESS is audited against required tool calls.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/projectTools.ts",
+          "relativePath": "src/plugins/projectTools.ts",
+          "purpose": "normalizes project-tool arguments and executes command/MCP project tools",
+          "symbols": [
+            "registerConfiguredProjectTools",
+            "normalizeCommandArguments",
+            "executeConfiguredProjectTool"
+          ],
+          "snippets": [
+            {
+              "line": 41,
+              "text": "import {"
+            },
+            {
+              "line": 42,
+              "text": "  normalizeCommandArguments,"
+            },
+            {
+              "line": 43,
+              "text": "  isSuccessfulCommandExitCode,"
+            },
+            {
+              "line": 86,
+              "text": "export { resolveContextField } from './projectTools/contextHelpers.js';"
+            },
+            {
+              "line": 87,
+              "text": "export { normalizeCommandArguments } from './projectTools/commandExecutor.js';"
+            },
+            {
+              "line": 88,
+              "text": "export { normalizeMcpPathArguments } from './projectTools/pathNormalization.js';"
+            },
+            {
+              "line": 102,
+              "text": ""
+            },
+            {
+              "line": 103,
+              "text": "// ---- executeConfiguredProjectTool (WI-12 flat form) ----"
+            },
+            {
+              "line": 104,
+              "text": ""
+            },
+            {
+              "line": 105,
+              "text": "export async function executeConfiguredProjectTool("
+            }
+          ],
+          "basename": "projectTools.ts",
+          "totalLines": 402
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "observes Pi tool calls, blocks shell policy violations, and audits required tools before SUCCESS",
+          "symbols": [
+            "registerPiToolObservers",
+            "shellPolicyRejection",
+            "requiredTools",
+            "resultIndicatesFailure"
+          ],
+          "snippets": [
+            {
+              "line": 121,
+              "text": "  nestedResultIndicatesFailure,"
+            },
+            {
+              "line": 122,
+              "text": "  resultIndicatesFailure,"
+            },
+            {
+              "line": 123,
+              "text": "  resultIndicatesSuccess,"
+            },
+            {
+              "line": 359,
+              "text": ""
+            },
+            {
+              "line": 360,
+              "text": "function requiredToolsForRun(run: ActiveRun): RequiredTool[] | undefined {"
+            },
+            {
+              "line": 361,
+              "text": "  const requiredTools = ["
+            },
+            {
+              "line": 362,
+              "text": "    ...(run.state.requiredTools || []),"
+            },
+            {
+              "line": 363,
+              "text": "    ...(run.action.requiredTools || [])"
+            },
+            {
+              "line": 364,
+              "text": "  ];"
+            },
+            {
+              "line": 365,
+              "text": "  return requiredTools.length > 0 ? requiredTools : undefined;"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/ProtocolInjector.ts",
+          "relativePath": "src/core/ProtocolInjector.ts",
+          "purpose": "injects protocol text for checklist and required-tool completion gates",
+          "symbols": [
+            "Completion Gate",
+            "required tools",
+            "signal_completion"
+          ],
+          "snippets": [
+            {
+              "line": 51,
+              "text": "- **Restart Routing**: Use \\`${BuiltInToolName.REQUEST_CONTEXT_RESTART}\\` for context pollution/window pressure and \\`${BuiltInToolName.REQUEST_HARNESS_RESTART}\\` for transient harness or Pi transport failures."
+            },
+            {
+              "line": 52,
+              "text": "- **Pre-Signal Gate Audit**: Call \\`${BuiltInToolName.PRE_SIGNAL_AUDIT}\\` BEFORE \\`${BuiltInToolName.SUBMIT_CHECKPOINT}\\` or \\`${BuiltInToolName.SIGNAL_COMPLETION}\\` to confirm gate readiness. It returns required tools (with pass/fail/never_invoked state), terminal failure-limit state, missing checklist items, checkpoint status, and exact blocking evidence so you can address all blockers before attempting the terminal signal."
+            },
+            {
+              "line": 53,
+              "text": "- **Completion Gate**: \\`${BuiltInToolName.SIGNAL_COMPLETION} SUCCESS\\` is programmatically rejected until mandatory checklist items and required tools pass."
+            },
+            {
+              "line": 54,
+              "text": "- **No Shell Fallback**: Do not use \\`${NativePiToolName.BASH}\\` for \\`pwd\\`, \\`ls\\`, \\`find\\`, \\`grep\\`, \\`wc\\`, \\`cmp\\`, \\`cp\\`, \\`git\\`, Python snippets, or configured project-tool capability. Use native Pi tools, \\`${BuiltInToolName.GET_ARTIFACT_PATHS}\\`, \\`${PluginToolName.BD_GET_STATE_CHART}\\`, \\`git_history\\`, \\`codemap\\`, \\`ast_grep\\`, and the configured project tools. If no configured tool exists, record a blocker rather than improvising a shell command."
+            }
+          ],
+          "basename": "ProtocolInjector.ts",
+          "totalLines": 61
+        }
+      ]
+    },
+    {
+      "key": "mergeCommit",
+      "title": "Harness-owned merge and commit",
+      "requirement": "Only the coordinator performs merge/commit after terminal statechart success.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/git.ts",
+          "relativePath": "src/plugins/git.ts",
+          "purpose": "contains coordinator-side worktree, merge, commit, and cleanup operations",
+          "symbols": [
+            "createWorktree",
+            "merge",
+            "commit",
+            "cleanup"
+          ],
+          "snippets": [
+            {
+              "line": 20,
+              "text": "  BRANCH: 'branch',"
+            },
+            {
+              "line": 21,
+              "text": "  COMMIT: 'commit',"
+            },
+            {
+              "line": 22,
+              "text": "  DIFF: 'diff',"
+            },
+            {
+              "line": 23,
+              "text": "  MERGE: 'merge',"
+            },
+            {
+              "line": 24,
+              "text": "  RESTORE: 'restore',"
+            },
+            {
+              "line": 38,
+              "text": "  NAME_ONLY: '--name-only',"
+            },
+            {
+              "line": 39,
+              "text": "  NO_COMMIT: '--no-commit',"
+            },
+            {
+              "line": 40,
+              "text": "  NO_FF: '--no-ff',"
+            },
+            {
+              "line": 133,
+              "text": ""
+            },
+            {
+              "line": 134,
+              "text": "async function unmergedPaths(cwd: string = process.cwd()): Promise<string[]> {"
+            }
+          ],
+          "basename": "git.ts",
+          "totalLines": 620
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "keeps teammate completion separate from terminal harness merge/commit",
+          "symbols": [
+            "FlowManager",
+            "mergeAndCommit",
+            "TEAMMATE_EXITED"
+          ],
+          "snippets": [
+            {
+              "line": 2226,
+              "text": ""
+            },
+            {
+              "line": 2227,
+              "text": "  if (event.type === TeammateEventType.TEAMMATE_EXITED) {"
+            },
+            {
+              "line": 2228,
+              "text": "    currentSupervisor.markBeadExited(beadId);"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/constants/index.ts",
+          "relativePath": "src/constants/index.ts",
+          "purpose": "defines merge/commit status constants",
+          "symbols": [
+            "MergeAndCommitStatus",
+            "WorktreeDefaults"
+          ],
+          "snippets": [
+            {
+              "line": 106,
+              "text": ""
+            },
+            {
+              "line": 107,
+              "text": "export enum MergeAndCommitStatus {"
+            },
+            {
+              "line": 108,
+              "text": "  STARTED = 'started',"
+            },
+            {
+              "line": 754,
+              "text": ""
+            },
+            {
+              "line": 755,
+              "text": "export const WorktreeDefaults = {"
+            },
+            {
+              "line": 756,
+              "text": "  AUTO_RESTORE_STATE_ID: 'worktree_reuse',"
+            }
+          ],
+          "basename": "index.ts",
+          "totalLines": 1250
+        }
+      ]
+    },
+    {
+      "key": "finalization",
+      "title": "Harness-owned terminal finalization",
+      "requirement": "Terminal teammate success is finalized by the coordinator through event-recorded merge, commit, and Bead closure controls rather than by worker-side commits or closes.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "routes teammate exit events into coordinator-owned terminal merge handling",
+          "symbols": [
+            "TEAMMATE_EXITED",
+            "merge_and_commit",
+            "closeAfterMerge",
+            "Harness-owned terminal merge failed"
+          ],
+          "snippets": [
+            {
+              "line": 2226,
+              "text": ""
+            },
+            {
+              "line": 2227,
+              "text": "  if (event.type === TeammateEventType.TEAMMATE_EXITED) {"
+            },
+            {
+              "line": 2228,
+              "text": "    currentSupervisor.markBeadExited(beadId);"
+            },
+            {
+              "line": 2306,
+              "text": "        beadId,"
+            },
+            {
+              "line": 2307,
+              "text": "        closeAfterMerge: true,"
+            },
+            {
+              "line": 2308,
+              "text": "        closeReason: event.summary"
+            },
+            {
+              "line": 2313,
+              "text": "          status: BeadStatus.BLOCKED,"
+            },
+            {
+              "line": 2314,
+              "text": "          notes: `Harness-owned terminal merge failed: ${JSON.stringify(mergeResult)}`"
+            },
+            {
+              "line": 2315,
+              "text": "        }, ctx);"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/git.ts",
+          "relativePath": "src/plugins/git.ts",
+          "purpose": "performs the staged merge and optional Bead close after successful merge",
+          "symbols": [
+            "MERGE_AND_COMMIT",
+            "closeAfterMerge",
+            "BD_UPDATE_STATUS",
+            "BeadStatus.COMPLETED"
+          ],
+          "snippets": [
+            {
+              "line": 260,
+              "text": " *"
+            },
+            {
+              "line": 261,
+              "text": " * MERGE_AND_COMMIT success behaviour is preserved: a removal failure never fails"
+            },
+            {
+              "line": 262,
+              "text": " * the merge — this function is always best-effort and logged."
+            },
+            {
+              "line": 518,
+              "text": "    {"
+            },
+            {
+              "line": 519,
+              "text": "      name: PluginToolName.MERGE_AND_COMMIT,"
+            },
+            {
+              "line": 520,
+              "text": "      description: 'Merge the worktree branch into the target branch.',"
+            },
+            {
+              "line": 524,
+              "text": "        targetBranch: Type.Optional(Type.String({ description: 'Branch to merge into' })),"
+            },
+            {
+              "line": 525,
+              "text": "        closeAfterMerge: Type.Optional(Type.Boolean({ description: 'Harness-owned terminal finalization: close the Bead after a clean staged merge. Bead state is propagated via the embedded Dolt DB; the JSONL export is no longer touched.' })),"
+            },
+            {
+              "line": 526,
+              "text": "        closeReason: Type.Optional(Type.String({ description: 'Close reason to record when closeAfterMerge is true.' }))"
+            },
+            {
+              "line": 527,
+              "text": "      }),"
+            }
+          ],
+          "basename": "git.ts",
+          "totalLines": 620
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/tests/git_plugin.test.ts",
+          "relativePath": "tests/git_plugin.test.ts",
+          "purpose": "regression coverage for close-after-merge finalization without JSONL export mutation",
+          "symbols": [
+            "git plugin merge finalization",
+            "closeAfterMerge",
+            "BD_UPDATE_STATUS",
+            "issues.jsonl"
+          ],
+          "snippets": [
+            {
+              "line": 36,
+              "text": "  fs.writeFileSync(path.join(repoRoot, 'source.txt'), 'before\\n');"
+            },
+            {
+              "line": 37,
+              "text": "  fs.writeFileSync(path.join(repoRoot, '.gitignore'), '.beads/issues.jsonl\\n');"
+            },
+            {
+              "line": 38,
+              "text": "  git(repoRoot, ['add', 'source.txt', '.gitignore']);"
+            },
+            {
+              "line": 113,
+              "text": ""
+            },
+            {
+              "line": 114,
+              "text": "describe('git plugin merge finalization', () => {"
+            },
+            {
+              "line": 115,
+              "text": "  let tempRoot: string;"
+            },
+            {
+              "line": 166,
+              "text": ""
+            },
+            {
+              "line": 167,
+              "text": "  it('closeAfterMerge updates the bead via bd and commits the merge without touching the JSONL export', async () => {"
+            },
+            {
+              "line": 168,
+              "text": "    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-1');"
+            },
+            {
+              "line": 177,
+              "text": "      tools: [{"
+            }
+          ],
+          "basename": "git_plugin.test.ts",
+          "totalLines": 547
+        }
+      ]
+    },
+    {
+      "key": "worktrees",
+      "title": "Mandatory worktree execution",
+      "requirement": "All bead work runs inside worktrees/<beadId> with framework-owned setup and cleanup.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/git.ts",
+          "relativePath": "src/plugins/git.ts",
+          "purpose": "creates and manages bead worktrees",
+          "symbols": [
+            "createWorktree",
+            "worktree",
+            "WorktreeDefaults"
+          ],
+          "snippets": [
+            {
+              "line": 8,
+              "text": "import { EventStore } from '../core/EventStore.js';"
+            },
+            {
+              "line": 9,
+              "text": "import { BeadStatus, Component, DomainEventName, FileMutationPolicyDefaults, PluginToolName, TransactionalStateDefaults, WorktreeDefaults, WorktreePreserveReason } from '../constants/index.js';"
+            },
+            {
+              "line": 10,
+              "text": "import type { ConfigLoader } from '../core/ConfigLoader.js';"
+            },
+            {
+              "line": 28,
+              "text": "  SWITCH: 'switch',"
+            },
+            {
+              "line": 29,
+              "text": "  WORKTREE: 'worktree'"
+            },
+            {
+              "line": 30,
+              "text": "} as const;"
+            },
+            {
+              "line": 64,
+              "text": "    retries: {"
+            },
+            {
+              "line": 65,
+              "text": "      retries: WorktreeDefaults.MAX_LOCK_RETRIES,"
+            },
+            {
+              "line": 66,
+              "text": "      factor: 1,"
+            },
+            {
+              "line": 67,
+              "text": "      minTimeout: WorktreeDefaults.LOCK_WAIT_MS,"
+            }
+          ],
+          "basename": "git.ts",
+          "totalLines": 620
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/plugins/teammates.ts",
+          "relativePath": "src/plugins/teammates.ts",
+          "purpose": "spawns teammates with worktree run directories",
+          "symbols": [
+            "runDir",
+            "worktreePath",
+            "PI_WORKTREE_PATH"
+          ],
+          "snippets": [
+            {
+              "line": 499,
+              "text": ""
+            },
+            {
+              "line": 500,
+              "text": "  public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {"
+            },
+            {
+              "line": 501,
+              "text": "    return this.observability.tracedAsync('spawn_teammate', {"
+            },
+            {
+              "line": 503,
+              "text": "      [OtelAttr.AGENT_STATE_ID]: stateId"
+            },
+            {
+              "line": 504,
+              "text": "    }, async () => this.spawnTeammateInTmuxInner(beadId, stateId, worktreePath, ctx))();"
+            },
+            {
+              "line": 505,
+              "text": "  }"
+            },
+            {
+              "line": 506,
+              "text": ""
+            },
+            {
+              "line": 507,
+              "text": "  private async spawnTeammateInTmuxInner(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {"
+            },
+            {
+              "line": 508,
+              "text": "    const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;"
+            },
+            {
+              "line": 510,
+              "text": "      assertSafeBeadId(beadId);"
+            }
+          ],
+          "basename": "teammates.ts",
+          "totalLines": 741
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/constants/index.ts",
+          "relativePath": "src/constants/index.ts",
+          "purpose": "defines worktree path and branch constants",
+          "symbols": [
+            "WorktreeDefaults",
+            "ROOT_DIR",
+            "BRANCH_PREFIX"
+          ],
+          "snippets": [
+            {
+              "line": 754,
+              "text": ""
+            },
+            {
+              "line": 755,
+              "text": "export const WorktreeDefaults = {"
+            },
+            {
+              "line": 756,
+              "text": "  AUTO_RESTORE_STATE_ID: 'worktree_reuse',"
+            },
+            {
+              "line": 757,
+              "text": "  ROOT_DIR: 'worktrees',"
+            },
+            {
+              "line": 758,
+              "text": "  BRANCH_PREFIX: 'bead/',"
+            },
+            {
+              "line": 759,
+              "text": "  GIT_LOCK_FILE: '.git-harness.lock',"
+            }
+          ],
+          "basename": "index.ts",
+          "totalLines": 1250
+        }
+      ]
+    },
+    {
+      "key": "restartRouting",
+      "title": "Harness and context restart routing",
+      "requirement": "Harness restarts and context restarts are distinct events routed by YAML.",
+      "archiveEvidence": [
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/TeammateEvents.ts",
+          "relativePath": "src/core/TeammateEvents.ts",
+          "purpose": "defines restart-related teammate event validation",
+          "symbols": [
+            "CONTEXT_RESTART_REQUESTED",
+            "createTeammateEventIdempotencyKey"
+          ],
+          "snippets": [
+            {
+              "line": 16,
+              "text": "  | TeammateEventType.STATE_BLOCKED"
+            },
+            {
+              "line": 17,
+              "text": "  | TeammateEventType.CONTEXT_RESTART_REQUESTED"
+            },
+            {
+              "line": 18,
+              "text": "  | TeammateEventType.HARNESS_RESTART_REQUESTED;"
+            },
+            {
+              "line": 23,
+              "text": "  TeammateEventType.STATE_BLOCKED,"
+            },
+            {
+              "line": 24,
+              "text": "  TeammateEventType.CONTEXT_RESTART_REQUESTED,"
+            },
+            {
+              "line": 25,
+              "text": "  TeammateEventType.HARNESS_RESTART_REQUESTED"
+            },
+            {
+              "line": 83,
+              "text": "export interface ContextRestartRequestedEvent extends TeammateEventBase {"
+            },
+            {
+              "line": 84,
+              "text": "  type: TeammateEventType.CONTEXT_RESTART_REQUESTED;"
+            },
+            {
+              "line": 85,
+              "text": "  actionId: string;"
+            },
+            {
+              "line": 133,
+              "text": ""
+            }
+          ],
+          "basename": "TeammateEvents.ts",
+          "totalLines": 315
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/extension.ts",
+          "relativePath": "src/extension.ts",
+          "purpose": "routes request_context_restart through configured restart events",
+          "symbols": [
+            "REQUEST_CONTEXT_RESTART",
+            "contextRestartEvent",
+            "harnessRestartEvent"
+          ],
+          "snippets": [
+            {
+              "line": 271,
+              "text": "  BuiltInToolName.SIGNAL_COMPLETION,"
+            },
+            {
+              "line": 272,
+              "text": "  BuiltInToolName.REQUEST_CONTEXT_RESTART,"
+            },
+            {
+              "line": 273,
+              "text": "  BuiltInToolName.REQUEST_HARNESS_RESTART,"
+            },
+            {
+              "line": 3353,
+              "text": "    pi.registerTool(wrapRuntimeTool({"
+            },
+            {
+              "line": 3354,
+              "text": "      name: BuiltInToolName.REQUEST_CONTEXT_RESTART,"
+            },
+            {
+              "line": 3355,
+              "text": "      description: 'Request a fresh Pi session with a dense handover to reset context pollution.',"
+            },
+            {
+              "line": 3367,
+              "text": "          actionId: activeRun.action.id,"
+            },
+            {
+              "line": 3368,
+              "text": "          transitionEvent: config.settings.contextRestartEvent || EventName.CONTEXT_RESTART,"
+            },
+            {
+              "line": 3369,
+              "text": "          summary,"
+            },
+            {
+              "line": 3395,
+              "text": "          actionId: activeRun.action.id,"
+            }
+          ],
+          "basename": "extension.ts",
+          "totalLines": 3489
+        },
+        {
+          "path": "/Users/aidan/dev/pi-experiment/src/core/ConfigLoader.ts",
+          "relativePath": "src/core/ConfigLoader.ts",
+          "purpose": "loads harness/context restart prompt and event configuration",
+          "symbols": [
+            "harnessRestartEvent",
+            "contextRestartEvent",
+            "harnessRestartPrompt",
+            "contextRestartPrompt"
+          ],
+          "snippets": [
+            {
+              "line": 63,
+              "text": "    startState: undefined,"
+            },
+            {
+              "line": 64,
+              "text": "    harnessRestartEvent: EventName.HARNESS_RESTART,"
+            },
+            {
+              "line": 65,
+              "text": "    contextRestartEvent: EventName.CONTEXT_RESTART,"
+            },
+            {
+              "line": 66,
+              "text": "    pi: {"
+            },
+            {
+              "line": 230,
+              "text": "  private resolveFileBackedFields(config: HarnessConfig): void {"
+            },
+            {
+              "line": 231,
+              "text": "    config.settings.harnessRestartPrompt = this.resolveTextReference(config.settings.harnessRestartPrompt) as string | undefined;"
+            },
+            {
+              "line": 232,
+              "text": "    config.settings.contextRestartPrompt = this.resolveTextReference(config.settings.contextRestartPrompt) as string | undefined;"
+            },
+            {
+              "line": 233,
+              "text": ""
+            },
+            {
+              "line": 238,
+              "text": "    for (const state of Object.values(config.states || {})) {"
+            },
+            {
+              "line": 239,
+              "text": "      state.harnessRestartPrompt = this.resolveTextReference(state.harnessRestartPrompt) as string | undefined;"
+            }
+          ],
+          "basename": "ConfigLoader.ts",
+          "totalLines": 267
+        }
+      ]
+    }
+  ]
+}

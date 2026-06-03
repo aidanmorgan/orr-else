@@ -1,5 +1,80 @@
 import type { TurnTelemetry } from './Telemetry.js';
 
+// ---- Per-tool token accounting (s3wp.16) ----
+//
+// Local constant — intentionally NOT imported from src/constants/index.ts so that
+// this module can be used and tested without a constants dependency.  The value (4)
+// matches TOKEN_ESTIMATE_CHARS_PER_TOKEN in both constants/index.ts and
+// plugins/projectTools/constants.ts.
+const TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
+
+/**
+ * Accounting record for a single plugin/built-in tool invocation.
+ * Stored in the event store as telemetry; never injected into the model-facing result.
+ */
+export interface ToolTokenAccounting {
+  /** Registered tool name. */
+  tool: string;
+  /** Bead identifier when available (undefined in non-worker mode). */
+  beadId: string | undefined;
+  /** State identifier when available. */
+  stateId: string | undefined;
+  /** Action identifier when available. */
+  actionId: string | undefined;
+  /** Byte length of the JSON-serialized model-facing result. */
+  modelFacingBytes: number;
+  /** Estimated token count: ceil(modelFacingBytes / 4). */
+  estimatedTokens: number;
+  /** Whether the result was served from the in-session cache (no new tool execution). */
+  cached: boolean;
+}
+
+/**
+ * Estimate the UTF-8 byte length of a value when serialized to the string form
+ * the model receives (plain string values are used as-is; everything else is
+ * JSON-serialized).  Returns 0 when serialization fails.
+ *
+ * This mirrors the logic in toolResult() in extension.ts:
+ *   typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+ * We use compact JSON here (no pretty-print) for a conservative byte estimate;
+ * the difference is whitespace, which has negligible token cost.
+ */
+export function estimateResultBytes(value: unknown): number {
+  try {
+    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
+    return Buffer.byteLength(serialized, 'utf8');
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Estimate the model-facing token cost of a tool result using the standard
+ * chars-per-token heuristic (4 bytes ≈ 1 token).
+ */
+export function estimateResultTokens(value: unknown): number {
+  return Math.ceil(estimateResultBytes(value) / TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+}
+
+/**
+ * Build a ToolTokenAccounting record for a completed tool invocation.
+ * The `modelFacingResult` is the value returned by execute() BEFORE toolResult()
+ * wraps it — i.e., the raw result the model will ultimately see as serialized text.
+ * This function is pure and does NOT mutate the result.
+ */
+export function buildToolTokenAccounting(
+  tool: string,
+  beadId: string | undefined,
+  stateId: string | undefined,
+  actionId: string | undefined,
+  modelFacingResult: unknown,
+  cached: boolean = false
+): ToolTokenAccounting {
+  const modelFacingBytes = estimateResultBytes(modelFacingResult);
+  const estimatedTokens = Math.ceil(modelFacingBytes / TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN);
+  return { tool, beadId, stateId, actionId, modelFacingBytes, estimatedTokens, cached };
+}
+
 /** Token/cost usage as reported on a Pi assistant message (`message.usage`). */
 export interface RawUsage {
   input?: number;

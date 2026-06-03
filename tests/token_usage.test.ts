@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildTurnUsageRecord } from '../src/core/TokenUsage.js';
+import { buildTurnUsageRecord, buildToolTokenAccounting, estimateResultBytes, estimateResultTokens } from '../src/core/TokenUsage.js';
 
 const ctx = {
   beadId: 'cerdiwen-1',
@@ -72,5 +72,100 @@ describe('buildTurnUsageRecord', () => {
   it('clamps negative durations to 0', () => {
     const record = buildTurnUsageRecord({ totalTokens: 100 }, { ...ctx, startTimeMs: 5000, endTimeMs: 1000 });
     expect(record!.event.durationMs).toBe(0);
+  });
+});
+
+// ---- Per-tool token accounting (s3wp.16) ----
+
+describe('estimateResultBytes', () => {
+  it('returns UTF-8 byte length for string values', () => {
+    expect(estimateResultBytes('hello')).toBe(5);
+  });
+
+  it('returns UTF-8 byte length for multi-byte characters', () => {
+    // '€' is 3 bytes in UTF-8
+    expect(estimateResultBytes('€')).toBe(3);
+  });
+
+  it('serializes objects to JSON and returns byte length', () => {
+    const obj = { status: 'ok', count: 42 };
+    const expected = Buffer.byteLength(JSON.stringify(obj), 'utf8');
+    expect(estimateResultBytes(obj)).toBe(expected);
+  });
+
+  it('returns 0 for circular references (unserializable)', () => {
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+    expect(estimateResultBytes(circular)).toBe(0);
+  });
+});
+
+describe('estimateResultTokens', () => {
+  it('returns ceil(bytes / 4) for a plain string', () => {
+    // 'abcd' = 4 bytes => 1 token
+    expect(estimateResultTokens('abcd')).toBe(1);
+    // 'abcde' = 5 bytes => ceil(5/4) = 2 tokens
+    expect(estimateResultTokens('abcde')).toBe(2);
+  });
+
+  it('returns 0 for empty string', () => {
+    expect(estimateResultTokens('')).toBe(0);
+  });
+});
+
+describe('buildToolTokenAccounting', () => {
+  it('produces accounting for a string result without mutating the input', () => {
+    const result = 'tool output text';
+    const resultBefore = result;
+    const accounting = buildToolTokenAccounting(
+      'my_tool', 'bead-1', 'Planning', 'action-1', result
+    );
+    // Result must be byte-identical — no mutation
+    expect(result).toBe(resultBefore);
+    expect(accounting.tool).toBe('my_tool');
+    expect(accounting.beadId).toBe('bead-1');
+    expect(accounting.stateId).toBe('Planning');
+    expect(accounting.actionId).toBe('action-1');
+    expect(accounting.modelFacingBytes).toBe(Buffer.byteLength(result, 'utf8'));
+    expect(accounting.estimatedTokens).toBe(Math.ceil(Buffer.byteLength(result, 'utf8') / 4));
+    expect(accounting.cached).toBe(false);
+  });
+
+  it('produces accounting for an object result without mutating the input', () => {
+    const result = { status: 'ok', files: ['a.ts', 'b.ts'] };
+    const serializedBefore = JSON.stringify(result);
+    const accounting = buildToolTokenAccounting(
+      'obj_tool', undefined, undefined, undefined, result
+    );
+    // Object must be unchanged — deep-equal
+    expect(JSON.stringify(result)).toBe(serializedBefore);
+    const expectedBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+    expect(accounting.modelFacingBytes).toBe(expectedBytes);
+    expect(accounting.estimatedTokens).toBe(Math.ceil(expectedBytes / 4));
+    expect(accounting.cached).toBe(false);
+  });
+
+  it('marks cached results correctly', () => {
+    const accounting = buildToolTokenAccounting(
+      'cached_tool', 'bead-2', 'Coding', 'act-2', 'cached result', true
+    );
+    expect(accounting.cached).toBe(true);
+  });
+
+  it('accounting does not add fields to the model-facing result object', () => {
+    const result = { status: 'ok', value: 42 };
+    const keysBefore = Object.keys(result).sort();
+    buildToolTokenAccounting('tool', 'b', 's', 'a', result);
+    // Public tool schema is unchanged — no new keys on result
+    expect(Object.keys(result).sort()).toEqual(keysBefore);
+  });
+
+  it('computes schema-native compact result accounting correctly', () => {
+    // Simulates a compact tool result with just a preview field
+    const compactResult = { RESULT_PREVIEW: 'short summary', status: 'ok' };
+    const accounting = buildToolTokenAccounting('compact_tool', 'b', 's', 'a', compactResult);
+    expect(accounting.modelFacingBytes).toBeGreaterThan(0);
+    expect(accounting.estimatedTokens).toBeGreaterThan(0);
+    expect(accounting.tool).toBe('compact_tool');
   });
 });

@@ -46,7 +46,7 @@ import {
   isStatusMutatingTeammateEvent
 } from './core/TeammateEvents.js';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from './core/ProviderRequestCap.js';
-import { buildTurnUsageRecord } from './core/TokenUsage.js';
+import { buildTurnUsageRecord, buildToolTokenAccounting } from './core/TokenUsage.js';
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
 import { postHarnessSignal } from './core/HarnessApiClient.js';
 import { Logger } from './core/Logger.js';
@@ -707,6 +707,13 @@ function wrapPluginTool(
             cached: true,
             cacheAgeMs: ageMs
           }).catch(() => {});
+          // s3wp.16: record token accounting for cached result — fire-and-forget, never blocks.
+          void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
+            tool.name, beadId,
+            process.env[EnvVars.STATE_ID] || session.activeRun?.stateId,
+            process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id,
+            hit.result, true
+          )).catch(() => {});
           return toolResult(hit.result);
         }
       } else if (isWorkerMode() && session.toolResultCache.size > 0) {
@@ -816,6 +823,11 @@ function wrapPluginTool(
         // s3wp.26: persist complete raw result to the harness-managed tool-calls dir
         // before the model receives it.  Fire-and-forget — never blocks the result.
         void persistPluginToolRawResult(tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result);
+        // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
+        // Does NOT mutate `result`; accounting is harness-side only.
+        void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
+          tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false
+        )).catch(() => {});
         return toolResult(result);
       } catch (error) {
         if (breakerEnabled) {
