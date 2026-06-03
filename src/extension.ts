@@ -33,7 +33,7 @@ import {
   projectToolFailureLimitSuggestedOutcome,
   registerConfiguredProjectTools
 } from './plugins/projectTools.js';
-import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
+import { PLUGIN_RAW_FILE_NAME, ARTIFACT_VALIDATOR_TOOL_NAME } from './plugins/projectTools/constants.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer } from './core/SignalingServer.js';
@@ -1702,6 +1702,99 @@ interface SignalingHealthSummary {
   healthy: boolean;
 }
 
+/** Structured gate status for a single configured artifact.
+ *
+ * Presence, validator outcome, and checklist completion are SEPARATE dimensions:
+ *  - presence=true means the file exists on disk (bytes/sha256 from get_artifact_paths).
+ *  - validatorStatus is the result of the last artifact_validator call for this artifact:
+ *      'passed'   — tool result indicates success (status=PASSED).
+ *      'rejected' — tool result indicates failure (status=REJECTED or isError).
+ *      'unknown'  — artifact_validator has not been invoked yet this run.
+ *  - checklistComplete reflects whether all mandatory checklist items are satisfied.
+ *
+ * A model must NOT infer "presence=true → gate satisfied". The gate requires
+ * validatorStatus='passed' (when artifact_validator is configured) AND
+ * checklistComplete=true before signal_completion will accept SUCCESS.
+ */
+export interface ArtifactGateItemStatus {
+  artifactId: string;
+  presence: boolean;
+  /** 'passed' | 'rejected' | 'unknown' — result of artifact_validator for this artifact.
+   *  'unknown' means artifact_validator has not been invoked this run. */
+  validatorStatus: 'passed' | 'rejected' | 'unknown';
+  checklistComplete: boolean;
+}
+
+export interface ArtifactGateStatus {
+  artifacts: ArtifactGateItemStatus[];
+  /** When true, all artifacts have presence=true, validatorStatus=passed, checklistComplete=true. */
+  allGatesSatisfied: boolean;
+}
+
+/** Resolve artifact gate status for the active run.
+ *
+ * Reads artifact presence from disk, validator status from the current-run
+ * observability snapshot, and checklist completion from the event-store projection.
+ * All errors are swallowed (best-effort — never blocks the harness action).
+ */
+async function resolveArtifactGateStatus(
+  run: ActiveRun,
+  services: RuntimeServices,
+  obs: Observability
+): Promise<ArtifactGateStatus | undefined> {
+  try {
+    const config = await services.configLoader.load();
+    const templates = config.settings.artifacts?.templates || {};
+    const artifactIds = Object.keys(templates);
+    if (artifactIds.length === 0) return undefined;
+
+    // Resolve artifact paths to get presence info
+    const resolution = await services.artifactPaths.resolve({
+      beadId: run.beadId,
+      stateId: run.stateId,
+      actionId: run.action.id,
+      includeContent: false
+    });
+
+    // Derive validator status from the artifact_validator tool result in observability.
+    // A single artifact_validator call covers all configured artifacts in one invocation.
+    const validatorResult = obs.getToolResult(ARTIFACT_VALIDATOR_TOOL_NAME);
+    let sharedValidatorStatus: 'passed' | 'rejected' | 'unknown';
+    if (validatorResult === undefined) {
+      sharedValidatorStatus = 'unknown';
+    } else if (resultIndicatesSuccess(validatorResult)) {
+      sharedValidatorStatus = 'passed';
+    } else {
+      sharedValidatorStatus = 'rejected';
+    }
+
+    // Checklist completion from event-store projection.
+    let checklistComplete = true;
+    try {
+      const projection = await services.eventStore.projectBead(run.beadId);
+      const missing = missingMandatoryChecklistItems(run.requiredItems, projection.checklists as any);
+      checklistComplete = missing.length === 0;
+    } catch {
+      // best-effort
+    }
+
+    const artifacts: ArtifactGateItemStatus[] = artifactIds.map(artifactId => ({
+      artifactId,
+      presence: resolution.artifactExists[artifactId] === true,
+      validatorStatus: sharedValidatorStatus,
+      checklistComplete
+    }));
+
+    const allGatesSatisfied = artifacts.every(
+      a => a.presence && a.validatorStatus === 'passed' && a.checklistComplete
+    );
+
+    return { artifacts, allGatesSatisfied };
+  } catch {
+    return undefined;
+  }
+}
+
 interface FlowStatusDetails {
   mode: 'teammate' | 'coordinator' | 'inactive';
   beadId?: string;
@@ -1723,6 +1816,11 @@ interface FlowStatusDetails {
     accepted: boolean;
   };
   configuredProjectTools?: ProjectToolStatusSummary;
+  /** Structured per-artifact gate status (teammate mode only).
+   *  Presence, validatorStatus (passed|rejected|unknown), and checklistComplete are SEPARATE
+   *  dimensions — a present artifact is NOT necessarily accepted by the gate.
+   *  Models must NOT infer presence=true → gate satisfied. */
+  artifactGateStatus?: ArtifactGateStatus;
   nextHarnessAction: string;
   /** Per-teammate assignments (coordinator mode only). Sourced from event store — not Beads metadata. */
   teammates?: ActiveAssignmentSummary[];
@@ -1780,6 +1878,8 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
       : typeof mandatoryOutstanding === 'number' && mandatoryOutstanding > 0
         ? `complete ${mandatoryOutstanding} mandatory checklist item(s) with ${BuiltInToolName.TICK_ITEMS}`
         : `continue the phase objective; when evidence is complete, use ${BuiltInToolName.SIGNAL_COMPLETION} with the configured outcome`;
+    const obs = session.piToolObservability || getObservability(services);
+    const artifactGateStatus = await resolveArtifactGateStatus(activeRun, services, obs);
     return {
       mode: 'teammate',
       beadId: activeRun.beadId,
@@ -1798,6 +1898,7 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
         accepted: activeRun.checkpointAccepted
       },
       configuredProjectTools: projectToolStatus,
+      artifactGateStatus,
       nextHarnessAction
     };
   }
@@ -1837,6 +1938,18 @@ function flowStatusText(details: FlowStatusDetails): string {
   const projectToolStatus = projectToolStatusText(details.configuredProjectTools);
 
   if (details.mode === 'teammate') {
+    // Format artifact gate status as compact lines: one per artifact.
+    const artifactGateLines: string[] = [];
+    if (details.artifactGateStatus) {
+      for (const a of details.artifactGateStatus.artifacts) {
+        const presenceText = a.presence ? 'present' : 'absent';
+        const validatorText = a.validatorStatus === 'unknown'
+          ? 'validatorStatus=unknown (artifact_validator not yet run)'
+          : `validatorStatus=${a.validatorStatus}`;
+        const checklistText = a.checklistComplete ? 'checklistComplete=true' : 'checklistComplete=false';
+        artifactGateLines.push(`  ${a.artifactId}: presence=${presenceText}, ${validatorText}, ${checklistText}`);
+      }
+    }
     return [
       'Orr Else teammate active.',
       `Bead: ${details.beadId}`,
@@ -1850,6 +1963,7 @@ function flowStatusText(details: FlowStatusDetails): string {
       `Mandatory checklist outstanding: ${details.checklist?.mandatoryOutstanding ?? 'unknown'}`,
       `Completed actions known: ${details.completedActionsKnown ?? 0}`,
       `Checkpoint accepted: ${details.checkpoint?.accepted ? 'yes' : 'no'}`,
+      artifactGateLines.length > 0 ? `Artifact gate status:\n${artifactGateLines.join('\n')}` : undefined,
       `Next harness action: ${details.nextHarnessAction}`,
       projectToolStatus
     ].filter(Boolean).join('\n');
@@ -2290,8 +2404,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         description:
           'Audit the current gate/checkpoint state BEFORE calling submit_checkpoint or signal_completion. ' +
           'Returns required tools (with pass/fail/never_invoked state), terminal failure-limit state, ' +
-          'required outcome, and exact blocking evidence. Use this to confirm readiness and surface blockers ' +
-          'without waiting for a REJECTED signal. Read-only and best-effort — safe to call at any time. ' +
+          'required outcome, exact blocking evidence, and per-artifact gate status. ' +
+          'artifactGateStatus reports artifact PRESENCE, validatorStatus (passed|rejected|unknown), and ' +
+          'checklistComplete as SEPARATE fields — a present artifact is NOT necessarily gate-accepted. ' +
+          'blockingEvidence names the EXACT missing gate (e.g. "planContract present but validatorStatus=unknown; run artifact_validator"). ' +
+          'Use this to confirm readiness and surface blockers without waiting for a REJECTED signal. ' +
+          'Read-only and best-effort — safe to call at any time. ' +
           'Pass the optional outcome parameter (default: SUCCESS) to evaluate readiness for a specific ' +
           'outcome — non-SUCCESS outcomes skip the SUCCESS-only gates (checklist, required tools, ' +
           'write-set, transactional state) so ready:true accurately reflects what signal_completion ' +
@@ -2317,6 +2435,45 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             // decision, guaranteeing audit.ready == real gate accept condition.
             const gate = await evaluateGateReadiness(activeRun, outcome, services, session, obs, config, isWorkerMode());
 
+            // ── artifact gate status (structured presence vs validation) ──────
+            // Resolved separately so the model sees presence/validatorStatus/
+            // checklistComplete as distinct dimensions, not inferred from presence alone.
+            const artifactGateStatus = await resolveArtifactGateStatus(activeRun, services, obs);
+
+            // ── artifact-specific blocking evidence ───────────────────────────
+            // Add named-gate blocking messages for artifacts that are present but
+            // not yet validated or already rejected. These complement the
+            // requiredTools check (which fires when artifact_validator is in
+            // requiredTools) by surfacing the gap even when artifact_validator is
+            // invoked as a non-required tool or not configured as a requiredTool.
+            const blockingEvidence = [...gate.blockingEvidence];
+            if (artifactGateStatus && isAdvanceOutcome(outcome, config)) {
+              for (const a of artifactGateStatus.artifacts) {
+                if (!a.presence) continue; // absent artifact: covered by plan-write-set gate
+                if (a.validatorStatus === 'unknown') {
+                  // Present but not validated — model must run artifact_validator
+                  const alreadyMentioned = blockingEvidence.some(
+                    e => e.includes(ARTIFACT_VALIDATOR_TOOL_NAME) && e.includes(a.artifactId)
+                  );
+                  if (!alreadyMentioned) {
+                    blockingEvidence.push(
+                      `${a.artifactId} present but validatorStatus=unknown; run ${ARTIFACT_VALIDATOR_TOOL_NAME} to gate this artifact.`
+                    );
+                  }
+                } else if (a.validatorStatus === 'rejected') {
+                  // Present but rejected — model must fix artifact and re-validate
+                  const alreadyMentioned = blockingEvidence.some(
+                    e => e.includes('rejected') && e.includes(a.artifactId)
+                  );
+                  if (!alreadyMentioned) {
+                    blockingEvidence.push(
+                      `${a.artifactId} present but validatorStatus=rejected; revise the artifact and rerun ${ARTIFACT_VALIDATOR_TOOL_NAME}.`
+                    );
+                  }
+                }
+              }
+            }
+
             // ── domain event (best-effort) ────────────────────────────────────
             services.eventStore.record(DomainEventName.PRE_SIGNAL_AUDIT_PERFORMED, {
               beadId: activeRun.beadId,
@@ -2324,7 +2481,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
               actionId: activeRun.action.id,
               outcome,
               ready: gate.ready,
-              blockingCount: gate.blockingEvidence.length
+              blockingCount: blockingEvidence.length
             }).catch(() => {});
 
             return {
@@ -2337,7 +2494,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
               checkpointAccepted: gate.checkpointAccepted,
               writeSetValid: gate.writeSetValid,
               transactionalValid: gate.transactionalValid,
-              blockingEvidence: gate.blockingEvidence
+              blockingEvidence,
+              artifactGateStatus
             };
           } catch (err) {
             // Best-effort: never throw from the audit tool
