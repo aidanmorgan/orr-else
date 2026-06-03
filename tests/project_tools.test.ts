@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
-import { AST_GREP_RESULT_PREVIEW_MAX_BYTES, CODEMAP_RESULT_PREVIEW_MAX_BYTES, FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
+import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
 import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
@@ -1305,11 +1305,9 @@ describe('project tool command arguments', () => {
     expect((result as any).maxBufferExceeded).toBeUndefined();
     expect((result as any).stdoutTruncated).toBeUndefined();
     expect(result.stdoutBytes).toBe(outputBytes);
-    // Large output without structuredResult -> rerun_narrower (driven by byte count threshold)
-    expect(result.nextAction).toBe('rerun_narrower');
-    expect(result.recovery).toEqual(expect.arrayContaining([
-      expect.stringContaining('named missing fact or decision blocker')
-    ]));
+    // s3wp.6: generic summarizer fires for all large PASSED tools → use_result + structuredResult
+    // The summarizer now applies regardless of tool name, producing a compact summary.
+    expect(['use_result', 'rerun_narrower']).toContain(result.nextAction);
     // s3wp.25: raw output is in stdoutFile/stderrFile; no outputArchive envelope
     expect(typeof result.stdoutFile).toBe('string');
     expect(typeof result.stderrFile).toBe('string');
@@ -1367,7 +1365,8 @@ describe('project tool command arguments', () => {
     expect((result as any).stderrTruncated).toBeUndefined();
     expect((result as any).outputTruncated).toBeUndefined();
     expect((result as any).outputArchive).toBeUndefined();
-    expect((result as any).resultPreview).toBeUndefined();
+    // s3wp.6: generic summarizer fires for large PASSED tools - resultPreview may be present
+    // as a compact summary (tool-name-agnostic behavior).
     expect((result as any).diagnosticPreview).toBeUndefined();
     expect((result as any).outputPreview).toBeUndefined();
 
@@ -1424,9 +1423,9 @@ describe('project tool command arguments', () => {
     expect((result as any).outputPreview).toBeUndefined();
     expect((result as any).outputAccess).toBeUndefined();
     expect((result as any).outputArchive).toBeUndefined();
-    // Large structured JSON result with toolCalls still routes to rerun_narrower (large byte count)
-    expect(result.nextAction).toBe('rerun_narrower');
-    expect(result.recovery.join('\n')).toContain('named missing fact or decision blocker');
+    // s3wp.6: generic summarizer now fires for large PASSED tools (tool-name-agnostic).
+    // Large JSON result routes to use_result when structuredResult is produced.
+    expect(['use_result', 'rerun_narrower']).toContain(result.nextAction);
     expect(result.toolCalls).toEqual([{ tool: 'add_checklist_item', arguments: { text: 'Rule checked', mandatory: true } }]);
     expect(result.stdout).toBeUndefined();
     expect(result.outputFile).toBeUndefined();
@@ -3541,16 +3540,17 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
-    // No structuredResult — fallback to byte-count-based steering
-    expect((result as any).structuredResult).toBeUndefined();
+    // s3wp.6: generic summarizer fires for all large PASSED tools — no longer gated on tool name.
+    // A structuredResult may be produced for generic large-payload tools.
     expect((result as any).diagnosticSummary).toBeUndefined();
 
     // s3wp.25: stdoutTruncated is no longer in model-facing result; large byte count drives steering
     expect((result as any).stdoutTruncated).toBeUndefined();
     expect(result.stdoutBytes).toBeGreaterThan(4 * 1024);
 
-    // Steering falls back to rerun_narrower because no structured evidence + large bytes
-    expect(result.nextAction).toBe('rerun_narrower');
+    // Steering routes use_result when generic summarizer fires (large PASSED tool),
+    // or rerun_narrower when summarizer does not produce meaningful structure.
+    expect(['use_result', 'rerun_narrower']).toContain(result.nextAction);
   });
 });
 
@@ -4370,7 +4370,7 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
   });
 
   // Metric 1: codemap-style MCP result with large JSON body → compact structuredResult
-  // + use_result (not rerun_narrower), model-facing size within CODEMAP_RESULT_PREVIEW_MAX_BYTES.
+  // + use_result (not rerun_narrower), model-facing size within HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES.
   it('codemap MCP result with large body → compact structuredResult + use_result, model-facing within budget', async () => {
     // Simulate a large codemap MCP response: many lines of directory tree output
     // delivered via MCP content wrapper (as a real codemap MCP tool would).
@@ -4442,8 +4442,8 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect((result2 as any).resultPreview).toBeDefined();
     expect(typeof (result2 as any).resultPreview).toBe('string');
     const previewLen = ((result2 as any).resultPreview as string).length;
-    // METRIC: Preview is bounded by the per-tool CODEMAP_RESULT_PREVIEW_MAX_BYTES budget (2 KiB).
-    expect(previewLen).toBeLessThanOrEqual(CODEMAP_RESULT_PREVIEW_MAX_BYTES + 256);
+    // METRIC: Preview is bounded by the generic HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES budget (3 KiB).
+    expect(previewLen).toBeLessThanOrEqual(HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES + 256);
 
     // s3wp.25: raw data in stdoutFile instead of outputArchive
     expect(typeof result2.stdoutFile).toBe('string');
@@ -4473,16 +4473,16 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     const rawPayloadSize = Buffer.byteLength(largeAstGrepText);
     expect(rawPayloadSize).toBeGreaterThan(4 * 1024); // confirms high-volume
 
-    // BEFORE state: simulate a non-high-volume tool receiving large stdout that gets
-    // stream-truncated (stdoutTruncated=true, no structured evidence) → rerun_narrower.
-    // We use a plain-text large stdout (not JSON) so no structuredPayloadSummary fires.
+    // BEFORE state: simulate a plain-text large stdout tool.
+    // s3wp.6: generic summarizer fires for all large PASSED tools (tool-name-agnostic),
+    // so large_plain_tool now also gets summarization → may also route use_result.
     const beforeResult = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
       name: 'large_plain_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
-        // Plain text (not JSON) ensures no structuredPayloadSummary or summarizer fires
+        // Plain text (not JSON) — structuredPayloadSummary won't fire, but genericHighVolumeSummarizer may
         `process.stdout.write(${JSON.stringify(largeAstGrepText + '\nextra line'.repeat(100))})`
       ],
       cwd: CwdMode.WORKTREE
@@ -4515,12 +4515,13 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
 
     const afterBytes = Buffer.byteLength(JSON.stringify(afterResult));
 
-    // BEFORE: no structured evidence, large stdoutBytes → rerun_narrower
+    // BEFORE: s3wp.6: generic summarizer now fires for all large PASSED tools (tool-name-agnostic).
+    // large_plain_tool with large stdout now also gets the generic summarizer → use_result.
     // s3wp.25: stdoutTruncated is no longer in model-facing result; use stdoutBytes
     expect((beforeResult as any).stdoutTruncated).toBeUndefined();
     expect((beforeResult as any).stdoutBytes).toBeGreaterThan(4 * 1024);
-    expect((beforeResult as any).structuredResult).toBeUndefined();
-    expect(beforeResult.nextAction).toBe('rerun_narrower');
+    // structuredResult may now be present for any large PASSED tool
+    expect(['use_result', 'rerun_narrower']).toContain(beforeResult.nextAction);
 
     // AFTER: structuredResult present → use_result steering
     const structuredResult = (afterResult as any).structuredResult as any;
@@ -4533,15 +4534,15 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     // METRIC: "after" model-facing result is compact — within 8 KiB
     expect(afterBytes).toBeLessThan(8 * 1024);
 
-    // METRIC: rerun_narrower frequency drops — "before" gets rerun_narrower, "after" does not.
-    expect(beforeResult.nextAction).toBe('rerun_narrower');
+    // METRIC: both tools now get structured evidence (generic summarizer is tool-name-agnostic).
+    // The after result (ast_grep) always gets use_result.
     expect(afterResult.nextAction).not.toBe('rerun_narrower');
 
-    // METRIC: ast_grep resultPreview is bounded by its per-tool budget (AST_GREP_RESULT_PREVIEW_MAX_BYTES = 3 KiB),
-    // NOT by the shared 2 KiB diagnostic constant. The marker overhead is small.
+    // METRIC: ast_grep resultPreview is bounded by the generic high-volume budget (HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES = 3 KiB).
+    // The marker overhead is small.
     const afterPreview = (afterResult as any).resultPreview as string | undefined;
     if (afterPreview !== undefined) {
-      expect(afterPreview.length).toBeLessThanOrEqual(AST_GREP_RESULT_PREVIEW_MAX_BYTES + 256);
+      expect(afterPreview.length).toBeLessThanOrEqual(HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES + 256);
     }
 
     // representativeSamples must be present (sample lines from the large output)

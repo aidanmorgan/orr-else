@@ -97,8 +97,8 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     expect(result).not.toBeNull();
     expect(result?.rejection).toBeDefined();
     expect(result?.rejection).toContain('PROTOCOL VIOLATION');
-    // Must name the framework root contract explicitly.
-    expect(result?.rejection).toContain('framework root');
+    // Must name the named-root contract explicitly.
+    expect(result?.rejection).toContain('configured named root');
     expect(result?.rejection).toContain('harness repository');
     // Must NOT be the generic "resolves outside worktree" message.
     expect(result?.rejection).not.toContain('may only mutate files inside this Bead worktree');
@@ -118,7 +118,7 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     );
 
     expect(result).not.toBeNull();
-    expect(result?.rejection).toContain('framework root');
+    expect(result?.rejection).toContain('configured named root');
     expect(result?.rejection).toContain('harness repository');
     expect(result?.rejection).not.toContain('may only mutate files inside this Bead worktree');
   });
@@ -135,12 +135,12 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     );
 
     expect(result).not.toBeNull();
-    expect(result?.rejection).toContain('framework root');
+    expect(result?.rejection).toContain('configured named root');
     expect(result?.rejection).toContain('harness repository');
   });
 
   it('allows a Write to a path inside the worktree even when the framework root is configured', async () => {
-    // Normal Cerdiwen worktree write — must pass through unchanged.
+    // Normal worktree write (worktree is inside the configured framework root) — must pass through unchanged.
     const targetPath = path.join(worktree, 'src', 'implementation.py');
 
     const result = await withWorkerEnv({}, () =>
@@ -171,8 +171,8 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     expect(result?.rejection).toBeDefined();
     // Should be the generic worktree-scope rejection, NOT the framework-root one.
     expect(result?.rejection).toContain('may only mutate files inside this Bead worktree');
-    // Must NOT incorrectly name the framework-root contract.
-    expect(result?.rejection).not.toContain('framework root');
+    // Must NOT incorrectly name the named-root contract.
+    expect(result?.rejection).not.toContain('configured named root');
   });
 
   it('does not invoke framework-root check when FRAMEWORK_ROOT env is not set', async () => {
@@ -191,9 +191,9 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
 
     // With no framework root env, falls through to generic worktree-scope rejection.
     expect(result).not.toBeNull();
-    // Generic rejection message — not the framework-root one.
+    // Generic rejection message — not the named-root one.
     expect(result?.rejection).toContain('may only mutate files inside this Bead worktree');
-    expect(result?.rejection).not.toContain('framework root');
+    expect(result?.rejection).not.toContain('configured named root');
   });
 
   it('hardening: framework-root check does not allow paths that the generic scope check would reject', async () => {

@@ -24,7 +24,7 @@ interface MutationContext {
   projectRoot: string;
   worktreePath: string;
   cwd: string;
-  /** Absolute path to the framework root (ORR_ELSE_FRAMEWORK_ROOT), if configured. */
+  /** Absolute path to a configured named root exposed as the framework root, if set. */
   frameworkRoot?: string;
 }
 
@@ -404,20 +404,19 @@ export class FileAccessPolicy {
 
   // (mis) Framework-root write-set early rejection.
   //
-  // When a Cerdiwen worker targets a path that is inside the framework root
-  // (ORR_ELSE_FRAMEWORK_ROOT) but outside the active worktree, reject EARLY
-  // with a clear framework-root-contract message rather than a confusing
-  // generic "escapes worktree" error.
+  // When a worker targets a path that is inside a configured named framework root
+  // but outside the active worktree, reject EARLY with a clear named-root-contract
+  // message rather than a confusing generic "escapes worktree" error.
   //
   // SECURITY: this is HARDENING only — it does NOT broaden what is allowed.
   // The worktreeScopeRejection that follows still applies to all other paths
   // outside the worktree, so the security surface is strictly unchanged.
   // canonicalPath + isInside are the same safe idiom used throughout this class.
   //
-  // The full "supported route" for framework-root changes (finalize through
-  // the harness repo + Cerdiwen project-tool root-contract agreement) is a
-  // dual-repo fix that requires live cerdiwen context and is explicitly
-  // OUT OF SCOPE for this harness-side bead.
+  // The full "supported route" for named-root changes (finalize through the
+  // harness repository under the appropriate root contract) requires coordination
+  // with the configured project tooling and is explicitly OUT OF SCOPE for
+  // a worker-side bead.
   private frameworkRootWriteSetRejection(
     targetPath: string,
     context: MutationContext,
@@ -433,11 +432,11 @@ export class FileAccessPolicy {
     // Give an explicit early rejection naming the framework-root contract.
     return [
       `PROTOCOL VIOLATION: ${toolLabel} attempted to write to \`${targetPath}\`,`,
-      `which is inside the framework root (\`${context.frameworkRoot}\`)`,
+      `which is inside a configured named root (\`${context.frameworkRoot}\`)`,
       'but outside the active Bead worktree.',
-      'Framework-root paths must be finalized through the harness repository, not through a Cerdiwen worktree.',
-      'The supported route for framework-root changes (harness-repo finalization + Cerdiwen project-tool',
-      'root-contract agreement) is a dual-repo operation — see the framework-root contract documentation.',
+      'Paths inside a configured named root must be finalized through the harness repository, not through a Bead worktree.',
+      'The supported route for named-root changes (harness-repo finalization + project-tool root-contract agreement)',
+      'is a coordinated operation — see the named-root contract documentation.',
       'If you intended to write a worktree file, use a path inside the active Bead worktree instead.'
     ].join(' ');
   }

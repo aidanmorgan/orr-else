@@ -11,8 +11,12 @@ const TemplateToken = {
   PROJECT_ROOT: '{{projectRoot}}',
   WORKTREE_PATH: '{{worktreePath}}',
   FRAMEWORK_ROOT: '{{frameworkRoot}}',
-  /** @deprecated Use settings.roots + {{roots.NAME}} instead.
-   *  Kept for backward compatibility with existing project configs. */
+  /**
+   * @deprecated Use `settings.roots` + `{{roots.NAME}}` instead.
+   * Resolves to the same value as `{{frameworkRoot}}` when a named root is
+   * configured as the framework root.  Kept for back-compat with project
+   * configs that still use this token; new configs should use {{roots.NAME}}.
+   */
   ORR_ELSE_FRAMEWORK_ROOT: '{{orrElseFrameworkRoot}}',
   BEAD_ID: '{{beadId}}',
   STATE_ID: '{{stateId}}',

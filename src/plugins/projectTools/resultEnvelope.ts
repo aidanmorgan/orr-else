@@ -55,14 +55,6 @@ import {
   HIGH_VOLUME_SAMPLE_COUNT,
   HIGH_VOLUME_NARROW_RERUN_RECOVERY,
   HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES,
-  CODEMAP_RESULT_PREVIEW_MAX_BYTES,
-  AST_GREP_RESULT_PREVIEW_MAX_BYTES,
-  REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES,
-  GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES,
-  WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES,
-  GIT_HISTORY_TOOL_NAME,
-  REFERENCE_DOCS_TOOL_NAME,
-  WORKFLOW_PARITY_TOOL_NAME,
   FAILURE_REREAD_ARCHIVE_RECOVERY,
   TOKEN_ESTIMATE_CHARS_PER_TOKEN
 } from './constants.js';
@@ -923,28 +915,7 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
 // Recovery text points agents to narrow-rerun / selector paths rather than
 // whole-archive reads (scope: archive section retrieval by path/range).
 
-const HIGH_VOLUME_TOOL_NAMES = new Set<string>([
-  CODEMAP_TOOL_NAME,
-  AST_GREP_TOOL_NAME,
-  GIT_HISTORY_TOOL_NAME,
-  REFERENCE_DOCS_TOOL_NAME,
-  WORKFLOW_PARITY_TOOL_NAME
-]);
 
-function highVolumePreviewBudget(toolName: string): number {
-  switch (toolName) {
-    case CODEMAP_TOOL_NAME: return CODEMAP_RESULT_PREVIEW_MAX_BYTES;
-    case AST_GREP_TOOL_NAME: return AST_GREP_RESULT_PREVIEW_MAX_BYTES;
-    case REFERENCE_DOCS_TOOL_NAME: return REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES;
-    case GIT_HISTORY_TOOL_NAME: return GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES;
-    case WORKFLOW_PARITY_TOOL_NAME: return WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES;
-    default: return HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
-  }
-}
-
-function isHighVolumeTool(definition: ProjectToolConfig): boolean {
-  return HIGH_VOLUME_TOOL_NAMES.has(definition.name.toLowerCase());
-}
 
 function rawPayloadBytes(record: Record<string, unknown>): number {
   let total = 0;
@@ -1022,21 +993,18 @@ function genericHighVolumePreview(
 
 const genericHighVolumeSummarizer: ProjectToolSummarizer = {
   name: 'generic_high_volume',
-  appliesTo(definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
-    if (!isHighVolumeTool(definition)) return false;
+  appliesTo(_definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
     // Only apply to PASSED results — failures are handled by commandFailureSummarizer
     if (record.status !== 'PASSED') return false;
-    // Do NOT apply when an existing resultPreview already fits within the per-tool
-    // preview budget.  The command executor sets RESULT_PREVIEW from the tool's stdout
-    // (e.g. codemap structure overview, ast_grep match preview).  If that preview is
-    // already compact enough, no summarizer is needed.  But if it exceeds the budget
-    // (e.g. a raw large MCP text set as RESULT_PREVIEW by structuredCommandResultPreview),
-    // we should still apply the generic summarizer to produce a compact structured result.
+    // Do NOT apply when an existing resultPreview already fits within the generic
+    // preview budget.  The command executor sets RESULT_PREVIEW from the tool's stdout.
+    // If that preview is already compact enough, no summarizer is needed.  But if it
+    // exceeds the budget (e.g. a raw large MCP text set as RESULT_PREVIEW), we should
+    // still apply the summarizer to produce a compact structured result.
     const existingPreview = record[ProjectToolResultKey.RESULT_PREVIEW];
     if (typeof existingPreview === 'string' && existingPreview.trim().length > 0) {
-      const budget = highVolumePreviewBudget(definition.name);
-      // If the existing preview already fits within budget, leave it alone
-      if (existingPreview.length <= budget) return false;
+      // If the existing preview already fits within the generic budget, leave it alone
+      if (existingPreview.length <= HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES) return false;
     }
     // Only apply when the raw payload is large enough to warrant summarization
     return rawPayloadBytes(record) >= HIGH_VOLUME_PAYLOAD_MIN_BYTES;
@@ -1048,7 +1016,7 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
   ): StructuredResult | null {
     try {
       const toolName = definition.name;
-      const budget = highVolumePreviewBudget(toolName);
+      const budget = HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
       const text = extractHighVolumeText(record);
       const payloadSize = rawPayloadBytes(record);
 
@@ -1618,7 +1586,7 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
       // is set — the omissions text is already embedded in the recovery so the model
       // can request a specific section via a narrower rerun.
       // Diagnostics and other summarizers that set omissions still get FETCH_NAMED_OMISSION.
-      if (isHighVolumeTool(definition) && isGenericHighVolumeSummarizerResult(record)) {
+      if (isGenericHighVolumeSummarizerResult(record)) {
         const highVolumeRecovery = omissions
           ? [`${HIGH_VOLUME_NARROW_RERUN_RECOVERY} Omitted sections: ${omissions}`]
           : [HIGH_VOLUME_NARROW_RERUN_RECOVERY];
@@ -1892,11 +1860,10 @@ function resultPreviewText(
       ? String(record[ProjectToolResultKey.RESULT_PREVIEW])
       : undefined;
     if (!existingPreview) return undefined;
-    // For high-volume tools summarized by genericHighVolumeSummarizer, apply the
-    // per-tool preview budget (which may exceed the shared 2 KiB diagnostic constant).
-    // Diagnostics are unchanged: they still use DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES.
+    // For results summarized by genericHighVolumeSummarizer, apply the generic
+    // high-volume preview budget.  Diagnostics still use the diagnostic constant.
     const previewBudget = (definition && isGenericHighVolumeSummarizerResult(record))
-      ? highVolumePreviewBudget(definition.name)
+      ? HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES
       : ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES;
     return boundedPreviewText(existingPreview, previewBudget);
   }
@@ -2107,21 +2074,20 @@ function computeResultAccounting(
 
 // ---- applyHighVolumeModelSummary ----
 //
-// Injects a compact RESULT_PREVIEW for high-volume tools summarized by
+// Injects a compact RESULT_PREVIEW for results summarized by
 // genericHighVolumeSummarizer, mirroring the pattern used by
 // applyDiagnosticModelSummary.  Only runs when the structuredResult on the
 // record came from the generic summarizer (identified by presence of
 // counts.payloadBytes without a diagnosticSummary) AND no RESULT_PREVIEW
 // is already set.  This ensures the model-facing resultPreview is within
-// the per-tool budget rather than a raw truncated dump.
+// the generic high-volume budget rather than a raw truncated dump.
 
 function applyHighVolumeModelSummary(
   definition: ProjectToolConfig,
   result: unknown
 ): unknown {
-  if (!isHighVolumeTool(definition)) return result;
   const record = resultRecord(result);
-  const budget = highVolumePreviewBudget(definition.name);
+  const budget = HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
   // Only inject when no compact RESULT_PREVIEW is already present.
   // An existing preview that fits within budget is fine as-is.  One that
   // exceeds the budget (e.g. raw MCP text) should be replaced with the
