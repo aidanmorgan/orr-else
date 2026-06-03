@@ -21,6 +21,14 @@ export interface ActiveRun {
   progressManager?: ProgressManager;
   worklogManager: WorklogManager;
   checkpointAccepted: boolean;
+  /**
+   * The summary provided to submit_checkpoint, set when the checkpoint is
+   * accepted.  Used by the handoverRequired gate in evaluateGateReadiness:
+   * when an action declares handoverRequired=true, this summary must be
+   * substantive (>= HandoverRequiredDefaults.MIN_SUMMARY_CHARS) before the
+   * advance-outcome gate allows completion.
+   */
+  handoverSummary?: string;
   parentSequenceCompleted: boolean;
   completedActionIds: string[];
   terminalFailureLimitScanned?: boolean;

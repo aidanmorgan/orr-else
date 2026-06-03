@@ -2730,6 +2730,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
         await services.eventStore.record(DomainEventName.CHECKPOINT_SUBMITTED, checkpointData);
         activeRun.checkpointAccepted = true;
+        activeRun.handoverSummary = summary;
 
         if (activeRun.progressManager) {
           await activeRun.progressManager.appendLog(`Checkpoint: ${summary.slice(0, WorkerDefaults.CHECKLIST_EVIDENCE_PREVIEW_CHARS)}...`);

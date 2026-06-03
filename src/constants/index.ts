@@ -1150,6 +1150,23 @@ export const MailboxDefaults = {
   EMPTY_MESSAGE: 'No new messages.'
 } as const;
 
+/**
+ * Gate enforcement constants for actions that declare handoverRequired: true.
+ *
+ * When an action (or its parent state) sets handoverRequired=true, the completion
+ * gate requires the checkpoint summary to be substantive — at or above
+ * MIN_SUMMARY_CHARS — so the field drives a real, testable behavioral difference
+ * rather than being a configuration decoration.
+ */
+export const HandoverRequiredDefaults = {
+  /**
+   * Minimum character count for a checkpoint summary to satisfy the
+   * handoverRequired gate. Keeps the bar low enough for normal summaries while
+   * rejecting trivial placeholders ("done", "ok", etc.).
+   */
+  MIN_SUMMARY_CHARS: 20
+} as const;
+
 export const WorkerDefaults = {
   // Safety net only. Telemetry shows this gate has not fired in real runs —
   // LLM-initiated `request_context_restart` is the actual restart driver.

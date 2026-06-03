@@ -22,11 +22,13 @@ import {
   BuiltInToolName,
   Component,
   WorkerDefaults,
+  HandoverRequiredDefaults,
   PromptProvenanceDefaults
 } from '../constants/index.js';
 import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PiIntegration.js';
 import { projectToolFailureLimitSuggestedOutcome } from '../plugins/projectTools.js';
 import { resultIndicatesSuccess, resultIndicatesFailure, isRecord } from './PiEventAdapters.js';
+import { resolveActionHandoverRequired } from './CoordinatorController.js';
 import type { ActiveRun } from './SessionTypes.js';
 
 // ── zero-target scan guard (mis) ─────────────────────────────────────────────
@@ -217,6 +219,15 @@ export interface GateReadiness {
   requiredOutcome: string | null;
   missingChecklistItems: string[];
   checkpointAccepted: boolean;
+  /**
+   * True when the handoverRequired gate is satisfied for this run.
+   *
+   * When the resolved handoverRequired is false (default), this is always true.
+   * When handoverRequired is true, this is true only when a checkpoint has been
+   * submitted with a summary of at least HandoverRequiredDefaults.MIN_SUMMARY_CHARS
+   * characters — ensuring the field drives a real behavioral difference.
+   */
+  handoverSatisfied: boolean;
   writeSetValid: boolean | null;
   writeSetReason?: string;
   transactionalValid: boolean | null;
@@ -400,6 +411,23 @@ export async function evaluateGateReadiness(
     );
   }
 
+  // ── 6a. Handover required ─────────────────────────────────────────────────
+  // When the action (or its parent state) declares handoverRequired=true, the
+  // checkpoint summary must be substantive — at or above MIN_SUMMARY_CHARS —
+  // so that the field drives a real gate rather than being a no-op decoration.
+  // Applies only to advance outcomes (same scope as checklist / required-tools).
+  const handoverRequired = resolveActionHandoverRequired(activeRun.action, activeRun.state);
+  const handoverSummary = activeRun.handoverSummary ?? '';
+  const handoverSatisfied = !handoverRequired ||
+    (checkpointAccepted && handoverSummary.length >= HandoverRequiredDefaults.MIN_SUMMARY_CHARS);
+  if (isAdvanceOutcome(outcome, config) && !handoverSatisfied) {
+    blockingEvidence.push(
+      `Action declares \`handoverRequired: true\` but no substantive checkpoint summary was recorded ` +
+      `(minimum ${HandoverRequiredDefaults.MIN_SUMMARY_CHARS} characters). ` +
+      `Call \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with a detailed summary before signaling completion.`
+    );
+  }
+
   // ── 7. Prompt provenance ──────────────────────────────────────────────────
   // Re-derive this run's prompt/config hashes and compare against the snapshot
   // recorded at STATE_RUN_INITIALIZED to detect drift since run-start.
@@ -490,6 +518,7 @@ export async function evaluateGateReadiness(
     requiredOutcome: terminal?.suggestedOutcome ?? null,
     missingChecklistItems,
     checkpointAccepted,
+    handoverSatisfied,
     writeSetValid,
     writeSetReason,
     transactionalValid,

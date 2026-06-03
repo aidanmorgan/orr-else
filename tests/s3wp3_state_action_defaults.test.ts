@@ -7,17 +7,29 @@
  *
  * Also tests the ConfigLoader YAML-level surface for defaultActionContextMode and
  * handoverRequired fields.
+ *
+ * Includes gate-level tests proving handoverRequired is non-inert:
+ * evaluateGateReadiness blocks SUCCESS when handoverRequired=true and no
+ * substantive checkpoint summary exists, and allows it when the summary is present.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   resolveActionContextMode,
   resolveActionHandoverRequired,
   actionRunContext
 } from '../src/extension/CoordinatorController.js';
-import { ActionContextMode, ActionRunContext, ActionType, EventName } from '../src/constants/index.js';
+import { evaluateGateReadiness } from '../src/extension/WorkerRunController.js';
+import {
+  ActionContextMode,
+  ActionRunContext,
+  ActionType,
+  EventName,
+  HandoverRequiredDefaults
+} from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
+import type { ActiveRun } from '../src/extension/SessionTypes.js';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -243,5 +255,196 @@ describe('selectActiveAction honors state-level defaultActionContextMode (s3wp.3
     expect(selected?.id).toBe('a1');
     // Verify the resolved context is FRESH
     expect(actionRunContext(selected!, state, config)).toBe(ActionRunContext.FRESH);
+  });
+});
+
+// ── handoverRequired gate: evaluateGateReadiness integration ──────────────────
+//
+// Proves handoverRequired is non-inert (s3wp.3 REOPEN fix):
+//   - When handoverRequired=true and no substantive checkpoint summary exists,
+//     evaluateGateReadiness blocks SUCCESS (handoverSatisfied=false in blockingEvidence).
+//   - When handoverRequired=true and a substantive summary was submitted,
+//     the gate allows SUCCESS (handoverSatisfied=true, no handover blocking).
+//   - When handoverRequired=false (default), the gate never blocks regardless.
+
+/**
+ * Build a minimal set of mocked services sufficient for evaluateGateReadiness
+ * to exercise the handoverRequired gate.
+ *
+ * All advance-outcome sub-gates (checklist, required tools, write-set,
+ * transactional, provenance) are mocked to PASS so that the only variable
+ * is the handoverRequired dimension being tested.
+ */
+function makeMinimalServicesAndConfig(state: SDLCState) {
+  const config = makeConfig();
+  // Add the state to config so flowManager.nextState succeeds for SUCCESS
+  (config.states as Record<string, SDLCState>)['TestState'] = {
+    ...state,
+    transitions: { SUCCESS: 'completed', FAILURE: 'TestState' }
+  };
+
+  const services = {
+    flowManager: {
+      nextState: vi.fn().mockReturnValue('completed')
+    },
+    eventStore: {
+      latestProjectToolFailureLimitEvent: vi.fn().mockResolvedValue(undefined),
+      projectBead: vi.fn().mockResolvedValue({ checklists: {} }),
+      eventsForBead: vi.fn().mockResolvedValue([
+        // A STATE_RUN_INITIALIZED with promptProvenanceResolutionFailed=true:
+        // the provenance gate treats this as a warn-only path (allows completion).
+        {
+          type: 'STATE_RUN_INITIALIZED',
+          data: {
+            beadId: 'bd-test',
+            stateId: 'TestState',
+            actionId: 'a1',
+            promptProvenanceResolutionFailed: true
+          }
+        }
+      ])
+    },
+    requiredToolResolver: {
+      resolve: vi.fn().mockResolvedValue({ toolNames: [] })
+    },
+    planWriteSet: {
+      validatePlanContract: vi.fn().mockResolvedValue({ passed: true })
+    },
+    transactionalStateGuard: {
+      validateSuccessReadOnly: vi.fn().mockResolvedValue({ passed: true })
+    },
+    configLoader: {
+      load: vi.fn().mockResolvedValue(config),
+      getConfigPath: vi.fn().mockReturnValue('/fake/harness.yaml')
+    },
+    projectRoot: '/fake/root'
+  } as any;
+
+  const obs = {
+    getToolResult: vi.fn().mockReturnValue(undefined)
+  } as any;
+
+  return { services, obs, config };
+}
+
+function makeActiveRun(overrides: Partial<ActiveRun>): ActiveRun {
+  const action = makeAction(overrides.action as Partial<TeammateAction> ?? {});
+  const state: SDLCState = {
+    ...(overrides.state ?? makeState()),
+    actions: [action],
+    transitions: { SUCCESS: 'completed', FAILURE: 'TestState' }
+  };
+  return {
+    beadId: 'bd-test',
+    stateId: 'TestState',
+    state,
+    action,
+    requiredItems: [],
+    startedAt: Date.now(),
+    worklogManager: { appendEntry: vi.fn() } as any,
+    checkpointAccepted: false,
+    parentSequenceCompleted: false,
+    completedActionIds: [],
+    ...overrides
+  };
+}
+
+describe('handoverRequired gate — evaluateGateReadiness (s3wp.3 non-inert fix)', () => {
+  it('blocks SUCCESS when handoverRequired=true and no checkpoint was submitted', async () => {
+    const action = makeAction({ handoverRequired: true });
+    const state = makeState({ handoverRequired: true, actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: false,
+      handoverSummary: undefined
+    });
+
+    const { services, obs, config } = makeMinimalServicesAndConfig(state);
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.handoverSatisfied).toBe(false);
+    // Both checkpoint gate and handover gate fire; at minimum the handover gate message is present
+    expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(true);
+    expect(gate.ready).toBe(false);
+  });
+
+  it('blocks SUCCESS when handoverRequired=true, checkpoint submitted but summary is too short', async () => {
+    const shortSummary = 'done'; // < HandoverRequiredDefaults.MIN_SUMMARY_CHARS
+    expect(shortSummary.length).toBeLessThan(HandoverRequiredDefaults.MIN_SUMMARY_CHARS);
+
+    const action = makeAction({ handoverRequired: true });
+    const state = makeState({ handoverRequired: true, actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: true,     // checkpoint submitted (satisfies gate #6)
+      handoverSummary: shortSummary  // but summary too short for handoverRequired gate
+    });
+
+    const { services, obs, config } = makeMinimalServicesAndConfig(state);
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.handoverSatisfied).toBe(false);
+    expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(true);
+    expect(gate.ready).toBe(false);
+  });
+
+  it('allows SUCCESS when handoverRequired=true and checkpoint has substantive summary', async () => {
+    const substantiveSummary = 'This is a detailed summary with enough content to satisfy the gate requirement.';
+    expect(substantiveSummary.length).toBeGreaterThanOrEqual(HandoverRequiredDefaults.MIN_SUMMARY_CHARS);
+
+    const action = makeAction({ handoverRequired: true });
+    const state = makeState({ handoverRequired: true, actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: true,
+      handoverSummary: substantiveSummary
+    });
+
+    const { services, obs, config } = makeMinimalServicesAndConfig(state);
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.handoverSatisfied).toBe(true);
+    expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(false);
+    // All other gates are mocked to pass, so gate should be ready
+    expect(gate.ready).toBe(true);
+  });
+
+  it('never blocks when handoverRequired=false (default), even with no checkpoint summary', async () => {
+    const action = makeAction(); // no handoverRequired
+    const state = makeState();   // no handoverRequired
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: true,
+      handoverSummary: undefined  // no summary
+    });
+
+    const { services, obs, config } = makeMinimalServicesAndConfig(state);
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.handoverSatisfied).toBe(true);
+    expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(false);
+  });
+
+  it('handoverSatisfied is true for non-advance outcomes regardless of handoverRequired', async () => {
+    // FAILURE outcome is not an advance outcome — handover gate must not fire
+    const action = makeAction({ handoverRequired: true });
+    const state = makeState({ handoverRequired: true, actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: false,   // no checkpoint
+      handoverSummary: undefined
+    });
+
+    const { services, obs, config } = makeMinimalServicesAndConfig(state);
+    const gate = await evaluateGateReadiness(run, 'FAILURE', services, { activeRun: run }, obs, config, true);
+
+    // handoverSatisfied reflects the resolved value (false because handoverRequired=true and no summary)
+    // but the gate must NOT push to blockingEvidence because FAILURE is not an advance outcome
+    expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(false);
   });
 });
