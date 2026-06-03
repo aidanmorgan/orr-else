@@ -145,6 +145,18 @@
           "description": "Named path roots resolved at runtime and injected as {{roots.NAME}} template variables into tool env, prompt variables, and path normalization virtualRoots. Values are absolute paths or paths relative to projectRoot. Keys are generic identifiers — project-specific names stay in project config, not harness defaults.",
           "additionalProperties": { "type": "string" }
         },
+        "worktreePolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Harness-wide worktree allocation policy. Controls which states receive an isolated git worktree before the teammate is spawned. When absent, defaults to { default: 'always' }, preserving pre-existing behavior. Per-state provisionWorktree overrides this policy for individual states.",
+          "properties": {
+            "default": {
+              "type": "string",
+              "enum": ["always", "never"],
+              "description": "Default provisioning mode for all states without an explicit provisionWorktree override. 'always' provisions a worktree for every state (default); 'never' runs all states at the project root unless overridden per-state."
+            }
+          }
+        },
         "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
         "defaultModel": { "type": "string" },
         "defaultProvider": { "type": "string" },
@@ -573,6 +585,10 @@
           "model": { "type": "string" },
           "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] },
           "contextRotThreshold": { "type": "integer", "minimum": 1 },
+          "provisionWorktree": {
+            "type": "boolean",
+            "description": "Whether to provision an isolated git worktree for this state. When true, the Supervisor creates a per-bead worktree before spawning the teammate. When false, the teammate runs at the project root. When absent, falls back to settings.worktreePolicy.default ('always' if not set)."
+          },
           "handoverTemplate": { "type": "string" },
           "qualityCheckCommand": { "type": "string" },
           "checklist": {

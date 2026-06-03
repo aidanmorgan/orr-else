@@ -193,6 +193,34 @@ export interface TeammateAction {
 
 export type ActionDefinition = TeammateAction;
 
+/**
+ * Worktree provisioning mode for harness.settings.worktreePolicy.default.
+ *
+ * 'always'  — every state receives an isolated git worktree (current default).
+ * 'never'   — no state receives an isolated worktree; teammates run at the
+ *             project root unless overridden per-state.
+ *
+ * Per-state `provisionWorktree` overrides this default for individual states.
+ */
+export type WorktreeProvisioningMode = 'always' | 'never';
+
+/**
+ * Top-level worktree allocation policy.
+ * Lives under settings.worktreePolicy in harness.yaml.
+ *
+ * When absent, defaults to { default: 'always' }, which preserves the
+ * behavior that existed before this field was introduced: every state
+ * receives an isolated git worktree regardless of its type.
+ */
+export interface WorktreePolicyConfig {
+  /**
+   * Default provisioning mode applied to all states that do not declare
+   * an explicit `provisionWorktree` field.
+   * Defaults to 'always'.
+   */
+  default?: WorktreeProvisioningMode;
+}
+
 export interface SDLCState {
   id: string;
   identity: AgentIdentity;
@@ -214,6 +242,20 @@ export interface SDLCState {
   transitions: Record<string, string>;
   requiredTools?: RequiredTool[];
   requiredSkills?: string[];
+  /**
+   * Whether to provision an isolated git worktree for this state.
+   *
+   * When true, the Supervisor provisions a per-bead worktree before spawning
+   * the teammate; the teammate runs isolated from the project root.
+   * When false, the teammate runs at the project root (no worktree created).
+   *
+   * When absent, the harness falls back to settings.worktreePolicy.default
+   * ('always' if the policy is also absent), preserving backward compatibility.
+   *
+   * Example: set to false for Planning/Review states that must not modify
+   * code; set to true (or omit) for Implementation states.
+   */
+  provisionWorktree?: boolean;
 }
 
 export interface HarnessConfig {
@@ -260,6 +302,18 @@ export interface HarnessConfig {
      * harness core remains generic — no hard-coded project paths in defaults.
      */
     roots?: Record<string, string>;
+    /**
+     * Harness-wide worktree allocation policy.
+     *
+     * Controls which states receive an isolated git worktree before the
+     * teammate is spawned.  When absent, the harness behaves as if
+     * `{ default: 'always' }` were specified — every state receives a
+     * worktree — preserving pre-existing behavior exactly.
+     *
+     * Per-state `provisionWorktree` overrides this policy for individual
+     * states regardless of the policy default.
+     */
+    worktreePolicy?: WorktreePolicyConfig;
     defaultActionContextMode?: ConfiguredActionContextMode;
     defaultModel: string;
     defaultProvider: string;

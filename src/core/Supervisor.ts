@@ -13,6 +13,7 @@ import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPo
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
+import type { WorktreeProvisioningMode } from './domain/StateModels.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
 
 export interface SupervisorOptions {
@@ -464,6 +465,34 @@ export class Supervisor {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Worktree allocation policy
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve whether a worktree should be provisioned for a given stateId,
+   * according to the configured `settings.worktreePolicy` and per-state
+   * `provisionWorktree` override.
+   *
+   * Resolution order (highest to lowest precedence):
+   *   1. Per-state `provisionWorktree` (explicit boolean on the SDLCState)
+   *   2. `settings.worktreePolicy.default` ('always' | 'never')
+   *   3. Hard default: 'always' — every state gets a worktree (backward compat)
+   *
+   * This encodes the invariant described in AGENTS.md and the bead acceptance
+   * criteria without altering existing behavior for configs that omit the field.
+   */
+  private resolveWorktreeProvisioning(stateId: string, config: HarnessConfig): boolean {
+    const stateConfig = config.states?.[stateId];
+    // 1. Per-state explicit override wins over everything.
+    if (stateConfig?.provisionWorktree !== undefined) {
+      return stateConfig.provisionWorktree;
+    }
+    // 2. Policy-level default.
+    const policyDefault: WorktreeProvisioningMode = config.settings?.worktreePolicy?.default ?? 'always';
+    return policyDefault !== 'never';
+  }
+
   private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
     await this.beadsPort().release(claimed.id).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
@@ -479,9 +508,15 @@ export class Supervisor {
     });
   }
 
-  /** Claim one bead, provision its worktree, record the event, and spawn a teammate.
-   * Owns the full claim → worktree → record → spawn sequence for a single bead,
-   * including releasing the lease on every failure path.
+  /** Claim one bead, conditionally provision its worktree, record the event,
+   * and spawn a teammate.  Owns the full claim → [worktree] → record → spawn
+   * sequence for a single bead, including releasing the lease on every failure
+   * path.
+   *
+   * Whether a worktree is provisioned is determined by `resolveWorktreeProvisioning`:
+   *   1. Per-state `provisionWorktree` (explicit boolean override on the SDLCState)
+   *   2. `settings.worktreePolicy.default` ('always' | 'never')
+   *   3. Hard default: 'always' (preserves behavior for configs without the field)
    *
    * Returns:
    *   'spawned'     — success; continue to the next bead.
@@ -519,24 +554,39 @@ export class Supervisor {
       return 'paused';
     }
 
-    // Mandatory Worktree Isolation
-    const result = await worktreePort.createWorktree(claimed.id, this.ctx);
-    const worktreePath = result.path;
-    if (result.success !== true || !worktreePath) {
-      // Release the lease before quarantining — preserves WI-11 lease integrity.
-      await beadsPort.release(claimed.id).catch(() => {});
-      this.startedBeads.delete(claimed.id);
-      this.startedBeadAtMs.delete(claimed.id);
-      // Classify and quarantine — emit once-per-quarantine structured event.
-      const errorText = result.error || `Failed to provision mandatory worktree for ${claimed.id}`;
-      const quarantineReason = this.classifyWorktreeError(errorText);
-      await this.quarantineBead(bead, quarantineReason);
-      return 'quarantined';
-    }
-    await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
+    // Worktree Allocation Policy
+    // resolveWorktreeProvisioning checks per-state override then policy default.
+    // Default is 'always' for backward compatibility.
+    const needsWorktree = this.resolveWorktreeProvisioning(bead.stateId, config);
+    let worktreePath: string;
 
-    // Post-worktree pause check: pause was detected after worktree provisioning.
-    // Release the lease (worktree already provisioned) and signal the caller to break.
+    if (needsWorktree) {
+      const result = await worktreePort.createWorktree(claimed.id, this.ctx);
+      worktreePath = result.path ?? '';
+      if (result.success !== true || !worktreePath) {
+        // Release the lease before quarantining — preserves WI-11 lease integrity.
+        await beadsPort.release(claimed.id).catch(() => {});
+        this.startedBeads.delete(claimed.id);
+        this.startedBeadAtMs.delete(claimed.id);
+        // Classify and quarantine — emit once-per-quarantine structured event.
+        const errorText = result.error || `Failed to provision worktree for ${claimed.id}`;
+        const quarantineReason = this.classifyWorktreeError(errorText);
+        await this.quarantineBead(bead, quarantineReason);
+        return 'quarantined';
+      }
+      await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
+    } else {
+      // No worktree for this state: use the project root so the teammate runs
+      // in the shared checked-out tree (read-only states such as Planning/Review).
+      worktreePath = this.services.projectRoot;
+      Logger.info(Component.SUPERVISOR, `Worktree provisioning skipped for state ${bead.stateId}; teammate will run at project root`, {
+        beadId: claimed.id,
+        stateId: bead.stateId
+      });
+    }
+
+    // Post-worktree pause check: pause was detected after worktree decision.
+    // Release the lease and signal the caller to break.
     if (this.isSchedulingPaused()) {
       await this.releaseClaimedAfterPause(claimed);
       return 'paused';
