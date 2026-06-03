@@ -211,6 +211,22 @@
           "description": "Named reusable partial command-tool configuration blocks. A command tool may reference one profile by name via its 'profile' field; the profile's fields are applied after toolDefaults and before per-tool fields.",
           "additionalProperties": { "$ref": "#/definitions/toolProfileShape" }
         },
+        "tsProjectToolDefaults": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Harness-wide defaults for tsProjectTool shorthand tools. scriptDir is the base directory (relative to projectRoot) used to resolve the default script path: <scriptDir>/<toolName>.ts. Defaults to .pi/project-tools.",
+          "properties": {
+            "scriptDir": {
+              "type": "string",
+              "description": "Base directory for default TS project-tool scripts. Relative to projectRoot. Defaults to .pi/project-tools."
+            },
+            "argsMode": { "type": "string", "enum": ["replace", "append"], "description": "Default argsMode for tsProjectTool tools. Defaults to append." },
+            "allowArgs": { "type": "boolean", "description": "Default allowArgs for tsProjectTool tools. Defaults to true." },
+            "cwd": { "type": "string" },
+            "timeoutMs": { "type": "integer", "minimum": 1 },
+            "wrapperTimeoutMs": { "type": "integer", "minimum": 1 }
+          }
+        },
         "worktreePolicy": {
           "type": "object",
           "additionalProperties": false,
@@ -516,6 +532,86 @@
                     "message": { "type": "string" }
                   }
                 }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["name", "type"],
+            "additionalProperties": false,
+            "description": "TypeScript project-tool shorthand. Expands to type: command with command: node, --experimental-strip-types, and the resolved script path before schema validation. argsMode defaults to append and allowArgs defaults to true unless explicitly overridden.",
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
+              "description": { "type": "string" },
+              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "type": { "const": "tsProjectTool" },
+              "scriptPath": {
+                "type": "string",
+                "description": "Path to the TypeScript script. Absolute or relative to projectRoot. Defaults to <settings.tsProjectToolDefaults.scriptDir>/<toolName>.ts (or .pi/project-tools/<toolName>.ts if not configured). Supports {{projectRoot}} template variable."
+              },
+              "profile": { "type": "string", "description": "Name of a settings.toolProfiles entry applied after tsProjectTool defaults and before per-tool fields." },
+              "defaultArgs": { "type": "array", "items": { "type": "string" }, "description": "Additional args appended after the script path. The node + --experimental-strip-types + scriptPath prefix is always prepended." },
+              "argsMode": { "type": "string", "enum": ["replace", "append"] },
+              "allowArgs": { "type": "boolean" },
+              "argumentPathScope": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "root": { "type": "string" },
+                  "rootKind": { "type": "string" },
+                  "workspaceRoot": { "type": "string" },
+                  "virtualRoots": { "type": "array", "items": { "type": "string" } },
+                  "mustStayInsideRoot": { "type": "boolean" },
+                  "positionals": { "type": "boolean" },
+                  "flags": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "cwd": { "type": "string" },
+              "allowCwdOverride": { "type": "boolean" },
+              "timeoutMs": { "type": "integer", "minimum": 1 },
+              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
+              "acceptMaxBuffer": { "type": "boolean" },
+              "successExitCodes": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 },
+                "minItems": 1,
+                "uniqueItems": true
+              },
+              "optional": { "type": "boolean" },
+              "failureLimit": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
+                  "suggestedOutcome": { "type": "string" },
+                  "suggestedOutcomeByState": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "suggestedOutcomeByAction": {
+                    "type": "object",
+                    "additionalProperties": { "type": "string" }
+                  },
+                  "message": { "type": "string" },
+                  "terminal": { "type": "boolean" }
+                }
+              },
+              "validationRules": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["tool", "condition"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "tool": { "type": "string" },
+                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
+                    "message": { "type": "string" }
+                  }
+                }
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
               }
             }
           }

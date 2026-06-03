@@ -85,6 +85,29 @@ export interface ToolProfileConfig {
   failureLimit?: BaseProjectToolConfig['failureLimit'];
 }
 
+/**
+ * Harness-wide defaults for tsProjectTool shorthand tools (s3wp.10).
+ * All fields are optional — absent fields use built-in defaults.
+ */
+export interface TsProjectToolDefaults {
+  /**
+   * Base directory for default TS project-tool scripts, relative to projectRoot.
+   * Default: .pi/project-tools
+   * The default script path for a tool named "foo" becomes <scriptDir>/foo.ts.
+   */
+  scriptDir?: string;
+  /** Default argsMode. Defaults to 'append'. */
+  argsMode?: 'replace' | 'append';
+  /** Default allowArgs. Defaults to true. */
+  allowArgs?: boolean;
+  /** Default cwd for tsProjectTool tools. */
+  cwd?: string;
+  /** Default timeoutMs for tsProjectTool tools. */
+  timeoutMs?: number;
+  /** Default wrapperTimeoutMs for tsProjectTool tools. */
+  wrapperTimeoutMs?: number;
+}
+
 export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   type: ProjectToolType.COMMAND;
   /**
@@ -342,6 +365,12 @@ export interface HarnessConfig {
      * Keys are arbitrary project-defined profile names.
      */
     toolProfiles?: Record<string, ToolProfileConfig>;
+    /**
+     * Harness-wide defaults for tsProjectTool shorthand tools (s3wp.10).
+     * scriptDir sets the base directory for default script paths.
+     * Other fields set defaults applied to all tsProjectTool tools.
+     */
+    tsProjectToolDefaults?: TsProjectToolDefaults;
     /**
      * Harness-wide worktree allocation policy.
      *

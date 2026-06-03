@@ -793,3 +793,208 @@ tools:
     expect(tool.timeoutMs).toBe(5000);
   });
 });
+
+// ---------------------------------------------------------------------------
+// s3wp.10: generic TypeScript project-tool defaults
+// ---------------------------------------------------------------------------
+describe('s3wp.10 tsProjectTool shorthand expansion', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-s3wp10-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  it('tsProjectTool expands to type: command with node, --experimental-strip-types, and default script path', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: run_checks
+    type: tsProjectTool
+    description: Run project checks
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'run_checks') as any;
+
+    expect(tool.type).toBe('command');
+    expect(tool.command).toBe('node');
+    expect(tool.defaultArgs[0]).toBe('--experimental-strip-types');
+    // Default script path: <projectRoot>/.pi/project-tools/run_checks.ts
+    expect(tool.defaultArgs[1]).toContain('run_checks.ts');
+    expect(tool.defaultArgs[1]).toContain('.pi/project-tools');
+    expect(tool.argsMode).toBe('append');
+    expect(tool.allowArgs).toBe(true);
+    expect(tool.description).toBe('Run project checks');
+  });
+
+  it('tsProjectTool uses explicit scriptPath when provided', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: custom_tool
+    type: tsProjectTool
+    scriptPath: scripts/my-tool.ts
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'custom_tool') as any;
+
+    expect(tool.type).toBe('command');
+    expect(tool.defaultArgs[1]).toContain('my-tool.ts');
+  });
+
+  it('tsProjectTool uses settings.tsProjectToolDefaults.scriptDir for default path', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  tsProjectToolDefaults:
+    scriptDir: src/scripts
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: my_tool
+    type: tsProjectTool
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'my_tool') as any;
+
+    expect(tool.defaultArgs[1]).toContain('src/scripts');
+    expect(tool.defaultArgs[1]).toContain('my_tool.ts');
+  });
+
+  it('per-tool argsMode overrides tsProjectTool default of append', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: tool_replace
+    type: tsProjectTool
+    argsMode: replace
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'tool_replace') as any;
+    expect(tool.argsMode).toBe('replace');
+  });
+
+  it('tsProjectToolDefaults argsMode overrides built-in append default', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  tsProjectToolDefaults:
+    argsMode: replace
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: tool_a
+    type: tsProjectTool
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'tool_a') as any;
+    expect(tool.argsMode).toBe('replace');
+  });
+
+  it('tsProjectTool with timeoutMs and cwd is preserved after expansion', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: timed_tool
+    type: tsProjectTool
+    timeoutMs: 120000
+    cwd: /tmp/working
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'timed_tool') as any;
+    expect(tool.timeoutMs).toBe(120000);
+    expect(tool.cwd).toBe('/tmp/working');
+  });
+
+  it('tsProjectTool with profile can be further resolved by s3wp.2 profile expansion', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolProfiles:
+    nodeEnv:
+      env:
+        NODE_ENV: "test"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: env_tool
+    type: tsProjectTool
+    profile: nodeEnv
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'env_tool') as any;
+    // Should be expanded to command with profile applied
+    expect(tool.type).toBe('command');
+    expect(tool.env?.NODE_ENV).toBe('test');
+  });
+
+  it('existing type: command tools are unaffected by tsProjectTool expansion', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: plain_cmd
+    type: command
+    command: python
+    defaultArgs: ["test.py"]
+    argsMode: replace
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'plain_cmd') as any;
+    expect(tool.type).toBe('command');
+    expect(tool.command).toBe('python');
+    expect(tool.defaultArgs).toEqual(['test.py']);
+    expect(tool.argsMode).toBe('replace');
+  });
+
+  it('tsProjectTool additional defaultArgs are appended after the script path', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: tool_with_args
+    type: tsProjectTool
+    defaultArgs: ["--verbose", "--ci"]
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'tool_with_args') as any;
+    expect(tool.defaultArgs[0]).toBe('--experimental-strip-types');
+    // Script path at index 1
+    expect(tool.defaultArgs[2]).toBe('--verbose');
+    expect(tool.defaultArgs[3]).toBe('--ci');
+  });
+});
