@@ -15,6 +15,7 @@ import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import type { WorktreeProvisioningMode } from './domain/StateModels.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
+import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
@@ -148,6 +149,13 @@ export class Supervisor {
    */
   private releasedThisTick: string[] = [];
   private readonly clock: Clock;
+  /**
+   * Cached MCP bridge health result (s3wp.32).
+   * Set on first MCP preflight check; reused on subsequent scan-loop iterations
+   * so the same module-load failure is not rediscovered per worker.
+   * undefined = not yet probed.
+   */
+  private mcpBridgeHealth: McpBridgeHealth | undefined;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -201,6 +209,12 @@ export class Supervisor {
       port: this.server.getListeningPort(),
       healthy: this.server.isListening()
     };
+  }
+
+  /** Returns the last MCP bridge health result (s3wp.32).
+   *  undefined if no MCP tool preflight has been run yet this session. */
+  public getMcpBridgeHealth(): McpBridgeHealth | undefined {
+    return this.mcpBridgeHealth;
   }
 
   /**
@@ -529,6 +543,59 @@ export class Supervisor {
     });
   }
 
+  /**
+   * Return the names of MCP-backed required tools for the given bead/state (s3wp.32).
+   *
+   * Collects required tool names from both the state and all of its actions,
+   * then filters to those backed by MCP-type project tools. The result is used
+   * to gate spawning: if any required MCP tool is unhealthy, the bead is skipped.
+   */
+  private requiredMcpToolNamesForBead(
+    stateId: string,
+    config: HarnessConfig
+  ): string[] {
+    const state = config.states?.[stateId];
+    if (!state) return [];
+
+    // Collect required tool names from state-level and all action-level declarations.
+    const requiredNames = new Set<string>();
+    for (const tool of state.requiredTools || []) {
+      const name = typeof tool === 'string' ? tool : tool.name;
+      if (name) requiredNames.add(name);
+    }
+    for (const action of state.actions || []) {
+      for (const tool of action.requiredTools || []) {
+        const name = typeof tool === 'string' ? tool : tool.name;
+        if (name) requiredNames.add(name);
+      }
+    }
+    if (requiredNames.size === 0) return [];
+
+    return mcpBackedRequiredToolNames([...requiredNames], config.tools || []);
+  }
+
+  /**
+   * Run the MCP bridge preflight for a set of required MCP tool names (s3wp.32).
+   *
+   * Caches the result on this Supervisor instance so the same probe result is
+   * reused across scan-loop iterations (collapsed health, not per-worker spam).
+   * Records a single domain event on the first unique failure.
+   */
+  private async runMcpPreflightForTools(mcpToolNames: string[]): Promise<McpBridgeHealth> {
+    const health = await checkMcpBridgeHealth(
+      mcpToolNames,
+      (data) => this.services.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
+    );
+    // Cache on this Supervisor instance for harness_status reporting.
+    if (!this.mcpBridgeHealth || (!this.mcpBridgeHealth.healthy && health.healthy)) {
+      this.mcpBridgeHealth = health;
+    }
+    if (!health.healthy && this.mcpBridgeHealth?.healthy !== false) {
+      this.mcpBridgeHealth = health;
+    }
+    return health;
+  }
+
   /** Claim one bead, conditionally provision its worktree, record the event,
    * and spawn a teammate.  Owns the full claim → [worktree] → record → spawn
    * sequence for a single bead, including releasing the lease on every failure
@@ -841,6 +908,24 @@ export class Supervisor {
           reason: this.quarantine.get(bead.id)?.reason
         });
         continue;
+      }
+
+      // PREFLIGHT: MCP transport health check (s3wp.32).
+      // If the bead's state has required MCP-backed tools and the bridge is
+      // unhealthy, skip this bead without spawning. The failure is logged and
+      // collapsed to a single domain event (not repeated per bead).
+      const requiredMcpTools = this.requiredMcpToolNamesForBead(bead.stateId, config);
+      if (requiredMcpTools.length > 0) {
+        const mcpHealth = await this.runMcpPreflightForTools(requiredMcpTools);
+        if (!mcpHealth.healthy) {
+          Logger.warn(Component.SUPERVISOR, 'Preflight: skipping bead — required MCP tools unavailable', {
+            beadId: bead.id,
+            stateId: bead.stateId,
+            unavailableTools: mcpHealth.affectedToolNames,
+            errorMessage: mcpHealth.message
+          });
+          continue;
+        }
       }
 
       this.startedBeads.add(bead.id);

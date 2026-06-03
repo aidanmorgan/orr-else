@@ -249,7 +249,14 @@ export enum DomainEventName {
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
   PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED',
   PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED',
-  SIGNAL_INTENT_RECONCILED = 'SIGNAL_INTENT_RECONCILED'
+  SIGNAL_INTENT_RECONCILED = 'SIGNAL_INTENT_RECONCILED',
+  /**
+   * Recorded ONCE when the MCP bridge module (or a specific server transport)
+   * fails its coordinator-side preflight probe. Subsequent spawn-loop iterations
+   * that hit the same failure do NOT record a new event — they reuse the cached
+   * health status so failures are collapsed rather than per-worker-rediscovered.
+   */
+  MCP_TRANSPORT_PREFLIGHT_FAILED = 'MCP_TRANSPORT_PREFLIGHT_FAILED'
 }
 
 export enum BeadsCliCommand {

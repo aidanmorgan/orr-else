@@ -1828,6 +1828,17 @@ interface FlowStatusDetails {
   latestEvent?: { type: string; timestamp: string };
   /** Signaling server health (coordinator mode only). */
   signaling?: SignalingHealthSummary;
+  /** MCP bridge health (coordinator mode only — s3wp.32).
+   *  Present when at least one MCP-backed tool preflight has been run.
+   *  healthy=false means the @modelcontextprotocol/sdk bridge failed to load;
+   *  affectedToolNames lists the project tools that could not be verified;
+   *  message + remediation describe the failure once (not per-worker). */
+  mcpBridgeHealth?: {
+    healthy: boolean;
+    affectedToolNames: string[];
+    message?: string;
+    remediation?: string;
+  };
 }
 
 async function configuredProjectToolStatus(services: RuntimeServices): Promise<ProjectToolStatusSummary | undefined> {
@@ -1924,7 +1935,8 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
       nextHarnessAction: 'monitor active teammate slots and process teammate signals',
       teammates,
       latestEvent,
-      signaling
+      signaling,
+      mcpBridgeHealth: supervisor.getMcpBridgeHealth()
     };
   }
 
@@ -1980,6 +1992,19 @@ function flowStatusText(details: FlowStatusDetails): string {
       ? `Latest event: ${details.latestEvent.type} at ${details.latestEvent.timestamp}`
       : undefined;
     const tmuxLine = 'Attach with: tmux attach -t orr-else';
+    let mcpBridgeLine: string | undefined;
+    if (details.mcpBridgeHealth) {
+      if (details.mcpBridgeHealth.healthy) {
+        mcpBridgeLine = 'MCP bridge: healthy';
+      } else {
+        const affectedList = details.mcpBridgeHealth.affectedToolNames.join(', ') || 'none';
+        mcpBridgeLine = [
+          `MCP bridge: UNAVAILABLE (affected tools: ${affectedList})`,
+          details.mcpBridgeHealth.message ? `  Error: ${details.mcpBridgeHealth.message}` : undefined,
+          details.mcpBridgeHealth.remediation ? `  Remediation: ${details.mcpBridgeHealth.remediation}` : undefined
+        ].filter(Boolean).join('\n');
+      }
+    }
     return [
       'Orr Else coordinator active.',
       `Requested bead: ${details.requestedBead}`,
@@ -1990,6 +2015,7 @@ function flowStatusText(details: FlowStatusDetails): string {
       ...teammateLines,
       signalingLine,
       latestEventLine,
+      mcpBridgeLine,
       `Next harness action: ${details.nextHarnessAction}`,
       projectToolStatus,
       tmuxLine
