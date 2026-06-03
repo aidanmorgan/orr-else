@@ -500,6 +500,17 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     mutating: false
   },
 
+  {
+    toolName: PluginToolName.FETCH_MAILBOX_MESSAGE,
+    toolClass: 'plugin',
+    owningFile: 'src/plugins/mailbox.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
+    mutating: false
+  },
+
   // -- Quality plugin — src/plugins/quality.ts --
 
   {

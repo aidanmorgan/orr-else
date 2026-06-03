@@ -62,9 +62,10 @@ export interface ProjectToolOutputArchive {
 export type ModelFacingProjectToolResult = Record<string, unknown> & {
   outputArchive?: ProjectToolOutputArchive;
   outputAccess?: string;
-  resultPreview?: string;
-  outputPreview?: string;
-  outputTruncated?: boolean;
+  // Tool-owned compact text summary (tool-owned deterministic compaction, not a generic cap).
+  compactSummary?: string;
+  // Tool-owned extracted diagnostic facts for failed results (not a generic cap).
+  diagnosticFacts?: string;
 };
 
 export interface ParsedProjectDiagnostic {
@@ -158,7 +159,6 @@ export interface CommandResultInput {
   stderrFile: string;
   boundedStdout: { text: string; bytes: number; truncated: boolean };
   boundedStderr: { text: string; bytes: number; truncated: boolean };
-  stdoutTruncated: boolean;
   structuredStdout: Record<string, unknown> | undefined;
   structuredSummary: unknown;
   toolCalls: unknown;

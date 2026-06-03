@@ -26,10 +26,10 @@ const EVENT_DETAIL_KEYS = new Set([
   'evidence',
   'handover',
   'output',
-  'outputPreview',
+  'compactSummary',
+  'diagnosticFacts',
   'params',
   'result',
-  'resultPreview',
   'stderr',
   'stdout',
   'text'

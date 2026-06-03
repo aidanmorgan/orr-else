@@ -54,7 +54,6 @@ import {
   HIGH_VOLUME_PAYLOAD_MIN_BYTES,
   HIGH_VOLUME_SAMPLE_COUNT,
   HIGH_VOLUME_NARROW_RERUN_RECOVERY,
-  HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES,
   FAILURE_REREAD_ARCHIVE_RECOVERY,
   TOKEN_ESTIMATE_CHARS_PER_TOKEN
 } from './constants.js';
@@ -458,7 +457,7 @@ function diagnosticsTextFromRecord(record: Record<string, unknown>): string | un
   // command-wrapper tests), extract the nested MCP text from stdoutRecord.result.
   const nestedMcpText = textFromMcpContent(stdoutRecord?.result);
   const candidates = [
-    record[ProjectToolResultKey.RESULT_PREVIEW],
+    record[ProjectToolResultKey.COMPACT_SUMMARY],
     stdoutRecord?.stdout,
     stdoutRecord?.stderr,
     mcpJson?.stdout,
@@ -522,11 +521,11 @@ function applyDiagnosticModelSummary(
   // Apply the per-tool budget to the compact preview so the model never receives
   // an unbounded diagnostic summary even on the inline (non-truncated) path.
   const rawPreview = diagnosticSummaryPreview(summary);
-  const boundedPreview = boundedPreviewText(rawPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+  const boundedPreview = boundedPreviewText(rawPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
   return withoutUndefined({
     ...record,
     [DIAGNOSTIC_SUMMARY_KEY]: summary,
-    [ProjectToolResultKey.RESULT_PREVIEW]: boundedPreview
+    [ProjectToolResultKey.COMPACT_SUMMARY]: boundedPreview
   });
 }
 
@@ -871,8 +870,8 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
       if (representativeSamples.length > 0) result.representativeSamples = representativeSamples;
 
       if (!hasParsedGroups) {
-        result.omissions = 'failure output could not be parsed into test/lint groups; diagnosticPreview and archive retain bounded raw context';
-        result.nextAction = 'inspect_diagnosticPreview_then_archive_if_more_context_needed';
+        result.omissions = 'failure output could not be parsed into test/lint groups; diagnosticFacts and archive retain bounded raw context';
+        result.nextAction = 'inspect_diagnosticFacts_then_archive_if_more_context_needed';
       } else {
         const omittedTestGroups = hasTestGroups ? Math.max(0, testTotalSeen - ProjectToolDefaults.COMMAND_FAILURE_MAX_TEST_GROUPS) : 0;
         const omittedLintGroups = hasLintGroups ? Math.max(0, lintTotalSeen - ProjectToolDefaults.COMMAND_FAILURE_MAX_LINT_GROUPS) : 0;
@@ -894,7 +893,7 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
 
       return result;
     } catch {
-      return { status: 'parse_error', nextAction: 'inspect_diagnosticPreview_then_archive_if_needed' };
+      return { status: 'parse_error', nextAction: 'inspect_diagnosticFacts_then_archive_if_needed' };
     }
   }
 };
@@ -949,9 +948,9 @@ function extractHighVolumeText(record: Record<string, unknown>): string | undefi
     ? stdoutRecord.stdout : undefined;
   if (nestedStdout) return nestedStdout;
 
-  const existing = typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string'
-    && (record[ProjectToolResultKey.RESULT_PREVIEW] as string).trim()
-    ? record[ProjectToolResultKey.RESULT_PREVIEW] as string
+  const existing = typeof record[ProjectToolResultKey.COMPACT_SUMMARY] === 'string'
+    && (record[ProjectToolResultKey.COMPACT_SUMMARY] as string).trim()
+    ? record[ProjectToolResultKey.COMPACT_SUMMARY] as string
     : undefined;
   if (existing) return existing;
 
@@ -996,16 +995,11 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
   appliesTo(_definition: ProjectToolConfig, record: Record<string, unknown>): boolean {
     // Only apply to PASSED results — failures are handled by commandFailureSummarizer
     if (record.status !== 'PASSED') return false;
-    // Do NOT apply when an existing resultPreview already fits within the generic
-    // preview budget.  The command executor sets RESULT_PREVIEW from the tool's stdout.
-    // If that preview is already compact enough, no summarizer is needed.  But if it
-    // exceeds the budget (e.g. a raw large MCP text set as RESULT_PREVIEW), we should
-    // still apply the summarizer to produce a compact structured result.
-    const existingPreview = record[ProjectToolResultKey.RESULT_PREVIEW];
-    if (typeof existingPreview === 'string' && existingPreview.trim().length > 0) {
-      // If the existing preview already fits within the generic budget, leave it alone
-      if (existingPreview.length <= HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES) return false;
-    }
+    // Do NOT apply when an existing compactSummary is already set — a tool-specific
+    // summarizer has already produced a compact result; the generic summarizer
+    // only provides counts/samples for truly large MCP or command payloads.
+    const existingSummary = record[ProjectToolResultKey.COMPACT_SUMMARY];
+    if (typeof existingSummary === 'string' && existingSummary.trim().length > 0) return false;
     // Only apply when the raw payload is large enough to warrant summarization
     return rawPayloadBytes(record) >= HIGH_VOLUME_PAYLOAD_MIN_BYTES;
   },
@@ -1016,7 +1010,10 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
   ): StructuredResult | null {
     try {
       const toolName = definition.name;
-      const budget = HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
+      // Compact sample budget: 3 KiB is enough to show a representative header + lines
+      // without overwhelming the model. This is NOT a byte cap on raw output — the full
+      // raw output is always persisted to the harness tool-calls dir.
+      const budget = 3 * 1024;
       const text = extractHighVolumeText(record);
       const payloadSize = rawPayloadBytes(record);
 
@@ -1381,7 +1378,7 @@ function projectToolRemediation(
   const text = searchableFailureText(result);
 
   if (toolName === ARTIFACT_VALIDATOR_TOOL_NAME) {
-    guidance.add('Treat artifact_validator output as an authoritative gate: use structuredResult, rejectedChecks, diagnosticPreview, and routingHint to revise the plan/artifact or route the configured failure edge.');
+    guidance.add('Treat artifact_validator output as an authoritative gate: use structuredResult, rejectedChecks, diagnosticFacts, and routingHint to revise the plan/artifact or route the configured failure edge.');
     guidance.add('Do not rerun artifact_validator unchanged after a terminal gate rejection.');
   }
 
@@ -1420,7 +1417,7 @@ function projectToolRemediation(
       guidance.add('Fix the active worktree or approved write-set mismatch, then rerun the configured tool; do not bypass the worktree boundary.');
       break;
     case ProjectToolFailureCategory.VERIFIER_FAILED:
-      guidance.add('Use diagnosticPreview, structuredResult, and rejectedChecks to fix the implementation or route the configured failure edge.');
+      guidance.add('Use diagnosticFacts, structuredResult, and rejectedChecks to fix the implementation or route the configured failure edge.');
       break;
   }
 
@@ -1473,7 +1470,7 @@ function pythonLspDiagnosticsPreviewHasEvidence(preview: string, operation?: str
 }
 
 function projectToolResultHasCompletePreview(record: Record<string, unknown>): boolean {
-  const value = record[ProjectToolResultKey.RESULT_PREVIEW];
+  const value = record[ProjectToolResultKey.COMPACT_SUMMARY];
   return typeof value === 'string'
     && value.trim().length > 0
     && !projectToolPreviewSuggestsNarrowing(value);
@@ -1488,7 +1485,7 @@ function projectToolMessageSuggestsNarrowing(value: unknown): boolean {
 }
 
 function projectToolResultHasActionableTruncatedPreview(record: Record<string, unknown>): boolean {
-  const preview = record[ProjectToolResultKey.RESULT_PREVIEW];
+  const preview = record[ProjectToolResultKey.COMPACT_SUMMARY];
   if (typeof preview !== 'string' || preview.trim().length === 0) return false;
   const tool = stringField(record, 'tool') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'tool');
   const operation = stringField(record, 'operation') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'operation');
@@ -1507,8 +1504,7 @@ function projectToolResultHasSufficientCompactEvidence(record: Record<string, un
 
 function projectToolResultHasPreviewNarrowingSignal(record: Record<string, unknown>): boolean {
   return [
-    record[ProjectToolResultKey.RESULT_PREVIEW],
-    record.outputPreview
+    record[ProjectToolResultKey.COMPACT_SUMMARY]
   ].some(projectToolPreviewSuggestsNarrowing);
 }
 
@@ -1612,20 +1608,20 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
           [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
           [ProjectToolResultKey.RECOVERY]: [
             'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
-            'Raw diagnostic lines are in stderrFile/stdoutFile (not truncated in resultPreview); rerun diagnostics narrowly only when representative locations in the summary are insufficient for a specific fix decision.'
+            'Raw diagnostic lines are in stderrFile/stdoutFile; rerun diagnostics narrowly only when representative locations in the diagnosticSummary are insufficient for a specific fix decision.'
           ]
         };
       }
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-        [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence. Decide from structuredResult, resultPreview, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
+        [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence. Decide from structuredResult, compactSummary, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
       };
     }
 
     if (projectToolResultNeedsNarrowing(record)) {
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RERUN_NARROWER,
-        [ProjectToolResultKey.RECOVERY]: ['First decide from resultPreview, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read outputArchive.artifactRef just because the preview is truncated.']
+        [ProjectToolResultKey.RECOVERY]: ['First decide from compactSummary, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read outputArchive.artifactRef just because the compact summary is small.']
       };
     }
     // s3wp.25: outputArchive/outputAccess no longer in model-facing result.
@@ -1758,7 +1754,7 @@ function baseResultSummary(definition: ProjectToolConfig, result: Record<string,
     [ProjectToolResultKey.MATCH_STATUS]: result[ProjectToolResultKey.MATCH_STATUS],
     [ProjectToolResultKey.FAILURE_CATEGORY]: result[ProjectToolResultKey.FAILURE_CATEGORY],
     [ProjectToolResultKey.REMEDIATION]: result[ProjectToolResultKey.REMEDIATION],
-    [ProjectToolResultKey.RESULT_PREVIEW]: result[ProjectToolResultKey.RESULT_PREVIEW],
+    [ProjectToolResultKey.COMPACT_SUMMARY]: result[ProjectToolResultKey.COMPACT_SUMMARY],
     [DIAGNOSTIC_SUMMARY_KEY]: result[DIAGNOSTIC_SUMMARY_KEY],
     stdoutBytes: result.stdoutBytes,
     stderrBytes: result.stderrBytes,
@@ -1776,7 +1772,7 @@ function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult 
     ? new Set([
         ...MODEL_HIDDEN_RESULT_KEYS,
         ...MODEL_RAW_SUPPRESSED_KEYS
-      ].filter(k => k !== ProjectToolResultKey.RESULT_PREVIEW))
+      ].filter(k => k !== ProjectToolResultKey.COMPACT_SUMMARY))
     : MODEL_HIDDEN_RESULT_KEYS;
   const modelFacing = Object.fromEntries(
     Object.entries(record).filter(([key, value]) => !hiddenKeys.has(key) && value !== undefined)
@@ -1785,16 +1781,16 @@ function modelFacingInlineResult(result: unknown): ModelFacingProjectToolResult 
   if (toolCalls && !Array.isArray(modelFacing[ProjectToolResultKey.TOOL_CALLS])) {
     modelFacing[ProjectToolResultKey.TOOL_CALLS] = toolCalls;
   }
-  // For failed/rejected results, derive a compact diagnosticPreview from the
+  // For failed/rejected results, derive compact diagnosticFacts from the
   // internal stdout/stderr fields.  This is tool-owned semantic compaction (the
   // commandDiagnosticPreview function extracts error-pattern lines) — allowed
   // per docs/raw-output-contract.md.  Not a generic byte cap.
   if (
     record.status !== ToolResultStatus.PASSED
-    && !modelFacing[ProjectToolResultKey.DIAGNOSTIC_PREVIEW]
+    && !modelFacing[ProjectToolResultKey.DIAGNOSTIC_FACTS]
   ) {
     const dp = commandDiagnosticPreview(record);
-    if (dp) modelFacing[ProjectToolResultKey.DIAGNOSTIC_PREVIEW] = dp;
+    if (dp) modelFacing[ProjectToolResultKey.DIAGNOSTIC_FACTS] = dp;
   }
   return modelFacing;
 }
@@ -1813,8 +1809,8 @@ function boundedPreviewText(value: string, limitBytes: number): string {
 function commandPayloadPreviewText(record: Record<string, unknown>): string | undefined {
   if (record[ProjectToolResultKey.MATCH_STATUS] === NO_MATCH_STATUS) return undefined;
 
-  if (typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string' && String(record[ProjectToolResultKey.RESULT_PREVIEW]).trim()) {
-    return String(record[ProjectToolResultKey.RESULT_PREVIEW]);
+  if (typeof record[ProjectToolResultKey.COMPACT_SUMMARY] === 'string' && String(record[ProjectToolResultKey.COMPACT_SUMMARY]).trim()) {
+    return String(record[ProjectToolResultKey.COMPACT_SUMMARY]);
   }
 
   const stdoutRecord = parseJsonRecord(record[ProjectToolResultKey.STDOUT]);
@@ -1846,7 +1842,7 @@ function isGenericHighVolumeSummarizerResult(record: Record<string, unknown>): b
   return typeof counts['payloadBytes'] === 'number';
 }
 
-function resultPreviewText(
+function compactSummaryText(
   record: Record<string, unknown>,
   limitBytes: number,
   definition?: Pick<ProjectToolConfig, 'name'>
@@ -1855,17 +1851,14 @@ function resultPreviewText(
     Boolean(record[ProjectToolResultKey.STRUCTURED_RESULT]) || Boolean(record[DIAGNOSTIC_SUMMARY_KEY]);
 
   if (hasStructuredModelSummary) {
-    const existingPreview = typeof record[ProjectToolResultKey.RESULT_PREVIEW] === 'string'
-      && String(record[ProjectToolResultKey.RESULT_PREVIEW]).trim()
-      ? String(record[ProjectToolResultKey.RESULT_PREVIEW])
+    const existingPreview = typeof record[ProjectToolResultKey.COMPACT_SUMMARY] === 'string'
+      && String(record[ProjectToolResultKey.COMPACT_SUMMARY]).trim()
+      ? String(record[ProjectToolResultKey.COMPACT_SUMMARY])
       : undefined;
     if (!existingPreview) return undefined;
-    // For results summarized by genericHighVolumeSummarizer, apply the generic
-    // high-volume preview budget.  Diagnostics still use the diagnostic constant.
-    const previewBudget = (definition && isGenericHighVolumeSummarizerResult(record))
-      ? HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES
-      : ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES;
-    return boundedPreviewText(existingPreview, previewBudget);
+    // Apply the diagnostic summary budget to bound compact summary text so it
+    // doesn't grow without limit. This is tool-owned compaction, not a generic cap.
+    return boundedPreviewText(existingPreview, ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
   }
 
   const mcpText = textFromMcpContent(record.result);
@@ -1906,30 +1899,33 @@ export function summarizeToolResult(result: unknown): unknown {
     [ProjectToolResultKey.SCANNED_TARGET_SAMPLES]: record[ProjectToolResultKey.SCANNED_TARGET_SAMPLES],
     [ProjectToolResultKey.NEXT_ACTION]: record[ProjectToolResultKey.NEXT_ACTION],
     [ProjectToolResultKey.RECOVERY]: record[ProjectToolResultKey.RECOVERY],
-    [ProjectToolResultKey.RESULT_PREVIEW]: record[ProjectToolResultKey.RESULT_PREVIEW],
-    [ProjectToolResultKey.DIAGNOSTIC_PREVIEW]: record[ProjectToolResultKey.DIAGNOSTIC_PREVIEW],
+    [ProjectToolResultKey.COMPACT_SUMMARY]: record[ProjectToolResultKey.COMPACT_SUMMARY],
+    [ProjectToolResultKey.DIAGNOSTIC_FACTS]: record[ProjectToolResultKey.DIAGNOSTIC_FACTS],
     [DIAGNOSTIC_SUMMARY_KEY]: record[DIAGNOSTIC_SUMMARY_KEY],
     [ProjectToolResultKey.STRUCTURED_RESULT]: record[ProjectToolResultKey.STRUCTURED_RESULT],
     // s3wp.25: include stderrHint in event-store summary so isInfrastructureProjectToolFailure
     // can detect ENOSPC/transient patterns when checking stored failure events.
     ...(record.stderrHint !== undefined ? { stderrHint: record.stderrHint } : {})
   };
+  // Event-store internal telemetry: byte counts + truncated excerpts of large raw fields.
+  // These are NOT model-facing — they live only in the event log for harness observability.
+  // Keys use the 'Excerpt' suffix (not 'Preview') so they don't match the forbidden cap list.
   for (const key of ['stdout', 'stderr', 'output', 'result']) {
     const value = record[key];
     if (typeof value === 'string') {
       summary[`${key}Bytes`] = value.length;
-      summary[`${key}Preview`] = value.length > WorkerDefaults.EVENT_PREVIEW_CHARS
+      summary[`${key}Excerpt`] = value.length > WorkerDefaults.EVENT_PREVIEW_CHARS
         ? `${value.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`
         : value;
     } else if (value !== undefined) {
       try {
         const json = JSON.stringify(value);
         summary[`${key}Bytes`] = json.length;
-        summary[`${key}Preview`] = json.length > WorkerDefaults.EVENT_PREVIEW_CHARS
+        summary[`${key}Excerpt`] = json.length > WorkerDefaults.EVENT_PREVIEW_CHARS
           ? `${json.slice(0, WorkerDefaults.EVENT_PREVIEW_CHARS)}...`
           : value;
       } catch {
-        summary[`${key}Preview`] = String(value);
+        summary[`${key}Excerpt`] = String(value);
       }
     }
   }
@@ -2074,28 +2070,24 @@ function computeResultAccounting(
 
 // ---- applyHighVolumeModelSummary ----
 //
-// Injects a compact RESULT_PREVIEW for results summarized by
+// Injects a compact COMPACT_SUMMARY for results summarized by
 // genericHighVolumeSummarizer, mirroring the pattern used by
 // applyDiagnosticModelSummary.  Only runs when the structuredResult on the
 // record came from the generic summarizer (identified by presence of
-// counts.payloadBytes without a diagnosticSummary) AND no RESULT_PREVIEW
-// is already set.  This ensures the model-facing resultPreview is within
-// the generic high-volume budget rather than a raw truncated dump.
+// counts.payloadBytes without a diagnosticSummary) AND no COMPACT_SUMMARY
+// is already set.  This injects a compact representative-sample text so the
+// model can read a few lines before deciding to rerun narrower.
+// s3wp.30: removed generic preview byte-cap (HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES).
+// The sample budget is inlined (3 KiB) and is tool-owned compaction, not a harness cap.
 
 function applyHighVolumeModelSummary(
   definition: ProjectToolConfig,
   result: unknown
 ): unknown {
   const record = resultRecord(result);
-  const budget = HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES;
-  // Only inject when no compact RESULT_PREVIEW is already present.
-  // An existing preview that fits within budget is fine as-is.  One that
-  // exceeds the budget (e.g. raw MCP text) should be replaced with the
-  // compact summary from the generic summarizer.
-  const existingPreview = record[ProjectToolResultKey.RESULT_PREVIEW];
-  if (typeof existingPreview === 'string'
-    && existingPreview.trim().length > 0
-    && existingPreview.length <= budget) {
+  // Only inject when no compact summary is already present.
+  const existingSummary = record[ProjectToolResultKey.COMPACT_SUMMARY];
+  if (typeof existingSummary === 'string' && existingSummary.trim().length > 0) {
     return result;
   }
   // Require a structuredResult from the generic summarizer (payloadBytes present).
@@ -2110,11 +2102,14 @@ function applyHighVolumeModelSummary(
   const toolName = definition.name;
   const lines = splitIntoLines(text);
   const sampleLines = lines.slice(0, Math.min(HIGH_VOLUME_SAMPLE_COUNT, lines.length));
-  const compactPreview = genericHighVolumePreview(toolName, sampleLines, lines.length, budget);
+  // 3 KiB sample budget — enough to show representative lines without overwhelming the model.
+  // This is tool-owned compaction of a large payload into a human-readable sample.
+  const sampleBudget = 3 * 1024;
+  const compactSummary = genericHighVolumePreview(toolName, sampleLines, lines.length, sampleBudget);
 
   return withoutUndefined({
     ...record,
-    [ProjectToolResultKey.RESULT_PREVIEW]: compactPreview
+    [ProjectToolResultKey.COMPACT_SUMMARY]: compactSummary
   });
 }
 

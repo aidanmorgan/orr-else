@@ -158,7 +158,7 @@ export class EventStore {
       eventType: data.type,
       resultStatus: result?.status,
       outputBytes: data.outputBytes || result?.outputBytes,
-      outputTruncated: data.outputTruncated || result?.outputTruncated,
+      // outputTruncated removed (obsolete — s3wp.30, forbidden per raw-output-contract.md)
       dataBytes: this.jsonByteLength(data),
       paramsBytes: this.jsonByteLength(data.params),
       resultBytes: this.jsonByteLength(data.result),

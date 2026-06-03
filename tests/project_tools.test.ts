@@ -9,7 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
-import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
+import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_SAMPLE_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
 import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
@@ -1190,7 +1190,7 @@ describe('project tool command arguments', () => {
     expect(result.message).toContain('does not support output-control flag --output-limit');
     expect(result.remediation).toEqual(expect.arrayContaining([
       expect.stringContaining('structuredResult'),
-      expect.stringContaining('resultPreview'),
+      expect.stringContaining('compactSummary'),
       expect.stringContaining('outputArchive.artifactRef'),
       expect.stringContaining('supported harness retrieval patterns')
     ]));
@@ -1368,7 +1368,7 @@ describe('project tool command arguments', () => {
     expect((result as any).outputArchive).toBeUndefined();
     // s3wp.6: generic summarizer fires for large PASSED tools - resultPreview may be present
     // as a compact summary (tool-name-agnostic behavior).
-    expect((result as any).diagnosticPreview).toBeUndefined();
+    expect((result as any).diagnosticFacts).toBeUndefined();
     expect((result as any).outputPreview).toBeUndefined();
 
     // s3wp.25: stdoutFile and stderrFile are present and point to actual files
@@ -1518,7 +1518,7 @@ describe('project tool command arguments', () => {
     // Codemap with large filler: high-volume summarizer fires → use_result + resultPreview
     expect(result.nextAction).toBe('use_result');
     // resultPreview is set by the high-volume summarizer
-    expect(result.resultPreview).toContain('Files: 542');
+    expect(result.compactSummary).toContain('Files: 542');
     // s3wp.25: full content in stdoutFile
     expect(typeof result.stdoutFile).toBe('string');
   });
@@ -1563,8 +1563,8 @@ describe('project tool command arguments', () => {
     expect((result as any).outputAccess).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     // Diagnostic summarizer still fires (internal stdout field available for extraction)
-    expect(result.resultPreview).toContain('Diagnostics in File: 257');
-    expect(result.resultPreview).toContain('reportMissingImports');
+    expect(result.compactSummary).toContain('Diagnostics in File: 257');
+    expect(result.compactSummary).toContain('reportMissingImports');
   });
 
   it('groups noisy python_lsp missing-import diagnostics before model display', async () => {
@@ -1616,10 +1616,10 @@ describe('project tool command arguments', () => {
       expect.stringContaining('inspect non-import groups')
     ]));
     expect(result.stdout).toBeUndefined();
-    expect(result.resultPreview.length).toBeLessThan(1200);
-    expect(result.resultPreview).toContain('Diagnostics in File: 257');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=257');
-    expect(result.resultPreview).not.toContain('module_256');
+    expect(result.compactSummary.length).toBeLessThan(1200);
+    expect(result.compactSummary).toContain('Diagnostics in File: 257');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=257');
+    expect(result.compactSummary).not.toContain('module_256');
     expect(summary.totalDiagnostics).toBe(257);
     expect(summary.missingImportCount).toBe(257);
     expect(summary.groups).toHaveLength(1);
@@ -1697,10 +1697,10 @@ describe('project tool command arguments', () => {
       count: 32,
       missingImport: true
     });
-    expect(result.resultPreview.indexOf('Pyright/reportAssignmentType')).toBeLessThan(result.resultPreview.indexOf('Pyright/reportMissingImports'));
-    expect(result.resultPreview).toContain('reportUndefinedVariable');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=32');
-    expect(result.resultPreview).not.toContain('noise_31');
+    expect(result.compactSummary.indexOf('Pyright/reportAssignmentType')).toBeLessThan(result.compactSummary.indexOf('Pyright/reportMissingImports'));
+    expect(result.compactSummary).toContain('reportUndefinedVariable');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=32');
+    expect(result.compactSummary).not.toContain('noise_31');
   });
 
   it('keeps resultPreview compact when diagnosticSummary is present even with large raw MCP diagnostic content', async () => {
@@ -1755,13 +1755,13 @@ describe('project tool command arguments', () => {
     // The model-facing resultPreview must be the compact summary, not the raw
     // MCP diagnostic text.  Assert it is well within the named budget constant
     // and does not expose individual raw import lines.
-    expect(result.resultPreview).toBeDefined();
-    expect(result.resultPreview.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
-    expect(result.resultPreview).toContain('Diagnostics in File: 257');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=257');
+    expect(result.compactSummary).toBeDefined();
+    expect(result.compactSummary.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
+    expect(result.compactSummary).toContain('Diagnostics in File: 257');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=257');
     // Raw individual module import lines must NOT appear in the preview.
-    expect(result.resultPreview).not.toContain('module_256');
-    expect(result.resultPreview).not.toContain('module_0');
+    expect(result.compactSummary).not.toContain('module_256');
+    expect(result.compactSummary).not.toContain('module_0');
     // diagnosticSummary must be present and correct.
     const summary = result.diagnosticSummary as any;
     expect(summary.totalDiagnostics).toBe(257);
@@ -1827,17 +1827,17 @@ describe('project tool command arguments', () => {
     expect((result as any).outputTruncated).toBeUndefined();
     expect(result.nextAction).toBe('use_result');
     // Actionable (non-import) groups must appear ahead of import noise.
-    expect(result.resultPreview).toContain('reportAssignmentType');
-    expect(result.resultPreview).toContain('reportUndefinedVariable');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=32');
+    expect(result.compactSummary).toContain('reportAssignmentType');
+    expect(result.compactSummary).toContain('reportUndefinedVariable');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=32');
     // The group listing must have non-import groups before the import noise group.
-    expect(result.resultPreview.indexOf('Pyright/reportAssignmentType')).toBeLessThan(
-      result.resultPreview.indexOf('Pyright/reportMissingImports count=32')
+    expect(result.compactSummary.indexOf('Pyright/reportAssignmentType')).toBeLessThan(
+      result.compactSummary.indexOf('Pyright/reportMissingImports count=32')
     );
     // Raw individual raw import lines must not appear.
-    expect(result.resultPreview).not.toContain('noise_31');
+    expect(result.compactSummary).not.toContain('noise_31');
     // Preview must fit within the named budget.
-    expect(result.resultPreview.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    expect(result.compactSummary.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
     // Summary groups are correctly ordered (non-import first).
     expect(codes.slice(0, 3)).toEqual([
       'reportAssignmentType',
@@ -1892,13 +1892,13 @@ describe('project tool command arguments', () => {
     expect(result.outputTruncated).toBeUndefined();
 
     // The compact summary must reach the model.
-    expect(result.resultPreview).toBeDefined();
-    expect(result.resultPreview).toContain('Diagnostics in File: 5');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=5');
+    expect(result.compactSummary).toBeDefined();
+    expect(result.compactSummary).toContain('Diagnostics in File: 5');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=5');
 
     // Raw individual module import lines must NOT appear inline.
-    expect(result.resultPreview).not.toContain('inline_module_0');
-    expect(result.resultPreview).not.toContain('inline_module_4');
+    expect(result.compactSummary).not.toContain('inline_module_0');
+    expect(result.compactSummary).not.toContain('inline_module_4');
     // The raw MCP 'result' field must be absent from the inline payload —
     // modelFacingInlineResult must have suppressed it when diagnosticSummary is present.
     expect((result as any).result).toBeUndefined();
@@ -1953,7 +1953,7 @@ describe('project tool command arguments', () => {
     // (filling 3 representative locations per group) plus an import group.  With a
     // long file path (≈90 chars per location × 3 per group × 6 groups = ≈1620 chars
     // for locations alone, plus headers/group-labels) the untruncated summary text
-    // exceeds DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES (2048).
+    // exceeds DIAGNOSTIC_SUMMARY_MAX_BYTES (2048).
     // Confirms: preview <= cap, truncation marker present, top (non-import) groups survive.
     const diagnosticFile = path.join(tempWorktree, 'packages/large_module_with_a_very_long_path_segment/subpackage/arithmetic_normalizer_extended.py');
 
@@ -2007,21 +2007,21 @@ describe('project tool command arguments', () => {
 
     // s3wp.24: outputTruncated no longer in model-facing result
     expect((result as any).outputTruncated).toBeUndefined();
-    expect(result.resultPreview).toBeDefined();
+    expect(result.compactSummary).toBeDefined();
 
     // Truncation marker must be present (summary exceeded the cap).
-    expect(result.resultPreview).toMatch(/\[truncated \d+ characters/);
+    expect(result.compactSummary).toMatch(/\[truncated \d+ characters/);
 
     // The content before the truncation marker must fit within the cap.
     // boundedPreviewText slices at cap chars then appends the marker, so the total
     // preview length is cap + marker-suffix length — we check the slice, not the total.
-    const markerIndex = result.resultPreview.indexOf('\n\n[truncated ');
+    const markerIndex = result.compactSummary.indexOf('\n\n[truncated ');
     expect(markerIndex).toBeGreaterThan(0);
-    expect(markerIndex).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    expect(markerIndex).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
 
     // Top non-import groups survive (they sort first in the summary).
-    expect(result.resultPreview).toContain('reportAssignmentType');
-    expect(result.resultPreview).toContain('reportUndefinedVariable');
+    expect(result.compactSummary).toContain('reportAssignmentType');
+    expect(result.compactSummary).toContain('reportUndefinedVariable');
   });
 
   it('keeps useful command stdout in resultPreview when project tool output is archived', async () => {
@@ -2061,8 +2061,8 @@ describe('project tool command arguments', () => {
     expect(result.nextAction).toBe('use_result');
     expect(result.stdout).toBeUndefined();
     // High-volume summarizer fires for ast_grep → compact resultPreview
-    expect(result.resultPreview).toContain('packages/example.py:10:class Example:');
-    expect(result.resultPreview).not.toContain('filler');
+    expect(result.compactSummary).toContain('packages/example.py:10:class Example:');
+    expect(result.compactSummary).not.toContain('filler');
     expect(JSON.stringify(result)).not.toContain('outputFile');
   });
 
@@ -2095,8 +2095,8 @@ describe('project tool command arguments', () => {
     expect(result.nextAction).toBe('fix_or_route_failure');
     expect(result.stdout).toBeUndefined();
     // commandFailureSummarizer fires → hasStructuredModelSummary=true → diagnosticPreview set
-    expect(result.diagnosticPreview).toContain('ImportError: cannot import name _emit_display_expression');
-    expect(result.diagnosticPreview).toContain('ERROR packages/example/test_display.py');
+    expect(result.diagnosticFacts).toContain('ImportError: cannot import name _emit_display_expression');
+    expect(result.diagnosticFacts).toContain('ERROR packages/example/test_display.py');
   });
 
   it('bounds inline project tool observations while preserving structured rejection summaries', async () => {
@@ -2184,7 +2184,7 @@ describe('project tool command arguments', () => {
     expect(description).toContain('query(path)');
     expect(description).toContain('Returned ids are Chroma document ids, not filesystem paths.');
     expect(description).toContain('artifactRef or outputAccess text, treat it as archive guidance');
-    expect(description).toContain('first decide from resultPreview, structuredResult, and toolCalls');
+    expect(description).toContain('first decide from compactSummary, structuredResult, and toolCalls');
     expect(description).toContain('Prefer one narrow project-tool call at a time');
     expect(description).toContain('rerun narrower only for a named missing fact or decision blocker');
     expect(description).toContain('Pi UI native MCP server count reports only Pi-adapter connections');
@@ -2882,11 +2882,11 @@ describe('per-tool structured summarizer registry', () => {
     });
 
     // 7i0 behavior: resultPreview is the compact grouped text, not raw lines
-    expect(result.resultPreview).toBeDefined();
-    expect(result.resultPreview).toContain(`Diagnostics in File: ${importLines.length}`);
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=50');
-    expect(result.resultPreview).not.toContain('module_49');
-    expect(result.resultPreview.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_RESULT_PREVIEW_MAX_BYTES);
+    expect(result.compactSummary).toBeDefined();
+    expect(result.compactSummary).toContain(`Diagnostics in File: ${importLines.length}`);
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=50');
+    expect(result.compactSummary).not.toContain('module_49');
+    expect(result.compactSummary.length).toBeLessThanOrEqual(ProjectToolDefaults.DIAGNOSTIC_SUMMARY_MAX_BYTES);
 
     // 7i0 behavior: recovery guidance cites diagnosticSummary
     expect(result.recovery).toEqual(expect.arrayContaining([
@@ -3201,8 +3201,8 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // failureCategory must be present (failure stays actionable)
     expect(result.failureCategory).toBeDefined();
     // diagnosticPreview must be present for actionable failure context
-    expect(result.diagnosticPreview).toBeDefined();
-    expect(result.diagnosticPreview).toMatch(/ERROR|AssertionError|FAILED/);
+    expect(result.diagnosticFacts).toBeDefined();
+    expect(result.diagnosticFacts).toMatch(/ERROR|AssertionError|FAILED/);
     // structuredResult with rejection evidence is present
     expect(result.structuredResult).toBeDefined();
     expect(result.structuredResult.rejectedCheckCount).toBe(1);
@@ -3243,7 +3243,7 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // Raw stdout content is in stdoutFile
     expect(fs.readFileSync(result.stdoutFile!, 'utf8')).toContain('match found at line 42');
     // resultPreview is not set when there is no structuredResult/diagnosticSummary
-    expect((result as any).resultPreview).toBeUndefined();
+    expect((result as any).compactSummary).toBeUndefined();
     // No duplicate raw text in model-facing result
     const resultJson = JSON.stringify(result);
     const occurrences = (resultJson.match(/match found at line 42/g) || []).length;
@@ -3291,10 +3291,10 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     // 7i0 behavior preserved: inline path, no outputTruncated
     expect(result.outputTruncated).toBeUndefined();
     // Compact summary must be present
-    expect(result.resultPreview).toContain('Diagnostics in File: 3');
-    expect(result.resultPreview).toContain('Pyright/reportMissingImports count=3');
+    expect(result.compactSummary).toContain('Diagnostics in File: 3');
+    expect(result.compactSummary).toContain('Pyright/reportMissingImports count=3');
     // Raw module names must NOT appear inline
-    expect(result.resultPreview).not.toContain('b77h_module_0');
+    expect(result.compactSummary).not.toContain('b77h_module_0');
     // Raw MCP result field must be absent (suppressed by hasStructuredModelSummary)
     expect((result as any).result).toBeUndefined();
     // diagnosticSummary is present
@@ -4048,11 +4048,11 @@ describe('commandFailureSummarizer', () => {
     expect(result.stderr).toBeUndefined();
 
     // MUST-FIX 1: diagnosticPreview must be present and carry bounded real failure text
-    expect(result.diagnosticPreview).toBeDefined();
-    expect(typeof result.diagnosticPreview).toBe('string');
-    expect(result.diagnosticPreview.length).toBeGreaterThan(0);
+    expect(result.diagnosticFacts).toBeDefined();
+    expect(typeof result.diagnosticFacts).toBe('string');
+    expect(result.diagnosticFacts.length).toBeGreaterThan(0);
     // The preview should contain something from the actual failure output
-    expect(result.diagnosticPreview).toContain('index.ts');
+    expect(result.diagnosticFacts).toContain('index.ts');
   });
 
   // MUST-FIX 2: misparse guard — bare Go/compiler-style output must NOT produce a lint group
@@ -4371,7 +4371,7 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
   });
 
   // Metric 1: codemap-style MCP result with large JSON body → compact structuredResult
-  // + use_result (not rerun_narrower), model-facing size within HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES.
+  // + use_result (not rerun_narrower), model-facing size within HIGH_VOLUME_SAMPLE_BUDGET_BYTES.
   it('codemap MCP result with large body → compact structuredResult + use_result, model-facing within budget', async () => {
     // Simulate a large codemap MCP response: many lines of directory tree output
     // delivered via MCP content wrapper (as a real codemap MCP tool would).
@@ -4440,11 +4440,11 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(modelFacingBytes).toBeLessThan(8 * 1024);
 
     // resultPreview must be present and compact
-    expect((result2 as any).resultPreview).toBeDefined();
-    expect(typeof (result2 as any).resultPreview).toBe('string');
-    const previewLen = ((result2 as any).resultPreview as string).length;
-    // METRIC: Preview is bounded by the generic HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES budget (3 KiB).
-    expect(previewLen).toBeLessThanOrEqual(HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES + 256);
+    expect((result2 as any).compactSummary).toBeDefined();
+    expect(typeof (result2 as any).compactSummary).toBe('string');
+    const previewLen = ((result2 as any).compactSummary as string).length;
+    // METRIC: Preview is bounded by the generic HIGH_VOLUME_SAMPLE_BUDGET_BYTES budget (3 KiB).
+    expect(previewLen).toBeLessThanOrEqual(HIGH_VOLUME_SAMPLE_BUDGET_BYTES + 256);
 
     // s3wp.25: raw data in stdoutFile instead of outputArchive
     expect(typeof result2.stdoutFile).toBe('string');
@@ -4539,11 +4539,11 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     // The after result (ast_grep) always gets use_result.
     expect(afterResult.nextAction).not.toBe('rerun_narrower');
 
-    // METRIC: ast_grep resultPreview is bounded by the generic high-volume budget (HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES = 3 KiB).
+    // METRIC: ast_grep resultPreview is bounded by the generic high-volume budget (HIGH_VOLUME_SAMPLE_BUDGET_BYTES = 3 KiB).
     // The marker overhead is small.
-    const afterPreview = (afterResult as any).resultPreview as string | undefined;
+    const afterPreview = (afterResult as any).compactSummary as string | undefined;
     if (afterPreview !== undefined) {
-      expect(afterPreview.length).toBeLessThanOrEqual(HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES + 256);
+      expect(afterPreview.length).toBeLessThanOrEqual(HIGH_VOLUME_SAMPLE_BUDGET_BYTES + 256);
     }
 
     // representativeSamples must be present (sample lines from the large output)

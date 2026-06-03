@@ -428,7 +428,7 @@ export function unsupportedArtifactValidatorOutputControlResult(
     unsupportedOutputControlFlag: flag,
     [ProjectToolResultKey.FAILURE_CATEGORY]: ProjectToolFailureCategory.TOOL_INPUT_ERROR,
     [ProjectToolResultKey.REMEDIATION]: [
-      'Use structuredResult, resultPreview, diagnosticPreview, rejectedChecks, and outputArchive.artifactRef from the artifact_validator response instead of adding output-control flags.',
+      'Use structuredResult, compactSummary, diagnosticFacts, rejectedChecks, and outputArchive.artifactRef from the artifact_validator response instead of adding output-control flags.',
       'Use supported harness retrieval patterns for archived output; artifactRef is an opaque harness handle, not a filesystem path.',
       'Rerun artifact_validator only with supported validator arguments or narrower artifact inputs.'
     ]
@@ -553,14 +553,12 @@ function commandStreamDiagnosticSection(key: (typeof COMMAND_STREAM_OUTPUT_KEYS)
 //   structuredResult, toolCalls              — tool-owned compact facts (semantic summarizers)
 //   plus any annotation fields (matchStatus etc.)
 //
-// Intentionally omitted (s3wp.24/s3wp.25 — forbidden generic output controls):
+// Intentionally omitted (s3wp.24/s3wp.25/s3wp.30 — forbidden generic output controls):
 //   stdout, stderr           — raw text (use stdoutFile/stderrFile instead)
-//   stdoutTruncated,
-//   stderrTruncated          — inline truncation flags
-//   resultPreview,
-//   diagnosticPreview,
-//   outputPreview            — bounded text previews
+//   truncation flags (stdoutTruncated, stderrTruncated) — obsolete, removed s3wp.30
+//   bounded text previews (resultPreview, diagnosticPreview, outputPreview) — obsolete, removed s3wp.30
 //   maxBufferExceeded        — no longer relevant (streaming always used)
+// Tool-owned compaction fields now use: compactSummary, diagnosticFacts (non-forbidden names)
 // Maximum length of the stderrHint used for infrastructure/transient failure classification.
 // Enough to capture common error lines like ENOSPC messages, not the full raw content.
 const STDERR_HINT_MAX_CHARS = 512;
@@ -714,7 +712,6 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
       stderrFile,
       boundedStdout: { text: stdoutInfo.text, bytes: stdoutInfo.bytes, truncated: false },
       boundedStderr: { text: stderrInfo.text, bytes: stderrInfo.bytes, truncated: false },
-      stdoutTruncated: false,
       structuredStdout,
       structuredSummary,
       toolCalls,
@@ -760,7 +757,6 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
       stderrFile,
       boundedStdout: { text: annotationStdout, bytes: stdoutInfo.bytes, truncated: false },
       boundedStderr: { text: annotationStderr, bytes: stderrInfo.bytes, truncated: false },
-      stdoutTruncated: false,
       structuredStdout,
       structuredSummary,
       toolCalls,

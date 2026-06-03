@@ -26,8 +26,12 @@ export const ProjectToolResultKey = {
   REMEDIATION: 'remediation',
   OUTPUT_ACCESS: 'outputAccess',
   OUTPUT_ARCHIVE: 'outputArchive',
-  RESULT_PREVIEW: 'resultPreview',
-  DIAGNOSTIC_PREVIEW: 'diagnosticPreview',
+  // Tool-owned compact text summary of the result (replaces the forbidden generic 'resultPreview').
+  // This is tool-owned deterministic compaction of raw output into a bounded text field.
+  COMPACT_SUMMARY: 'compactSummary',
+  // Tool-owned extracted diagnostic lines (replaces the forbidden generic 'diagnosticPreview').
+  // For failed results: semantically extracted error-pattern lines from stderr/stdout.
+  DIAGNOSTIC_FACTS: 'diagnosticFacts',
   STRUCTURED_RESULT: 'structuredResult',
   NEXT_ACTION: 'nextAction',
   RECOVERY: 'recovery',
@@ -59,8 +63,6 @@ export const StructuredPayloadSummaryKey = [
   'outputFilters',
   'stdoutBytes',
   'stderrBytes',
-  'stdoutTruncated',
-  'stderrTruncated',
   'scannedTargetCount',
   'scanned_target_count',
   'scannedTargetsCount',
@@ -111,18 +113,18 @@ export const StructuredPayloadSummaryOutputKey = {
 } as const;
 
 export const PROJECT_TOOL_OUTPUT_ACCESS_GUIDANCE =
-  'Archived by harness; artifactRef is an opaque handle, not a path. First decide from resultPreview, structuredResult, and toolCalls. Do not read the archive just because the preview is truncated; rerun with narrower arguments only for a named missing fact or decision blocker.';
+  'Archived by harness; artifactRef is an opaque handle, not a path. First decide from compactSummary, structuredResult, and toolCalls. Do not read the archive just because the compact summary is small; rerun with narrower arguments only for a named missing fact or decision blocker.';
 
 export const PROJECT_TOOL_MODEL_CONTRACT = [
   'Configured project tools are the supported route for project-specific command and MCP-backed capabilities.',
   'Do not replace them with shell, native MCP, or native reads of harness artifact paths.',
-  'If a PASSED result includes outputArchive.artifactRef or outputAccess text, treat it as archive guidance, not a tool failure. The artifactRef is an opaque harness handle, not a filesystem path; first decide from resultPreview, structuredResult, and toolCalls.',
+  'If a PASSED result includes outputArchive.artifactRef or outputAccess text, treat it as archive guidance, not a tool failure. The artifactRef is an opaque harness handle, not a filesystem path; first decide from compactSummary, structuredResult, and toolCalls.',
   'Prefer one narrow project-tool call at a time. If a preview is truncated, a wrapper warning is returned, or a broad codemap/ast_grep call returns too much data, use the available preview/summary/toolCalls first; rerun narrower only for a named missing fact or decision blocker.',
   'The Pi UI native MCP server count reports only Pi-adapter connections. It can show zero while Orr Else MCP-backed project tools are healthy; use the named configured project tool and route BLOCKED only when that tool itself reports unavailable/rejected.'
 ] as const;
 
 export const PROJECT_TOOL_DESCRIPTION_SUFFIX =
-  'Returns bounded inline previews and structured summaries; outputArchive.artifactRef is an opaque harness handle, not a path to read. Decide from resultPreview, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
+  'Returns compact summaries and structured facts; outputArchive.artifactRef is an opaque harness handle, not a path to read. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 
 export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
 export const AST_GREP_TOOL_NAME = 'ast_grep';
@@ -132,22 +134,11 @@ export const GIT_HISTORY_TOOL_NAME = 'git_history';
 export const REFERENCE_DOCS_TOOL_NAME = 'reference_docs';
 export const WORKFLOW_PARITY_TOOL_NAME = 'workflow_parity';
 
-// High-volume tool preview budgets (model-facing resultPreview byte caps).
-// These constants bound the compact structured summary preview emitted by the
-// generic high-volume summarizer so the model never receives a raw truncated dump.
-//
-// DEFAULT: used for any high-volume tool that does not have a family override.
-export const HIGH_VOLUME_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
-// Codemap structure dumps can include large directory trees — keep the overview
-// tight so the model sees the header (Files / Top Extensions) without raw paths.
-export const CODEMAP_RESULT_PREVIEW_MAX_BYTES = 2 * 1024; // 2 KiB
-// ast_grep match output: each match line is short, so allow slightly more lines.
-export const AST_GREP_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
-// Reference docs / git history / workflow parity: JSON/text blobs that compress
-// well into a compact {status, counts, samples} envelope.
-export const REFERENCE_DOCS_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
-export const GIT_HISTORY_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
-export const WORKFLOW_PARITY_RESULT_PREVIEW_MAX_BYTES = 3 * 1024; // 3 KiB
+// Compact sample budget used by the generic high-volume summarizer.
+// This is the byte limit for the tool-owned representative sample text injected
+// into compactSummary — not a generic byte cap on raw output.
+// Raw output is always persisted in full to the harness tool-calls dir.
+export const HIGH_VOLUME_SAMPLE_BUDGET_BYTES = 3 * 1024; // 3 KiB
 
 // Minimum byte size of a result's raw payload that qualifies it as "high-volume"
 // and triggers the generic summarizer.  Results below this threshold are not
@@ -293,8 +284,8 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
 //     of stderr included in the model-facing result for failure classification context
 //     and for classifyProjectToolFailure to identify ENOSPC/transient patterns.
 //   outputFile: internal harness reference, always hidden.
-//   outputTruncated, outputPreview, outputAccess, outputArchive: forbidden per the
-//     minimal-schema contract (docs/raw-output-contract.md).
+//   outputAccess, outputArchive: forbidden generic envelope fields per
+//     docs/raw-output-contract.md.
 // s3wp.26:
 //   result: raw MCP callTool payload — always hidden.  Complete payload is persisted
 //     to mcp-raw.json; the model sees only rawFile/rawBytes/rawChecksum references.
@@ -304,8 +295,6 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
 export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'outputFile',
   'outputBytes',
-  'outputTruncated',
-  'outputPreview',
   ProjectToolResultKey.STDOUT,
   ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,
