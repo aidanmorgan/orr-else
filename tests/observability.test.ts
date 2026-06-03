@@ -113,12 +113,12 @@ states:
     const passingResult = { status: ToolResultStatus.PASSED, scoped: true };
     const laterFailure = { status: ToolResultStatus.REJECTED, strict: true };
 
-    observability.recordToolInvocation('run_quality_checks', passingResult);
-    observability.recordToolInvocation('run_quality_checks', laterFailure);
+    observability.recordToolInvocation('some_tool', passingResult);
+    observability.recordToolInvocation('some_tool', laterFailure);
 
-    expect(observability.getToolResult('run_quality_checks')).toBe(laterFailure);
-    expect(observability.getPassingToolResult('run_quality_checks')).toBe(passingResult);
-    expect(observability.hasToolPassed('run_quality_checks')).toBe(true);
+    expect(observability.getToolResult('some_tool')).toBe(laterFailure);
+    expect(observability.getPassingToolResult('some_tool')).toBe(passingResult);
+    expect(observability.hasToolPassed('some_tool')).toBe(true);
   });
 
   // ---------------------------------------------------------------------------

@@ -36,7 +36,6 @@ describe('ToolRegistry composition', () => {
       PluginToolName.SEND_MAILBOX_MESSAGE,
       PluginToolName.CHECK_MAILBOX,
       'fetch_mailbox_message',
-      PluginToolName.RUN_QUALITY_CHECKS,
       PluginToolName.COMPRESS_SESSION_LOGS,
       BuiltInToolName.SIGNAL_COMPLETION
     ]);

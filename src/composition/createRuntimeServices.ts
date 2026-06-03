@@ -109,7 +109,7 @@ export function createRuntimeServices(
       git: gitPlugin,
       teammates: teammatePlugin(teammateFactory),
       mailbox: createMailboxPlugin(eventStore, projectRoot),
-      quality: createQualityPlugin(observability),
+      quality: createQualityPlugin(),
       signaling: signalingPlugin,
       meta: createMetaPlugin(eventStore),
       teammateSpawner: teammateFactory as TeammateSpawner,

@@ -741,7 +741,6 @@ export enum PluginToolName {
   SEND_MAILBOX_MESSAGE = 'send_mailbox_message',
   CHECK_MAILBOX = 'check_mailbox',
   FETCH_MAILBOX_MESSAGE = 'fetch_mailbox_message',
-  RUN_QUALITY_CHECKS = 'run_quality_checks',
   COMPRESS_SESSION_LOGS = 'compress_session_logs',
   SPAWN_TEAMMATE = 'spawn_teammate',
   CREATE_NEW_PLUGIN = 'create_new_plugin'
@@ -1336,7 +1335,7 @@ export const SpanName = {
   TEAMMATE_SPAWN: 'teammate_spawn',
   /**
    * Verifier / quality-check run duration.
-   * Span is emitted from quality.ts (run_quality_checks tool execute path).
+   * Span is emitted from project-tool verifier paths (e.g. a project-owned quality check script).
    */
   VERIFIER_RUN: 'verifier_run',
   /**

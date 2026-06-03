@@ -514,17 +514,6 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   // -- Quality plugin — src/plugins/quality.ts --
 
   {
-    toolName: PluginToolName.RUN_QUALITY_CHECKS,
-    toolClass: 'plugin',
-    owningFile: 'src/plugins/quality.ts',
-    schemaTypeName: 'untyped_record',
-    skillPath: '.pi/skills/tool-routing/SKILL.md',
-    rawOutputLocation: 'tool_calls_dir',
-    deterministicCompaction: true,
-    mutating: false
-  },
-
-  {
     toolName: PluginToolName.COMPRESS_SESSION_LOGS,
     toolClass: 'plugin',
     owningFile: 'src/plugins/quality.ts',
