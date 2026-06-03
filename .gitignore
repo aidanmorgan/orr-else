@@ -37,3 +37,4 @@ scripts/*.d.ts.map
 
 # Stray per-run progress artifacts (use beads, not markdown, for tracking)
 PROGRESS.md
+.claude/worktrees/
