@@ -584,3 +584,212 @@ tools:
     warnSpy.mockRestore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// s3wp.2: tool defaults and profiles
+// ---------------------------------------------------------------------------
+describe('s3wp.2 tool defaults and profiles', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-s3wp2-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  it('toolDefaults are applied to all command tools when the tool field is absent', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolDefaults:
+    argsMode: append
+    timeoutMs: 30000
+    env:
+      BASE_VAR: "from-defaults"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: tool_a
+    type: command
+    command: node
+  - name: tool_b
+    type: command
+    command: python
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const toolA = config.tools?.find(t => t.name === 'tool_a') as any;
+    const toolB = config.tools?.find(t => t.name === 'tool_b') as any;
+
+    expect(toolA.argsMode).toBe('append');
+    expect(toolA.timeoutMs).toBe(30000);
+    expect(toolA.env?.BASE_VAR).toBe('from-defaults');
+    expect(toolB.argsMode).toBe('append');
+    expect(toolB.timeoutMs).toBe(30000);
+  });
+
+  it('per-tool fields win over toolDefaults', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolDefaults:
+    argsMode: replace
+    timeoutMs: 10000
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: tool_a
+    type: command
+    command: node
+    argsMode: append
+    timeoutMs: 99000
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const toolA = config.tools?.find(t => t.name === 'tool_a') as any;
+    // Per-tool wins
+    expect(toolA.argsMode).toBe('append');
+    expect(toolA.timeoutMs).toBe(99000);
+  });
+
+  it('named profile is applied between toolDefaults and per-tool fields', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolDefaults:
+    argsMode: replace
+    timeoutMs: 10000
+    env:
+      BASE: "default"
+  toolProfiles:
+    nodeTs:
+      argsMode: append
+      timeoutMs: 60000
+      env:
+        BASE: "profile"
+        EXTRA: "profile-extra"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: ts_tool
+    type: command
+    command: node
+    profile: nodeTs
+    env:
+      BASE: "tool"
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'ts_tool') as any;
+    // Profile wins over defaults for argsMode and timeoutMs
+    expect(tool.argsMode).toBe('append');
+    expect(tool.timeoutMs).toBe(60000);
+    // env merge: default BASE="default", profile BASE="profile" EXTRA="profile-extra",
+    // per-tool BASE="tool" → final BASE="tool", EXTRA="profile-extra"
+    expect(tool.env.BASE).toBe('tool');
+    expect(tool.env.EXTRA).toBe('profile-extra');
+  });
+
+  it('toolDefaults do not affect mcp tools', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolDefaults:
+    argsMode: append
+    timeoutMs: 30000
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: mcp_tool
+    type: mcp
+    server: my-server
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const mcpTool = config.tools?.find(t => t.name === 'mcp_tool') as any;
+    // mcp tools must not receive command-tool defaults
+    expect(mcpTool.argsMode).toBeUndefined();
+    // mcp has its own timeoutMs field — toolDefaults must not set it
+    expect(mcpTool.timeoutMs).toBeUndefined();
+  });
+
+  it('warning is logged for unknown profile reference, tool still loads', async () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: ts_tool
+    type: command
+    command: node
+    profile: nonExistentProfile
+`);
+    const { Logger } = await import('../src/core/Logger.js');
+    const warnSpy = vi.spyOn(Logger, 'warn');
+
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    expect(config.tools?.length).toBe(1);
+
+    const warnCalls = warnSpy.mock.calls;
+    const profileWarnings = warnCalls.filter(call =>
+      String(call[1] ?? '').includes('nonExistentProfile')
+    );
+    expect(profileWarnings.length).toBeGreaterThanOrEqual(1);
+    warnSpy.mockRestore();
+  });
+
+  it('toolDefaults.failureLimit is merged shallowly with per-tool failureLimit', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolDefaults:
+    failureLimit:
+      maxFailuresPerState: 3
+      terminal: false
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: ts_tool
+    type: command
+    command: node
+    failureLimit:
+      maxFailuresPerState: 5
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'ts_tool') as any;
+    // Per-tool maxFailuresPerState wins; terminal from defaults is not overridden
+    expect(tool.failureLimit.maxFailuresPerState).toBe(5);
+    expect(tool.failureLimit.terminal).toBe(false);
+  });
+
+  it('existing configs without toolDefaults/toolProfiles are unaffected', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: plain_tool
+    type: command
+    command: node
+    argsMode: replace
+    timeoutMs: 5000
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'plain_tool') as any;
+    expect(tool.argsMode).toBe('replace');
+    expect(tool.timeoutMs).toBe(5000);
+  });
+});

@@ -3,6 +3,63 @@
   "type": "object",
   "required": ["settings", "scheduler", "states"],
   "additionalProperties": false,
+  "definitions": {
+    "toolProfileShape": {
+      "type": "object",
+      "description": "Reusable partial command-tool configuration. Fields here are applied as defaults before per-tool values. Per-tool fields always win.",
+      "additionalProperties": false,
+      "properties": {
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "cwd": { "type": "string" },
+        "allowCwdOverride": { "type": "boolean" },
+        "timeoutMs": { "type": "integer", "minimum": 1 },
+        "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
+        "argsMode": { "type": "string", "enum": ["replace", "append"] },
+        "allowArgs": { "type": "boolean" },
+        "acceptMaxBuffer": { "type": "boolean" },
+        "successExitCodes": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "argumentPathScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "root": { "type": "string" },
+            "rootKind": { "type": "string" },
+            "workspaceRoot": { "type": "string" },
+            "virtualRoots": { "type": "array", "items": { "type": "string" } },
+            "mustStayInsideRoot": { "type": "boolean" },
+            "positionals": { "type": "boolean" },
+            "flags": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "failureLimit": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxFailuresPerState": { "type": "integer", "minimum": 1 },
+            "suggestedOutcome": { "type": "string" },
+            "suggestedOutcomeByState": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "suggestedOutcomeByAction": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "message": { "type": "string" },
+            "terminal": { "type": "boolean" }
+          }
+        }
+      }
+    }
+  },
   "properties": {
     "settings": {
       "type": "object",
@@ -145,6 +202,15 @@
           "description": "Named path roots resolved at runtime and injected as {{roots.NAME}} template variables into tool env, prompt variables, and path normalization virtualRoots. Values are absolute paths or paths relative to projectRoot. Keys are generic identifiers — project-specific names stay in project config, not harness defaults.",
           "additionalProperties": { "type": "string" }
         },
+        "toolDefaults": {
+          "$ref": "#/definitions/toolProfileShape",
+          "description": "Global defaults applied to every command tool before per-tool or per-profile values. Per-tool fields always win over toolDefaults."
+        },
+        "toolProfiles": {
+          "type": "object",
+          "description": "Named reusable partial command-tool configuration blocks. A command tool may reference one profile by name via its 'profile' field; the profile's fields are applied after toolDefaults and before per-tool fields.",
+          "additionalProperties": { "$ref": "#/definitions/toolProfileShape" }
+        },
         "worktreePolicy": {
           "type": "object",
           "additionalProperties": false,
@@ -274,6 +340,7 @@
                 }
               },
               "type": { "const": "command" },
+              "profile": { "type": "string", "description": "Name of a settings.toolProfiles entry whose fields are applied as defaults for this tool (after toolDefaults, before per-tool fields)." },
               "command": { "type": "string" },
               "defaultArgs": { "type": "array", "items": { "type": "string" } },
               "argsMode": { "type": "string", "enum": ["replace", "append"] },

@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
-import { ResolvedLLMConfig, HarnessConfig } from './domain/StateModels.js';
+import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, ProjectCommandToolConfig } from './domain/StateModels.js';
 import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
@@ -174,6 +174,7 @@ export class ConfigLoader {
       );
       this.validate(merged);
       config = merged;
+      this.expandToolProfiles(config);
       this.resolveFileBackedFields(config);
       this.cached = config;
       this.cachedPath = configPath;
@@ -326,6 +327,103 @@ export class ConfigLoader {
             `in statechart advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes. ` +
             `Add it to customOutcomes to suppress this warning.`
           );
+        }
+      }
+    }
+  }
+
+  /**
+   * s3wp.2: Expand tool profiles and defaults.
+   *
+   * Merge precedence (lowest → highest):
+   *   settings.toolDefaults → settings.toolProfiles[tool.profile] → per-tool fields
+   *
+   * Only command tools participate (mcp/extension tools are left untouched).
+   * The `profile` field is retained on the config object after expansion (it is
+   * informational and does not affect runtime behaviour once merged).
+   *
+   * Merge rules:
+   * - Plain scalar fields (cwd, allowCwdOverride, timeoutMs, …): per-tool wins if
+   *   explicitly set (i.e. !== undefined); otherwise profile wins; otherwise default wins.
+   * - `env` record: shallowly merged (default → profile → per-tool; per-tool keys win).
+   * - `failureLimit` object: shallowly merged field-by-field (same precedence).
+   * - `argumentPathScope` object: shallowly merged field-by-field (same precedence).
+   * - `successExitCodes` array: per-tool wins if explicitly set; otherwise profile wins;
+   *   otherwise default wins (no array concatenation — replacement semantics).
+   *
+   * If a tool references a profile name that does not exist, a warning is logged and
+   * the tool is left as-is (load does not fail).
+   */
+  private expandToolProfiles(config: HarnessConfig): void {
+    const toolDefaults = config.settings.toolDefaults;
+    const toolProfiles = config.settings.toolProfiles;
+
+    const PROFILE_SCALAR_KEYS: Array<keyof ToolProfileConfig> = [
+      'cwd', 'allowCwdOverride', 'timeoutMs', 'wrapperTimeoutMs',
+      'argsMode', 'allowArgs', 'acceptMaxBuffer'
+    ];
+
+    for (const tool of config.tools || []) {
+      if (tool.type !== 'command') continue;
+      const cmdTool = tool as ProjectCommandToolConfig;
+
+      // Resolve profile (if any)
+      let profile: ToolProfileConfig | undefined;
+      if (cmdTool.profile) {
+        if (toolProfiles && cmdTool.profile in toolProfiles) {
+          profile = toolProfiles[cmdTool.profile];
+        } else {
+          Logger.warn(Component.CONFIG,
+            `Tool "${cmdTool.name}" references profile "${cmdTool.profile}" which is not defined in settings.toolProfiles. Profile is ignored.`,
+            { tool: cmdTool.name, profile: cmdTool.profile }
+          );
+        }
+      }
+
+      // If no defaults or profile, and no profile reference, skip to avoid unnecessary iteration
+      if (!toolDefaults && !profile) continue;
+
+      // Merge scalar fields: default → profile → per-tool (per-tool wins when defined)
+      for (const key of PROFILE_SCALAR_KEYS) {
+        if (cmdTool[key] === undefined) {
+          if (profile?.[key] !== undefined) {
+            (cmdTool as unknown as Record<string, unknown>)[key] = profile[key];
+          } else if (toolDefaults?.[key] !== undefined) {
+            (cmdTool as unknown as Record<string, unknown>)[key] = toolDefaults[key];
+          }
+        }
+      }
+
+      // Merge `env` (shallow: default → profile → per-tool; per-tool keys win)
+      const envDefault = toolDefaults?.env;
+      const envProfile = profile?.env;
+      const envTool = cmdTool.env;
+      if (envDefault || envProfile || envTool) {
+        cmdTool.env = { ...envDefault, ...envProfile, ...envTool };
+      }
+
+      // Merge `argumentPathScope` (shallow field-by-field)
+      const apsDefault = toolDefaults?.argumentPathScope;
+      const apsProfile = profile?.argumentPathScope;
+      const apsTool = cmdTool.argumentPathScope;
+      if (apsDefault || apsProfile || apsTool) {
+        cmdTool.argumentPathScope = { ...apsDefault, ...apsProfile, ...apsTool };
+      }
+
+      // Merge `failureLimit` (shallow field-by-field)
+      const flDefault = toolDefaults?.failureLimit;
+      const flProfile = profile?.failureLimit;
+      const flTool = cmdTool.failureLimit;
+      if (flDefault || flProfile || flTool) {
+        cmdTool.failureLimit = { ...flDefault, ...flProfile, ...flTool };
+      }
+
+      // Merge `successExitCodes` (replacement — per-tool wins if set)
+      if (cmdTool.successExitCodes === undefined) {
+        if (profile?.successExitCodes !== undefined) {
+          cmdTool.successExitCodes = profile.successExitCodes;
+        } else if (toolDefaults?.successExitCodes !== undefined) {
+          cmdTool.successExitCodes = toolDefaults.successExitCodes;
         }
       }
     }

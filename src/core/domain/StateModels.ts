@@ -66,8 +66,34 @@ export interface BaseProjectToolConfig {
   };
 }
 
+/**
+ * Partial command-tool configuration that can be shared across multiple tools
+ * via settings.toolProfiles (named profile) or settings.toolDefaults (global).
+ * These fields are merged: toolDefaults → named profile → per-tool fields (per-tool wins).
+ */
+export interface ToolProfileConfig {
+  env?: Record<string, string>;
+  cwd?: CwdMode | string;
+  allowCwdOverride?: boolean;
+  timeoutMs?: number;
+  wrapperTimeoutMs?: number;
+  argsMode?: 'replace' | 'append';
+  allowArgs?: boolean;
+  acceptMaxBuffer?: boolean;
+  successExitCodes?: number[];
+  argumentPathScope?: ProjectCommandArgumentPathConfig;
+  failureLimit?: BaseProjectToolConfig['failureLimit'];
+}
+
 export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   type: ProjectToolType.COMMAND;
+  /**
+   * Optional name of a settings.toolProfiles entry.
+   * When set, the named profile's fields are applied as defaults for this tool
+   * (after settings.toolDefaults, before per-tool explicit values).
+   * The profile field itself is stripped before the tool reaches runtime consumers.
+   */
+  profile?: string;
   command: string;
   defaultArgs?: string[];
   argsMode?: 'replace' | 'append';
@@ -302,6 +328,20 @@ export interface HarnessConfig {
      * harness core remains generic — no hard-coded project paths in defaults.
      */
     roots?: Record<string, string>;
+    /**
+     * Global defaults applied to every command tool before per-tool or per-profile
+     * values. Any field set here acts as the lowest-priority base; per-tool and
+     * per-profile values always win. Optional and additive — existing configs
+     * without this field behave identically to before.
+     */
+    toolDefaults?: ToolProfileConfig;
+    /**
+     * Named reusable partial command-tool configuration blocks.
+     * A command tool can reference one profile by name via its `profile` field.
+     * Profile fields are applied after toolDefaults and before per-tool fields.
+     * Keys are arbitrary project-defined profile names.
+     */
+    toolProfiles?: Record<string, ToolProfileConfig>;
     /**
      * Harness-wide worktree allocation policy.
      *
