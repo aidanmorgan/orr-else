@@ -2859,6 +2859,18 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           if (!transactionalState.passed) {
             return `REJECTED: Transactional state gate failed.\n${transactionalState.reason}\nUpdate the approved plan/write-set through the configured workflow or revert the unapproved files before signaling SUCCESS.`;
           }
+
+          // ── Gate 6a: handoverRequired (enforcing) ─────────────────────────
+          // evaluateGateReadiness (called above) already computed handoverSatisfied
+          // and populated blockingEvidence for the handover gate. Reuse that result
+          // directly — do NOT re-compute. This is the ENFORCING path that makes
+          // handoverRequired actually binding on signal_completion (not just advisory
+          // in pre_signal_audit). Fires only on advance outcomes (SUCCESS), never on
+          // FAILURE/BLOCKED, and never when handoverRequired is false.
+          if (!gateReadiness.handoverSatisfied) {
+            const handoverEvidence = gateReadiness.blockingEvidence.find(e => e.includes('handoverRequired'));
+            return `REJECTED: ${handoverEvidence ?? 'Action declares \`handoverRequired: true\` but no substantive checkpoint summary was recorded. Call \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with a detailed summary before signaling completion.'}`;
+          }
         }
 
         if (!activeRun.checkpointAccepted) {

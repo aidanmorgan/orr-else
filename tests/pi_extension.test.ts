@@ -2505,3 +2505,368 @@ states:
     }
   });
 });
+
+// ── signal_completion enforcement: handoverRequired (gate-6a binding) ─────────
+//
+// s3wp.3 REOPEN fix: signal_completion SUCCESS must be REJECTED when
+// handoverRequired=true and no/short handoverSummary, and ACCEPTED when a
+// substantive summary exists. These tests drive the REAL signal_completion
+// handler (not just evaluateGateReadiness), confirming gate-6a is enforcing.
+describe('signal_completion gate — handoverRequired enforcement (s3wp.3)', () => {
+  // ── shared helpers ──────────────────────────────────────────────────────────
+
+  function makeHarnessYamlHandover(handoverRequired: boolean): string {
+    const handoverLine = handoverRequired ? '        handoverRequired: true' : '';
+    return `settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan"
+${handoverLine}
+    transitions: { SUCCESS: completed, FAILURE: Planning }
+`;
+  }
+
+  async function setupHandoverHarness(
+    tempRoot: string,
+    worktreePath: string,
+    beadId: string,
+    handoverRequired: boolean
+  ): Promise<ReturnType<typeof fakePi>> {
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), makeHarnessYamlHandover(handoverRequired));
+    process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+    process.env[EnvVars.BEAD_ID] = beadId;
+    process.env[EnvVars.STATE_ID] = 'Planning';
+    process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+    await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+    return harness;
+  }
+
+  it('rejects SUCCESS when handoverRequired=true and no checkpoint summary was submitted', async () => {
+    // The real signal_completion handler must REJECT when the action declares
+    // handoverRequired=true and submit_checkpoint was never called.
+    // (Checkpoint gate fires first; both gates block — the key assertion is REJECTED.)
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-handover-no-summary-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      harness = await setupHandoverHarness(tempRoot, worktreePath, 'bd-handover-no-summary', true);
+
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+      // Do NOT call submit_checkpoint — no handover summary recorded.
+      const result = await signalCompletion.execute('signal-no-handover', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must be REJECTED (checkpoint gate or handover gate — both block)
+      expect(result.details).toContain('REJECTED');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects SUCCESS when handoverRequired=true and checkpoint summary is too short', async () => {
+    // submit_checkpoint is called but with a trivially short summary ("done" < MIN_SUMMARY_CHARS=20 chars).
+    // The checkpoint gate is satisfied but the handoverRequired gate must still REJECT signal_completion SUCCESS.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-handover-short-summary-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    const receivedEvents: unknown[] = [];
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let server: import('node:http').Server | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      server = await startSignalAckServer(receivedEvents);
+      harness = await setupHandoverHarness(tempRoot, worktreePath, 'bd-handover-short-summary', true);
+
+      const submitCheckpoint = harness.tools.find((t: any) => t.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Short summary: 4 chars < MIN_SUMMARY_CHARS=20
+      const shortSummary = 'done';
+      await submitCheckpoint.execute('checkpoint', {
+        summary: shortSummary,
+        evidence: shortSummary
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-short-handover', {
+        outcome: 'SUCCESS',
+        summary: shortSummary
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must be REJECTED with the handoverRequired blocking reason
+      expect(result.details).toContain('REJECTED');
+      expect(result.details).toContain('handoverRequired');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts SUCCESS when handoverRequired=true and checkpoint has substantive summary', async () => {
+    // A checkpoint with a summary of >= MIN_SUMMARY_CHARS=20 characters satisfies the
+    // handoverRequired gate — signal_completion SUCCESS must be ACCEPTED.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-handover-ok-summary-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    const receivedEvents: unknown[] = [];
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let server: import('node:http').Server | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      server = await startSignalAckServer(receivedEvents);
+      harness = await setupHandoverHarness(tempRoot, worktreePath, 'bd-handover-ok-summary', true);
+
+      const submitCheckpoint = harness.tools.find((t: any) => t.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Substantive summary: well over MIN_SUMMARY_CHARS=20
+      const substantiveSummary = 'Completed planning phase with full analysis of requirements and acceptance criteria.';
+      await submitCheckpoint.execute('checkpoint', {
+        summary: substantiveSummary,
+        evidence: substantiveSummary
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-with-handover', {
+        outcome: 'SUCCESS',
+        summary: substantiveSummary
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must NOT be rejected for handoverRequired — gate is satisfied
+      expect(result.details).not.toContain('handoverRequired');
+      expect(result.details).toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts SUCCESS when handoverRequired=false (default), even with only a short summary', async () => {
+    // When handoverRequired is not set (defaults to false), the handover gate
+    // must be silent — signal_completion SUCCESS must be ACCEPTED.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-handover-not-required-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    const receivedEvents: unknown[] = [];
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let server: import('node:http').Server | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      server = await startSignalAckServer(receivedEvents);
+      // handoverRequired=false (not set → default false)
+      harness = await setupHandoverHarness(tempRoot, worktreePath, 'bd-handover-not-required', false);
+
+      const submitCheckpoint = harness.tools.find((t: any) => t.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Short summary — fine when handoverRequired=false
+      await submitCheckpoint.execute('checkpoint', {
+        summary: 'done',
+        evidence: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-no-handover-required', {
+        outcome: 'SUCCESS',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must NOT be rejected for handoverRequired (field not set → gate is silent)
+      expect(result.details).not.toContain('handoverRequired');
+      expect(result.details).toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts FAILURE when handoverRequired=true (handover gate never fires on non-advance outcomes)', async () => {
+    // FAILURE is not an advance outcome — the handoverRequired gate must be silent
+    // even when handoverRequired=true and only a short summary was submitted.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-handover-failure-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    const receivedEvents: unknown[] = [];
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let server: import('node:http').Server | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      server = await startSignalAckServer(receivedEvents);
+      // handoverRequired=true but we will signal FAILURE (non-advance outcome)
+      harness = await setupHandoverHarness(tempRoot, worktreePath, 'bd-handover-failure', true);
+
+      const submitCheckpoint = harness.tools.find((t: any) => t.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      // Short summary — would fail the handover gate if this were SUCCESS
+      await submitCheckpoint.execute('checkpoint', {
+        summary: 'done',
+        evidence: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-failure-handover', {
+        outcome: 'FAILURE',
+        summary: 'done'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Must NOT be rejected for handoverRequired on a FAILURE outcome
+      expect(result.details).not.toContain('handoverRequired');
+      expect(result.details).toContain('Completion signaled with outcome: FAILURE');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
