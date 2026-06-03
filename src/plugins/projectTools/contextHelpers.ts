@@ -88,8 +88,13 @@ function frameworkRootFromArgs(args: any, fallbackRoot?: string, env: RuntimeEnv
 }
 
 export function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): string | undefined {
-  const value = config.settings.artifacts?.templates?.orrElseFrameworkRoot;
-  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const configValue = config.settings.artifacts?.templates?.orrElseFrameworkRoot;
+  // When the config literal is absent or empty, fall back to the ORR_ELSE_FRAMEWORK_ROOT
+  // environment variable so project configs need not hard-code user-specific absolute paths.
+  const value = (typeof configValue === 'string' && configValue.trim())
+    ? configValue
+    : env.env(EnvVars.FRAMEWORK_ROOT);
+  if (!value || !value.trim()) return undefined;
   const projectRoot = env.env(EnvVars.PROJECT_ROOT) || injectedRoot;
   const context: TemplateContext = {
     projectRoot,

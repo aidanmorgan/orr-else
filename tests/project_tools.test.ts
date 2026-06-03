@@ -13,6 +13,7 @@ import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIG
 import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
+import { frameworkRootFromConfig } from '../src/plugins/projectTools/contextHelpers.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -5532,5 +5533,61 @@ describe('structured-invocation registry integration (5fij)', () => {
     // structuredResult is populated from the mypy parse
     expect(result.structuredResult).toBeDefined();
     expect((result.structuredResult as any).counts?.notes).toBe(1);
+  });
+});
+
+// s3wp.8: frameworkRootFromConfig env-driven fallback
+describe('frameworkRootFromConfig — env-driven root resolution (s3wp.8)', () => {
+  const ENV_VAR = EnvVars.FRAMEWORK_ROOT; // 'ORR_ELSE_FRAMEWORK_ROOT'
+
+  function makeEnv(vars: Record<string, string | undefined>): import('../src/core/RuntimeEnvironment.js').RuntimeEnvironment {
+    return { env: (key: string) => vars[key] };
+  }
+
+  function minimalConfig(orrElseFrameworkRoot?: string): import('../src/core/domain/StateModels.js').HarnessConfig {
+    return {
+      settings: {
+        artifacts: orrElseFrameworkRoot !== undefined
+          ? { templates: { orrElseFrameworkRoot } }
+          : undefined
+      } as any,
+      tools: [],
+      states: {},
+    } as any;
+  }
+
+  it('returns the config literal when it is set to an absolute path', () => {
+    const config = minimalConfig('/abs/framework');
+    const env = makeEnv({});
+    const result = frameworkRootFromConfig(config, env, '/project');
+    expect(result).toBe('/abs/framework');
+  });
+
+  it('falls back to the ORR_ELSE_FRAMEWORK_ROOT env var when config literal is absent', () => {
+    const config = minimalConfig(); // no orrElseFrameworkRoot in config
+    const env = makeEnv({ [ENV_VAR]: '/env/framework' });
+    const result = frameworkRootFromConfig(config, env, '/project');
+    expect(result).toBe('/env/framework');
+  });
+
+  it('falls back to the ORR_ELSE_FRAMEWORK_ROOT env var when config literal is empty string', () => {
+    const config = minimalConfig('');
+    const env = makeEnv({ [ENV_VAR]: '/env/framework' });
+    const result = frameworkRootFromConfig(config, env, '/project');
+    expect(result).toBe('/env/framework');
+  });
+
+  it('returns undefined when both config literal and env var are absent', () => {
+    const config = minimalConfig();
+    const env = makeEnv({});
+    const result = frameworkRootFromConfig(config, env, '/project');
+    expect(result).toBeUndefined();
+  });
+
+  it('prefers the config literal over the env var when both are present', () => {
+    const config = minimalConfig('/config/framework');
+    const env = makeEnv({ [ENV_VAR]: '/env/framework' });
+    const result = frameworkRootFromConfig(config, env, '/project');
+    expect(result).toBe('/config/framework');
   });
 });
