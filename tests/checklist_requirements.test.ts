@@ -124,7 +124,7 @@ describe('ChecklistRequirements', () => {
     expect(protocol).toContain(BuiltInToolName.GET_OUTSTANDING_TASKS);
     expect(protocol).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
     expect(protocol).toContain(BuiltInToolName.SIGNAL_COMPLETION);
-    expect(protocol).toContain('outputArchive.artifactRef');
-    expect(protocol).toContain('opaque harness handle, not a filesystem path');
+    expect(protocol).toContain('Tool Result Contract');
+    expect(protocol).toContain('minimal schema');
   });
 });
