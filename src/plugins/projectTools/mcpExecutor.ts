@@ -353,7 +353,7 @@ function unavailable(name: string, message: string) {
  * Errors here are swallowed (logged only) so a persistence failure never
  * prevents the model from receiving its result.
  */
-async function persistMcpRawResult(
+export async function persistMcpRawResult(
   outputDir: string,
   payload: unknown
 ): Promise<{ rawFile: string; rawBytes: number; rawChecksum: string } | undefined> {
