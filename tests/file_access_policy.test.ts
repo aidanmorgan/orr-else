@@ -1,6 +1,11 @@
 /**
  * Tests for FileAccessPolicy framework-root-write-set early rejection (Part B of
- * bead pi-experiment-mis).
+ * bead pi-experiment-mis; contract aligned in pi-experiment-ruq0).
+ *
+ * CONTRACT (ruq0): the framework root (orr-else repo) is READ-ONLY EVIDENCE from
+ * a Cerdiwen worktree.  Framework-root write-sets are EXPLICITLY REJECTED with a
+ * clear message that names the correct route: make framework/orr-else changes
+ * directly in the orr-else repository, not via a Cerdiwen worktree write-set.
  *
  * SECURITY CONTRACT: these tests verify HARDENING — the framework-root check must
  * reject earlier and more clearly, but must NEVER broaden what is allowed.
@@ -97,9 +102,10 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     expect(result).not.toBeNull();
     expect(result?.rejection).toBeDefined();
     expect(result?.rejection).toContain('PROTOCOL VIOLATION');
-    // Must name the named-root contract explicitly.
-    expect(result?.rejection).toContain('configured named root');
-    expect(result?.rejection).toContain('harness repository');
+    // Must name the read-only-evidence contract and the correct route.
+    expect(result?.rejection).toContain('configured framework root');
+    expect(result?.rejection).toContain('read-only evidence');
+    expect(result?.rejection).toContain('orr-else repository');
     // Must NOT be the generic "resolves outside worktree" message.
     expect(result?.rejection).not.toContain('may only mutate files inside this Bead worktree');
     // Event must be recorded.
@@ -118,8 +124,9 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     );
 
     expect(result).not.toBeNull();
-    expect(result?.rejection).toContain('configured named root');
-    expect(result?.rejection).toContain('harness repository');
+    expect(result?.rejection).toContain('configured framework root');
+    expect(result?.rejection).toContain('read-only evidence');
+    expect(result?.rejection).toContain('orr-else repository');
     expect(result?.rejection).not.toContain('may only mutate files inside this Bead worktree');
   });
 
@@ -135,8 +142,9 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     );
 
     expect(result).not.toBeNull();
-    expect(result?.rejection).toContain('configured named root');
-    expect(result?.rejection).toContain('harness repository');
+    expect(result?.rejection).toContain('configured framework root');
+    expect(result?.rejection).toContain('read-only evidence');
+    expect(result?.rejection).toContain('orr-else repository');
   });
 
   it('allows a Write to a path inside the worktree even when the framework root is configured', async () => {
@@ -171,8 +179,8 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     expect(result?.rejection).toBeDefined();
     // Should be the generic worktree-scope rejection, NOT the framework-root one.
     expect(result?.rejection).toContain('may only mutate files inside this Bead worktree');
-    // Must NOT incorrectly name the named-root contract.
-    expect(result?.rejection).not.toContain('configured named root');
+    // Must NOT incorrectly name the framework-root contract.
+    expect(result?.rejection).not.toContain('configured framework root');
   });
 
   it('does not invoke framework-root check when FRAMEWORK_ROOT env is not set', async () => {
@@ -191,9 +199,9 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
 
     // With no framework root env, falls through to generic worktree-scope rejection.
     expect(result).not.toBeNull();
-    // Generic rejection message — not the named-root one.
+    // Generic rejection message — not the framework-root one.
     expect(result?.rejection).toContain('may only mutate files inside this Bead worktree');
-    expect(result?.rejection).not.toContain('configured named root');
+    expect(result?.rejection).not.toContain('configured framework root');
   });
 
   it('hardening: framework-root check does not allow paths that the generic scope check would reject', async () => {
@@ -213,5 +221,64 @@ describe('FileAccessPolicy — framework-root write-set early rejection (Part B 
     // Must still be rejected — the framework-root hardening must not have broadened anything.
     expect(result).not.toBeNull();
     expect(result?.rejection).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // ruq0: read-only-evidence contract + correct-route message
+  // -------------------------------------------------------------------------
+
+  it('ruq0: rejection message names the read-only-evidence contract and the correct finalization route', async () => {
+    // The framework root is read-only evidence from a Cerdiwen worktree.
+    // The rejection must name the correct route: orr-else repo directly.
+    const targetPath = path.join(frameworkRoot, 'src', 'core', 'FileAccessPolicy.ts');
+
+    const result = await withWorkerEnv({}, () =>
+      policy.apply({
+        toolName: NativePiToolName.WRITE,
+        toolCallId: 'write-framework-policy-file',
+        input: { path: targetPath, content: 'overwrite attempt' }
+      })
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.rejection).toBeDefined();
+    // Contract wording: read-only evidence + correct route.
+    expect(result?.rejection).toContain('read-only evidence');
+    expect(result?.rejection).toContain('orr-else repository');
+    expect(result?.rejection).toContain('explicitly rejected');
+  });
+
+  it('ruq0: normal cerdiwen worktree write-set is accepted (unchanged by framework-root contract)', async () => {
+    // A write to a path inside the cerdiwen worktree must NOT be rejected
+    // by the framework-root contract even when a framework root is configured.
+    const targetPath = path.join(worktree, 'packages', 'ceridwen', 'compiler.py');
+
+    const result = await withWorkerEnv({}, () =>
+      policy.apply({
+        toolName: NativePiToolName.WRITE,
+        toolCallId: 'write-cerdiwen-worktree-file',
+        input: { path: targetPath, content: 'def compile(): pass' }
+      })
+    );
+
+    // Must be null (allowed) — the stub PlanWriteSet passes all mutations.
+    expect(result).toBeNull();
+  });
+
+  it('ruq0: framework-root write-set rejection applies to the framework root itself (not just subdirs)', async () => {
+    // A write targeting a file at the framework root level must also be rejected.
+    const targetPath = path.join(frameworkRoot, 'package.json');
+
+    const result = await withWorkerEnv({}, () =>
+      policy.apply({
+        toolName: NativePiToolName.EDIT,
+        toolCallId: 'edit-framework-root-package-json',
+        input: { filePath: targetPath, oldString: '"name":', newString: '"name": "modified"' }
+      })
+    );
+
+    expect(result).not.toBeNull();
+    expect(result?.rejection).toContain('read-only evidence');
+    expect(result?.rejection).toContain('orr-else repository');
   });
 });

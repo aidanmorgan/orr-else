@@ -402,21 +402,21 @@ export class FileAccessPolicy {
     return undefined;
   }
 
-  // (mis) Framework-root write-set early rejection.
+  // (mis/ruq0) Framework-root write-set early rejection.
   //
   // When a worker targets a path that is inside a configured named framework root
-  // but outside the active worktree, reject EARLY with a clear named-root-contract
-  // message rather than a confusing generic "escapes worktree" error.
+  // but outside the active worktree, reject EARLY with a clear read-only-evidence
+  // contract message rather than a confusing generic "escapes worktree" error.
+  //
+  // CONTRACT (ruq0): the framework root (orr-else repo) is READ-ONLY EVIDENCE
+  // from a Cerdiwen worktree. Framework-root write-sets are EXPLICITLY REJECTED.
+  // The correct route is to make framework/orr-else changes directly in the
+  // orr-else repository, not via a Cerdiwen worktree write-set.
   //
   // SECURITY: this is HARDENING only — it does NOT broaden what is allowed.
   // The worktreeScopeRejection that follows still applies to all other paths
   // outside the worktree, so the security surface is strictly unchanged.
   // canonicalPath + isInside are the same safe idiom used throughout this class.
-  //
-  // The full "supported route" for named-root changes (finalize through the
-  // harness repository under the appropriate root contract) requires coordination
-  // with the configured project tooling and is explicitly OUT OF SCOPE for
-  // a worker-side bead.
   private frameworkRootWriteSetRejection(
     targetPath: string,
     context: MutationContext,
@@ -429,15 +429,15 @@ export class FileAccessPolicy {
     // allow it to proceed through normal policy (no early rejection needed).
     if (context.worktreePath && this.isInside(resolvedPath, context.worktreePath)) return null;
     // Path is under framework root but outside the active worktree.
-    // Give an explicit early rejection naming the framework-root contract.
+    // Give an explicit early rejection naming the read-only-evidence contract.
     return [
       `PROTOCOL VIOLATION: ${toolLabel} attempted to write to \`${targetPath}\`,`,
-      `which is inside a configured named root (\`${context.frameworkRoot}\`)`,
+      `which resolves inside the configured framework root (\`${context.frameworkRoot}\`)`,
       'but outside the active Bead worktree.',
-      'Paths inside a configured named root must be finalized through the harness repository, not through a Bead worktree.',
-      'The supported route for named-root changes (harness-repo finalization + project-tool root-contract agreement)',
-      'is a coordinated operation — see the named-root contract documentation.',
-      'If you intended to write a worktree file, use a path inside the active Bead worktree instead.'
+      'The framework root (orr-else repo) is read-only evidence from a Cerdiwen worktree;',
+      'framework-root write-sets are explicitly rejected.',
+      'Make framework/orr-else changes directly in the orr-else repository,',
+      'not via a Cerdiwen worktree write-set.'
     ].join(' ');
   }
 
