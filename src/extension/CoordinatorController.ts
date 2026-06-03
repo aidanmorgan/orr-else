@@ -24,8 +24,64 @@ import {
 
 // ── action context + completion key ──────────────────────────────────────────
 
-export function actionRunContext(action: TeammateAction): ActionRunContext {
-  if (action.context === ActionRunContext.FRESH || action.contextMode === ActionContextMode.SUBAGENT) {
+/**
+ * Resolve the effective contextMode for an action, honoring the inheritance chain:
+ *   per-action contextMode → state.defaultActionContextMode → settings.defaultActionContextMode
+ *
+ * Returns the resolved string value (or undefined if none set at any level).
+ * s3wp.3: makes state and global defaults operational.
+ */
+export function resolveActionContextMode(
+  action: TeammateAction,
+  state?: SDLCState,
+  config?: HarnessConfig
+): string | undefined {
+  return action.contextMode
+    ?? state?.defaultActionContextMode
+    ?? config?.settings.defaultActionContextMode;
+}
+
+/**
+ * Resolve whether handover is required for an action, honoring the inheritance chain:
+ *   per-action handoverRequired → state.handoverRequired
+ *
+ * Returns the effective boolean (false when not set at any level — opt-in semantics).
+ * s3wp.3: makes state-level handoverRequired default operational.
+ */
+export function resolveActionHandoverRequired(
+  action: TeammateAction,
+  state?: SDLCState
+): boolean {
+  if (action.handoverRequired !== undefined) return action.handoverRequired;
+  if (state?.handoverRequired !== undefined) return state.handoverRequired;
+  return false;
+}
+
+/**
+ * Determine whether an action runs in a fresh (subagent/oneShot) or parent context.
+ *
+ * Resolution (s3wp.3): per-action contextMode → state.defaultActionContextMode →
+ * settings.defaultActionContextMode → action.context field.
+ *
+ * 'subagent' and 'oneShot' → FRESH context (new Pi session).
+ * 'same' or unset → PARENT context (continue in the current session).
+ *
+ * The optional state and config parameters enable the inheritance chain.
+ * When omitted, falls back to the pre-s3wp.3 behavior (per-action only).
+ */
+export function actionRunContext(
+  action: TeammateAction,
+  state?: SDLCState,
+  config?: HarnessConfig
+): ActionRunContext {
+  if (action.context === ActionRunContext.FRESH) {
+    return ActionRunContext.FRESH;
+  }
+  const effectiveContextMode = resolveActionContextMode(action, state, config);
+  if (
+    effectiveContextMode === ActionContextMode.SUBAGENT ||
+    effectiveContextMode === ActionContextMode.ONE_SHOT
+  ) {
     return ActionRunContext.FRESH;
   }
   return ActionRunContext.PARENT;
@@ -61,10 +117,10 @@ export function selectActiveAction(
   const pending = state.actions.filter(candidate => !isActionCompleted(config, stateId, candidate, completedActionIds));
   const searchSpace = pending.length > 0 ? pending : state.actions;
   return searchSpace.find(candidate =>
-    actionRunContext(candidate) === ActionRunContext.PARENT &&
+    actionRunContext(candidate, state, config) === ActionRunContext.PARENT &&
     (candidate.type === ActionType.PROMPT || candidate.type === ActionType.CHECKLIST)
-  ) || searchSpace.find(candidate => actionRunContext(candidate) === ActionRunContext.FRESH)
-    || searchSpace.find(candidate => actionRunContext(candidate) === ActionRunContext.PARENT)
+  ) || searchSpace.find(candidate => actionRunContext(candidate, state, config) === ActionRunContext.FRESH)
+    || searchSpace.find(candidate => actionRunContext(candidate, state, config) === ActionRunContext.PARENT)
     || state.actions[0];
 }
 

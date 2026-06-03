@@ -1101,7 +1101,7 @@ async function runParentSequenceActionsBeforeActive(
   for (const action of precedingActions) {
     if (isActionCompleted(config, run.stateId, action, run.completedActionIds)) continue;
 
-    if (actionRunContext(action) === ActionRunContext.FRESH) {
+    if (actionRunContext(action, run.state, config) === ActionRunContext.FRESH) {
       throw new Error(`Action ${action.id} requests fresh context but has not completed before ${run.action.id}.`);
     }
 
