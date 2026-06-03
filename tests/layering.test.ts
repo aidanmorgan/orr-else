@@ -33,7 +33,7 @@ const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
   },
   {
     layer: 'tools',
-    pattern: /^src\/tools\//,
+    pattern: /^src\/(?:tools|bin)\//,
     intent: 'CLI/tool entrypoints may orchestrate shared contracts and runtime APIs.'
   },
   {
