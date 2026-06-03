@@ -91,68 +91,113 @@ function allowedArtifactRoots(beadId: string): string[] {
 /**
  * Registry entry: maps a human-readable projection name to the dot-path
  * selector that extracts the relevant subtree from the artifact JSON.
+ *
+ * A projection may have multiple candidate selectors to handle schema drift
+ * across Cerdiwen artifact versions. The tool tries each candidate selector in
+ * order and returns the first that resolves to a non-undefined value. This is
+ * a generic fallback mechanism — not Cerdiwen-specific leakage — so the same
+ * pattern can be used for any artifact type whose schema has evolved.
  */
 interface ProjectionEntry {
-  /** Dot-path into the artifact JSON (empty string means root). */
-  selector: string;
+  /**
+   * Ordered list of candidate dot-paths to try against the artifact JSON.
+   * The first selector that resolves to a defined value wins.
+   * An empty string means "return the root".
+   *
+   * Using an array of candidates rather than a single selector is the key
+   * mechanism for handling schema drift: when an artifact uses a newer key
+   * (e.g. completenessGaps) instead of the original one (gapFlags), both
+   * names can coexist as candidates without coupling the registry to any one
+   * schema version.
+   */
+  selectors: [string, ...string[]];
   /** Short human description for rejection hints. */
   description: string;
 }
 
 /**
  * Registry for planContract named projections (req 2).
- * Keys are stable model-facing names; values are selectors into the JSON.
+ * Keys are stable model-facing names; values are entries with candidate selectors.
+ *
+ * Fallback lists cover both the original harness schema keys and the current
+ * Cerdiwen planContract keys so queries succeed regardless of which schema
+ * version produced the artifact.
  */
 const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionEntry> = {
   writeSet: {
-    selector: 'writeSet',
+    selectors: ['writeSet'],
     description: 'Approved file write set for this implementation step'
   },
   verifierObligations: {
-    selector: 'verifierObligations',
+    selectors: ['verifierObligations'],
     description: 'Verifier obligations that must pass before acceptance'
   },
   implementationSteps: {
-    selector: 'implementationSteps',
+    selectors: ['implementationSteps', 'planSteps'],
     description: 'Ordered implementation steps from the plan'
   },
+  planSteps: {
+    selectors: ['planSteps', 'implementationSteps'],
+    description: 'Ordered plan steps (Cerdiwen planContract schema)'
+  },
+  smtEvidence: {
+    selectors: ['smtEvidence'],
+    description: 'SMT/formal evidence associated with this plan'
+  },
   riskList: {
-    selector: 'riskList',
+    selectors: ['riskList'],
     description: 'Identified risks and mitigations'
   },
   evidenceReferences: {
-    selector: 'evidenceReferences',
+    selectors: ['evidenceReferences'],
     description: 'Evidence references supporting the plan'
   },
   acceptanceCriteria: {
-    selector: 'acceptanceCriteria',
+    selectors: ['acceptanceCriteria'],
     description: 'Acceptance criteria for this bead'
   }
 } as const;
 
 /**
  * Registry for requirementsAnalysis named projections (req 3).
+ *
+ * Fallback lists cover both the original harness schema keys and the current
+ * Cerdiwen requirementsAnalysis keys. For example, the projection "gapFlags"
+ * also tries "completenessGaps" (the Cerdiwen key), and "unresolvedQuestions"
+ * also tries "clarificationQuestions".
  */
 const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
   requirementsInventory: {
-    selector: 'requirementsInventory',
+    selectors: ['requirementsInventory'],
     description: 'Full inventory of discovered requirements'
   },
   traceabilityReferences: {
-    selector: 'traceabilityReferences',
+    selectors: ['traceabilityReferences', 'traceability'],
     description: 'Traceability links between requirements and source artifacts'
   },
+  traceability: {
+    selectors: ['traceability', 'traceabilityReferences'],
+    description: 'Traceability map (Cerdiwen requirementsAnalysis schema)'
+  },
   gapFlags: {
-    selector: 'gapFlags',
+    selectors: ['gapFlags', 'completenessGaps'],
     description: 'Flags indicating gaps in requirements coverage'
   },
+  completenessGaps: {
+    selectors: ['completenessGaps', 'gapFlags'],
+    description: 'Completeness gaps identified in requirements (Cerdiwen requirementsAnalysis schema)'
+  },
   referenceCitations: {
-    selector: 'referenceCitations',
+    selectors: ['referenceCitations'],
     description: 'Source citations referenced in the requirements analysis'
   },
   unresolvedQuestions: {
-    selector: 'unresolvedQuestions',
+    selectors: ['unresolvedQuestions', 'clarificationQuestions'],
     description: 'Open questions that require resolution before planning'
+  },
+  clarificationQuestions: {
+    selectors: ['clarificationQuestions', 'unresolvedQuestions'],
+    description: 'Clarification questions to be resolved (Cerdiwen requirementsAnalysis schema)'
   }
 } as const;
 
@@ -165,6 +210,72 @@ const PROJECTION_REGISTRY: Record<string, Record<string, ProjectionEntry>> = {
   planContract: PLAN_CONTRACT_PROJECTIONS,
   requirementsAnalysis: REQUIREMENTS_ANALYSIS_PROJECTIONS
 } as const;
+
+// ─── Projection resolution helpers ───────────────────────────────────────────
+
+/**
+ * Try each candidate selector in `entry.selectors` against `root` in order.
+ * Returns the first that resolves to a defined value plus the selector used.
+ * If no selector resolves, returns { value: undefined, resolvedSelector: entry.selectors[0] }
+ * so callers have a primary selector for error messages.
+ */
+function resolveProjectionValue(
+  root: unknown,
+  entry: ProjectionEntry
+): { value: unknown; resolvedSelector: string } {
+  for (const sel of entry.selectors) {
+    const v = safeSelectPath(root, sel);
+    if (v !== undefined) {
+      return { value: v, resolvedSelector: sel };
+    }
+  }
+  return { value: undefined, resolvedSelector: entry.selectors[0] };
+}
+
+/**
+ * Find the closest projection name to `name` by Levenshtein distance,
+ * for use in retry hints. Returns undefined when the registry is empty or the
+ * closest match is too distant (> maxDistance edits) to be useful.
+ */
+function closestProjection(
+  name: string,
+  registry: Record<string, ProjectionEntry>,
+  maxDistance = 4
+): string | undefined {
+  let best: string | undefined;
+  let bestDist = maxDistance + 1;
+
+  for (const candidate of Object.keys(registry)) {
+    const dist = levenshtein(name.toLowerCase(), candidate.toLowerCase());
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = candidate;
+    }
+  }
+
+  return bestDist <= maxDistance ? best : undefined;
+}
+
+/** Simple two-row iterative Levenshtein distance (no recursion, O(n) space). */
+function levenshtein(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+
+  // prev[j] = edit distance between a[0..i-1] and b[0..j-1]
+  let prev: number[] = Array.from({ length: n + 1 }, (_, i) => i);
+
+  for (let i = 1; i <= m; i++) {
+    const curr: number[] = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    prev = curr;
+  }
+
+  return prev[n];
+}
 
 // ─── JSON Pointer normalization ───────────────────────────────────────────────
 
@@ -539,7 +650,24 @@ export interface ProjectionSummaryEntry {
   name: string;
   /** Human-readable description (schema-aware only; absent for generic keys). */
   description?: string;
-  /** Size estimate for the value at this projection/key. */
+  /**
+   * Whether this projection's selector resolves to an actual value in the
+   * artifact being queried.  Schema-aware projections are listed even when
+   * the selector is absent so agents see the full menu; this flag
+   * distinguishes "present and fetchable" from "registered but unavailable".
+   *
+   * Always true for generic (non-schema-aware) summaries because generic
+   * entries are derived directly from the artifact's top-level keys.
+   */
+  available: boolean;
+  /**
+   * The selector that would be used to retrieve this projection.
+   * For multi-candidate projections, this is the first candidate that
+   * actually resolves in the artifact; for unavailable projections it is the
+   * primary (first) candidate selector.
+   */
+  resolvedSelector: string;
+  /** Size estimate for the value at this projection/key (zero when unavailable). */
   sizeEstimate: SizeEstimate;
 }
 
@@ -695,35 +823,62 @@ export class ArtifactQuery {
 
     // 5. Resolve selector from projection or raw selector input
     let effectiveSelector: string;
+    let value: unknown;
+
     if (input.projection) {
       const projEntry = this.lookupProjection(resolvedId, input.projection);
       if (!projEntry) {
+        // "Unknown projection" — not in the registry at all.
         const validProjections = this.validProjectionNames(resolvedId);
+        const registry = PROJECTION_REGISTRY[resolvedId];
+        const hint = registry ? closestProjection(input.projection, registry) : undefined;
+        const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
         return {
           status: 'rejected',
-          reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". Use one of the validProjections listed, or provide a dot-path "selector" instead.`,
+          reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection name is not registered; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
           validProjections,
           artifactPath: resolvedPath,
           exists: true
         };
       }
-      effectiveSelector = projEntry.selector;
+
+      // Projection is registered — try each candidate selector.
+      const { value: projValue, resolvedSelector } = resolveProjectionValue(parsed, projEntry);
+      effectiveSelector = resolvedSelector;
+      value = projValue;
+
+      if (value === undefined) {
+        // "Registered projection whose selector is absent in this artifact."
+        // This is a schema-drift case, not an unknown-projection error.
+        const validProjections = this.validProjectionNames(resolvedId);
+        const candidateList = projEntry.selectors.join('", "');
+        return {
+          status: 'rejected',
+          reason: `Projection "${input.projection}" is registered but its selector(s) ["${candidateList}"] did not match any key in artifact "${resolvedId}". The artifact may use a different schema version. Try the "schema" or "summary" modes to inspect the actual artifact shape.`,
+          validProjections,
+          artifactPath: resolvedPath,
+          exists: true
+        };
+      }
     } else {
       // Normalize JSON Pointer ("/foo/bar/0") to dot-path ("foo.bar.0") if needed
       effectiveSelector = normalizeSelectorToDotPath(input.selector ?? '');
-    }
+      value = safeSelectPath(parsed, effectiveSelector);
 
-    // 6. Apply safe dot-path traversal
-    const value = safeSelectPath(parsed, effectiveSelector);
-    if (value === undefined && effectiveSelector) {
-      const validProjections = this.validProjectionNames(resolvedId);
-      return {
-        status: 'rejected',
-        reason: `Selector "${effectiveSelector}" did not match any value in artifact "${resolvedId}".${validProjections.length > 0 ? ' Use a named projection for schema-aware access.' : ''}`,
-        validProjections: validProjections.length > 0 ? validProjections : undefined,
-        artifactPath: resolvedPath,
-        exists: true
-      };
+      if (value === undefined && effectiveSelector) {
+        const validProjections = this.validProjectionNames(resolvedId);
+        // Provide a projection retry hint when the raw selector looks like a known projection name.
+        const registry = PROJECTION_REGISTRY[resolvedId];
+        const hint = registry ? closestProjection(effectiveSelector, registry) : undefined;
+        const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
+        return {
+          status: 'rejected',
+          reason: `Selector "${effectiveSelector}" did not match any value in artifact "${resolvedId}".${validProjections.length > 0 ? ' Use a named projection for schema-aware access.' : ''}${hintLine}`,
+          validProjections: validProjections.length > 0 ? validProjections : undefined,
+          artifactPath: resolvedPath,
+          exists: true
+        };
+      }
     }
 
     // 7. Too-much-data guard (req 4)
@@ -749,6 +904,9 @@ export class ArtifactQuery {
    * For known artifact types (planContract, requirementsAnalysis), lists each
    * named projection from the registry — even when the artifact doesn't
    * contain every key — so agents see the full menu and its cost.
+   * Each entry includes an `available` flag indicating whether the projection's
+   * selector resolves against this particular artifact (guards against stale
+   * menus that list projections which don't exist in the artifact).
    * For unknown types, lists top-level JSON keys.
    */
   private buildSummary(parsed: unknown, artifactId: string, artifactPath: string): ArtifactSummary {
@@ -761,16 +919,23 @@ export class ArtifactQuery {
 
     if (schemaAware) {
       projections = Object.entries(registry).map(([name, entry]) => {
-        const value = safeSelectPath(parsed, entry.selector);
-        const serialized = serializeForMeasure(value);
+        // Try each candidate selector in order; use the first that resolves.
+        const { value, resolvedSelector } = resolveProjectionValue(parsed, entry);
+        const available = value !== undefined;
+        // Unavailable projections have no content → zero size estimate.
+        const { byteCount: projBytes, tokenEstimate: projTokens } = available
+          ? sizeEstimate(serializeForMeasure(value))
+          : { byteCount: 0, tokenEstimate: 0 };
         return {
           name,
           description: entry.description,
-          sizeEstimate: sizeEstimate(serialized)
+          available,
+          resolvedSelector,
+          sizeEstimate: { byteCount: projBytes, tokenEstimate: projTokens }
         };
       });
     } else {
-      // Generic: enumerate top-level keys
+      // Generic: enumerate top-level keys (always available since derived from artifact)
       const root = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
         ? (parsed as Record<string, unknown>)
         : {};
@@ -778,6 +943,8 @@ export class ArtifactQuery {
         const serialized = serializeForMeasure(value);
         return {
           name,
+          available: true,
+          resolvedSelector: name,
           sizeEstimate: sizeEstimate(serialized)
         };
       });
