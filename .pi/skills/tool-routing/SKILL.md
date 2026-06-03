@@ -298,27 +298,26 @@ Plugin source: `src/plugins/mailbox.ts`.
 - **Rerun strategy**: re-call to poll; use `fetch_mailbox_message` to retrieve the
   body of a specific message by ID.
 
+### fetch_mailbox_message
+- **Schema fields**: `{ messageId, found, message? }`.
+  - `messageId`: the ID requested.
+  - `found`: `true` when the message exists in the mailbox store; `false` otherwise.
+  - `message`: the full message record (present when `found: true`) — includes
+    `from`, `to`, `type`, `timestamp`, and the complete inline body.
+- **Raw-output file/ref**: tool_calls_dir archive (deterministicCompaction: true).
+- **Pass/fail authority**: `found` field; `found: false` = message not present
+  (not yet delivered, or ID incorrect).
+- **Rerun strategy**: `check_mailbox` first to obtain valid `messageId` values;
+  then call `fetch_mailbox_message` once per message whose body is needed.
+  This is the fetch-selector complement to `check_mailbox`: `check_mailbox`
+  returns routing metadata for all pending messages; `fetch_mailbox_message`
+  fetches one full body by ID.
+
 ---
 
 ## Quality Plugin Tools
 
 Plugin source: `src/plugins/quality.ts`.
-
-### run_quality_checks
-- **Schema fields**: `QualityChecksResult` — `{ status, verdict, exitCode,
-  durationMs, rawLogFile, errorCount, warningCount, failedChecks[], passedCheckCount }`.
-  - `verdict`: `"passed"` | `"failed"` — authoritative pass/fail signal.
-  - `rawLogFile`: absolute path to the complete raw log written to `tool_output_dir`.
-  - `failedChecks`: first up to 10 failing check lines (deterministic semantic
-    selection — not a byte-capped preview).
-  - `errorCount` / `warningCount`: full counts from the complete raw output.
-- **Raw-output file/ref**: `rawLogFile` — absolute path to the complete raw log.
-  Use native Read on `rawLogFile` only when a named failing check requires
-  deeper context not present in `failedChecks`.
-- **Pass/fail authority**: `verdict` field. `exitCode` confirms the underlying
-  command exit status.
-- **Rerun strategy**: re-call with a narrower `command` argument (e.g. a single
-  test file) to isolate a failing check. Do not rerun the full suite on every turn.
 
 ### compress_session_logs
 - **Schema fields**: `SessionLogSummary` — `{ rawLogFile, lineCount, byteCount,
@@ -407,7 +406,7 @@ Need code overview?            → codemap
 Need precise code match/edit?  → ast_grep (rg to shortlist first)
 Need compiler symbol graph?    → LSP
 Need library API docs?         → reference_docs
-Need quality gate result?      → run_quality_checks (before submit_checkpoint)
+Need quality gate result?      → use configured project tools (see project SKILL.md)
 Need change history/intent?    → Bash: git log/blame
 Need harness artifact path?    → get_artifact_paths → query_artifact
 Need raw output from a tool?   → re-run the tool with narrower arguments

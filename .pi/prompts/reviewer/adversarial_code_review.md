@@ -5,7 +5,7 @@ Phase: Adversarial Post-Review
 Conduct a ruthless post-implementation audit of the actual code changes. Guarantee codebase cohesion, system safety, and execution correctness.
 
 ## Required Tools
-- `run_quality_checks`: To verify the final code quality.
+- Configured project quality tools (see project SKILL.md): To verify the final code quality.
 - Repository search and file-reading tools: To check consistency with existing patterns.
 
 ## Mandatory Checklist

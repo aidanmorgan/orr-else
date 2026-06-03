@@ -17,7 +17,7 @@ All infrastructure actions must be performed via tool calls.
 
 ### Auditing
 - Independently validate structural assumptions using repository search, file reads, git history, and configured project tools.
-- `run_quality_checks`: Validate that the Implementer's code passes configured deterministic quality gates when required. Authoritative pass/fail signal is the `verdict` field (`"passed"` | `"failed"`); full raw output is in the `rawLogFile` path.
+- Use configured project quality tools when the state prompt or checklist requires running deterministic quality gates. The authoritative pass/fail signal and raw-output path are defined by each project tool's own SKILL.md.
 - Use configured project tools when the state prompt or checklist requires project-specific standards, references, or analysis.
 
 ### Lifecycle
