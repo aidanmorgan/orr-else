@@ -1,6 +1,6 @@
 # Tool-Validated State Protocol
 
-Orr Else runs as a pi.dev extension. `/orr-else` starts the coordinator in the current Pi session. The coordinator claims ready Beads, creates Implementation worktrees, spawns teammate Pi processes in tmux, receives completion signals, updates Beads, and replenishes available slots.
+Orr Else runs as a pi.dev extension. `/orr-else` starts the coordinator in the current Pi session. The coordinator claims ready Beads, provisions per-bead worktrees according to the configured worktree-allocation policy, spawns teammate Pi processes in tmux, receives completion signals, updates Beads, and replenishes available slots.
 
 ## Completion Protocol
 
@@ -34,7 +34,7 @@ The bundled example flow uses provider-portable states:
 
 - `Planning`: codebase/history/rules exploration and surgical plan.
 - `AdversarialPreReview`: independent plan critique before implementation.
-- `Implementation`: worktree-isolated execution of the approved plan.
+- `Implementation`: execution of the approved plan; receives a worktree by default (configurable via `provisionWorktree`).
 - `AdversarialPostReview`: independent implementation audit before completion.
 
 ## Provider Routing
@@ -51,7 +51,7 @@ Before spawning a teammate, the coordinator resolves the state provider and star
 
 1. `ORCHESTRATE`: `/orr-else` starts the coordinator and signaling server.
 2. `CLAIM`: the coordinator reads `bd_ready`, sorts work, and claims a Bead with `bd_claim`.
-3. `PREPARE`: Implementation states create a worktree through `create_worktree`.
+3. `PREPARE`: states that resolve `provisionWorktree` as `true` (per the worktree-allocation policy) create a worktree through `create_worktree`.
 4. `SPAWN`: `spawn_teammate` starts a Pi process in tmux with teammate environment variables.
 5. `EXECUTE`: the teammate injects state identity, provider metadata, rules, docs, history, and checklist protocol.
 6. `VALIDATE`: `submit_checkpoint` verifies mandatory evidence and records a worklog/handover.

@@ -8,7 +8,7 @@ The harness is designed around deterministic control:
 - `harness.yaml` defines the workflow, prompts, providers, checklists, tools, and transitions.
 - Teammates are state executions, not long-lived reusable agents.
 - Completion is accepted only through tool-recorded evidence and typed lifecycle signals.
-- Implementation work is isolated through Git worktrees and harness-owned merge steps.
+- Work is isolated through per-bead Git worktrees (provisioned per the configurable worktree-allocation policy) and harness-owned merge steps.
 - Observability, logs, worklogs, and JSONL exports make runs auditable.
 
 ## Runtime Flow
@@ -293,7 +293,7 @@ The Git plugin creates one branch and worktree per Bead:
 
 Teammates receive `PI_WORKTREE_PATH`, and prompts expose it as `WORKING_DIRECTORY`. Project command tools can choose `cwd: project` or `cwd: worktree`.
 
-The project rules define implementation work as worktree-bound. The current supervisor prepares or reuses a Bead worktree before spawning a teammate so the assigned workspace is explicit.
+The supervisor resolves whether to provision a worktree for each state using `resolveWorktreeProvisioning`. The decision follows a two-level priority: a per-state `provisionWorktree` boolean overrides the harness-wide `settings.worktreePolicy.default` (`'always'` | `'never'`, defaulting to `'always'`). With the default policy every state receives an isolated worktree; to restrict worktrees to specific states, set `worktreePolicy.default: 'never'` and add `provisionWorktree: true` on the states that need one (e.g. Implementation), or set `provisionWorktree: false` on read-only states and leave the default as `'always'`.
 
 ### Git Locking
 
