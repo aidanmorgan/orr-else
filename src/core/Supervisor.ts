@@ -89,6 +89,21 @@ interface SlotHealthSnapshot {
   workingCount: number;
   /** Heartbeating bead IDs that are not in the live-pane set. */
   heartbeatOnlyLiveGaps: string[];
+  /**
+   * Churn-diagnostic worker sets (s3wp.33).
+   *
+   * trackedOnly  — tracked by the supervisor but absent from the live pane set;
+   *                these are workers that may have exited without a pane-death event.
+   * paneOnly     — present in the live pane set but not tracked by the supervisor;
+   *                these are orphaned panes (e.g. from a prior run).
+   * restarting   — currently in inactive-restart backoff; a recovery was triggered
+   *                and the new spawn has not yet appeared in the pane scan.
+   * released     — durably pruned from tracking this tick (confirmed inactive events).
+   */
+  trackedOnlyBeadIds: string[];
+  paneOnlyBeadIds: string[];
+  restartingBeadIds: string[];
+  releasedBeadIds: string[];
 }
 
 export class Supervisor {
@@ -126,6 +141,12 @@ export class Supervisor {
    * its own independent debounce state.
    */
   private readonly finalBlockedPollCounts = new Map<string, number>();
+  /**
+   * Beads pruned from startedBeads this tick by pruneDurablyInactiveStartedBeads.
+   * Cleared at the start of each slot-health snapshot and populated during the prune
+   * step so that `recordSlotHealth` can include them in the releasedBeadIds set.
+   */
+  private releasedThisTick: string[] = [];
   private readonly clock: Clock;
 
   constructor(
@@ -887,6 +908,8 @@ export class Supervisor {
     }
 
     if (prunedBeadIds.length > 0) {
+      // Record released beads for inclusion in the current slot-health snapshot.
+      this.releasedThisTick.push(...prunedBeadIds);
       Logger.info(Component.SUPERVISOR, 'Pruned released or exited Beads from slot health tracking', {
         beadIds: prunedBeadIds.sort()
       });
@@ -941,6 +964,10 @@ export class Supervisor {
   }
 
   private async collectSlotHealthSnapshot(): Promise<SlotHealthSnapshot> {
+    // Clear the released-this-tick accumulator before the prune step so only
+    // beads pruned during THIS snapshot are included in the churn report.
+    this.releasedThisTick = [];
+
     const liveBeadIds = [...await this.factory.getLiveTeammateBeadIds()].sort();
     await this.pruneDurablyInactiveStartedBeads(new Set(liveBeadIds));
     const config = await this.services.configLoader.load();
@@ -987,6 +1014,20 @@ export class Supervisor {
       .filter(beadId => !liveBeadIds.includes(beadId))
       .sort();
 
+    // Churn-diagnostic sets (s3wp.33).
+    // trackedOnly: tracked but not live → possible silent exit without pane-death event.
+    const trackedSet = new Set(trackedBeadIds);
+    const liveSet = new Set(liveBeadIds);
+    const trackedOnlyBeadIds = trackedBeadIds.filter(id => !liveSet.has(id)).sort();
+    // paneOnly: live but not tracked → orphaned pane from a prior run.
+    const paneOnlyBeadIds = liveBeadIds.filter(id => !trackedSet.has(id)).sort();
+    // restarting: currently in inactive-restart backoff.
+    const restartingBeadIds = [...this.inactiveRestartedAtMs.keys()]
+      .filter(id => now - (this.inactiveRestartedAtMs.get(id) || 0) < noProgressTimeoutMs)
+      .sort();
+    // released: durably pruned from tracking this tick.
+    const releasedBeadIds = [...new Set(this.releasedThisTick)].sort();
+
     return {
       observedLiveBeadIds: liveBeadIds,
       effectiveLiveBeadIds,
@@ -1003,7 +1044,11 @@ export class Supervisor {
       missingTrackedBeadIds,
       activeCount,
       workingCount,
-      heartbeatOnlyLiveGaps
+      heartbeatOnlyLiveGaps,
+      trackedOnlyBeadIds,
+      paneOnlyBeadIds,
+      restartingBeadIds,
+      releasedBeadIds
     };
   }
 
@@ -1029,7 +1074,11 @@ export class Supervisor {
       missingTrackedBeadIds,
       activeCount,
       workingCount,
-      heartbeatOnlyLiveGaps
+      heartbeatOnlyLiveGaps,
+      trackedOnlyBeadIds,
+      paneOnlyBeadIds,
+      restartingBeadIds,
+      releasedBeadIds
     } = snapshot;
 
     await this.services.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
@@ -1045,11 +1094,29 @@ export class Supervisor {
       inactiveBeadIds,
       trackedBeadIds,
       missingTrackedBeadIds,
-      heartbeatOnlyLiveGaps
+      heartbeatOnlyLiveGaps,
+      // Churn-diagnostic sets (s3wp.33)
+      trackedOnlyBeadIds,
+      paneOnlyBeadIds,
+      restartingBeadIds,
+      releasedBeadIds
     }).catch(() => {});
 
-    const details = { expectedCount, activeCount, workingCount, liveBeadIds: effectiveLiveBeadIds, missingTrackedBeadIds, staleBeadIds, heartbeatOnlyStaleBeadIds };
-    const digest = `${expectedCount}/${workingCount}/${activeCount}|${missingTrackedBeadIds.join(',')}|${staleBeadIds.join(',')}|${heartbeatOnlyStaleBeadIds.join(',')}`;
+    const details = {
+      expectedCount,
+      activeCount,
+      workingCount,
+      liveBeadIds: effectiveLiveBeadIds,
+      missingTrackedBeadIds,
+      staleBeadIds,
+      heartbeatOnlyStaleBeadIds,
+      // Churn-diagnostic sets (s3wp.33)
+      trackedOnlyBeadIds,
+      paneOnlyBeadIds,
+      restartingBeadIds,
+      releasedBeadIds
+    };
+    const digest = `${expectedCount}/${workingCount}/${activeCount}|${missingTrackedBeadIds.join(',')}|${staleBeadIds.join(',')}|${heartbeatOnlyStaleBeadIds.join(',')}|${trackedOnlyBeadIds.join(',')}|${paneOnlyBeadIds.join(',')}`;
     if (digest !== this.lastLoggedSlotHealthDigest) {
       this.lastLoggedSlotHealthDigest = digest;
       if (activeCount < expectedCount || staleBeadIds.length > 0 || heartbeatOnlyStaleBeadIds.length > 0) {

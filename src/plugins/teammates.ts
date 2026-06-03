@@ -115,6 +115,40 @@ async function tmux(args: string[]): Promise<string> {
   return result.stdout;
 }
 
+/**
+ * Return the exact-match tmux target prefix for a session name.
+ *
+ * tmux resolves target sessions by prefix: a session named "orr-else" will
+ * also match "orr-else-coordinator" because "orr-else" is a prefix of that
+ * name.  Prepending "=" forces an exact (non-prefix) lookup, so "=orr-else"
+ * never resolves into "orr-else-coordinator".
+ *
+ * References:
+ *   tmux(1) "TARGET" section — any target starting with "=" is matched exactly
+ *   against the session name rather than by prefix.
+ */
+export function exactSession(sessionName: string): string {
+  return `=${sessionName}`;
+}
+
+/**
+ * Verify that a tmux session with the given name exists and resolves to exactly
+ * that name (not a prefix-colliding session).
+ *
+ * Runs `tmux display-message -p -t =<sessionName> '#{session_name}'` and
+ * compares the output to `sessionName`.  Returns false when the command fails
+ * (session absent) or when the resolved name differs (should not happen with
+ * exact-match targeting, but guards against edge cases).
+ */
+async function verifyExactSession(sessionName: string): Promise<boolean> {
+  try {
+    const resolved = await tmux(['display-message', '-p', '-t', exactSession(sessionName), '#{session_name}']);
+    return resolved.trim() === sessionName;
+  } catch {
+    return false;
+  }
+}
+
 function shellQuoteValue(value: string): string {
   return quoteShellArgs([value]);
 }
@@ -127,6 +161,14 @@ export class TeammateFactory {
   private lastLiveTeammatePanes: TmuxPane[] = [];
   private paneListFailed = false;
   private lastPaneListFailureMessage = '';
+  /**
+   * When ensureAgentsWindow detects a hard failure (window creation failed or
+   * could not be verified), this flag is set to true.  While true, pane scans
+   * are throttled — getLiveTeammatePanes returns the last cached result without
+   * issuing list-panes noise — and spawn attempts are rejected immediately.
+   */
+  private agentsWindowSetupFailed = false;
+  private lastAgentsWindowSetupError = '';
 
   constructor(
     private readonly observability: Observability,
@@ -160,6 +202,15 @@ export class TeammateFactory {
   }
 
   private async getLiveTeammatePanes(): Promise<TmuxPane[]> {
+    // When setup is known-failed, suppress list-panes noise: return cached
+    // fallback immediately rather than issuing repeated failing tmux calls.
+    // The only message emitted is the deduplication-throttled setup-failure log
+    // (already emitted once in ensureAgentsWindow), not a per-poll PANE_SCAN_FAILED.
+    if (this.agentsWindowSetupFailed) {
+      const fallbackPanes = this.lastLiveTeammatePanes.filter(pane => !pane.dead);
+      return fallbackPanes;
+    }
+
     try {
       const panes = await this.listAgentPanes();
       await this.removeDeadTeammatePanes(panes);
@@ -200,7 +251,7 @@ export class TeammateFactory {
       TmuxFormat.PANE_DEAD,            // index 5
       TmuxFormat.PANE_ORR_WORKER       // index 6
     ].join(TmuxFormat.FIELD_SEPARATOR);
-    const output = await tmux([TmuxCommand.LIST_PANES, '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
+    const output = await tmux([TmuxCommand.LIST_PANES, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
     return output.trim().split('\n').filter(Boolean).map(line => {
       const parts = line.split(TmuxFormat.FIELD_SEPARATOR);
       const [paneId = '', paneTitle = '', currentCommand = '', startCommand = ''] = parts;
@@ -460,41 +511,131 @@ export class TeammateFactory {
     return this.maxSlots;
   }
 
-  public async ensureAgentsWindow() {
-    try {
-      await tmux([TmuxCommand.HAS_SESSION, '-t', this.sessionName]);
-    } catch {
-      await tmux([TmuxCommand.NEW_SESSION, '-d', '-s', this.sessionName, '-n', Defaults.TMUX_COORDINATOR_WINDOW]);
+  /**
+   * Ensure the tmux session and Agents window exist, using exact-match session
+   * targeting to prevent prefix collisions (e.g. "orr-else" resolving into
+   * "orr-else-coordinator").
+   *
+   * Hard-failure semantics (s3wp.33):
+   *   - Returns `{ ok: true }` when the Agents window is verified to exist.
+   *   - Returns `{ ok: false, error: string }` when creation or verification
+   *     fails.  The caller (spawnTeammateInTmuxInner) treats this as a hard
+   *     setup failure and aborts the spawn rather than continuing silently.
+   *
+   * Also sets `this.agentsWindowSetupFailed` so subsequent pane scans are
+   * throttled while the window is known-unready.
+   */
+  public async ensureAgentsWindow(): Promise<{ ok: boolean; error?: string }> {
+    // Step 1: ensure the session exists. Use exact-match targeting so
+    // "has-session -t =orr-else" never resolves "orr-else-coordinator".
+    const sessionExists = await verifyExactSession(this.sessionName);
+    if (!sessionExists) {
+      try {
+        await tmux([TmuxCommand.NEW_SESSION, '-d', '-s', this.sessionName, '-n', Defaults.TMUX_COORDINATOR_WINDOW]);
+      } catch (error) {
+        const msg = `Failed to create tmux session "${this.sessionName}": ${String(error)}`;
+        this.agentsWindowSetupFailed = true;
+        this.lastAgentsWindowSetupError = msg;
+        Logger.error(Component.FACTORY, 'Hard setup failure: could not create tmux session', {
+          sessionName: this.sessionName,
+          error: String(error)
+        });
+        return { ok: false, error: msg };
+      }
     }
 
+    // Step 2: ensure the Agents window exists.
+    let windowAlreadyExists = false;
     try {
-      const windows = (await tmux([TmuxCommand.LIST_WINDOWS, '-t', this.sessionName, '-F', '#{window_name}'])).trim().split('\n');
-      if (!windows.includes(Defaults.TMUX_AGENTS_WINDOW)) {
-        await tmux([TmuxCommand.NEW_WINDOW, '-t', this.sessionName, '-n', Defaults.TMUX_AGENTS_WINDOW]);
+      const windows = (await tmux([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
+      windowAlreadyExists = windows.includes(Defaults.TMUX_AGENTS_WINDOW);
+    } catch (error) {
+      const msg = `Failed to list windows for session "${this.sessionName}": ${String(error)}`;
+      this.agentsWindowSetupFailed = true;
+      this.lastAgentsWindowSetupError = msg;
+      Logger.error(Component.FACTORY, 'Hard setup failure: could not list tmux windows', {
+        sessionName: this.sessionName,
+        error: String(error)
+      });
+      return { ok: false, error: msg };
+    }
+
+    if (!windowAlreadyExists) {
+      try {
+        await tmux([TmuxCommand.NEW_WINDOW, '-t', exactSession(this.sessionName), '-n', Defaults.TMUX_AGENTS_WINDOW]);
+      } catch (error) {
+        const msg = `Failed to create Agents window in session "${this.sessionName}": ${String(error)}`;
+        this.agentsWindowSetupFailed = true;
+        this.lastAgentsWindowSetupError = msg;
+        Logger.error(Component.FACTORY, 'Hard setup failure: new-window for Agents failed', {
+          sessionName: this.sessionName,
+          error: String(error)
+        });
+        return { ok: false, error: msg };
       }
+
+      // Step 3: verify the window actually exists after creation. A spurious
+      // fork/device error might silently succeed from tmux's perspective while
+      // the window was never actually created.
+      try {
+        const windowsAfter = (await tmux([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
+        if (!windowsAfter.includes(Defaults.TMUX_AGENTS_WINDOW)) {
+          const msg = `Agents window not found in session "${this.sessionName}" after creation`;
+          this.agentsWindowSetupFailed = true;
+          this.lastAgentsWindowSetupError = msg;
+          Logger.error(Component.FACTORY, 'Hard setup failure: Agents window missing after new-window', {
+            sessionName: this.sessionName
+          });
+          return { ok: false, error: msg };
+        }
+      } catch (error) {
+        const msg = `Failed to verify Agents window after creation: ${String(error)}`;
+        this.agentsWindowSetupFailed = true;
+        this.lastAgentsWindowSetupError = msg;
+        Logger.error(Component.FACTORY, 'Hard setup failure: could not verify Agents window', {
+          sessionName: this.sessionName,
+          error: String(error)
+        });
+        return { ok: false, error: msg };
+      }
+    }
+
+    // Step 4: apply window options. remain-on-exit is required; pane-border-status is best-effort.
+    try {
       await tmux([
         TmuxCommand.SET_WINDOW_OPTION,
         '-t',
-        `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`,
+        `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`,
         TmuxOption.REMAIN_ON_EXIT,
         TmuxOptionValue.OFF
       ]);
-      // Enable the pane border status bar once when the Agents window is ready.
-      // This is a window-level option: setting it here (rather than per-spawn)
-      // ensures N concurrent spawns do not issue N redundant window-option writes.
-      // Non-fatal: a rejection from an older tmux must not prevent spawn.
-      tmux([
-        TmuxCommand.SET_OPTION,
-        '-w',
-        '-t',
-        `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`,
-        TmuxOption.PANE_BORDER_STATUS,
-        TmuxOptionValue.PANE_BORDER_STATUS_TOP
-      ]).catch(() => {});
     } catch (error) {
-      // Session might not exist yet if just created
+      // Non-fatal: warn but do not fail setup — the window is verified to exist.
       Logger.warn(Component.FACTORY, 'Failed to configure agents window in tmux session', { sessionName: this.sessionName, error: String(error) });
     }
+
+    // Enable the pane border status bar once when the Agents window is ready.
+    // This is a window-level option: setting it here (rather than per-spawn)
+    // ensures N concurrent spawns do not issue N redundant window-option writes.
+    // Non-fatal: a rejection from an older tmux must not prevent spawn.
+    tmux([
+      TmuxCommand.SET_OPTION,
+      '-w',
+      '-t',
+      `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`,
+      TmuxOption.PANE_BORDER_STATUS,
+      TmuxOptionValue.PANE_BORDER_STATUS_TOP
+    ]).catch(() => {});
+
+    // Clear any prior setup failure — window is now verified.
+    this.agentsWindowSetupFailed = false;
+    this.lastAgentsWindowSetupError = '';
+    return { ok: true };
+  }
+
+  /** Returns true when the Agents window setup is known to have failed. Exposed for testing. */
+  public isSetupFailed(): boolean {
+    return this.agentsWindowSetupFailed;
   }
 
   public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {
@@ -511,7 +652,27 @@ export class TeammateFactory {
       if (!worktreePath) {
         return { success: false, error: 'A mandatory worktreePath is required for every Orr Else teammate.' };
       }
-      await this.ensureAgentsWindow();
+      const windowSetup = await this.ensureAgentsWindow();
+      if (!windowSetup.ok) {
+        // Hard setup failure: do NOT continue — the Agents window is unverified.
+        // Record the spawn failure and return immediately.
+        await this.eventStore.record(DomainEventName.TEAMMATE_SPAWN_FAILED, {
+          beadId,
+          stateId,
+          worktreePath,
+          error: windowSetup.error
+        }).catch(() => {});
+        Logger.error(Component.FACTORY, 'Aborting spawn: Agents window setup failed', {
+          beadId,
+          stateId,
+          error: windowSetup.error
+        });
+        if (ui?.hasUI) {
+          ui.ui?.notify(`Failed to spawn teammate: Agents window setup failed`, 'error');
+          ui.ui?.setWorkingMessage(undefined);
+        }
+        return { success: false, error: windowSetup.error };
+      }
 
       const slots = await this.getAvailableSlots();
       if (slots <= 0) {
@@ -628,7 +789,7 @@ export class TeammateFactory {
         bootstrapDigestId: spawnDigestId
       });
 
-      const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
+      const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
       if (paneId) {
         // Set the visible pane title (backward compat: slot-counter reads #{pane_title}
         // via AGENT_PANE_PREFIX prefix; Pi may overwrite this, but the @orr_worker
@@ -657,7 +818,7 @@ export class TeammateFactory {
         tmux([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.PANE_BORDER_FORMAT, ORR_WORKER_BORDER_FORMAT])
           .catch(() => {});
       }
-      await tmux([TmuxCommand.SELECT_LAYOUT, '-t', `${this.sessionName}:${Defaults.TMUX_AGENTS_WINDOW}`, 'tiled']);
+      await tmux([TmuxCommand.SELECT_LAYOUT, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, 'tiled']);
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWNED, {
         beadId,
         stateId,

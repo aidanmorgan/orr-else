@@ -1539,4 +1539,148 @@ describe('Supervisor', () => {
     expect(createWorktree).toHaveBeenCalledTimes(1);
     expect(spawnTeammateInTmux).toHaveBeenCalledTimes(1);
   });
+
+  // ---------------------------------------------------------------------------
+  // s3wp.33 — slot health churn diagnostic sets
+  // trackedOnly / paneOnly / restarting / released
+  // ---------------------------------------------------------------------------
+
+  it('(s33/churn) TEAMMATE_SLOT_HEALTH_CHECKED includes trackedOnlyBeadIds for tracked-but-not-live beads', async () => {
+    // bead-1 is live; bead-tracked-only is in startedBeads but not in the live set.
+    const { supervisor, records, clock } = supervisorHarness(
+      NOW_MS,
+      [{ workerId: 'w1', beadId: 'bead-1', stateId: 'Planning', timestampMs: NOW_MS }],
+      new Set(['bead-1']),
+      2
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-tracked-only');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    (supervisor as any).startedBeadAtMs.set('bead-tracked-only', clock.now() - TimeMs.SECOND);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const event = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(event).toBeDefined();
+    // bead-tracked-only is tracked but absent from the live pane set.
+    expect(event!.data.trackedOnlyBeadIds).toContain('bead-tracked-only');
+    expect(event!.data.trackedOnlyBeadIds).not.toContain('bead-1');
+  });
+
+  it('(s33/churn) TEAMMATE_SLOT_HEALTH_CHECKED includes paneOnlyBeadIds for live-but-not-tracked beads', async () => {
+    // bead-1 is live + tracked; bead-orphan is live but NOT in startedBeads.
+    const { supervisor, records, clock } = supervisorHarness(
+      NOW_MS,
+      [{ workerId: 'w1', beadId: 'bead-1', stateId: 'Planning', timestampMs: NOW_MS }],
+      new Set(['bead-1', 'bead-orphan']),
+      2
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    // bead-orphan is in the live set but NOT in startedBeads → pane-only.
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const event = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(event).toBeDefined();
+    expect(event!.data.paneOnlyBeadIds).toContain('bead-orphan');
+    expect(event!.data.paneOnlyBeadIds).not.toContain('bead-1');
+  });
+
+  it('(s33/churn) TEAMMATE_SLOT_HEALTH_CHECKED includes restartingBeadIds for beads in inactive-restart backoff', async () => {
+    // Use a non-immediate timeout so the restart backoff is visible.
+    // The supervisorHarness uses IMMEDIATE_NO_PROGRESS_TIMEOUT_MS (1ms), so we
+    // build a custom harness with a larger noProgressTimeoutMs here.
+    const clock = createFakeClock();
+    const records: Array<{ event: string; data: any }> = [];
+    const LONGER_TIMEOUT_MS = TimeMs.MINUTE * 15;
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [{ workerId: 'w1', beadId: 'bead-1', stateId: 'Planning', timestampMs: clock.now() }] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set(['bead-1'])),
+        terminateTeammatesForBead: vi.fn(async () => ({ terminatedPaneIds: [] })),
+        captureBeadPaneText: vi.fn(async () => ''),
+        getActiveTeammateCount: vi.fn(async () => 1),
+        getAvailableSlots: vi.fn(async () => 0)
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: { teammateNoProgressTimeoutMs: LONGER_TIMEOUT_MS } }) },
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          eventsForBeads: vi.fn(async () => new Map()),
+          latestEventsForBeads: vi.fn(async () => new Map([
+            ['bead-1', { id: 'e1', type: DomainEventName.CONTEXT_COMPACTION_RECORDED, timestamp: new Date(clock.now()).toISOString(), sessionId: 's', data: { beadId: 'bead-1' } }]
+          ]))
+        },
+        beadsPort: fakeBeadsPort(),
+        worktreePort: { createWorktree: vi.fn() },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock }
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    // Set restart timestamp to NOW (0ms ago) — well within LONGER_TIMEOUT_MS.
+    (supervisor as any).inactiveRestartedAtMs.set('bead-restart', clock.now());
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const event = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(event).toBeDefined();
+    // bead-restart is within the backoff window → restarting.
+    expect(event!.data.restartingBeadIds).toContain('bead-restart');
+  });
+
+  it('(s33/churn) TEAMMATE_SLOT_HEALTH_CHECKED includes releasedBeadIds for beads durably pruned this tick', async () => {
+    const now = NOW_MS;
+    const releasedEvents = [
+      domainEvent('e1', DomainEventName.BEAD_CLAIMED, 'bead-was-released', now - 3000, { stateId: 'Planning' }),
+      domainEvent('e2', DomainEventName.BEAD_RELEASED, 'bead-was-released', now - 1000)
+    ];
+    const { supervisor, records, clock } = supervisorHarness(
+      now,
+      [{ workerId: 'w1', beadId: 'bead-1', stateId: 'Planning', timestampMs: now }],
+      new Set(['bead-1']),
+      2,
+      new Map([['bead-was-released', releasedEvents]])
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeads.add('bead-was-released');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+    (supervisor as any).startedBeadAtMs.set('bead-was-released', clock.now() - 4000);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const event = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(event).toBeDefined();
+    // bead-was-released was durably pruned this tick → releasedBeadIds.
+    expect(event!.data.releasedBeadIds).toContain('bead-was-released');
+    // bead-1 is still active → not released.
+    expect(event!.data.releasedBeadIds).not.toContain('bead-1');
+  });
+
+  it('(s33/churn) all churn sets are empty arrays when cluster is healthy and stable', async () => {
+    // All beads tracked + live, no orphans, no backoff, nothing pruned.
+    const { supervisor, records, clock } = supervisorHarness(
+      NOW_MS,
+      [{ workerId: 'w1', beadId: 'bead-1', stateId: 'Planning', timestampMs: NOW_MS }],
+      new Set(['bead-1']),
+      1
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+    (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const event = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(event).toBeDefined();
+    expect(event!.data.trackedOnlyBeadIds).toEqual([]);
+    expect(event!.data.paneOnlyBeadIds).toEqual([]);
+    expect(event!.data.restartingBeadIds).toEqual([]);
+    expect(event!.data.releasedBeadIds).toEqual([]);
+  });
 });

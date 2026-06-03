@@ -1949,7 +1949,15 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   // consistent with the operator's explicit CLI intent.
   session.teammateFactory.setMaxSlots(options.maxSlots || Defaults.MAX_SLOTS);
   const factory = session.teammateFactory;
-  await factory.ensureAgentsWindow();
+  const windowSetup = await factory.ensureAgentsWindow();
+  if (!windowSetup.ok) {
+    // Log the hard failure but allow the supervisor to start. The Supervisor's
+    // pane scan suppression will prevent repeated noise; the operator must
+    // fix the tmux environment and restart.
+    Logger.error('OrrElse', 'Agents window setup failed at startup — pane scans suppressed until resolved', {
+      error: windowSetup.error
+    });
+  }
 
   session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
     maxSlots: options.maxSlots,

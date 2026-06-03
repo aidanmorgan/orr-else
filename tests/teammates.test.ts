@@ -827,6 +827,257 @@ states:
     expect(typeof metadata?.error).toBe('string');
     expect((metadata?.error as string).length).toBeGreaterThan(0);
   });
+
+  // ---------------------------------------------------------------------------
+  // s3wp.33 — exact tmux target resolution + hard ensureAgentsWindow failure +
+  //           throttled pane scans
+  // ---------------------------------------------------------------------------
+
+  it('(s33/exact-target) list-panes target uses =session-name to avoid prefix-collision with orr-else-coordinator', async () => {
+    // Verify that every list-panes call uses "=orr-else:Agents" not "orr-else:Agents",
+    // so that a co-existing "orr-else-coordinator" session never receives the command.
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    await factory.getLiveTeammateBeadIds();
+
+    const listPanesCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('list-panes'));
+    expect(listPanesCall).toBeDefined();
+    const listPanesArgs = listPanesCall![1] as string[];
+    const targetArg = listPanesArgs[listPanesArgs.indexOf('-t') + 1];
+    // Must start with "=" to force exact session matching.
+    expect(targetArg).toMatch(/^=orr-else:/);
+    // Must NOT be the ambiguous prefix form.
+    expect(targetArg).not.toBe('orr-else:Agents');
+  });
+
+  it('(s33/exact-target) split-window target uses =session-name to avoid prefix-collision', async () => {
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    await factory.spawnTeammateInTmux('bead-exact' as any, 'Planning', worktreePath);
+
+    const splitCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('split-window'));
+    expect(splitCall).toBeDefined();
+    const splitArgs = splitCall![1] as string[];
+    const targetArg = splitArgs[splitArgs.indexOf('-t') + 1];
+    expect(targetArg).toMatch(/^=orr-else:/);
+  });
+
+  it('(s33/exact-target) new-window and list-windows in ensureAgentsWindow use =session-name', async () => {
+    // Force the code path that creates a new Agents window (list-windows returns no Agents window).
+    // Verify that new-window and list-windows both use exact-match targeting.
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' }; // no Agents window
+      if (args.includes('new-window')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '%1\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    await factory.ensureAgentsWindow();
+
+    const listWindowsCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('list-windows'));
+    for (const call of listWindowsCalls) {
+      const args = call[1] as string[];
+      const tIdx = args.indexOf('-t');
+      if (tIdx >= 0) {
+        expect(args[tIdx + 1]).toMatch(/^=/);
+      }
+    }
+
+    const newWindowCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('new-window'));
+    expect(newWindowCall).toBeDefined();
+    const newWindowArgs = newWindowCall![1] as string[];
+    const tIdx = newWindowArgs.indexOf('-t');
+    expect(newWindowArgs[tIdx + 1]).toMatch(/^=/);
+  });
+
+  it('(s33/hard-failure) ensureAgentsWindow returns { ok: false } when new-window fails', async () => {
+    // Simulate: display-message succeeds (session exists), list-windows returns no Agents window,
+    // new-window throws (e.g. fork failed: Device not configured).
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
+      if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.ensureAgentsWindow();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain('Device not configured');
+    // Setup-failed flag must be set so subsequent pane scans are suppressed.
+    expect(factory.isSetupFailed()).toBe(true);
+  });
+
+  it('(s33/hard-failure) spawn returns { success: false } immediately when ensureAgentsWindow fails', async () => {
+    const records: Array<{ event: string; data: any }> = [];
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
+      if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    const result = await factory.spawnTeammateInTmux('bead-fail' as any, 'Planning', worktreePath);
+
+    // Spawn must fail hard — do not silently continue.
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain('Device not configured');
+
+    // split-window must NOT have been called — we aborted before spawning.
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('split-window'));
+    expect(splitCalls).toHaveLength(0);
+
+    // TEAMMATE_SPAWN_FAILED must be recorded.
+    const failedEvent = records.find(r => r.event === DomainEventName.TEAMMATE_SPAWN_FAILED);
+    expect(failedEvent).toBeDefined();
+    expect(failedEvent!.data.beadId).toBe('bead-fail');
+  });
+
+  it('(s33/throttle) pane scans are suppressed (no list-panes calls) when setup is known-failed', async () => {
+    // After a hard setup failure, getLiveTeammatePanes must return cached data
+    // without issuing list-panes (no repeated PANE_SCAN_FAILED noise).
+    const records: Array<{ event: string; data: any }> = [];
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
+      if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(
+      observability,
+      configLoader,
+      { record: vi.fn(async (event: string, data: any) => records.push({ event, data })) } as any,
+      {},
+      6,
+      undefined,
+      currentExtensionPath
+    );
+
+    // Trigger setup failure.
+    await factory.ensureAgentsWindow();
+    expect(factory.isSetupFailed()).toBe(true);
+
+    // Now reset the mock to a version that would fail list-panes — if called, it would throw.
+    // We want to confirm list-panes is NOT called after setup failure.
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(async (_bin: string, args: string[]) => {
+      if ((args as string[]).includes('list-panes')) throw new Error('should not be called after setup failure');
+      return { stdout: '', stderr: '' };
+    });
+
+    // Multiple calls to getLiveTeammateBeadIds must not call list-panes.
+    await factory.getLiveTeammateBeadIds();
+    await factory.getLiveTeammateBeadIds();
+    await factory.getLiveTeammateBeadIds();
+
+    // list-panes must not appear in any mock call.
+    const listPanesCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('list-panes'));
+    expect(listPanesCalls).toHaveLength(0);
+
+    // TEAMMATE_PANE_SCAN_FAILED must NOT have been recorded (no spam).
+    const scanFailedEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_PANE_SCAN_FAILED);
+    expect(scanFailedEvents).toHaveLength(0);
+  });
+
+  it('(s33/throttle) setup failure flag clears when ensureAgentsWindow subsequently succeeds', async () => {
+    // First call fails (no Agents window, new-window throws).
+    let newWindowShouldFail = true;
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) {
+        // After the fix call, return Agents in the list.
+        return { stdout: newWindowShouldFail ? 'Coordinator\n' : 'Coordinator\nAgents\n', stderr: '' };
+      }
+      if (args.includes('new-window')) {
+        if (newWindowShouldFail) throw new Error('fork failed');
+        return { stdout: '', stderr: '' };
+      }
+      if (args.includes('split-window')) return { stdout: '%10\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+
+    // First call: fail.
+    const first = await factory.ensureAgentsWindow();
+    expect(first.ok).toBe(false);
+    expect(factory.isSetupFailed()).toBe(true);
+
+    // Fix the environment: now new-window succeeds and Agents window is listed.
+    newWindowShouldFail = false;
+
+    // Second call: succeed → setup-failed flag clears.
+    const second = await factory.ensureAgentsWindow();
+    expect(second.ok).toBe(true);
+    expect(factory.isSetupFailed()).toBe(false);
+  });
+
+  it('(s33/prefix-collision) session named "orr-else" must not be targeted as ambiguous prefix when "orr-else-coordinator" coexists', async () => {
+    // This test simulates the live incident: tmux has two sessions — "orr-else"
+    // and "orr-else-coordinator".  Without exact-match targeting, tmux would
+    // reject ambiguous prefix "orr-else" (or resolve to the wrong session).
+    // With exact-match targeting ("=orr-else"), tmux resolves unambiguously.
+    //
+    // We verify that the -t argument passed to list-panes always starts with "="
+    // so that even if an "orr-else-coordinator" session exists, it is never matched.
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, 'orr-else', currentExtensionPath);
+    await factory.getLiveTeammateBeadIds();
+
+    const listPanesCall = vi.mocked(execa).mock.calls.find(([, args]) => (args as string[]).includes('list-panes'));
+    expect(listPanesCall).toBeDefined();
+    const args = listPanesCall![1] as string[];
+    const target = args[args.indexOf('-t') + 1];
+
+    // Exact-match prefix "=" prevents tmux from treating "orr-else" as a
+    // prefix that could match "orr-else-coordinator".
+    expect(target.startsWith('=')).toBe(true);
+    expect(target).toBe('=orr-else:Agents');
+  });
+
+  it('(s33/hard-failure) ensureAgentsWindow returns { ok: false } when Agents window missing after new-window', async () => {
+    // Simulates a scenario where new-window appears to succeed but the window
+    // is absent when we re-list (e.g. partial failure from device error).
+    let listWindowsCallCount = 0;
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('list-windows')) {
+        listWindowsCallCount += 1;
+        // First call (check): no Agents; second call (verify): also no Agents (creation silent-failed).
+        return { stdout: 'Coordinator\n', stderr: '' };
+      }
+      if (args.includes('new-window')) return { stdout: '', stderr: '' }; // "succeeds" but window is absent
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.ensureAgentsWindow();
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('Agents window not found');
+    expect(factory.isSetupFailed()).toBe(true);
+    // Both list-windows calls were made (check + verify).
+    expect(listWindowsCallCount).toBeGreaterThanOrEqual(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
