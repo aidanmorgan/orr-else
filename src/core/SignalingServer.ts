@@ -56,6 +56,10 @@ export class SignalingServer {
   private readonly heartbeats = new Map<string, number>();
   private readonly heartbeatDetails = new Map<string, HeartbeatSnapshot>();
   private readonly lastRecordedHeartbeatMs = new Map<string, number>();
+  /** Per-bead promise chains that serialize async signal handling so a duplicate
+   * (network-retry of the same idempotencyKey) cannot interleave with the original
+   * and defeat the coordinator's check-then-act idempotency guard (xmp3). */
+  private readonly signalChains = new Map<string, Promise<void>>();
   private readonly port: number;
   private readonly allowedCustomEvents: ReadonlySet<string>;
   /** Actual bound port, populated after start() resolves. */
@@ -143,7 +147,10 @@ export class SignalingServer {
         });
 
         res.status(HttpStatus.OK).json({ ok: true });
-        void tracedSignal(event).catch(async error => {
+        // Enqueue the handler on this bead's serialization chain (fire-and-forget):
+        // the HTTP response is already sent, but handling runs sequentially per bead
+        // so a duplicate retry observes the original's recorded idempotency key.
+        this.enqueueBeadSignal(event.beadId, () => tracedSignal(event).catch(async error => {
           Logger.error(Component.SIGNALING, 'Asynchronous teammate signal handler failed', {
             type: event.type,
             beadId: event.beadId,
@@ -166,7 +173,7 @@ export class SignalingServer {
               stack: (recordError as Error).stack
             });
           }
-        });
+        }));
       }));
 
       app.post(ApiPath.HEARTBEAT, asyncRoute(async (req, res) => {
@@ -213,12 +220,29 @@ export class SignalingServer {
     });
   }
 
+  /**
+   * Run `handler` after any previously-enqueued handler for the same bead has
+   * settled, so signal handling is serialized per bead. The chain link always
+   * runs (regardless of the prior link's outcome) and the chain entry is pruned
+   * once it settles with nothing newer queued, keeping the map bounded.
+   */
+  private enqueueBeadSignal(beadId: string, handler: () => Promise<void>): void {
+    const key = beadId || '__unkeyed__';
+    const previous = this.signalChains.get(key) ?? Promise.resolve();
+    const next = previous.then(handler, handler);
+    this.signalChains.set(key, next);
+    void next.finally(() => {
+      if (this.signalChains.get(key) === next) this.signalChains.delete(key);
+    });
+  }
+
   public stop() {
     this.server?.close();
     this.server = undefined;
     this.boundPort = undefined;
     this.heartbeats.clear();
     this.heartbeatDetails.clear();
+    this.signalChains.clear();
   }
 
   /** Returns true if the HTTP server is currently listening. */

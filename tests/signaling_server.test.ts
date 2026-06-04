@@ -190,6 +190,35 @@ states:
     }
   });
 
+  it('serializes async signal handling per bead so duplicate retries cannot interleave (xmp3)', async () => {
+    let active = 0;
+    let maxActive = 0;
+    let completed = 0;
+    const server = new SignalingServer(async () => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await new Promise(resolve => setTimeout(resolve, 60));
+      active--;
+      completed++;
+    }, observability, eventStore, 39500 + (process.pid % 1000));
+    const port = await server.start();
+    try {
+      // Two POSTs of the SAME signal (same beadId + idempotencyKey) — a network-retry duplicate.
+      const body = JSON.stringify(eventBody());
+      const headers = { 'Content-Type': 'application/json' };
+      await Promise.all([
+        fetch(`http://127.0.0.1:${port}/signals`, { method: 'POST', headers, body }),
+        fetch(`http://127.0.0.1:${port}/signals`, { method: 'POST', headers, body })
+      ]);
+      // Wait until both fire-and-forget handlers have run.
+      await waitFor(() => expect(completed).toBe(2));
+      // They must NEVER have executed concurrently for the same bead.
+      expect(maxActive).toBe(1);
+    } finally {
+      server.stop();
+    }
+  });
+
   it('rejects malformed typed events without invoking the handler', async () => {
     const events: any[] = [];
     const server = new SignalingServer(event => {
