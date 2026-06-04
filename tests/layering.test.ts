@@ -48,8 +48,8 @@ const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
   },
   {
     layer: 'shared',
-    pattern: /^src\/(?:constants|types)\//,
-    intent: 'Shared constants and types are dependency leaves for runtime layers.'
+    pattern: /^src\/(?:constants|types)\/|^src\/contract(?:\.type-tests)?\.ts$/,
+    intent: 'Shared constants, types, and the harness-owned tool/verify contract are dependency leaves for runtime layers.'
   }
 ];
 

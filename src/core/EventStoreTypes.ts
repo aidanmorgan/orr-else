@@ -6,9 +6,21 @@
  * EventStore re-exports all of these so existing callers are unaffected.
  */
 
-import type { DomainEventName, ToolResultStatus } from '../constants/index.js';
+import type { DomainEventName } from '../constants/index.js';
 import type { HarnessBeadMetadata } from '../types/index.js';
 import type { RestartKind, MergeAndCommitStatus } from '../constants/index.js';
+
+/**
+ * The CANONICAL tool-result base now lives in the harness-owned contract module
+ * (`orr-else/contract`, src/contract.ts) so there is ONE definition shared by
+ * the tools, the verifier, and this event-payload layer. We re-export it here
+ * so existing callers that pull ToolResultBase off this module stay unaffected
+ * (pi-experiment-0yt5.15 reconciles the pf7v duplicate).
+ *
+ * EventStoreTypes importing FROM the lean contract is fine; the contract must
+ * never import EventStoreTypes (that would make the contract graph heavy).
+ */
+export type { ToolResultBase } from '../contract.js';
 
 /**
  * The payload carried across the EventStore persistence boundary.
@@ -20,27 +32,6 @@ import type { RestartKind, MergeAndCommitStatus } from '../constants/index.js';
  * instead of a silent `undefined` — exactly the safety `any` was throwing away.
  */
 export type EventData = Record<string, unknown>;
-
-/**
- * Typed shape of the tool-result payload the artifact-presence gate / verifier
- * reads off a recorded event (pf7v coherence with the typed-handle bead 0yt5.x).
- *
- * Recorded under the event's `data.result` (or as the `data` itself for
- * tool-result events); declared here so producers and the verifier share one
- * compile-checked contract instead of duck-typing the same fields twice.
- */
-export interface ToolResultBase {
-  tool: string;
-  status: ToolResultStatus.PASSED | ToolResultStatus.REJECTED;
-  /**
-   * Serialized failure-category string (the `ProjectToolFailureCategory` enum
-   * value). Typed as `string` rather than the enum because that enum lives in
-   * the plugin layer and core must not import upward.
-   */
-  failureCategory?: string;
-  outputFile?: string;
-  outputFileBytes?: number;
-}
 
 export interface DomainEvent {
   id: string;
