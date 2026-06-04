@@ -46,7 +46,10 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { RequiredToolResolver } from '../src/core/RequiredToolResolver.js';
-import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
+import { Observability } from '../src/core/Observability.js';
+import { SignalingServer, type SignalAck, type SignalGateVerdict } from '../src/core/SignalingServer.js';
+import { createTeammateEventIdempotencyKey, type TeammateEvent } from '../src/core/TeammateEvents.js';
+import { DomainEventName, ToolResultStatus, TeammateEventType } from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
@@ -271,5 +274,119 @@ describe('AC5 — per-verify isolation: throw and timeout both yield FAIL withou
     const result = await runVerifierGate(baseCtx, ['boom', 'ok'], new FakeStore(), { verifyTimeoutMs: 200 });
     expect(result.perTool.map(p => p.tool)).toEqual(['boom', 'ok']);
     expect(result.failures.map(f => f.tool)).toEqual(['boom']);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AC3 (decision B) — VERDICT ROUND-TRIP: the status-mutating completion signal
+// runs the gate SYNCHRONOUSLY in the request handler and returns a STRUCTURED
+// VERDICT to the caller (advance vs reject+verdict/reasons) — NOT fire-and-forget
+// {ok:true}. We drive the REAL gate (fixture verify() registered via the contract
+// `verifier`) through the SignalingServer's hold/send ack — exactly how
+// handleTeammateEvent wires it — and assert the HTTP response carries the verdict.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('AC3 — synchronous gate verdict round-trip in the completion-signal HTTP response', () => {
+  // A handler modelled on handleTeammateEvent's gate wiring: hold the response
+  // SYNCHRONOUSLY for the status-mutating completion signal, run the gate, send
+  // the structured verdict. Non-STATE_TRANSITIONED signals stay fire-and-forget.
+  function gatedHandler(deps: CoordinatorVerifierGateDeps) {
+    return async (event: TeammateEvent, ack: SignalAck): Promise<void> => {
+      if (event.type !== TeammateEventType.STATE_TRANSITIONED) return;
+      ack.hold();
+      const outcome = await evaluateCoordinatorGate(deps, {
+        beadId: event.beadId,
+        stateId: event.stateId,
+        actionId: (event as { actionId?: string }).actionId || '',
+        requiredTools: ['tA']
+      });
+      if (!outcome.ran) { ack.send(); return; }
+      const verdict: SignalGateVerdict = {
+        pass: outcome.pass,
+        failures: outcome.failures,
+        rejectMessage: outcome.rejectMessage
+      };
+      ack.send(verdict);
+    };
+  }
+
+  function transitionBody(overrides: Record<string, unknown> = {}) {
+    const base = {
+      type: TeammateEventType.STATE_TRANSITIONED,
+      beadId: 'bd-1',
+      workerId: 'worker-1',
+      stateId: 'Implementing',
+      actionId: 'code',
+      transitionEvent: 'SUCCESS',
+      summary: 'done',
+      evidence: 'evidence recorded',
+      handover: 'handover recorded',
+      timestamp: Date.now()
+    };
+    return { ...base, idempotencyKey: createTeammateEventIdempotencyKey(base), ...overrides };
+  }
+
+  async function withServer(deps: CoordinatorVerifierGateDeps, run: (port: number) => Promise<void>): Promise<void> {
+    const observability = new Observability(h.configLoader, undefined, h.projectRoot);
+    await observability.initialize();
+    const port = 39920 + (process.pid % 60);
+    const server = new SignalingServer(gatedHandler(deps), observability, h.store, port);
+    await server.start();
+    try {
+      await run(port);
+    } finally {
+      server.stop();
+      observability.shutdown();
+    }
+  }
+
+  it('a gate that FAILS returns the structured verdict (pass:false + failures{tool,verdict,reasons} + rejectMessage), NOT a bare {ok:true}', async () => {
+    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+    });
+    registerVerify('tA', () => ({ verdict: VerifyVerdict.FAIL, reasons: ['tA content invalid'] }));
+
+    await withServer(h.deps, async (port) => {
+      const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(transitionBody())
+      });
+      const body = await response.json() as {
+        ok?: boolean;
+        blocked?: boolean;
+        gate?: { pass: boolean; failures: Array<{ tool: string; verdict?: string; reasons: string[] }>; rejectMessage: string };
+      };
+
+      // Structured rejection — NOT a bare {ok:true}.
+      expect(body.ok).toBe(false);
+      expect(body.blocked).toBe(true);
+      expect(body.gate).toBeDefined();
+      expect(body.gate!.pass).toBe(false);
+      expect(body.gate!.failures[0].tool).toBe('tA');
+      expect(body.gate!.failures[0].verdict).toBe(VerifyVerdict.FAIL);
+      expect(body.gate!.failures[0].reasons).toContain('tA content invalid');
+      expect(body.gate!.rejectMessage).toContain('tA content invalid');
+    });
+  });
+
+  it('a gate that PASSes returns an advance verdict {ok:true, gate:{pass:true}}', async () => {
+    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+    });
+    registerVerify('tA', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
+
+    await withServer(h.deps, async (port) => {
+      const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(transitionBody())
+      });
+      const body = await response.json() as { ok?: boolean; gate?: { pass: boolean } };
+      expect(body.ok).toBe(true);
+      expect(body.gate).toBeDefined();
+      expect(body.gate!.pass).toBe(true);
+    });
   });
 });

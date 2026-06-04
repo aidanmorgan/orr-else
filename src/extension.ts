@@ -39,7 +39,7 @@ import { registerBuiltInVerifiers } from './tools/index.js';
 import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
-import { SignalingServer } from './core/SignalingServer.js';
+import { SignalingServer, type SignalAck } from './core/SignalingServer.js';
 import { loadCoordinatorWorkerExtensions } from './core/CoordinatorExtensionLoader.js';
 import { evaluateCoordinatorGate, validateRequiredToolVerifiers } from './core/CoordinatorVerifierGate.js';
 import { Bead, BeadId } from './types/index.js';
@@ -1466,7 +1466,7 @@ async function latestWorktreePathForBead(services: RuntimeServices, beadId: stri
   return undefined;
 }
 
-async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices, session: ExtensionSession) {
+async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices, session: ExtensionSession, ack?: SignalAck) {
   const currentSupervisor = session.supervisor;
   if (!currentSupervisor) return;
 
@@ -1475,6 +1475,15 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   if (event.type === TeammateEventType.HEARTBEAT) {
     Logger.debug(Component.ORR_ELSE, 'Received teammate heartbeat', { beadId: event.beadId, workerId: event.workerId });
     return;
+  }
+
+  // AC3 (pi-experiment-0yt5.20): a STATE_TRANSITIONED signal is the only
+  // status-mutating completion signal that can hit the COORDINATOR-side verifier
+  // gate. Hold the HTTP response SYNCHRONOUSLY (before any await) so the gate's
+  // structured verdict round-trips back to the caller instead of a fire-and-forget
+  // {ok:true}. Every other signal leaves the response on its immediate path.
+  if (ack && event.type === TeammateEventType.STATE_TRANSITIONED) {
+    ack.hold();
   }
 
   const priorEvents = await services.eventStore.eventsForBead(beadId);
@@ -1592,6 +1601,15 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             evaluatedTools: gateOutcome.evaluatedTools
           });
 
+          // AC3: round-trip the structured rejection to the caller SYNCHRONOUSLY
+          // (before the slow BLOCKED-status side effects) so the worker receives
+          // the verdict + reasons and can remediate — not a bare {ok:true}.
+          ack?.send({
+            pass: false,
+            failures: gateOutcome.failures,
+            rejectMessage: gateOutcome.rejectMessage
+          });
+
           // Block: record a STATE_TRANSITION_APPLIED that does NOT advance (the
           // bead stays in its current state — a self-loop) and persist BLOCKED
           // status carrying the structured reject so the model can remediate and
@@ -1633,6 +1651,12 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
           });
           currentSupervisor.markBeadExited(beadId);
           return;
+        }
+
+        // AC3: the gate ran and PASSed — round-trip the advance verdict to the
+        // caller before continuing the (slow) advance side effects.
+        if (gateOutcome.ran) {
+          ack?.send({ pass: true, failures: [], rejectMessage: '' });
         }
       }
     }
@@ -2226,7 +2250,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   });
   validateRequiredToolVerifiers(startupConfig);
 
-  const server = new SignalingServer(event => handleTeammateEvent(pi, ctx, event, services, session), runtimeObservability, services.eventStore, {
+  const server = new SignalingServer((event, ack) => handleTeammateEvent(pi, ctx, event, services, session, ack), runtimeObservability, services.eventStore, {
     allowedCustomEvents: startupConfig.statechart?.customEvents
   });
   const apiPort = await server.start();

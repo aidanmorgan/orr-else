@@ -7,7 +7,39 @@ import { EventStore } from './EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, OtelAttr, TeammateEventType, WorkerDefaults } from '../constants/index.js';
 
-type SignalHandler = (event: TeammateEvent) => Promise<void> | void;
+/**
+ * The structured gate verdict the COORDINATOR rounds back to the caller for a
+ * GATED status-mutating completion signal (pi-experiment-0yt5.20 AC3). Carries
+ * the verifier-gate pass/fail + the structured failures + a rendered reject so
+ * the worker receives the verdict SYNCHRONOUSLY and can remediate — instead of
+ * a fire-and-forget {ok:true} that surfaced the verdict only via BLOCKED status.
+ */
+export interface SignalGateVerdict {
+  pass: boolean;
+  /** Structured per-tool failures (tool/verdict/reasons); empty when pass. */
+  failures: unknown[];
+  /** A single rendered reject message; empty string when pass. */
+  rejectMessage: string;
+}
+
+/**
+ * The acknowledgement handle the SignalingServer passes to the signal handler.
+ *
+ * By default the server responds {ok:true} immediately and runs the handler
+ * fire-and-forget (the pre-existing live behaviour for every signal). A handler
+ * that owns a SYNCHRONOUS verdict (the gated status-mutating completion signal)
+ * calls `hold()` SYNCHRONOUSLY — before its first await — so the server defers
+ * the HTTP response, then calls `send(verdict)` once the gate has run. `send()`
+ * with no verdict (or never holding) keeps the {ok:true} fire-and-forget path.
+ */
+export interface SignalAck {
+  /** Synchronously defer the HTTP response until send() is called. */
+  hold(): void;
+  /** Resolve the deferred response, optionally carrying the gate verdict. */
+  send(verdict?: SignalGateVerdict): void;
+}
+
+type SignalHandler = (event: TeammateEvent, ack: SignalAck) => Promise<void> | void;
 
 export interface HeartbeatSnapshot {
   workerId: string;
@@ -115,7 +147,9 @@ export class SignalingServer {
             stateId: event.stateId,
             timestampMs
           });
-          await this.onSignal(event);
+          // Heartbeats are never gated — pass a no-op ack so the handler signature
+          // is satisfied without ever deferring the (already-immediate) response.
+          await this.onSignal(event, { hold: () => {}, send: () => {} });
           const lastRecorded = this.lastRecordedHeartbeatMs.get(event.workerId) || 0;
           if (timestampMs - lastRecorded >= WorkerDefaults.HEARTBEAT_RECORD_INTERVAL_MS) {
             this.lastRecordedHeartbeatMs.set(event.workerId, timestampMs);
@@ -128,6 +162,27 @@ export class SignalingServer {
           res.status(HttpStatus.OK).json({ ok: true });
           return;
         }
+
+        // ── Synchronous verdict round-trip (pi-experiment-0yt5.20 AC3) ──────────
+        // By default the HTTP response is sent immediately and handling runs
+        // fire-and-forget (the pre-existing live behaviour). A handler that owns
+        // a SYNCHRONOUS verdict — the GATED status-mutating completion signal —
+        // calls ack.hold() in its synchronous prelude (before its first await) to
+        // defer the response, then ack.send(verdict) once the gate has run. We
+        // give the handler's synchronous prelude one microtask to call hold()
+        // before deciding whether to respond now or await the verdict.
+        let held = false;
+        let responseSent = false;
+        let resolveSend: () => void = () => {};
+        const sendDeferred = new Promise<void>(resolve => { resolveSend = resolve; });
+        let verdict: SignalGateVerdict | undefined;
+        const ack: SignalAck = {
+          hold: () => { held = true; },
+          send: (gateVerdict?: SignalGateVerdict) => {
+            verdict = gateVerdict;
+            resolveSend();
+          }
+        };
 
         const tracedSignal = this.observability.tracedAsync(`signal:${event.type}`, {
           [OtelAttr.AGENT_BEAD_ID]: event.beadId,
@@ -143,13 +198,15 @@ export class SignalingServer {
             workerId: event.workerId,
             stateId: event.stateId
           });
-          await this.onSignal(event);
+          await this.onSignal(event, ack);
+          // A held handler that never explicitly sent (e.g. no gate ran on this
+          // path) still releases the deferred response with no verdict.
+          resolveSend();
         });
 
-        res.status(HttpStatus.OK).json({ ok: true });
-        // Enqueue the handler on this bead's serialization chain (fire-and-forget):
-        // the HTTP response is already sent, but handling runs sequentially per bead
-        // so a duplicate retry observes the original's recorded idempotency key.
+        // Enqueue the handler on this bead's serialization chain: handling runs
+        // sequentially per bead so a duplicate retry observes the original's
+        // recorded idempotency key (xmp3).
         this.enqueueBeadSignal(event.beadId, () => tracedSignal(event).catch(async error => {
           Logger.error(Component.SIGNALING, 'Asynchronous teammate signal handler failed', {
             type: event.type,
@@ -173,7 +230,40 @@ export class SignalingServer {
               stack: (recordError as Error).stack
             });
           }
+          // Release any held response so a failing held handler never hangs the
+          // caller — it falls back to the {ok:true} acknowledgement.
+          resolveSend();
         }));
+
+        // The handler's synchronous prelude calls ack.hold() (before its first
+        // await) when it owns a synchronous verdict — the gated status-mutating
+        // completion signal. A setImmediate yields a full macrotask, after the
+        // entire microtask queue (the enqueued handler + its traced/context hops)
+        // has drained, so `held` is observed deterministically — without racing
+        // the gate. If held, defer the response until the verdict (or the handler)
+        // settles and round-trip the structured gate verdict; otherwise respond
+        // now and keep the pre-existing fire-and-forget behaviour for every other
+        // signal.
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (held) {
+          await sendDeferred;
+          if (!responseSent) {
+            responseSent = true;
+            if (verdict && !verdict.pass) {
+              // Block: a structured rejection the worker can remediate against.
+              res.status(HttpStatus.OK).json({ ok: false, blocked: true, gate: verdict });
+            } else if (verdict) {
+              res.status(HttpStatus.OK).json({ ok: true, gate: verdict });
+            } else {
+              res.status(HttpStatus.OK).json({ ok: true });
+            }
+          }
+          return;
+        }
+        if (!responseSent) {
+          responseSent = true;
+          res.status(HttpStatus.OK).json({ ok: true });
+        }
       }));
 
       app.post(ApiPath.HEARTBEAT, asyncRoute(async (req, res) => {
