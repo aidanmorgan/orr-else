@@ -662,15 +662,30 @@ These are protocol-level tools:
 
 ### System Plugin Tools
 
-The harness ships plugin tools for:
+The harness ships plugin tools for its own control plane:
 
 - Beads orchestration.
 - Git worktrees and merge.
 - tmux teammate spawning.
 - Mailbox communication.
-- Quality checks.
 - Signaling compatibility.
 - Plugin creation.
+
+### Common Tools The Harness Owns
+
+Beyond the control-plane plugins above, the generic harness ships exactly three **common project tools** that it owns and that are useful to any consuming project, regardless of language or framework:
+
+- `git_history` — read-only Git history/blame inspection (implementation lives in the orr-else source).
+- `artifact_validator` — a generic artifact-presence/validation tool. It is framework-agnostic; the consuming project configures which artifacts it gates.
+- `read_path_context` — resolves path existence, total lines, valid read offsets, and nearest matches before a read.
+
+The harness self-registers each common tool's `verify()` callback at load, so their evidence participates in `requiredTools`/`validationRules` and artifact gating without any per-project wiring.
+
+Every other domain-specific tool — `codemap`, `python_lsp`, `sonarqube`, `ast_grep`, `reference_docs`, `pytest`, `semgrep`, `coding_standards`, `smt_lib`, `codemod`, `auto_fix`, and similar — is **not** shipped by the generic harness. Those are cerdiwen-owned project tools (see "Cerdiwen-Owned Project Tools" below).
+
+### Tool Result Contract
+
+Tools are **dual-mode**: each is a standalone CLI (a `main` entry point invokable on the command line) and also exports a `verify()` callback the harness can call directly. The harness does **no** result truncation, no result recognition, and no result steering: it does not parse, summarize, or rewrite a tool's output, and it does not inject tool-specific decision logic. Each tool is responsible for its own bounded output and for the structured evidence it returns; the harness only records that evidence and applies the configured validation rules.
 
 ### Configured Command Tools
 
@@ -697,10 +712,12 @@ Command arguments can be supplied as an array, a string, or an object whose keys
 
 ```yaml
 tools:
-  - name: reference_docs_query
+  - name: project_extension_query
     type: extension
-    description: Query the project reference-docs extension tool.
+    description: Query a project-owned extension tool.
 ```
+
+The example tool name above is a placeholder. Project-specific tools such as `reference_docs_query` are not shipped by the generic harness; they are owned by the consuming project and registered via that project's Pi extension (see "Cerdiwen-Owned Project Tools" below).
 
 The tool implementation must be registered with `pi.registerTool()` from a Pi-supported extension location: `.pi/extensions/*.ts`, `.pi/extensions/*/index.ts`, `~/.pi/agent/extensions`, or an installed Pi package. Orr Else does not register or execute these tools directly. It activates them for teammates, observes their `tool_call`/`tool_result` events, records event-store and OTEL evidence, and enforces `requiredTools`/`validationRules` from the observed result.
 
@@ -712,7 +729,7 @@ Native Pi extension tools cannot be used for harness-executed parent-context too
 
 ```yaml
 tools:
-  - name: docs_query
+  - name: project_mcp_query
     type: mcp
     server: docs
     configPath: "{{projectRoot}}/.pi/mcp/config.json"
@@ -721,6 +738,8 @@ tools:
 ```
 
 MCP-backed tools read the configured MCP server from `configPath` and call the selected MCP operation directly. If no operation is configured, the caller must pass `operation`. Optional tools report `UNAVAILABLE` for missing infrastructure; required tools report `REJECTED`.
+
+An MCP server named in `server` is a raw backend, not a harness tool. For example, a Chroma vector store sits *behind* a project-owned `reference_docs` tool as an MCP backend; Chroma itself is never registered or listed as a harness tool. See "Cerdiwen-Owned Project Tools" below.
 
 ### CWD Modes
 
@@ -737,6 +756,20 @@ Project command tools can run in:
 ### Plugin Creation
 
 `create_new_plugin` writes a new TypeScript plugin file into `src/plugins`. It enforces a single `.ts` filename and is intended for extending harness capabilities.
+
+### Cerdiwen-Owned Project Tools (registered via the cerdiwen pi extension)
+
+The cerdiwen project configures a set of domain-specific tools that are **not** part of the generic harness. They are owned by cerdiwen and registered through the cerdiwen Pi extension; the harness only activates, observes, and gates them like any other configured project tool. Examples include:
+
+- `codemap` — project structure / dependency mapping.
+- `python_lsp` — language-server symbols, diagnostics, hover, definitions, references.
+- `sonarqube`, `semgrep`, `coding_standards` — static analysis and standards checks.
+- `ast_grep`, `codemod`, `auto_fix` — structural code queries and rewrites.
+- `reference_docs` — documentation lookup. It is backed by a raw Chroma MCP vector store: Chroma is the MCP backend *behind* `reference_docs` and is **not** itself a tool.
+- `pytest` — test execution.
+- `smt_lib` — SMT solver integration.
+
+A consuming project that is not cerdiwen does not get these tools. To add equivalent capabilities, register them from your own project's Pi extension and declare them in `harness.yaml` as `type: extension`, `type: command`, or `type: mcp` tools.
 
 ## Artifact Concepts
 
