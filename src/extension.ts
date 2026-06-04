@@ -2497,13 +2497,15 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           'Use this tool when a file path or line offset is uncertain — it eliminates wasted ENOENT retries and EOF errors. ' +
           'Paths outside the active worktree or project root return a structured out_of_scope rejection (no content leak). ' +
           `Up to ${PathContextDefaults.MAX_NEAR_MATCHES} nearest matches are returned. ` +
-          `The optional slice parameter (offset + limit, capped at ${PathContextDefaults.MAX_SLICE_LINES} lines) returns bounded file content when both are valid.`,
+          `The optional slice parameter (offset + limit, capped at ${PathContextDefaults.MAX_SLICE_LINES} lines) returns bounded file content when both are valid. ` +
+          'The optional skeleton parameter returns a structural skeleton (signatures/declarations with bodies elided), or raw content when no extractor is registered for the file extension.',
         parameters: Type.Object({
           filePath: Type.String({ description: 'The candidate file path to inspect. May be absolute or relative to cwd.' }),
           offset: Type.Optional(Type.Number({ description: '1-based line offset to validate. Response indicates whether this offset is within the file and provides the valid range.' })),
-          limit: Type.Optional(Type.Number({ description: `Number of lines to request starting at offset. Capped at ${PathContextDefaults.MAX_SLICE_LINES}. Requires offset to be valid.` }))
+          limit: Type.Optional(Type.Number({ description: `Number of lines to request starting at offset. Capped at ${PathContextDefaults.MAX_SLICE_LINES}. Requires offset to be valid.` })),
+          skeleton: Type.Optional(Type.Boolean({ description: 'When true, returns a structural skeleton of the file (signatures/declarations with bodies elided) in skeletonContent, dispatched by file extension to the harness skeletons registry. If no extractor is registered for the extension, the raw file content is returned instead (skeletonFallback:true). Mutually exclusive with offset/limit.' }))
         }),
-        execute: async (params: { filePath: string; offset?: number; limit?: number }) => {
+        execute: async (params: { filePath: string; offset?: number; limit?: number; skeleton?: boolean }) => {
           const result = pathContext.resolve(params);
           // Emit a bounded domain event recording the avoided-retry category.
           // Best-effort: never blocks the tool response.
