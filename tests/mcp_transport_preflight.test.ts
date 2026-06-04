@@ -21,6 +21,7 @@ import {
   setBridgeProbeForTest
 } from '../src/core/McpTransportPreflight.js';
 import { Supervisor } from '../src/core/Supervisor.js';
+import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 import { DomainEventName, ProjectToolType } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 
@@ -226,15 +227,9 @@ function buildSupervisorForMcpGating(options: {
     { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
     {
       configLoader: { load: async () => config },
-      eventStore: {
-        record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
-        eventsForBeads: vi.fn(async () => new Map()),
-        latestEventsForBeads: vi.fn(async () => new Map()),
-        latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
-        eventsForBead: vi.fn(async () => []),
-        readAll: vi.fn(async () => []),
-        projectBead: vi.fn(async () => ({}))
-      },
+      eventStore: fakeProjectionStore({
+        record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+      }),
       beadsPort,
       worktreePort: { createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/wt' })) },
       scheduler: {

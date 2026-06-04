@@ -16,6 +16,7 @@ vi.mock('../src/core/Orchestrator.js', () => ({
 }));
 
 import { Supervisor } from '../src/core/Supervisor.js';
+import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 
 const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
 
@@ -84,9 +85,9 @@ describe('Supervisor capacity pause handling', () => {
         },
         flowManager: {},
         scheduler: {},
-        eventStore: {
-          record: vi.fn(async (event: string, data: unknown) => records.push({ event, data }))
-        },
+        eventStore: fakeProjectionStore({
+          record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+        }),
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
@@ -133,8 +134,7 @@ describe('Supervisor capacity pause handling', () => {
         },
         flowManager: {},
         scheduler: {},
-        eventStore: {
-          record: vi.fn(async () => undefined),
+        eventStore: fakeProjectionStore({
           latestEventByType: vi.fn(async () => ({
             id: 'capacity-event',
             type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
@@ -142,14 +142,14 @@ describe('Supervisor capacity pause handling', () => {
             sessionId: 'previous-session',
             data: { pauseUntil, reason: 'subscription capacity exhausted' }
           }))
-        },
+        }),
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort()
       } as any,
       { maxSlots: 1, clock }
     );
 
-    await (supervisor as any).restoreCapacityPauseFromEventStore();
+    await (supervisor as any).restoreCapacityPauseFromStore();
     await (supervisor as any).scanAndSpawn();
 
     expect(orchestratorMock.selectAssignments).not.toHaveBeenCalled();
@@ -186,9 +186,7 @@ describe('Supervisor capacity pause handling', () => {
         },
         flowManager: {},
         scheduler: {},
-        eventStore: {
-          record: vi.fn(async () => undefined)
-        },
+        eventStore: fakeProjectionStore(),
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
@@ -248,8 +246,8 @@ describe('Supervisor capacity pause handling', () => {
         },
         flowManager: {},
         scheduler: {},
-        eventStore: {
-          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+        eventStore: fakeProjectionStore({
+          record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }),
           projectBead: vi.fn(async (beadId: string) => beadId === 'bead-restart'
             ? {
               id: beadId,
@@ -260,9 +258,8 @@ describe('Supervisor capacity pause handling', () => {
               restartFromState: 'Planning',
               restartTargetState: 'Planning'
             }
-            : { id: beadId, status: 'Planning', restartRequested: false }),
-          latestEventsForBeads: vi.fn(async () => new Map())
-        },
+            : { id: beadId, status: 'Planning', restartRequested: false })
+        }),
         beadsPort: fakeBeadsPort({ claim, release: release as any, getBead }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,

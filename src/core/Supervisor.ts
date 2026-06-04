@@ -7,7 +7,7 @@ import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventNa
 import { detectFinalBlockedState, ScanCategory } from './PaneTranscriptScanner.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
-import type { DomainEvent } from './EventStore.js';
+import type { DomainEvent, ProjectionCapableStore } from './EventStore.js';
 import type { RuntimeServices, WorktreeResult } from './RuntimeServices.js';
 import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import { systemClock } from './Clock.js';
@@ -188,14 +188,27 @@ export class Supervisor {
     this.clock = options.clock || systemClock;
   }
 
+  /**
+   * Narrow read/record view of the event store the Supervisor depends on.
+   *
+   * Typing this accessor as {@link ProjectionCapableStore} (not the concrete
+   * store class) makes the dependency a structural contract: every call site
+   * below is checked against the interface, so removing a method the Supervisor
+   * needs — e.g. latestProjectToolFailureLimitEvent — is a `tsc` error here
+   * rather than a runtime "is not a function" crash inside a test double.
+   */
+  private get eventStore(): ProjectionCapableStore {
+    return this.services.eventStore;
+  }
+
   public async start() {
-    await this.restoreCapacityPauseFromEventStore();
+    await this.restoreCapacityPauseFromStore();
     // Single readAll() pass: fetch the full event log once and share it with
     // both startup helpers so coordinator boot makes exactly one O(events) scan
     // instead of two.
     let startupEvents: DomainEvent[] = [];
     try {
-      startupEvents = await this.services.eventStore.readAll();
+      startupEvents = await this.eventStore.readAll();
     } catch (error) {
       Logger.warn(Component.SUPERVISOR, 'Unable to read event store on startup; signal-state restore skipped', { error: String(error) });
     }
@@ -213,7 +226,7 @@ export class Supervisor {
     this.stopping = true;
     if (this.interval) clearInterval(this.interval);
     this.server.stop();
-    void this.services.eventStore.record(DomainEventName.HARNESS_STOPPED, {
+    void this.eventStore.record(DomainEventName.HARNESS_STOPPED, {
       requestedBeadId: this.options.requestedBeadId
     }).catch(() => {});
   }
@@ -249,7 +262,7 @@ export class Supervisor {
     for (const beadId of beadIds) {
       let stateId = 'unknown';
       try {
-        const projection = await this.services.eventStore.projectBead(beadId, { includeDetails: false });
+        const projection = await this.eventStore.projectBead(beadId, { includeDetails: false });
         if (projection.status) stateId = String(projection.status);
       } catch {
         // best-effort — keep 'unknown'
@@ -284,7 +297,7 @@ export class Supervisor {
     if (pauseUntilMs <= this.schedulingPausedUntilMs) return;
     this.schedulingPausedUntilMs = pauseUntilMs;
     this.schedulingPausedReason = reason;
-    void this.services.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
+    void this.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
       pauseUntil: this.clock.date(pauseUntilMs).toISOString(),
       reason
     }).catch(() => {});
@@ -294,8 +307,8 @@ export class Supervisor {
     });
   }
 
-  private async restoreCapacityPauseFromEventStore(): Promise<void> {
-    const latestCapacityEvent = await this.services.eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED).catch((error: unknown) => {
+  private async restoreCapacityPauseFromStore(): Promise<void> {
+    const latestCapacityEvent = await this.eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
       return undefined;
     });
@@ -325,7 +338,7 @@ export class Supervisor {
   private async rebuildProcessedSignalsFromEvents(events?: DomainEvent[]): Promise<void> {
     let rebuilt = 0;
     try {
-      const allEvents = events ?? await this.services.eventStore.readAll();
+      const allEvents = events ?? await this.eventStore.readAll();
       for (const event of allEvents) {
         if (event.type !== DomainEventName.TEAMMATE_EVENT) continue;
         const data = event.data || {};
@@ -358,7 +371,7 @@ export class Supervisor {
    */
   private async reconcileUnacknowledgedSignalIntents(events?: DomainEvent[]): Promise<void> {
     try {
-      const allEvents = events ?? await this.services.eventStore.readAll();
+      const allEvents = events ?? await this.eventStore.readAll();
 
       // Build the set of idempotency keys already processed (ACCEPT decision) or
       // already reconciled (a prior startup already emitted SIGNAL_INTENT_RECONCILED).
@@ -403,7 +416,7 @@ export class Supervisor {
           type: intentData.type,
           stateId: intentData.stateId
         });
-        await this.services.eventStore.record(DomainEventName.SIGNAL_INTENT_RECONCILED, {
+        await this.eventStore.record(DomainEventName.SIGNAL_INTENT_RECONCILED, {
           idempotencyKey: key,
           beadId: intentData.beadId,
           type: intentData.type,
@@ -508,7 +521,7 @@ export class Supervisor {
   private async quarantineBead(bead: Bead, reason: QuarantineReason, details: Record<string, unknown> = {}): Promise<void> {
     const signature = this.quarantineSignatureFor(bead);
     this.quarantine.set(bead.id, { reason, signature, details });
-    await this.services.eventStore.record(DomainEventName.BEAD_QUARANTINED, {
+    await this.eventStore.record(DomainEventName.BEAD_QUARANTINED, {
       beadId: bead.id,
       reason,
       signature,
@@ -571,7 +584,7 @@ export class Supervisor {
     const state = config.states?.[stateId];
     if (!state) return undefined;
 
-    const terminalFailureEvent = await this.services.eventStore.latestProjectToolFailureLimitEvent(bead.id, {
+    const terminalFailureEvent = await this.eventStore.latestProjectToolFailureLimitEvent(bead.id, {
       stateId,
       terminalOnly: true
     }).catch((error: unknown) => {
@@ -584,7 +597,7 @@ export class Supervisor {
     });
     if (!terminalFailureEvent) return undefined;
 
-    const events = await this.services.eventStore.eventsForBead(bead.id).catch((error: unknown) => {
+    const events = await this.eventStore.eventsForBead(bead.id).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to inspect restart events before spawn', {
         beadId: bead.id,
         stateId,
@@ -721,7 +734,7 @@ export class Supervisor {
   private async runMcpPreflightForTools(mcpToolNames: string[]): Promise<McpBridgeHealth> {
     const health = await checkMcpBridgeHealth(
       mcpToolNames,
-      (data) => this.services.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
+      (data) => this.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
     );
     // Cache on this Supervisor instance for harness_status reporting.
     if (!this.mcpBridgeHealth || (!this.mcpBridgeHealth.healthy && health.healthy)) {
@@ -799,7 +812,7 @@ export class Supervisor {
         await this.quarantineBead(bead, quarantineReason);
         return 'quarantined';
       }
-      await this.services.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
+      await this.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
     } else {
       // No worktree for this state: use the project root so the teammate runs
       // in the shared checked-out tree (read-only states such as Planning/Review).
@@ -888,7 +901,7 @@ export class Supervisor {
         }
         : { beadId };
       Logger.warn(Component.SUPERVISOR, 'Teammate process is no longer active; releasing scheduler slot', eventData);
-      await this.services.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, eventData).catch(() => {});
+      await this.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, eventData).catch(() => {});
       await this.beadsPort().release(beadId).catch((error: unknown) => {
         Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease for exited teammate', {
           beadId,
@@ -900,7 +913,7 @@ export class Supervisor {
 
   private async restartDetailsForMissingStartedBead(beadId: string): Promise<MissingStartedRestartDetails | undefined> {
     try {
-      const projection = await this.services.eventStore.projectBead(beadId, { includeDetails: false });
+      const projection = await this.eventStore.projectBead(beadId, { includeDetails: false });
       if (projection?.restartRequested === true) {
         return {
           restartKind: projection.restartKind,
@@ -918,7 +931,7 @@ export class Supervisor {
     }
 
     try {
-      const events = await this.services.eventStore.eventsForBead(beadId);
+      const events = await this.eventStore.eventsForBead(beadId);
       for (const event of [...events].reverse()) {
         const data = event.data || {};
         if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED || event.type === DomainEventName.CONTEXT_RESTART_REQUESTED) {
@@ -1087,7 +1100,7 @@ export class Supervisor {
       } catch (error) {
         this.startedBeads.delete(bead.id);
         this.startedBeadAtMs.delete(bead.id);
-        await this.services.eventStore.record(DomainEventName.ASSIGNMENT_FAILED, {
+        await this.eventStore.record(DomainEventName.ASSIGNMENT_FAILED, {
           beadId: bead.id,
           stateId: bead.stateId,
           error: String(error)
@@ -1123,7 +1136,7 @@ export class Supervisor {
 
     let groupedEvents: Map<string, DomainEvent[]>;
     try {
-      groupedEvents = await this.services.eventStore.eventsForBeads(candidates);
+      groupedEvents = await this.eventStore.eventsForBeads(candidates);
     } catch (error) {
       Logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
         beadIds: candidates.sort(),
@@ -1211,7 +1224,7 @@ export class Supervisor {
       heartbeatByBead.set(heartbeat.beadId, Math.max(previous, heartbeat.timestampMs));
     }
     const heartbeatDetails = this.server.getHeartbeatSnapshot();
-    const latestProgressEvents = await this.services.eventStore.latestEventsForBeads(liveBeadIds, {
+    const latestProgressEvents = await this.eventStore.latestEventsForBeads(liveBeadIds, {
       excludeTypes: [DomainEventName.HEARTBEAT_RECORDED, DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED],
       excludeTeammateEventTypes: [TeammateEventType.HEARTBEAT],
       excludeToolNames: [PluginToolName.BD_HEARTBEAT]
@@ -1313,7 +1326,7 @@ export class Supervisor {
       releasedBeadIds
     } = snapshot;
 
-    await this.services.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
+    await this.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
       stage,
       expectedCount,
       activeCount,
@@ -1421,7 +1434,7 @@ export class Supervisor {
       lastHeartbeatByBead
     };
 
-    await this.services.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
+    await this.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
     Logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
   }
 
@@ -1531,14 +1544,14 @@ export class Supervisor {
           evidenceLine: finalBlockedResult.evidenceLine
         });
 
-        await this.services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
+        await this.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
           beadId,
           stateId,
           summary,
           paneSnapshot,
           error: summary
         }).catch(() => {});
-        await this.services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
+        await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
           beadId,
           stateId,
           targetState: stateId,
@@ -1585,14 +1598,14 @@ export class Supervisor {
         ? `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`
         : summary;
 
-      await this.services.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
+      await this.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
         beadId,
         stateId,
         summary,
         paneSnapshot: paneSnapshot || undefined,
         error: summary
       }).catch(() => {});
-      await this.services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
+      await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
         beadId,
         stateId,
         targetState: stateId,
@@ -1629,6 +1642,8 @@ export class Supervisor {
     const cleanup = new RetentionCleanup(
       this.services.projectRoot,
       this.clock,
+      // RetentionCleanup needs the full concrete store (not the narrow
+      // ProjectionCapableStore the rest of the Supervisor consumes).
       this.services.eventStore,
       RetentionDefaults.MAX_AGE_MS,
       () => this.factory.getLiveTeammateBeadIds()

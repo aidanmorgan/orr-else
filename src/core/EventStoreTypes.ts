@@ -34,6 +34,31 @@ export interface ProjectToolFailureLimitFilterOptions {
   terminalOnly?: boolean;
 }
 
+/**
+ * Narrow read/record surface of the EventStore that the Supervisor (and the
+ * coordinator-side artifact-presence gate, 0yt5.20) actually consume.
+ *
+ * Declaring this interface lets the Supervisor depend on a structural contract
+ * rather than the concrete `EventStore` class, so test doubles are checked at
+ * compile time: a mock typed against `ProjectionCapableStore` that omits a
+ * method (e.g. `latestProjectToolFailureLimitEvent`) is a tsc error instead of
+ * a runtime crash. The real `EventStore` class structurally satisfies this
+ * interface (see the `_check` conformance assertion in EventStore.ts).
+ *
+ * It lists EVERY EventStore method the Supervisor calls — keep it in sync when
+ * the Supervisor reaches for a new EventStore method.
+ */
+export interface ProjectionCapableStore {
+  record(event: DomainEventName | string, data: unknown): Promise<void>;
+  readAll(): Promise<DomainEvent[]>;
+  projectBead(beadId: string, options?: EventProjectionOptions): Promise<Partial<HarnessBeadMetadata>>;
+  eventsForBead(beadId: string): Promise<DomainEvent[]>;
+  eventsForBeads(beadIds: Iterable<string>): Promise<Map<string, DomainEvent[]>>;
+  latestEventsForBeads(beadIds: Iterable<string>, options?: LatestEventFilterOptions): Promise<Map<string, DomainEvent>>;
+  latestEventByType(type: DomainEventName | string): Promise<DomainEvent | undefined>;
+  latestProjectToolFailureLimitEvent(beadId: string, options?: ProjectToolFailureLimitFilterOptions): Promise<DomainEvent | undefined>;
+}
+
 export interface BeadStateTransitionProjection {
   eventId: string;
   sessionId: string;

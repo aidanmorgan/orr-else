@@ -30,6 +30,7 @@ vi.mock('../src/core/Orchestrator.js', () => ({
 }));
 
 import { Supervisor } from '../src/core/Supervisor.js';
+import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 
 const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
 
@@ -88,11 +89,9 @@ function buildSupervisor(
       },
       flowManager: {},
       scheduler: {},
-      eventStore: {
-        record: vi.fn(async (event: string, data: unknown) => records.push({ event, data })),
-        latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
-        eventsForBead: vi.fn(async () => [])
-      },
+      eventStore: fakeProjectionStore({
+        record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+      }),
       beadsPort: fakeBeadsPort({ claim, release }),
       worktreePort: fakeWorktreePort({ createWorktree }),
       projectRoot: '/project/root'

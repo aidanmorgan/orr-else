@@ -24,6 +24,7 @@ export type {
   EventProjectionOptions,
   LatestEventFilterOptions,
   ProjectToolFailureLimitFilterOptions,
+  ProjectionCapableStore,
   BeadStateTransitionProjection,
   BeadStateChartProjection
 } from './EventStoreTypes.js';
@@ -32,6 +33,7 @@ import type {
   DomainEvent,
   LatestEventFilterOptions,
   ProjectToolFailureLimitFilterOptions,
+  ProjectionCapableStore,
   EventProjectionOptions,
   BeadStateChartProjection
 } from './EventStoreTypes.js';
@@ -45,7 +47,7 @@ interface EventStoreLocation {
   path: string;
 }
 
-export class EventStore {
+export class EventStore implements ProjectionCapableStore {
   private currentLocation: EventStoreLocation | null | undefined;
   private sessionId: string;
 
