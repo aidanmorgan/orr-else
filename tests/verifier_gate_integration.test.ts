@@ -185,11 +185,14 @@ describe('AC1 — end-to-end coordinator gate with a fixture dual-mode tool', ()
     // The verify() actually read back what the run() side wrote (not vacuous).
     expect(sawContent).toBe(JSON.stringify({ ok: true }));
     expect(fs.readFileSync(outputFile, 'utf8')).toBe(JSON.stringify({ ok: true }));
-    // The gate does NOT auto-route: the outcome carries NO selected edge — it
-    // only advances/blocks; the model picks the recovery edge.
-    expect((outcome as Record<string, unknown>).edge).toBeUndefined();
-    expect((outcome as Record<string, unknown>).transitionEvent).toBeUndefined();
-    expect((outcome as Record<string, unknown>).nextState).toBeUndefined();
+    // The gate does NOT auto-route: it returns ONLY a pass/block verdict — the
+    // model (not the gate) picks the recovery edge. This is structurally
+    // guaranteed by CoordinatorGateOutcome carrying no routing field; we assert
+    // it falsifiably by pinning the outcome's own keys to the verdict surface
+    // (a future field that smuggled in a routing decision would fail here).
+    expect(Object.keys(outcome).sort()).toEqual(
+      ['evaluatedTools', 'failures', 'pass', 'perTool', 'rejectMessage', 'ran'].sort()
+    );
   });
 
   it('outputFile/event ABSENT (tool not invoked) => BLOCKS (did-not-run)', async () => {
