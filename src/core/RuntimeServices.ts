@@ -21,7 +21,8 @@ import { TelemetryStore } from './Telemetry.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
 import { TransactionalStateGuard } from './TransactionalStateGuard.js';
 import { EnvVars, PluginToolName } from '../constants/index.js';
-import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
+import type { BeadStatus } from '../constants/index.js';
+import type { BeadsPort, BeadCompletionPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
 // WorktreeResult is defined in OrchestrationPorts; re-exported here for
 // backward compatibility with existing callers (git.ts, extension.ts, etc.)
@@ -151,6 +152,7 @@ class BeadsPortAdapter implements BeadsPort {
   private readonly getBeadTool;
   private readonly claimTool;
   private readonly releaseTool;
+  private readonly updateStatusTool;
   private readonly _invalidateCache: () => void;
 
   constructor(bdPlugin: RuntimePlugin, invalidateCache: () => void) {
@@ -159,6 +161,7 @@ class BeadsPortAdapter implements BeadsPort {
     this.getBeadTool = requirePluginTool(bdPlugin, PluginToolName.BD_GET_BEAD);
     this.claimTool = requirePluginTool(bdPlugin, PluginToolName.BD_CLAIM);
     this.releaseTool = requirePluginTool(bdPlugin, PluginToolName.BD_RELEASE);
+    this.updateStatusTool = requirePluginTool(bdPlugin, PluginToolName.BD_UPDATE_STATUS);
     this._invalidateCache = invalidateCache;
   }
 
@@ -182,9 +185,28 @@ class BeadsPortAdapter implements BeadsPort {
     await this.releaseTool.execute({ id });
   }
 
+  async updateStatus(id: string, status: BeadStatus, notes: string | undefined, ctx?: unknown): Promise<void> {
+    await this.updateStatusTool.execute({ id, status, notes }, ctx);
+  }
+
   invalidateCache(): void {
     this._invalidateCache();
   }
+}
+
+/**
+ * Build the narrow {@link BeadCompletionPort} (BD_UPDATE_STATUS slice) from the
+ * bd plugin. The git merge path consumes this typed port instead of doing its
+ * own stringly tool lookup. The tool handle is resolved at construction time so
+ * a missing tool fails at wiring rather than mid-merge.
+ */
+export function createBeadCompletionPort(bdPlugin: RuntimePlugin): BeadCompletionPort {
+  const updateStatusTool = requirePluginTool(bdPlugin, PluginToolName.BD_UPDATE_STATUS);
+  return {
+    async updateStatus(id: string, status: BeadStatus, notes: string | undefined, ctx?: unknown): Promise<void> {
+      await updateStatusTool.execute({ id, status, notes }, ctx);
+    }
+  };
 }
 
 /**

@@ -804,6 +804,24 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
             throw error;
           }
           bead = await normalizeIssue(eventStore, issue);
+          // Lease-ownership check: an in-progress bead is only a successful
+          // self-claim when its existing lease belongs to THIS claimant. A bead
+          // leased by a different owner/session must be rejected — otherwise a
+          // failed `--claim` against another worker's lease would be reported as
+          // a spurious self-claim.
+          const claimant = owner || bead.assigned_to;
+          const currentOwner = bead.lease?.owner || bead.assigned_to;
+          const ownedByClaimant =
+            claimant !== undefined &&
+            currentOwner !== undefined &&
+            currentOwner === claimant;
+          if (!ownedByClaimant) {
+            if (ui?.hasUI) ui.ui?.setWorkingMessage(undefined);
+            throw new Error(
+              `Cannot claim Bead ${id}: already in progress and leased by ` +
+              `${currentOwner ?? 'an unknown owner'} (claimant: ${claimant ?? 'unknown'}).`
+            );
+          }
           restartRequested = bead.restartRequested || false;
         }
 

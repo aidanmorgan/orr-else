@@ -40,7 +40,7 @@ describe('meta plugin — CREATE_NEW_PLUGIN', () => {
 
   it('returns structured { success, name, path } on successful plugin creation', async () => {
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
     expect(createTool).toBeDefined();
 
@@ -60,7 +60,7 @@ describe('meta plugin — CREATE_NEW_PLUGIN', () => {
 
   it('returns structured { success: false, error } on validation failure (non-.ts name)', async () => {
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
 
     const result = await createTool.execute({ name: 'evil.js', content: 'bad' }) as CreatePluginResult;
@@ -74,7 +74,7 @@ describe('meta plugin — CREATE_NEW_PLUGIN', () => {
 
   it('returns structured { success: false, error } on validation failure (path traversal attempt)', async () => {
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
 
     const result = await createTool.execute({ name: '../evil.ts', content: 'bad' }) as CreatePluginResult;
@@ -87,7 +87,7 @@ describe('meta plugin — CREATE_NEW_PLUGIN', () => {
 
   it('records PLUGIN_FILE_CREATED event on success', async () => {
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
 
     await createTool.execute({ name: 'event-test.ts', content: 'export default {};\n' });
@@ -135,7 +135,7 @@ describe('meta plugin — no-cap minimal schema (s3wp.27e)', () => {
     expect(largeContent.length).toBeGreaterThan(10000);
 
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
 
     const result = await createTool.execute({ name: 'large-plugin.ts', content: largeContent }) as Record<string, unknown>;
@@ -167,7 +167,7 @@ describe('meta plugin — no-cap minimal schema (s3wp.27e)', () => {
 
   it('result is never a plain string (must always be a structured object)', async () => {
     const eventStore = makeStubEventStore();
-    const plugin = createMetaPlugin(eventStore);
+    const plugin = createMetaPlugin(eventStore, tempRoot);
     const createTool = plugin.tools.find(tool => tool.name === PluginToolName.CREATE_NEW_PLUGIN)!;
 
     // Test both success and failure paths return objects, not strings

@@ -173,17 +173,12 @@ describe('git plugin merge finalization', () => {
     const closeCalls: Array<{ id: string; status: string; notes?: string }> = [];
     const configLoader = new ConfigLoader();
     const eventStore = new EventStore(configLoader);
-    const bdPlugin = {
-      name: 'bd-test',
-      tools: [{
-        name: PluginToolName.BD_UPDATE_STATUS,
-        execute: async ({ id, status, notes }: { id: string; status: string; notes?: string }) => {
-          closeCalls.push({ id, status, notes });
-          return { id, status, notes };
-        }
-      }]
+    const beadCompletionPort = {
+      updateStatus: async (id: string, status: string, notes: string | undefined) => {
+        closeCalls.push({ id, status, notes });
+      }
     };
-    const plugin = createGitPlugin(eventStore, configLoader, bdPlugin, tempRoot);
+    const plugin = createGitPlugin(eventStore, configLoader, beadCompletionPort, tempRoot);
     const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
 
     const result = await mergeTool.execute({
@@ -211,17 +206,12 @@ describe('git plugin merge finalization', () => {
     const closeCalls: Array<{ id: string; status: string; notes?: string }> = [];
     const configLoader = new ConfigLoader();
     const eventStore = new EventStore(configLoader);
-    const bdPlugin = {
-      name: 'bd-test',
-      tools: [{
-        name: PluginToolName.BD_UPDATE_STATUS,
-        execute: async ({ id, status, notes }: { id: string; status: string; notes?: string }) => {
-          closeCalls.push({ id, status, notes });
-          return { id, status, notes };
-        }
-      }]
+    const beadCompletionPort = {
+      updateStatus: async (id: string, status: string, notes: string | undefined) => {
+        closeCalls.push({ id, status, notes });
+      }
     };
-    const plugin = createGitPlugin(eventStore, configLoader, bdPlugin, tempRoot);
+    const plugin = createGitPlugin(eventStore, configLoader, beadCompletionPort, tempRoot);
     const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
 
     const result = await mergeTool.execute({
@@ -248,14 +238,10 @@ describe('git plugin merge finalization', () => {
 
     const configLoader = new ConfigLoader();
     const eventStore = new EventStore(configLoader);
-    const bdPlugin = {
-      name: 'bd-test',
-      tools: [{
-        name: PluginToolName.BD_UPDATE_STATUS,
-        execute: async ({ id, status, notes }: { id: string; status: string; notes?: string }) => ({ id, status, notes })
-      }]
+    const beadCompletionPort = {
+      updateStatus: async (_id: string, _status: string, _notes: string | undefined) => {}
     };
-    const plugin = createGitPlugin(eventStore, configLoader, bdPlugin, tempRoot);
+    const plugin = createGitPlugin(eventStore, configLoader, beadCompletionPort, tempRoot);
     const mergeTool = plugin.tools.find(tool => tool.name === PluginToolName.MERGE_AND_COMMIT)!;
 
     const result = await mergeTool.execute({

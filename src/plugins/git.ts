@@ -10,6 +10,7 @@ import { BeadStatus, Component, DomainEventName, EnvVars, FileMutationPolicyDefa
 import type { Observability } from '../core/Observability.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
 import type { MergeResult, RuntimePlugin, RuntimeTool, WorktreeResult } from '../core/RuntimeServices.js';
+import type { BeadCompletionPort } from '../core/OrchestrationPorts.js';
 
 const appendFileAsync = fs.promises.appendFile;
 const mkdirAsync = fs.promises.mkdir;
@@ -397,7 +398,7 @@ async function autoRemoveWorktreeAfterMerge(
 export function createGitPlugin(
   eventStore: EventStore,
   configLoader?: ConfigLoader,
-  bdPlugin?: RuntimePlugin,
+  beadCompletionPort?: BeadCompletionPort,
   projectRoot: string = process.cwd(),
   getLiveTeammateBeadIds?: () => Promise<Set<string>>,
   observability?: Observability
@@ -573,9 +574,8 @@ export function createGitPlugin(
             }
             await git([GitSubcommand.COMMIT, GitFlag.MESSAGE, commitMessage], projectRoot);
             if (closeAfterMerge) {
-              const closeTool = bdPlugin?.tools.find(tool => tool.name === PluginToolName.BD_UPDATE_STATUS);
-              if (!closeTool) throw new Error('Cannot close Bead during merge: bd_update_status tool is unavailable.');
-              await closeTool.execute({ id: beadId, status: BeadStatus.COMPLETED, notes: closeReason || commitMessage }, ctx);
+              if (!beadCompletionPort) throw new Error('Cannot close Bead during merge: bead completion port is unavailable.');
+              await beadCompletionPort.updateStatus(beadId, BeadStatus.COMPLETED, closeReason || commitMessage, ctx);
             }
           });
 

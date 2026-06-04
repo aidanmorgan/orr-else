@@ -12,7 +12,7 @@ export interface CreatePluginResult {
   error?: string;
 }
 
-export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
+export function createMetaPlugin(eventStore: EventStore, projectRoot: string): RuntimePlugin {
   return {
   name: 'meta-plugin-manager',
   tools: [
@@ -30,7 +30,7 @@ export function createMetaPlugin(eventStore: EventStore): RuntimePlugin {
           if (!safeName.endsWith('.ts') || safeName !== name) {
             throw new Error('Plugin name must be a single TypeScript filename ending in .ts');
           }
-          const pluginPath = path.join(process.cwd(), 'src', 'plugins', safeName);
+          const pluginPath = path.join(projectRoot, 'src', 'plugins', safeName);
           fs.writeFileSync(pluginPath, content);
           await eventStore.record(DomainEventName.PLUGIN_FILE_CREATED, {
             pluginName: safeName,

@@ -1,10 +1,15 @@
 import { Type } from "@earendil-works/pi-ai";
 import { NativeMailbox } from '../core/Mailbox.js';
 import { EventStore } from '../core/EventStore.js';
-import { EnvVars, Defaults, PluginToolName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
+import { EnvVars, PluginToolName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
+import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
-export function createMailboxPlugin(eventStore: EventStore, projectRoot: string = process.cwd()): RuntimePlugin {
+export function createMailboxPlugin(
+  eventStore: EventStore,
+  projectRoot: string = process.cwd(),
+  env: RuntimeEnvironment = nodeRuntimeEnvironment
+): RuntimePlugin {
   const mailbox = new NativeMailbox(eventStore, undefined, projectRoot);
   return {
   name: 'mailbox-communication',
@@ -32,11 +37,19 @@ export function createMailboxPlugin(eventStore: EventStore, projectRoot: string 
         recipient: Type.String({ description: "Your name (e.g., 'TeamLead')" })
       }),
       execute: async (params: unknown) => {
-        // recipient is declared in the parameters schema but the actual lookup uses the worker env var
-        void params; // params shape: { recipient: string } — unused at runtime; lookup uses WORKER_ID
-        const workerId = process.env[EnvVars.WORKER_ID] || Defaults.API_HOST; // Fallback
+        const { recipient } = (params && typeof params === 'object' ? params : {}) as { recipient?: string };
+        // Resolve identity: explicit recipient param wins, else the injected
+        // RuntimeEnvironment's WORKER_ID. Fail closed — never fall back to an
+        // arbitrary identity, which would leak another worker's mail.
+        const resolved = (recipient && recipient.trim()) || env.env(EnvVars.WORKER_ID)?.trim();
+        if (!resolved) {
+          throw new Error(
+            'check_mailbox: cannot resolve recipient identity. Pass a `recipient` ' +
+            `or set ${EnvVars.WORKER_ID} in the environment.`
+          );
+        }
         // Return routing-only result: ids + metadata, no body content.
-        return await mailbox.listMessagesFor(workerId);
+        return await mailbox.listMessagesFor(resolved);
       }
     },
     {

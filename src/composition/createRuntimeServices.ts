@@ -19,7 +19,7 @@ import { ConfigLoader } from '../core/ConfigLoader.js';
 import { EventStore } from '../core/EventStore.js';
 import { Observability } from '../core/Observability.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
-import { assembleRuntimeServices } from '../core/RuntimeServices.js';
+import { assembleRuntimeServices, createBeadCompletionPort } from '../core/RuntimeServices.js';
 import { EnvVars } from '../constants/index.js';
 import type { TeammateSpawner } from '../core/OrchestrationPorts.js';
 import type { ApiAddress } from '../types/index.js';
@@ -83,7 +83,10 @@ export function createRuntimeServices(
       ? teammateFactoryRef.getLiveTeammateBeadIds()
       : Promise.resolve(new Set<string>());
 
-  const gitPlugin = createGitPlugin(eventStore, configLoader, bdPlugin, projectRoot, getLiveTeammateBeadIds, observability);
+  // Typed completion slice (BD_UPDATE_STATUS) so the git merge path closes a bead
+  // via an injected port rather than a stringly tool lookup.
+  const beadCompletionPort = createBeadCompletionPort(bdPlugin);
+  const gitPlugin = createGitPlugin(eventStore, configLoader, beadCompletionPort, projectRoot, getLiveTeammateBeadIds, observability);
 
   // WI-20: single factory. Extension.ts uses ??= so SESSION_START-constructed
   // factory is reused for coordinator. This instance is the default for tests
@@ -108,10 +111,10 @@ export function createRuntimeServices(
       bd: bdPlugin,
       git: gitPlugin,
       teammates: teammatePlugin(teammateFactory),
-      mailbox: createMailboxPlugin(eventStore, projectRoot),
+      mailbox: createMailboxPlugin(eventStore, projectRoot, env),
       quality: createQualityPlugin(),
       signaling: signalingPlugin,
-      meta: createMetaPlugin(eventStore),
+      meta: createMetaPlugin(eventStore, projectRoot),
       teammateSpawner: teammateFactory as TeammateSpawner,
       apiAddress,
       // FIX-1: thread BeadsClient.invalidate() into the adapter so the Supervisor

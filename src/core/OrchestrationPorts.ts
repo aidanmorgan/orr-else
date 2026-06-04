@@ -10,7 +10,7 @@
  */
 
 import type { Bead } from '../types/index.js';
-import type { BeadsIssueStatus } from '../constants/index.js';
+import type { BeadsIssueStatus, BeadStatus } from '../constants/index.js';
 
 // ---------------------------------------------------------------------------
 // Shared result contract for git worktree provisioning.
@@ -64,6 +64,12 @@ export interface BeadsPort {
   /** BD_RELEASE — release the lease on a bead. */
   release(id: string): Promise<void>;
   /**
+   * BD_UPDATE_STATUS — transition a bead to a coarse lifecycle status.
+   * Used by the git merge path to close a bead after a clean merge without a
+   * stringly tool lookup. Passes ctx through for audit/UI.
+   */
+  updateStatus(id: string, status: BeadStatus, notes: string | undefined, ctx?: unknown): Promise<void>;
+  /**
    * Invalidate the read cache so the next read fetches fresh data from bd.
    * Call at the start of each supervisor tick so that mutations made by worker
    * processes (separate bd instances, separate caches) are visible to the
@@ -72,6 +78,13 @@ export interface BeadsPort {
    */
   invalidateCache(): void;
 }
+
+/**
+ * Narrow completion slice of BeadsPort consumed by the git merge path.
+ * The git plugin depends on this minimal port (typed, injected) rather than on
+ * a RuntimePlugin array + stringly tool lookup.
+ */
+export type BeadCompletionPort = Pick<BeadsPort, 'updateStatus'>;
 
 // ---------------------------------------------------------------------------
 // WorktreePort — wraps CREATE_WORKTREE
