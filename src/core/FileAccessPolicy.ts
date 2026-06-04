@@ -17,6 +17,7 @@ import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnviro
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';
 import type { EventStore } from './EventStore.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
+import type { ArtifactPaths } from './ArtifactPaths.js';
 
 interface MutationContext {
   beadId?: string;
@@ -78,7 +79,8 @@ export class FileAccessPolicy {
     private readonly shellCommandParser: ShellCommandParser,
     private readonly planWriteSet: PlanWriteSet,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    private readonly artifactPaths?: ArtifactPaths
   ) {}
 
   public async apply(event: any): Promise<PolicyResult | null> {
@@ -134,6 +136,15 @@ export class FileAccessPolicy {
         await this.recordRejection(event, context, targetPath, planContractRejection.rejection || 'PROTOCOL VIOLATION: plan contract mutation rejected.');
         return planContractRejection;
       }
+      return null;
+    }
+
+    // A declared writable system artifact (e.g. lesson capture) is permitted at its
+    // EXACT resolved path even though it is project-scoped (outside the worktree) and
+    // not in the plan write set. Undeclared paths fall through to the normal checks. (g9ye)
+    const declaredArtifact = await this.declaredWritableArtifactMatch(targetPath, context);
+    if (declaredArtifact) {
+      await this.recordSystemArtifactWritePermitted(context, declaredArtifact);
       return null;
     }
 
@@ -208,6 +219,12 @@ export class FileAccessPolicy {
     if (operationalRejection) {
       await this.recordRejection(event, context, target.text, operationalRejection);
       return { rejection: operationalRejection };
+    }
+    // Declared writable system artifact bypass (g9ye) — same as the native path.
+    const declaredArtifact = await this.declaredWritableArtifactMatch(target.text, context);
+    if (declaredArtifact) {
+      await this.recordSystemArtifactWritePermitted(context, declaredArtifact);
+      return null;
     }
     // (mis) Early framework-root write-set rejection for shell targets.
     const frameworkRootRejection = this.frameworkRootWriteSetRejection(target.text, context, `\`${NativePiToolName.BASH}\``);
@@ -479,6 +496,38 @@ export class FileAccessPolicy {
       toolLabel
     });
     return result.passed ? null : result.reason || `PROTOCOL VIOLATION: ${toolLabel} target is outside the approved plan write set.`;
+  }
+
+  /**
+   * Returns the resolved artifact path if `targetPath` exactly matches a declared
+   * writable system artifact for the current bead/state, otherwise null.
+   */
+  private async declaredWritableArtifactMatch(targetPath: string, context: MutationContext): Promise<string | null> {
+    if (!this.artifactPaths || !context.beadId) return null;
+    const resolvedTarget = this.canonicalPath(this.resolvePath(targetPath, context.cwd));
+    const actionId = this.env.env(EnvVars.ACTION_ID);
+    const writablePaths = await this.artifactPaths.resolveWritableArtifactPaths({
+      beadId: context.beadId,
+      stateId: context.stateId,
+      actionId: actionId || undefined,
+      includeContent: false
+    }).catch(() => [] as string[]);
+    for (const candidate of writablePaths) {
+      if (this.canonicalPath(candidate) === resolvedTarget) return candidate;
+    }
+    return null;
+  }
+
+  private async recordSystemArtifactWritePermitted(context: MutationContext, resolvedPath: string): Promise<void> {
+    await this.eventStore.record(DomainEventName.SYSTEM_ARTIFACT_WRITE_PERMITTED, {
+      beadId: context.beadId,
+      stateId: context.stateId,
+      actionId: this.env.env(EnvVars.ACTION_ID),
+      resolvedPath,
+      pathClass: 'systemArtifact'
+    }).catch(error => {
+      Logger.warn(Component.ORR_ELSE, 'Failed to record system-artifact write permit', { error: String(error) });
+    });
   }
 
   private async planContractArtifactRejection(

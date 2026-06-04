@@ -135,7 +135,13 @@ export class RequiredToolResolver {
 
   private templateValue(key: string, context: RequiredToolResolverContext): string | undefined {
     const trimmedKey = key.trim();
-    const templates = context.config.settings.artifacts?.templates || {};
+    // Normalize artifact templates (string shorthand OR { path, ... } object) to
+    // their path string for template-variable substitution.
+    const templates: Record<string, string> = Object.fromEntries(
+      Object.entries(context.config.settings.artifacts?.templates || {}).map(
+        ([name, entry]) => [name, typeof entry === 'string' ? entry : entry.path]
+      )
+    );
     const directValues: Record<string, string | undefined> = {
       projectRoot: context.projectRoot || this.projectRoot,
       worktreePath: context.worktreePath,

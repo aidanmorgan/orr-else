@@ -311,7 +311,7 @@ export function assembleRuntimeServices(
     telemetryStore: new TelemetryStore(),
     artifactPaths,
     planWriteSet,
-    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot),
+    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot, artifactPaths),
     shellCommandParser,
     transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
     toolCallPathFactory: new ToolCallPathFactory(),

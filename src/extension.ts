@@ -1216,6 +1216,12 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   const worklogManager = new WorklogManager(services.eventStore);
   const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
 
+  // Generate directories for declared artifact types (ensureDir:true) so a teammate
+  // can write them before any plan write set exists (e.g. lesson capture). g9ye.
+  await services.artifactPaths.ensureArtifactDirs({ beadId, stateId, actionId: action.id }).catch(error => {
+    Logger.warn(Component.ORR_ELSE, 'Failed to ensure declared artifact directories', { beadId, stateId, error: String(error) });
+  });
+
   session.activeRun = {
     beadId,
     stateId,

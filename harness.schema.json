@@ -193,7 +193,23 @@
             "baseDir": { "type": "string" },
             "templates": {
               "type": "object",
-              "additionalProperties": { "type": "string" }
+              "description": "Artifact-type registry. Each entry is a path template (string shorthand) or a rich declaration object. Object form lets an extension declare a harness-generated, writable system artifact.",
+              "additionalProperties": {
+                "oneOf": [
+                  { "type": "string" },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["path"],
+                    "properties": {
+                      "path": { "type": "string", "description": "Path template (supports {{beadId}}, {{stateId}}, {{baseDir}}, {{projectRoot}}, {{worktreePath}})." },
+                      "scope": { "type": "string", "enum": ["project", "worktree"], "description": "Root the template resolves against when relative. Defaults to project." },
+                      "writable": { "type": "boolean", "description": "Permit the teammate to write this artifact's exact resolved path outside the plan write set." },
+                      "ensureDir": { "type": "boolean", "description": "Harness ensures the artifact's parent directory exists (mkdir -p)." }
+                    }
+                  }
+                ]
+              }
             }
           }
         },

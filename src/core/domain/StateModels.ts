@@ -189,9 +189,32 @@ export interface CompatibilityDiscoveryConfig {
   agentDirs?: string[];
 }
 
+/**
+ * Rich declaration for an artifact type. Lets a project extension declare an
+ * artifact the harness should generate a directory for and/or permit the
+ * teammate to write outside the plan write-set. The plain-string shorthand
+ * (`name: "<template>"`) remains valid and is equivalent to `{ path: "<template>" }`.
+ */
+export interface ArtifactTemplate {
+  /** Path template (supports {{beadId}}, {{stateId}}, {{baseDir}}, {{projectRoot}}, {{worktreePath}}, ...). */
+  path: string;
+  /** Which root the template resolves against when relative. Defaults to 'project'. */
+  scope?: 'project' | 'worktree';
+  /**
+   * When true, the teammate may write to this artifact's exact resolved path even
+   * when it is NOT in the bead's approved plan write set (path-class systemArtifact).
+   * Undeclared workspace-root writes remain rejected.
+   */
+  writable?: boolean;
+  /** When true, the harness ensures the artifact's parent directory exists (mkdir -p). */
+  ensureDir?: boolean;
+}
+
+export type ArtifactTemplateConfig = string | ArtifactTemplate;
+
 export interface ArtifactConfig {
   baseDir?: string;
-  templates?: Record<string, string>;
+  templates?: Record<string, ArtifactTemplateConfig>;
 }
 
 export interface PiShellPolicyConfig {
