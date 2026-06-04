@@ -80,6 +80,13 @@ export interface ProjectionCapableStore {
   latestEventsForBeads(beadIds: Iterable<string>, options?: LatestEventFilterOptions): Promise<Map<string, DomainEvent>>;
   latestEventByType(type: DomainEventName | string): Promise<DomainEvent | undefined>;
   latestProjectToolFailureLimitEvent(beadId: string, options?: ProjectToolFailureLimitFilterOptions): Promise<DomainEvent | undefined>;
+  /**
+   * Latest tool-result event for one (beadId, stateId, actionId, tool) tuple.
+   * Reconciles the FLAT (command/MCP) and NESTED (plugin) recorded shapes so
+   * the coordinator-side verifier gate can recover a tool's outputFile + run
+   * status (pi-experiment-0yt5.5).
+   */
+  latestToolResultEvent(beadId: string, stateId: string, actionId: string, tool: string): Promise<DomainEvent | undefined>;
 }
 
 export interface BeadStateTransitionProjection {

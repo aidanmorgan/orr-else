@@ -43,6 +43,30 @@ import type { HarnessBeadMetadata } from '../types/index.js';
 
 const existsSync = fs.existsSync;
 
+/** Path segment that marks the start of the PROJECT-scoped tool-output archive. */
+const TOOL_OUTPUT_DIR_SEGMENT = 'tool-output';
+
+/**
+ * Recover the (beadId, stateId, actionId, tool) tuple from a tool-output
+ * outputFile path. The archive layout is deterministic
+ * (`.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}/…`), so the
+ * four segments immediately after `tool-output` carry the tuple. Returns
+ * undefined when the path is not a recognisable tool-output path.
+ */
+function toolOutputPathSegments(outputFile: string):
+  | { beadId: string; stateId: string; actionId: string; tool: string }
+  | undefined {
+  const parts = outputFile.split(/[\\/]+/).filter(Boolean);
+  const anchor = parts.lastIndexOf(TOOL_OUTPUT_DIR_SEGMENT);
+  if (anchor < 0 || parts.length < anchor + 5) return undefined;
+  return {
+    beadId: parts[anchor + 1],
+    stateId: parts[anchor + 2],
+    actionId: parts[anchor + 3],
+    tool: parts[anchor + 4]
+  };
+}
+
 interface EventStoreLocation {
   dir: string;
   path: string;
@@ -303,6 +327,70 @@ export class EventStore implements ProjectionCapableStore {
       if (!latest || this.compareEvents(latest, event) < 0) latest = event;
     });
     return latest;
+  }
+
+  /**
+   * Resolve the LATEST tool-result event for one (beadId, stateId, actionId,
+   * tool) tuple. This is the COORDINATOR-side read the verifier gate uses to
+   * recover a tool's outputFile + run status: it must reflect a retry (the
+   * freshest event wins) and never a stale prior-run leaf.
+   *
+   * Two recorded shapes are reconciled here (see pi-experiment-0yt5.27):
+   *  - FLAT (command / MCP tools): PROJECT_TOOL_SUCCEEDED / PROJECT_TOOL_FAILED
+   *    carry top-level { beadId, stateId, actionId, tool, status, outputFile }.
+   *  - NESTED (wrapped plugin tools): TOOL_INVOCATION_SUCCEEDED /
+   *    TOOL_INVOCATION_FAILED carry top-level { beadId, tool } plus a nested
+   *    { toolResult: ToolResultBase }. The plugin event does NOT carry stateId /
+   *    actionId at the top level, so the (state, action) are recovered from the
+   *    deterministic outputFile path layout
+   *    `.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}/…`.
+   */
+  public async latestToolResultEvent(
+    beadId: string,
+    stateId: string,
+    actionId: string,
+    tool: string
+  ): Promise<DomainEvent | undefined> {
+    if (!beadId || !tool) return undefined;
+    let latest: DomainEvent | undefined;
+    for (const event of await this.eventsForBead(beadId)) {
+      if (!this.toolResultEventMatches(event, beadId, stateId, actionId, tool)) continue;
+      if (!latest || this.compareEvents(latest, event) < 0) latest = event;
+    }
+    return latest;
+  }
+
+  private toolResultEventMatches(
+    event: DomainEvent,
+    beadId: string,
+    stateId: string,
+    actionId: string,
+    tool: string
+  ): boolean {
+    const data = isRecord(event.data) ? event.data : {};
+    if (data.beadId !== beadId) return false;
+
+    if (event.type === DomainEventName.PROJECT_TOOL_SUCCEEDED || event.type === DomainEventName.PROJECT_TOOL_FAILED) {
+      // FLAT shape — state/action/tool live at the top level of the event data.
+      return data.stateId === stateId && data.actionId === actionId && data.tool === tool;
+    }
+
+    if (event.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED || event.type === DomainEventName.TOOL_INVOCATION_FAILED) {
+      // NESTED shape — tool name is top-level; state/action are recovered from
+      // the toolResult.outputFile path so a retry's freshest event still wins.
+      if (data.tool !== tool) return false;
+      const toolResult = isRecord(data.toolResult) ? data.toolResult : undefined;
+      const outputFile = typeof toolResult?.outputFile === 'string' ? toolResult.outputFile : undefined;
+      if (!outputFile) return false;
+      const segments = toolOutputPathSegments(outputFile);
+      return segments !== undefined
+        && segments.beadId === beadId
+        && segments.stateId === stateId
+        && segments.actionId === actionId
+        && segments.tool === tool;
+    }
+
+    return false;
   }
 
   // ---------------------------------------------------------------------------
