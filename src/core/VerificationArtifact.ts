@@ -15,9 +15,10 @@
  *
  * ## Alignment with the harness's structured verification results
  *
- * The StructuredResult type in src/plugins/projectTools/resultEnvelope.ts
- * carries { status, counts, affectedPaths, representativeSamples, omissions,
- * nextAction }.  The structured payload keys in
+ * A tool's own structured verification result conventionally carries
+ * { status, counts, affectedPaths, representativeSamples, omissions,
+ * nextAction } (the harness no longer defines or shapes this — it is tool-owned
+ * as of 0yt5.16/0yt5.17).  The structured payload keys in
  * src/plugins/projectTools/constants.ts (StructuredPayloadSummaryKey) surface
  * `verdict`, `blocking_count`, `total_errors`, and `context_count` as
  * first-class evidence fields that the harness already emits for verifier

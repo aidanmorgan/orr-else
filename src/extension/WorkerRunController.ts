@@ -31,22 +31,11 @@ import { resultIndicatesSuccess, resultIndicatesFailure, isRecord } from './PiEv
 import { resolveActionHandoverRequired } from './CoordinatorController.js';
 import type { ActiveRun } from './SessionTypes.js';
 
-// ── zero-target scan guard (mis) ─────────────────────────────────────────────
-//
-// A scan result that ran with zero scanned targets is vacuous evidence:
-// scannedTargetCount === 0 means the tool inspected nothing, so its PASSED
-// status carries no real security/verification signal.  The gate must treat
-// such results as non-passing even when the raw status field says PASSED.
-//
-// This guard is deliberately narrow: it only fires when scannedTargetCount
-// is explicitly present AND equals exactly 0.  Results that do not report
-// a target count at all are unaffected (preserving backward compatibility).
-
-function isZeroTargetScanResult(result: unknown): boolean {
-  if (!isRecord(result)) return false;
-  const count = result['scannedTargetCount'];
-  return count === 0;
-}
+// 0yt5.16/0yt5.17: the zero-target-scan guard has been REMOVED. It was harness-side
+// result-field recognition (reading the tool result's scanned-target count to
+// override its PASSED status). The harness no longer recognizes scan-target evidence
+// on a tool result; zero-target-scan semantics, if a tool needs them, belong in that
+// tool's own verify() callback.
 
 // ── terminal failure limit payload helpers ────────────────────────────────────
 
@@ -382,16 +371,8 @@ export async function evaluateGateReadiness(
         state = 'never_invoked';
         toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
         blockingEvidence.push(`Required tool \`${toolName}\` was never invoked.`);
-      } else if (resultIndicatesSuccess(result) && !isZeroTargetScanResult(result)) {
+      } else if (resultIndicatesSuccess(result)) {
         state = 'passed';
-      } else if (resultIndicatesSuccess(result) && isZeroTargetScanResult(result)) {
-        // (mis) A scan result with zero scanned targets is vacuous: it cannot satisfy
-        // a required verifier gate even if its status is PASSED.  The model must rerun
-        // the scan against at least one actual target for the evidence to count.
-        state = 'failed';
-        const zeroTargetReason = `Tool \`${toolName}\` ran with zero scanned targets — a zero-target scan is not passing verifier evidence. Rerun against actual target files.`;
-        toolAuditFailures.push(zeroTargetReason);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass: zero scanned targets (vacuous scan is not accepted evidence).`);
       } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
         state = 'failed';
         toolAuditFailures.push(`Tool \`${toolName}\` failed: ${result}`);

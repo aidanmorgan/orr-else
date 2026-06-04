@@ -9,16 +9,8 @@ import { resolveTemplateString } from '../../core/PiIntegration.js';
 import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
 import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../../constants/index.js';
 import {
-  COMMAND_DIAGNOSTIC_LINE_PATTERN,
-  COMMAND_DIAGNOSTIC_MAX_MATCH_LINES,
-  COMMAND_DIAGNOSTIC_SECTION_SUFFIX,
-  COMMAND_DIAGNOSTIC_TAIL_LINES,
   COMMAND_STDERR_FILE_NAME,
   COMMAND_STDOUT_FILE_NAME,
-  COMMAND_STREAM_OUTPUT_KEYS,
-  COMMAND_TRUNCATION_MARKER_PREFIX,
-  COMMAND_TRUNCATION_STREAM_MARKER_SUFFIX,
-  COMMAND_TRUNCATION_TEXT_MARKER_SUFFIX,
   ProjectToolParameter,
   ProjectToolResultKey,
   StructuredPayloadCollectionKey,
@@ -27,21 +19,14 @@ import {
   StructuredPayloadIssueKey,
   StructuredPayloadToolResultKey,
   UNSUPPORTED_PROJECT_TOOL_OUTPUT_CONTROL_FLAGS,
-  PROJECT_TOOL_CONTROL_PARAMETERS,
-  SCAN_TARGET_COUNT_KEYS,
-  SCAN_TARGET_COLLECTION_KEYS,
-  SEMGREP_PATH_COLLECTION_KEYS,
-  SCAN_TARGET_SAMPLE_LIMIT
+  PROJECT_TOOL_CONTROL_PARAMETERS
 } from './constants.js';
 import { ProjectToolFailureCategory } from './failureCategory.js';
-import type { CommandResultInput, ProjectToolExecutionContext, ScanTargetEvidence } from './types.js';
+import type { CommandResultInput, ProjectToolExecutionContext } from './types.js';
 import {
   isJsonRecord,
   parseJsonRecord,
-  resultRecord,
-  uniqueLines,
-  withoutUndefined,
-  nestedRecord
+  withoutUndefined
 } from './utils.js';
 import {
   normalizeCommandArgumentPaths,
@@ -112,69 +97,11 @@ export function isAcceptedMaxBufferFailure(definition: ProjectCommandToolConfig,
     && (error as { code?: unknown }).code === CommandErrorCode.MAX_BUFFER;
 }
 
-// commandReturnBytes removed (obsolete — s3wp.25). Generic byte-cap on
-// command return text is forbidden per docs/raw-output-contract.md.
-// Raw stdout/stderr are persisted to files; the model-facing result references
-// stdoutFile/stderrFile + byte counts only.
-
-export function boundedCommandText(value: unknown, limitBytes: number): { text: string; bytes: number; truncated: boolean } {
-  const text = typeof value === 'string'
-    ? value
-    : value === undefined || value === null
-      ? ''
-      : String(value);
-  if (text.length <= limitBytes) {
-    return { text, bytes: text.length, truncated: false };
-  }
-  const headLength = Math.ceil(limitBytes / 2);
-  const tailLength = Math.max(limitBytes - headLength, 0);
-  const tail = tailLength > 0 ? `\n\n${text.slice(-tailLength)}` : '';
-  return {
-    text: `${text.slice(0, headLength)}\n\n${COMMAND_TRUNCATION_MARKER_PREFIX}${text.length - limitBytes}${COMMAND_TRUNCATION_TEXT_MARKER_SUFFIX}]${tail}`,
-    bytes: text.length,
-    truncated: true
-  };
-}
-
-export async function boundedCommandFile(filePath: string, limitBytes: number): Promise<{ text: string; bytes: number; truncated: boolean }> {
-  let size = 0;
-  try {
-    size = (await stat(filePath)).size;
-  } catch (error: any) {
-    if (error?.code === 'ENOENT') return { text: '', bytes: 0, truncated: false };
-    throw error;
-  }
-
-  if (size === 0) return { text: '', bytes: 0, truncated: false };
-
-  const handle = await open(filePath, 'r');
-  try {
-    if (size <= limitBytes) {
-      const buffer = Buffer.alloc(size);
-      const { bytesRead } = await handle.read(buffer, 0, size, 0);
-      return { text: buffer.subarray(0, bytesRead).toString('utf8'), bytes: size, truncated: false };
-    }
-
-    const headBytes = Math.ceil(limitBytes / 2);
-    const tailBytes = Math.max(limitBytes - headBytes, 0);
-    const headBuffer = Buffer.alloc(headBytes);
-    const tailBuffer = Buffer.alloc(tailBytes);
-    const { bytesRead: headBytesRead } = await handle.read(headBuffer, 0, headBytes, 0);
-    const { bytesRead: tailBytesRead } = tailBytes > 0
-      ? await handle.read(tailBuffer, 0, tailBytes, Math.max(size - tailBytes, 0))
-      : { bytesRead: 0 };
-    const headText = headBuffer.subarray(0, headBytesRead).toString('utf8');
-    const tailText = tailBuffer.subarray(0, tailBytesRead).toString('utf8');
-    const tail = tailText.length > 0 ? `\n\n${tailText}` : '';
-    return {
-      text: `${headText}\n\n${COMMAND_TRUNCATION_MARKER_PREFIX}${size - limitBytes}${COMMAND_TRUNCATION_STREAM_MARKER_SUFFIX}]${tail}`,
-      bytes: size,
-      truncated: true
-    };
-  } finally {
-    await handle.close();
-  }
-}
+// commandReturnBytes / boundedCommandText / boundedCommandFile removed
+// (0yt5.17). The harness performs NO truncation/capping of command output:
+// raw stdout/stderr are persisted in full to stdoutFile/stderrFile; the
+// model-facing result references those files + byte counts. Generic byte-cap
+// of command return text is forbidden per docs/raw-output-contract.md.
 
 // ---- Structured payload helpers ----
 
@@ -240,97 +167,11 @@ function rejectedChecksFromRecord(record: Record<string, unknown>): unknown[] | 
   return rejected.length > 0 ? rejected : undefined;
 }
 
-function scanTargetCountValue(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
-    return Math.floor(value);
-  }
-  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
-    return Number.parseInt(value.trim(), 10);
-  }
-  return undefined;
-}
-
-function scanTargetSamplesFromArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value
-    .map(item => {
-      if (typeof item === 'string') return item;
-      if (isJsonRecord(item) && typeof item.path === 'string') return item.path;
-      if (isJsonRecord(item) && typeof item.file === 'string') return item.file;
-      return undefined;
-    })
-    .filter((item): item is string => Boolean(item));
-}
-
-function compactScanTargetSamples(samples: string[] | undefined): string[] | undefined {
-  if (!samples) return undefined;
-  const uniqueSamples = uniqueLines(samples).slice(0, SCAN_TARGET_SAMPLE_LIMIT);
-  return uniqueSamples.length > 0
-    ? uniqueSamples.map(sample => String(compactStructuredValue(sample)))
-    : undefined;
-}
-
-function scanTargetEvidenceFromPayload(record: Record<string, unknown> | undefined): ScanTargetEvidence | undefined {
-  if (!record) return undefined;
-
-  let scannedTargetCount: number | undefined;
-  let scannedTargetSamples: string[] | undefined;
-
-  for (const key of SCAN_TARGET_COUNT_KEYS) {
-    const value = scanTargetCountValue(record[key]);
-    if (value !== undefined) {
-      scannedTargetCount = value;
-      break;
-    }
-  }
-
-  for (const key of SCAN_TARGET_COLLECTION_KEYS) {
-    const samples = scanTargetSamplesFromArray(record[key]);
-    if (samples !== undefined) {
-      scannedTargetSamples = samples;
-      if (scannedTargetCount === undefined) scannedTargetCount = samples.length;
-      break;
-    }
-  }
-
-  const paths = nestedRecord(record, 'paths');
-  if (paths) {
-    for (const key of SEMGREP_PATH_COLLECTION_KEYS) {
-      const samples = scanTargetSamplesFromArray(paths[key]);
-      if (samples !== undefined) {
-        scannedTargetSamples = samples;
-        if (scannedTargetCount === undefined) scannedTargetCount = samples.length;
-        break;
-      }
-    }
-  }
-
-  if (scannedTargetCount === undefined) return undefined;
-  return withoutUndefined({
-    [ProjectToolResultKey.SCANNED_TARGET_COUNT]: scannedTargetCount,
-    [ProjectToolResultKey.SCANNED_TARGET_SAMPLES]: compactScanTargetSamples(scannedTargetSamples)
-  }) as unknown as ScanTargetEvidence;
-}
-
-export function scanTargetEvidenceFromResult(result: unknown): ScanTargetEvidence | undefined {
-  const record = resultRecord(result);
-  const candidates = [
-    record,
-    isJsonRecord(record[ProjectToolResultKey.STRUCTURED_RESULT])
-      ? record[ProjectToolResultKey.STRUCTURED_RESULT] as Record<string, unknown>
-      : undefined,
-    parseJsonRecord(record[ProjectToolResultKey.STDOUT]),
-    parseJsonRecord(record[ProjectToolResultKey.STDERR]),
-    parseJsonRecord(record.output),
-    isJsonRecord(record.result) ? record.result as Record<string, unknown> : undefined
-  ];
-
-  for (const candidate of candidates) {
-    const evidence = scanTargetEvidenceFromPayload(candidate);
-    if (evidence) return evidence;
-  }
-  return undefined;
-}
+// 0yt5.16/0yt5.17: harness-side scan-target recognition (the scan-target evidence
+// extractors and their scanned-count / scanned-sample field plucking) has been
+// REMOVED. The harness no longer recognizes scan-target evidence on a tool result.
+// A tool that wants to surface zero-target-scan semantics does so in its own
+// verify() callback.
 
 export function structuredPayloadSummary(record: Record<string, unknown>): Record<string, unknown> | undefined {
   const summary: Record<string, unknown> = {};
@@ -361,9 +202,6 @@ export function structuredPayloadSummary(record: Record<string, unknown>): Recor
 
   const toolResults = toolResultSummary(record[StructuredPayloadCollectionKey.TOOL_RESULTS]);
   if (toolResults) summary[StructuredPayloadSummaryOutputKey.TOOL_RESULTS] = toolResults;
-
-  const scanTargetEvidence = scanTargetEvidenceFromPayload(record);
-  if (scanTargetEvidence) Object.assign(summary, scanTargetEvidence);
 
   return Object.keys(summary).length > 0 ? summary : undefined;
 }
@@ -464,17 +302,6 @@ function commandFailureStatus(error: any): ToolResultStatus {
   return error?.code === 'ENOENT' ? ToolResultStatus.UNAVAILABLE : ToolResultStatus.REJECTED;
 }
 
-export function structuredCommandResultPreview(record: Record<string, unknown> | undefined): string | undefined {
-  if (!record) return undefined;
-  const stdout = typeof record.stdout === 'string' && record.stdout.trim() ? record.stdout : undefined;
-  const stderr = typeof record.stderr === 'string' && record.stderr.trim() ? record.stderr : undefined;
-  const mcpText = textFromMcpContent(record.result);
-  if (stdout && stderr) return `stdout:\n${stdout}\n\nstderr:\n${stderr}`;
-  if (stdout) return stdout;
-  if (stderr) return `stderr:\n${stderr}`;
-  return mcpText;
-}
-
 export function textFromMcpContent(value: unknown): string | undefined {
   if (!isJsonRecord(value)) return undefined;
   const content = value.content;
@@ -487,33 +314,11 @@ export function textFromMcpContent(value: unknown): string | undefined {
   return text.trim() ? text : undefined;
 }
 
-export function commandDiagnosticPreview(record: Record<string, unknown>): string | undefined {
-  if (record.status === ToolResultStatus.PASSED && record.timedOut !== true) return undefined;
-
-  const sections = COMMAND_STREAM_OUTPUT_KEYS
-    .map(key => commandStreamDiagnosticSection(key, record[key]))
-    .filter((value): value is string => Boolean(value));
-
-  if (sections.length === 0) return undefined;
-  // 3 KiB cap on the diagnostic preview text (semantic summarizer budget, not a model-facing byte cap).
-  return boundedCommandText(sections.join('\n\n'), 3 * 1024).text;
-}
-
-function commandStreamDiagnosticSection(key: (typeof COMMAND_STREAM_OUTPUT_KEYS)[number], value: unknown): string | undefined {
-  if (typeof value !== 'string' || value.trim().length === 0) return undefined;
-
-  const lines = value
-    .split(/\r?\n/)
-    .map(line => line.trimEnd())
-    .filter(line => line.trim().length > 0);
-  const matchedLines = lines
-    .filter(line => COMMAND_DIAGNOSTIC_LINE_PATTERN.test(line))
-    .slice(-COMMAND_DIAGNOSTIC_MAX_MATCH_LINES);
-  const tailLines = lines.slice(-COMMAND_DIAGNOSTIC_TAIL_LINES);
-  const diagnosticLines = uniqueLines([...matchedLines, ...tailLines]);
-  if (diagnosticLines.length === 0) return undefined;
-  return `${key}${COMMAND_DIAGNOSTIC_SECTION_SUFFIX}:\n${diagnosticLines.join('\n')}`;
-}
+// 0yt5.17: commandDiagnosticPreview / commandStreamDiagnosticSection /
+// structuredCommandResultPreview REMOVED — these produced bounded/truncated
+// model-facing preview text (the harness diagnostic summarizer). The harness no
+// longer summarizes or truncates command output; raw stdout/stderr are persisted
+// in full to stdoutFile/stderrFile.
 
 // ---- buildCommandResult ----
 

@@ -512,14 +512,14 @@ function parseSemgrepOutput(stdout: string): StructuredInvocationResult | null {
   }
 
   const groups = [...groupMap.values()];
-  // Compute scannedTargetCount before building the result literal so it is
-  // set inline rather than via post-hoc mutation.
-  const scannedTargetCount = scanned.length;
+  // 0yt5.16/0yt5.17: emit the scanned-file count under scannedFiles only. The
+  // redundant scanned-target-count echo (which existed solely to feed the removed
+  // harness zero-target-scan recognition) is gone — the harness no longer
+  // recognizes scan-target evidence on a tool result.
   const counts: Record<string, number> = {
     findings: results.length,
     errors: errs.length,
-    scannedFiles: scannedTargetCount,
-    ...(scannedTargetCount > 0 ? { scannedTargetCount } : {})
+    scannedFiles: scanned.length
   };
 
   const result: StructuredInvocationResult = {

@@ -53,11 +53,6 @@ export function stringField(value: unknown, key: string): string | undefined {
   return isJsonRecord(value) && typeof value[key] === 'string' ? value[key] : undefined;
 }
 
-export function truncateString(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  return `${value.slice(0, limit)}...`;
-}
-
 export function nestedRecord(value: unknown, key: string): Record<string, unknown> | undefined {
   if (!isJsonRecord(value)) return undefined;
   return isJsonRecord(value[key]) ? value[key] as Record<string, unknown> : undefined;

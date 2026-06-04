@@ -66,73 +66,21 @@ export interface SerializedCommandLockTimeoutMetadata {
   lockFile: string;
 }
 
-export interface ProjectToolOutputArchive {
-  artifactRef: string;
-  bytes: number;
-  truncated: boolean;
-}
+// 0yt5.16/0yt5.17: the model-facing result is the tool's own result passed
+// through VERBATIM (minus internal-only raw-stream keys). It is an opaque record
+// to the harness — no narrowing/preview/archive envelope fields are added.
+export type ModelFacingProjectToolResult = Record<string, unknown>;
 
-export type ModelFacingProjectToolResult = Record<string, unknown> & {
-  outputArchive?: ProjectToolOutputArchive;
-  outputAccess?: string;
-  // Tool-owned compact text summary (tool-owned deterministic compaction, not a generic cap).
-  compactSummary?: string;
-  // Tool-owned extracted diagnostic facts for failed results (not a generic cap).
-  diagnosticFacts?: string;
-};
-
-export interface ParsedProjectDiagnostic {
-  severity: string;
-  message: string;
-  source?: string;
-  code?: string;
-  file?: string;
-  line?: number;
-  column?: number;
-}
-
-export interface ParsedProjectDiagnostics {
-  diagnostics: ParsedProjectDiagnostic[];
-  declaredDiagnostics?: number;
-  sourceTruncated: boolean;
-}
-
-export interface DiagnosticGroupSummary {
-  source: string;
-  code: string;
-  severity: string;
-  messagePrefix: string;
-  count: number;
-  missingImport: boolean;
-  representativeLocations: string[];
-}
-
-export interface DiagnosticGroupAccumulator extends DiagnosticGroupSummary {
-  sortIndex: number;
-  severityRank: number;
-}
-
-export interface ProjectDiagnosticSummary {
-  totalDiagnostics: number;
-  parsedDiagnostics: number;
-  declaredDiagnostics?: number;
-  missingImportCount: number;
-  sourceTruncated: boolean;
-  groups: DiagnosticGroupSummary[];
-  omittedGroups?: number;
-  nextAction: string;
-}
+// 0yt5.16/0yt5.17: the diagnostic/scan/failure-group summarizer types
+// (ParsedProjectDiagnostic(s), DiagnosticGroupSummary/Accumulator,
+// ProjectDiagnosticSummary, ScanTargetEvidence, CommandFailureTestGroup/LintGroup,
+// ProjectToolOutputArchive) have been REMOVED along with the summarizer machinery.
 
 export interface ProjectToolFailureLimitResult {
   reached: boolean;
   failureCount: number;
   maxFailures: number;
   result?: Record<string, unknown>;
-}
-
-export interface ScanTargetEvidence {
-  scannedTargetCount: number;
-  scannedTargetSamples?: string[];
 }
 
 export type CommandArgumentPathNormalization = {
@@ -176,18 +124,4 @@ export interface CommandResultInput {
   structuredSummary: unknown;
   toolCalls: unknown;
   normalizedPathArguments: string[];
-}
-
-export interface CommandFailureTestGroup {
-  testName: string;
-  assertionType?: string;
-  locations: string[];
-  count: number;
-}
-
-export interface CommandFailureLintGroup {
-  rule: string;
-  severity: string;
-  locations: string[];
-  count: number;
 }

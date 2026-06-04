@@ -1098,14 +1098,15 @@ export const ProjectToolDefaults = {
   // NOTE: COMMAND_RETURN_BYTES, INLINE_RESULT_BYTES, OUTPUT_PREVIEW_BYTES,
   // COMMAND_DIAGNOSTIC_PREVIEW_BYTES, and TOOL_CALL_EXTRACTION_MAX_BYTES have
   // been removed (obsolete — s3wp.24/s3wp.25). Generic byte caps are forbidden
-  // per docs/raw-output-contract.md. Semantic summarizer caps below are KEPT.
-  // Hard safety bound for the model-facing compactSummary when a diagnosticSummary
-  // is available. Measured in UTF-16 code units (.length). Compact grouped text
-  // is typically under 1 KiB; a worst-case 6-group summary with long messages
-  // and paths may approach ~1.5 KiB, so the compact summary can be truncated — the
-  // truncation marker is intentionally graceful (non-import groups sort first and
-  // survive). Far below the raw diagnostic payload (tens of KiB).
-  DIAGNOSTIC_SUMMARY_MAX_BYTES: 2 * DataSize.KIB,
+  // per docs/raw-output-contract.md.
+  //
+  // 0yt5.17: the harness result truncation/summarizer caps (the diagnostic-summary
+  // byte cap, the per-summarizer affected-paths / representative-sample caps, and the
+  // command-failure test/lint group + message/context-line caps) have all been
+  // REMOVED — the harness no longer summarizes or truncates tool results.
+  // STRUCTURED_SUMMARY_* remain: they bound a COMMAND tool's own
+  // structuredPayloadSummary construction (the tool building its own result),
+  // not a harness-side cap on the returned result.
   STRUCTURED_SUMMARY_MAX_GROUPS: 6,
   STRUCTURED_SUMMARY_MAX_ITEMS_PER_GROUP: 3,
   STRUCTURED_SUMMARY_TEXT_CHARS: 240,
@@ -1113,22 +1114,6 @@ export const ProjectToolDefaults = {
   UNSPECIFIED_STATE_ID: 'state',
   UNSPECIFIED_ACTION_ID: 'manual',
   UNSAFE_PATH_SEGMENT_PATTERN: /[^A-Za-z0-9._-]/g,
-  // Per-tool structured summarizer registry caps.
-  // Maximum number of affected paths surfaced in a StructuredResult.
-  SUMMARIZER_MAX_AFFECTED_PATHS: 10,
-  // Maximum number of representative samples surfaced in a StructuredResult.
-  SUMMARIZER_MAX_REPRESENTATIVE_SAMPLES: 5,
-  // Command failure summarizer caps.
-  // Maximum number of distinct test-failure groups surfaced per run.
-  COMMAND_FAILURE_MAX_TEST_GROUPS: 8,
-  // Maximum number of distinct linter/scanner-failure groups surfaced per run.
-  COMMAND_FAILURE_MAX_LINT_GROUPS: 8,
-  // Maximum number of representative location strings per group.
-  COMMAND_FAILURE_MAX_LOCATIONS_PER_GROUP: 3,
-  // Char limit applied to individual message/rule strings before they are stored.
-  COMMAND_FAILURE_MESSAGE_CHARS: 200,
-  // Char limit applied to a single representative traceback/context line.
-  COMMAND_FAILURE_CONTEXT_LINE_CHARS: 160,
   // Bounded-storage / scratch-cleanup constants.
   //
   // ROOT CAUSE: Each project-tool invocation allocates a unique scratch dir at

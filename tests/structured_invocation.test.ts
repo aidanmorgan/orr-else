@@ -355,7 +355,9 @@ describe('semgrep parser', () => {
     expect(result!.status).toBe('ok');
     expect(result!.counts?.findings).toBe(2);
     expect(result!.counts?.scannedFiles).toBe(3);
-    expect(result!.counts?.scannedTargetCount).toBe(3);
+    // 0yt5.16/0yt5.17: the redundant scannedTargetCount echo was removed; the
+    // scanned-file count is carried under scannedFiles only.
+    expect(result!.counts?.scannedTargetCount).toBeUndefined();
     expect(result!.affectedPaths).toContain('app/views.py');
     const samples = result!.representativeSamples as any[];
     expect(samples.length).toBeGreaterThan(0);

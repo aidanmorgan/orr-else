@@ -53,7 +53,6 @@ import {
 import {
   persistAndBoundResult,
   attachFailureCategory,
-  attachProjectToolSteering,
   summarizeToolResult
 } from './projectTools/resultEnvelope.js';
 import {
@@ -88,7 +87,6 @@ export { normalizeCommandArguments } from './projectTools/commandExecutor.js';
 export { normalizeMcpPathArguments } from './projectTools/pathNormalization.js';
 export { shouldSerializeMcpTool, mcpToolRequestTimeoutMs } from './projectTools/mcpExecutor.js';
 export { projectToolFailureLimitSuggestedOutcome } from './projectTools/preflight.js';
-export type { StructuredResult, ProjectToolSummarizer } from './projectTools/resultEnvelope.js';
 export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool } from './projectTools/commandExecutor.js';
 
 // ---- ProjectToolRuntimeContext ----
@@ -134,7 +132,7 @@ export async function executeConfiguredProjectTool(
   // Failure-limit short-circuit (reservation is held; release in finally below)
   if (failureLimit.reached && failureLimit.result) {
     try {
-      const result = attachProjectToolSteering(definition, attachFailureCategory(definition, failureLimit.result));
+      const result = attachFailureCategory(definition, failureLimit.result);
       await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
         beadId,
         stateId,
@@ -183,9 +181,9 @@ export async function executeConfiguredProjectTool(
             )
           )
           : result;
-      const finalResult = attachProjectToolSteering(definition, status === ToolResultStatus.PASSED
+      const finalResult = status === ToolResultStatus.PASSED
         ? finalResultWithoutCategory
-        : attachFailureCategory(definition, finalResultWithoutCategory));
+        : attachFailureCategory(definition, finalResultWithoutCategory);
       await eventStore.record(
         status === ToolResultStatus.PASSED ? DomainEventName.PROJECT_TOOL_SUCCEEDED : DomainEventName.PROJECT_TOOL_FAILED,
         {

@@ -2453,14 +2453,16 @@ states:
   });
 });
 
-// ── Part A (mis): zero-target scan gate tests ─────────────────────────────────
+// ── Part A (mis → 0yt5.16/0yt5.17): zero-target scan recognition REMOVED ───────
 //
-// A scan result with scannedTargetCount === 0 must NOT satisfy a required
-// verifier gate even when its status field is PASSED.  The model must rerun
-// the scan against at least one real target for the evidence to count.
+// The harness no longer performs result-field recognition of a scan's scanned-
+// target count to override a PASSED status. A PASSED tool result satisfies the
+// required-tool presence gate regardless of how many targets it scanned; zero-
+// target-scan semantics, if a tool needs them, now live in that tool's own
+// verify() callback (not in the harness pre_signal_audit gate).
 
-describe('signal_completion gate — zero-target scan as required verifier evidence (mis Part A)', () => {
-  it('rejects SUCCESS when a required tool returned status=PASSED but scannedTargetCount=0 (vacuous evidence)', async () => {
+describe('signal_completion gate — zero-target scan recognition removed (0yt5.16/0yt5.17)', () => {
+  it('does NOT reject a PASSED required tool for having zero scanned targets (harness no longer recognizes scan-target evidence)', async () => {
     const previousCwd = process.cwd();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
@@ -2514,20 +2516,22 @@ states:
       const zeroTargetTool = harness.tools.find((t: any) => t.name === 'zero_target_verifier');
       const signalCompletion = harness.tools.find((t: any) => t.name === BuiltInToolName.SIGNAL_COMPLETION);
 
-      // Invoke the tool: returns PASSED but with zero scanned targets.
+      // Invoke the tool: returns PASSED with zero scanned targets.
       await zeroTargetTool.execute('zero-scan', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
 
-      // signal_completion with SUCCESS should be REJECTED — the zero-target scan
-      // is not accepted as passing verifier evidence.
+      // 0yt5.16/0yt5.17: the harness no longer recognizes scan-target evidence.
+      // The required tool RAN and returned PASSED, so it satisfies the required-tool
+      // presence gate regardless of scanned-target count — the completion is NOT
+      // rejected with a zero-target / vacuous-scan reason. (A real "did this scan
+      // cover anything" judgement now belongs in the tool's own verify() callback.)
       const completion = await signalCompletion.execute('signal-success', {
         outcome: 'SUCCESS',
         summary: 'done'
       }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
 
-      expect(completion.details).toContain('REJECTED: Protocol Violation');
-      // Must surface the zero-target scan as the blocking reason.
-      expect(completion.details).toContain('zero_target_verifier');
-      expect(completion.details).toMatch(/zero.scanned.targets|zero-target scan|zero scanned targets/i);
+      const details = String(completion.details ?? '');
+      expect(details).not.toMatch(/zero.scanned.targets|zero-target scan|zero scanned targets/i);
+      expect(details).not.toContain('did not pass: zero scanned targets');
     } finally {
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));

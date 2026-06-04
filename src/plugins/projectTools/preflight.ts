@@ -19,7 +19,7 @@ import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../../constants/index.js';
 import { ProjectToolFailureCategory, isInfrastructureProjectToolFailure } from './failureCategory.js';
 import { ProjectToolResultKey } from './constants.js';
-import { summarizeToolResult, attachFailureCategory, attachProjectToolSteering, transferResultAccounting } from './resultEnvelope.js';
+import { summarizeToolResult, attachFailureCategory } from './resultEnvelope.js';
 import { reserveProjectToolCall, projectToolBackpressureResult } from './contextHelpers.js';
 import type { ProjectToolExecutionContext, ProjectToolFailureLimitResult } from './types.js';
 import { isJsonRecord } from './utils.js';
@@ -67,25 +67,17 @@ export function attachProjectToolFailureLimit(
 ): unknown {
   const limit = failureLimitResult.failureLimit;
   if (!isJsonRecord(result)) {
-    const newResult = {
+    return {
       ...failureLimitResult,
       result
     };
-    // (9g8z) Preserve accounting across the spread — re-register on the new object.
-    // See NOTE (9g8z fragility) in resultEnvelope.ts: every pipeline spread site must
-    // call transferResultAccounting to keep the WeakMap entry reachable.
-    transferResultAccounting(result, newResult);
-    return newResult;
   }
 
-  const newResult = {
+  return {
     ...result,
     message: typeof result.message === 'string' ? result.message : failureLimitResult.message,
     failureLimit: limit
   };
-  // (9g8z) Preserve accounting across the spread — re-register on the new object.
-  transferResultAccounting(result, newResult);
-  return newResult;
 }
 
 // ---- failure window boundary helpers ----
@@ -276,7 +268,7 @@ export async function preflightProjectTool(
       status: ToolResultStatus.REJECTED,
       message: `Project tool ${definition.name} is registered by a Pi extension and cannot be executed directly by Orr Else. Use it as a model tool call, or configure a command/mcp tool for harness-run parent actions.`
     };
-    const finalResult = attachProjectToolSteering(definition, attachFailureCategory(definition, result));
+    const finalResult = attachFailureCategory(definition, result);
     await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,
@@ -293,10 +285,7 @@ export async function preflightProjectTool(
   const reservation = reserveProjectToolCall(backpressure, definition, context);
 
   if (reservation.existing) {
-    const result = attachProjectToolSteering(
-      definition,
-      attachFailureCategory(definition, projectToolBackpressureResult(definition, context, reservation.existing))
-    );
+    const result = attachFailureCategory(definition, projectToolBackpressureResult(definition, context, reservation.existing));
     await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,

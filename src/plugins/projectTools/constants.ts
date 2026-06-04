@@ -36,9 +36,7 @@ export const ProjectToolResultKey = {
   RECOVERY: 'recovery',
   REJECTED_CHECKS: 'rejectedChecks',
   REJECTED_CHECK_COUNT: 'rejectedCheckCount',
-  PASSED_CHECK_COUNT: 'passedCheckCount',
-  SCANNED_TARGET_COUNT: 'scannedTargetCount',
-  SCANNED_TARGET_SAMPLES: 'scannedTargetSamples'
+  PASSED_CHECK_COUNT: 'passedCheckCount'
 } as const;
 
 export const StructuredPayloadSummaryKey = [
@@ -61,19 +59,7 @@ export const StructuredPayloadSummaryKey = [
   'warnings',
   'outputFilters',
   'stdoutBytes',
-  'stderrBytes',
-  'scannedTargetCount',
-  'scanned_target_count',
-  'scannedTargetsCount',
-  'scanned_targets_count',
-  'scannedTargetSamples',
-  'scanned_target_samples',
-  'filesScanned',
-  'files_scanned',
-  'scannedFileCount',
-  'scanned_file_count',
-  'targetsScanned',
-  'targets_scanned'
+  'stderrBytes'
 ] as const;
 
 export const StructuredPayloadCollectionKey = {
@@ -111,9 +97,6 @@ export const StructuredPayloadSummaryOutputKey = {
   TOOL_RESULTS: 'toolResults'
 } as const;
 
-export const PROJECT_TOOL_OUTPUT_ACCESS_GUIDANCE =
-  'Raw output is archived by the harness and referenced via stdoutFile/stderrFile, not inlined. First decide from compactSummary, structuredResult, and toolCalls. Do not read the archive just because the compact summary is small; rerun with narrower arguments only for a named missing fact or decision blocker.';
-
 export const PROJECT_TOOL_MODEL_CONTRACT = [
   'Configured project tools are the supported route for project-specific command and MCP-backed capabilities.',
   'Do not replace them with shell, native MCP, or native reads of harness artifact paths.',
@@ -125,42 +108,10 @@ export const PROJECT_TOOL_MODEL_CONTRACT = [
 export const PROJECT_TOOL_DESCRIPTION_SUFFIX =
   'Returns compact summaries and structured facts; raw output is referenced via stdoutFile/stderrFile, not inlined. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 
-// Compact sample budget used by the generic high-volume summarizer.
-// This is the byte limit for the tool-owned representative sample text injected
-// into compactSummary — not a generic byte cap on raw output.
-// Raw output is always persisted in full to the harness tool-calls dir.
-export const HIGH_VOLUME_SAMPLE_BUDGET_BYTES = 3 * 1024; // 3 KiB
-
-// Minimum byte size of a result's raw payload that qualifies it as "high-volume"
-// and triggers the generic summarizer.  Results below this threshold are not
-// worth summarizing — the raw preview already fits within the budget.
-export const HIGH_VOLUME_PAYLOAD_MIN_BYTES = 4 * 1024; // 4 KiB
-
-// Generic summarizer representative sample cap: how many entries (lines/items) to
-// surface in representativeSamples when the full content would exceed the preview budget.
-export const HIGH_VOLUME_SAMPLE_COUNT = 8;
-
-// (wp8h) Recovery guidance for FAILED command results with an archived failure output.
-// The model must re-read the archived output (via its stdoutFile/stderrFile reference)
-// rather than re-running the expensive command (tests/build/etc.).
-// This is distinct from the SUCCESS-path guidance which steers toward preview/structuredResult.
-export const FAILURE_REREAD_ARCHIVE_RECOVERY =
-  'The command failed and the full failure output is preserved in the harness tool-calls archive. '
-  + 'Re-read the archived failure output via its stdoutFile/stderrFile reference '
-  + 'to diagnose the root cause before deciding on a fix. '
-  + 'Do NOT re-run the command until the failure is understood — '
-  + 're-running an expensive failed build or test suite without first reading the archived output '
-  + 'wastes time and compute.';
-
-// (9g8z) Divisor for converting model-facing byte count to approximate token estimate (chars/4).
-// GPT-4 / Claude tokenizer approximation: ~4 chars per token on average for mixed code+prose.
-export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
-
-// NOTE: MODEL_FACING_RESULT_BUDGET_BYTES has been removed (obsolete — s3wp.24).
-// Generic byte-budget gating of the model-facing result is forbidden per
-// docs/raw-output-contract.md.  The rawExceededBudget field on ResultAccounting
-// now always reflects whether the raw payload was non-trivial (>0 bytes) relative
-// to the model-facing result, without a fixed byte cap.  See resultEnvelope.ts.
+// 0yt5.17: HIGH_VOLUME_* summarizer caps, FAILURE_REREAD_ARCHIVE_RECOVERY
+// steering text, and TOKEN_ESTIMATE_CHARS_PER_TOKEN result-accounting divisor have
+// been REMOVED. The harness no longer summarizes, steers, or token-accounts tool
+// results; it persists raw to outputFile and passes the tool's result verbatim.
 
 // Output-control flags rejected for ALL project command tools: project-tool
 // output is already bounded and archived by the harness, so a model-supplied
@@ -181,8 +132,6 @@ export const ProjectToolNextAction = {
   FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure'
 } as const;
 
-export const NO_MATCH_STATUS = 'no_match';
-
 export const TRANSIENT_PROJECT_TOOL_FAILURE_PATTERN =
   /\b(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|ENOSPC|timed out|timeout|socket|transport|network|response headers timed out|temporar(?:y|ily))\b/i;
 
@@ -192,29 +141,13 @@ export const TOOL_INPUT_PROJECT_TOOL_FAILURE_PATTERN =
 export const WORKTREE_STATE_PROJECT_TOOL_FAILURE_PATTERN =
   /\b(?:dirty worktree|worktree state|outside approved|write set|untracked|unstaged|merge conflict|index lock|permission denied)\b/i;
 
-export const NO_MATCH_FILTERED_RECOVERY =
-  'The tool ran first and the wrapper-side outputFilters post-filtered stdout after the tool executed. Empty output here means the tool produced output that was then filtered out — it does NOT mean the tool found no matches. Treat this as filter-eliminated output, not a genuine no-match. Rerun without the filter or with a narrower filter to see what the tool matched.';
-
-export const ZERO_TARGET_SCAN_MESSAGE_PREFIX =
-  'INSUFFICIENT_EVIDENCE: configured security/evidence scan reported zero scanned targets.';
-
-export const SCAN_TARGET_SAMPLE_LIMIT = 5;
-export const INSUFFICIENT_EVIDENCE_NEXT_ACTION = 'insufficient_evidence';
-
-export const COMMAND_TRUNCATION_MARKER_PREFIX = '[truncated ';
-export const COMMAND_TRUNCATION_STREAM_MARKER_SUFFIX = ' bytes; full stream archived by harness';
-export const COMMAND_TRUNCATION_TEXT_MARKER_SUFFIX = ' characters';
-
-export const COMMAND_STREAM_OUTPUT_KEYS = [ProjectToolResultKey.STDOUT, ProjectToolResultKey.STDERR] as const;
-export const COMMAND_DIAGNOSTIC_SECTION_SUFFIX = ' diagnostic';
-export const COMMAND_DIAGNOSTIC_LINE_PATTERN = /\b(?:ERROR|FAILED|FAILURES|Traceback|Exception|Error|ImportError|AssertionError|TypeError|NameError|Timeout|timed out)\b|^E\s+/i;
-export const COMMAND_DIAGNOSTIC_MAX_MATCH_LINES = 40;
-export const COMMAND_DIAGNOSTIC_TAIL_LINES = 25;
-
-export const DIAGNOSTIC_SUMMARY_KEY = 'diagnosticSummary';
-export const DIAGNOSTIC_SUMMARY_LOCATION_LIMIT = 3;
-export const DIAGNOSTIC_MESSAGE_PREFIX_CHARS = 160;
-export const DIAGNOSTIC_TRUNCATION_PATTERN = /\[truncated\b/i;
+// 0yt5.16/0yt5.17: the no-match/filtered recovery text, the zero-target-scan
+// message prefix, the scan-target sample limit, the insufficient-evidence next
+// action, the command-stream truncation markers, the command-stream output keys,
+// the command-stream diagnostic-extraction constants, and the diagnostic-summary /
+// diagnostic-source-truncation pattern constants have all been REMOVED. The harness
+// performs no truncation, diagnostic summarization, or scan-target recognition on
+// tool results.
 
 /** tmpdir bucket for serialized MCP project-tool locks. */
 export const MCP_TOOL_LOCK_DIR = 'orr-else-mcp-tool-locks';
@@ -259,26 +192,21 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
   ProjectToolParameter.CWD_MODE
 ]);
 
-// MODEL_HIDDEN_RESULT_KEYS: fields always removed from the model-facing payload.
+// MODEL_HIDDEN_RESULT_KEYS: INTERNAL-ONLY keys removed from the model-facing
+// payload because they are not part of the tool's result — they are harness
+// scratch the executors attach in-process. Everything ELSE on the tool's result
+// passes through VERBATIM (0yt5.16/0yt5.17 — no truncation/capping/summarization).
 //
-// s3wp.25:
-//   stdout / stderr: present in the internal result record for semantic summarizers
-//     (diagnostics extraction, high-volume compaction, failure classification).
-//     Always hidden from the model.  Full raw streams are in stdoutFile / stderrFile.
-//   stdoutFile / stderrFile: intentionally NOT in this set — raw-output file refs
-//     that the model should see.
-//   stderrHint: intentionally NOT in this set.  It is a compact (≤512-char) excerpt
-//     of stderr included in the model-facing result for failure classification context
-//     and for classifyProjectToolFailure to identify ENOSPC/transient patterns.
-//   outputFile: internal harness reference, always hidden.
-//   outputAccess, outputArchive: forbidden generic envelope fields per
-//     docs/raw-output-contract.md.
-// s3wp.26:
-//   result: raw MCP callTool payload — always hidden.  Complete payload is persisted
-//     to mcp-raw.json; the model sees only rawFile/rawBytes/rawChecksum references.
-//     Previously only suppressed when hasStructuredModelSummary was true (via
-//     MODEL_RAW_SUPPRESSED_KEYS); now always hidden so no raw MCP content leaks to
-//     the model regardless of whether a semantic summarizer produced a structuredResult.
+//   stdout / stderr: in-process raw text sample retained ONLY for failure
+//     classification (classifyProjectToolFailure / stderrHint). Always hidden;
+//     the full raw streams live in stdoutFile / stderrFile.
+//   stdoutFile / stderrFile: intentionally NOT hidden — raw-output file refs the
+//     model should see.
+//   stderrHint: intentionally NOT hidden — compact (≤512-char) stderr excerpt the
+//     model-facing result carries for failure-classification context.
+//   outputFile / outputBytes: internal harness archive handle, always hidden.
+//   result: raw MCP callTool payload — always hidden. Complete payload is persisted
+//     to mcp-raw.json; the model sees only the file references.
 export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'outputFile',
   'outputBytes',
@@ -290,76 +218,7 @@ export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'result' // s3wp.26: raw MCP callTool payload — always hidden; see mcp-raw.json
 ]);
 
-export const MODEL_RAW_SUPPRESSED_KEYS = new Set<string>([
-  ProjectToolResultKey.STDOUT,
-  ProjectToolResultKey.STDERR,
-  'output',
-  'result'
-]);
-
-export const SCAN_TARGET_COUNT_KEYS = [
-  'scannedTargetCount',
-  'scanned_target_count',
-  'scannedTargetsCount',
-  'scanned_targets_count',
-  'filesScanned',
-  'files_scanned',
-  'scannedFileCount',
-  'scanned_file_count',
-  'targetsScanned',
-  'targets_scanned'
-] as const;
-
-export const SCAN_TARGET_COLLECTION_KEYS = [
-  'scannedTargets',
-  'scanned_targets',
-  'scannedTargetSamples',
-  'scanned_target_samples',
-  'scannedFiles',
-  'scanned_files',
-  'targetPaths',
-  'target_paths'
-] as const;
-
-export const SEMGREP_PATH_COLLECTION_KEYS = [
-  'scanned',
-  'scannedTargets',
-  'scanned_targets'
-] as const;
-
-// commandFailureSummarizer patterns
-export const CMD_FAIL_TEST_FAILURE_PATTERN =
-  /^(?:FAILED|FAIL\s+\S|✗|×|●)\s+(\S+?(?:::\S+)?)\s*(?:-\s*(.+))?$|^(?:FAILED|FAIL)\s+(\S+(?:\s+>\s+\S+)+)/m;
-
-export const CMD_FAIL_TEST_LINE_PATTERN =
-  /^(?:FAILED|✗|×|●)\s+(\S+(?:::\S+|\s+>\s+\S+)*)/;
-
-export const CMD_FAIL_PYTEST_SECTION_PATTERN =
-  /^_{3,}\s+(\S.+?)\s+_{3,}$/;
-
-export const CMD_FAIL_ASSERTION_PATTERN =
-  /^(?:E\s{2,})?([A-Za-z][A-Za-z0-9_]*Error|[A-Za-z][A-Za-z0-9_]*Exception|AssertionError|assert\b)[\s:](.{0,120})/;
-
-export const CMD_FAIL_TRACEBACK_LINE_PATTERN =
-  /(?:File\s+"([^"]+)",\s+line\s+(\d+))|(?:^\s+at\s+\S+\s+\(([^)]+):(\d+):\d+\))|(?:^(\S+\.(py|ts|js|tsx|jsx|rb|go|rs|java|cs|cpp|c|h):\d+))/m;
-
-export const CMD_FAIL_LINT_LINE_PATTERN =
-  /^(\S[^:]*\.[a-zA-Z]{1,8}):(\d+)(?::\d+)?:?\s+(?:(error|warning|note|info|hint)\s*[:—\-]\s*)?(.{0,180})/i;
-
-export const CMD_FAIL_ESLINT_RULE_PATTERN =
-  /^\s{2,}([a-z][\w/.-]{2,50})\s*$/;
-
-export const CMD_FAIL_SEVERITY_WORD_PATTERN =
-  /^(error|warning|warn|note|info|hint)\b/i;
-
-export const CMD_FAIL_TIMEOUT_PATTERN =
-  /\b(?:timed?\s*out|timeout|ETIMEDOUT|SIGALRM)\b/i;
-
-export const CMD_FAIL_MAX_BUFFER_PATTERN =
-  /\b(?:ERR_CHILD_PROCESS_STDIO_MAXBUFFER|maxBuffer|max[_-]?buffer)\b/i;
-
-export const CMD_FAIL_SIGNAL_PATTERN =
-  /\b(?:SIGKILL|SIGTERM|SIGABRT|SIGSEGV|killed|signal\s+\d+)\b/i;
-
-export const CMD_FAIL_TRANSPORT_PATTERN =
-  /\b(?:ECONNRESET|EPIPE|ENOSPC|transport\s+error|connection\s+reset)\b/i;
+// 0yt5.16/0yt5.17: the model raw-suppressed key set, the scan-target / semgrep-path
+// recognition key lists, and the command-failure summarizer regex patterns have all
+// been REMOVED. The harness no longer recognizes scan-target evidence nor summarizes
+// command-failure output into test/lint groups.
