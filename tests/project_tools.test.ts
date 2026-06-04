@@ -449,7 +449,14 @@ describe('project tool command arguments', () => {
 
   it('returns structured backpressure when python_lsp serialized lock acquisition times out', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
-    vi.spyOn(lockfile, 'lock').mockRejectedValueOnce(new Error('Lock file is already being held'));
+    // Reject ONLY the MCP project-tool lock; let the shared events-JSONL append
+    // lock (a .jsonl path) succeed so event recording is unaffected (13op).
+    vi.spyOn(lockfile, 'lock').mockImplementation(async (target: string) => {
+      if (String(target).includes('orr-else-mcp-tool-locks')) {
+        throw new Error('Lock file is already being held');
+      }
+      return (async () => {}) as () => Promise<void>;
+    });
     const tool: ProjectMcpToolConfig = {
       name: 'python_lsp',
       type: ProjectToolType.MCP,

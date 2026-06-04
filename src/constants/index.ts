@@ -898,6 +898,17 @@ export const EventStoreDefaults = {
   UNSAFE_INDEX_PATH_SEGMENT_PATTERN: /[^A-Za-z0-9._-]/g
 } as const;
 
+/** Cross-process append-lock tuning for the shared events JSONL (13op). Sibling
+ * worker processes append to the same file; the lock prevents torn/interleaved
+ * records. Kept short — an append holds the lock for one write only. */
+export const EventLogDefaults = {
+  LOCK_SUFFIX: '.lock',
+  LOCK_STALE_MS: 10 * TimeMs.SECOND,
+  LOCK_RETRIES: 100,
+  LOCK_RETRY_MIN_MS: 5,
+  LOCK_RETRY_MAX_MS: 200
+} as const;
+
 export const TransactionalStateDefaults = {
   PLAN_CONTRACT_ARTIFACT_ID: 'planContract',
   PRE_PLAN_CONTRACT_STATE_IDS: ['RequirementsAnalysis'],
