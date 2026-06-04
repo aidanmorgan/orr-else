@@ -35,6 +35,7 @@ import {
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME, ARTIFACT_VALIDATOR_TOOL_NAME } from './plugins/projectTools/constants.js';
 import type { ToolResultBase } from './contract.js';
+import { registerBuiltInVerifiers } from './tools/index.js';
 import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
@@ -2186,6 +2187,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   // Fresh per-invocation state — guards reset here so a second call to
   // orrElseExtension(pi2, services) re-registers tools on the new pi instance.
   const session = createExtensionSession();
+
+  // Self-register the harness's OWN built-in tools' verify() callbacks (e.g.
+  // git_history). The harness registers these via the contract's verifier
+  // registry directly — distinct from CONSUMER tools, which register through
+  // the consuming-project extension. Idempotent (last-wins).
+  registerBuiltInVerifiers();
 
   const services = providedServices || createRuntimeServices();
   // Point the Logger's rotating-file transport at the injected project root so
