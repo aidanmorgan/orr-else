@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { Observability, SpanStatusValue } from '../src/core/Observability.js';
+import { JsonlSpanExporter, Observability, SpanStatusValue } from '../src/core/Observability.js';
 import { EnvVars, ObservabilityDefaults, SpanName, ToolResultStatus } from '../src/constants/index.js';
 
 describe('Observability', () => {
@@ -259,6 +259,62 @@ states:
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// a1j1 AC#1: the JSONL trace WriteStream has an 'error' handler so a write
+// failure (e.g. ENOSPC) is handled rather than thrown as an uncaught exception.
+// ---------------------------------------------------------------------------
+
+describe('JsonlSpanExporter stream error handling', () => {
+  const root = path.join(os.tmpdir(), 'orr-else-otel-stream-error-test');
+  const filePath = path.join(root, 'traces-test.jsonl');
+
+  beforeEach(() => {
+    fs.mkdirSync(root, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches an 'error' listener to the write stream", () => {
+    const exporter = new JsonlSpanExporter(filePath);
+    try {
+      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter }).stream;
+      // The handler attached in the constructor must be the only/first listener,
+      // so an emitted 'error' is consumed instead of crashing the process.
+      expect(stream.listenerCount('error')).toBeGreaterThanOrEqual(1);
+    } finally {
+      void (exporter as unknown as { stream: { destroy(): void } }).stream.destroy();
+    }
+  });
+
+  it('does not throw / emit an uncaught exception when the stream errors (simulated ENOSPC)', async () => {
+    const unhandled: unknown[] = [];
+    const onUncaught = (err: unknown) => unhandled.push(err);
+    process.on('uncaughtException', onUncaught);
+    process.on('unhandledRejection', onUncaught);
+
+    try {
+      const exporter = new JsonlSpanExporter(filePath);
+      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter }).stream;
+
+      // Simulate the kernel surfacing a disk-full write error on the stream.
+      // With the handler in place this must NOT throw or escape as uncaught.
+      const enospc = Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+      expect(() => stream.emit('error', enospc)).not.toThrow();
+
+      // Give any (mis)scheduled microtasks/macrotasks a tick to surface.
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      expect(unhandled).toHaveLength(0);
+      void (exporter as unknown as { stream: { destroy(): void } }).stream.destroy();
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      process.off('unhandledRejection', onUncaught);
     }
   });
 });

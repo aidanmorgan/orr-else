@@ -1629,3 +1629,257 @@ states:
     configLoader.reset();
   });
 });
+
+// ---------------------------------------------------------------------------
+// a1j1 AC#2 / AC#3: OTEL traces are added to retention and bounded by both
+// max-age (the `otel` RETENTION_AREAS entry) and max-bytes rotation.
+// ---------------------------------------------------------------------------
+
+describe('RetentionCleanup — OTEL traces retention', () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpRoot();
+    fs.mkdirSync(path.join(tmpRoot, '.pi', 'otel'), { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it('AC2: reclaims a stale traces-*.jsonl under .pi/otel (bytesReclaimed > 0)', async () => {
+    const otelFile = path.join(tmpRoot, '.pi', 'otel', 'traces-stale-session.jsonl');
+    const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    writeFileWithMtime(otelFile, '{"span":"old"}\n', oldMtime);
+
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const result = await cleanup.run();
+
+    expect(fs.existsSync(otelFile)).toBe(false);
+    expect(result.totalBytesReclaimed).toBeGreaterThan(0);
+    const otelArea = result.areas.find(a => a.area === 'otel');
+    expect(otelArea).toBeDefined();
+    expect(otelArea!.bytesReclaimed).toBeGreaterThan(0);
+  });
+
+  it('AC2: keeps a recent traces-*.jsonl that is within the age threshold', async () => {
+    const otelFile = path.join(tmpRoot, '.pi', 'otel', 'traces-recent-session.jsonl');
+    writeFileWithMtime(otelFile, '{"span":"new"}\n', NOW_MS - ONE_HOUR_MS);
+
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    await cleanup.run();
+
+    expect(fs.existsSync(otelFile)).toBe(true);
+  });
+
+  it('AC3: rotates (removes) an over-size traces-*.jsonl even when it is recent', async () => {
+    // Recent mtime — the age scan would KEEP this; only the max-bytes pass removes it.
+    const otelFile = path.join(tmpRoot, '.pi', 'otel', 'traces-huge-session.jsonl');
+    const recentMtime = NOW_MS - ONE_HOUR_MS;
+    const big = 'x'.repeat(2000);
+    writeFileWithMtime(otelFile, big, recentMtime);
+
+    const es = fakeEventStore();
+    // maxBytes is the 5th positional? No — otelMaxBytes is an instance default; we
+    // exercise it via a tiny RetentionConfig-independent path by constructing with
+    // a small threshold through the public surface: the default is 50MiB, so to
+    // prove rotation we shrink the threshold by monkeypatching the instance.
+    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    (cleanup as unknown as { otelMaxBytes: number }).otelMaxBytes = 1000; // 1000 < 2000
+    const result = await cleanup.run();
+
+    expect(fs.existsSync(otelFile)).toBe(false);
+    const otelArea = result.areas.find(a => a.area === 'otel');
+    expect(otelArea!.bytesReclaimed).toBeGreaterThanOrEqual(2000);
+  });
+
+  it('AC3: keeps an under-size recent traces-*.jsonl (rotation is size-bounded)', async () => {
+    const otelFile = path.join(tmpRoot, '.pi', 'otel', 'traces-small-session.jsonl');
+    writeFileWithMtime(otelFile, 'x'.repeat(100), NOW_MS - ONE_HOUR_MS);
+
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    (cleanup as unknown as { otelMaxBytes: number }).otelMaxBytes = 1000; // 100 < 1000 → kept
+    await cleanup.run();
+
+    expect(fs.existsSync(otelFile)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// a1j1 AC#4 / AC#5: per-call raw-output archives (output/result.json +
+// mcp-raw.json under .pi/tool-output/{bead}/{state}/{action}/...) are reclaimed
+// for a LIVE bead's AGED PRIOR transitions, while the CURRENT (latest)
+// state/action subtree is EXEMPT (gate-before-reclaim carve-out).
+// ---------------------------------------------------------------------------
+
+describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-reclaim carve-out', () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpRoot();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  /**
+   * Event store stub that ONLY answers projectBeadStateChart, returning the
+   * current state/action for each bead. This is the load-bearing input to the
+   * gate-before-reclaim carve-out.
+   */
+  function fakeEventStoreWithCurrent(
+    current: Record<string, { currentState?: string; activeActionId?: string }>
+  ) {
+    const records: Array<{ event: string; data: unknown }> = [];
+    return {
+      record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }),
+      projectBeadStateChart: vi.fn(async (beadId: string) => ({
+        beadId,
+        currentState: current[beadId]?.currentState,
+        activeActionId: current[beadId]?.activeActionId,
+        handovers: {},
+        completedActionIds: [],
+        checkedItems: {},
+        addedChecklistItems: [],
+        checkpoints: []
+      })),
+      records
+    };
+  }
+
+  /** Write a per-call raw archive (output/result.json + mcp-raw.json) at a given mtime. */
+  function writeRawArchive(
+    root: string,
+    beadId: string,
+    stateId: string,
+    actionId: string,
+    mtimeMs: number
+  ): { resultJson: string; mcpRaw: string; actionDir: string } {
+    const actionDir = path.join(root, '.pi', 'tool-output', beadId, stateId, actionId, 'bash', 'inv-1');
+    const resultJson = path.join(actionDir, 'output', 'result.json');
+    const mcpRaw = path.join(actionDir, 'mcp-raw.json');
+    writeFileWithMtime(resultJson, '{"status":"PASSED"}', mtimeMs);
+    writeFileWithMtime(mcpRaw, '{"raw":"mcp"}', mtimeMs);
+    // Set the action-dir mtime (the carve-out keys reclaim off this dir's age).
+    const stateActionDir = path.join(root, '.pi', 'tool-output', beadId, stateId, actionId);
+    makeDirWithMtime(stateActionDir, mtimeMs);
+    return { resultJson, mcpRaw, actionDir: stateActionDir };
+  }
+
+  it('AC4: reclaims an AGED prior-transition raw archive for a LIVE bead', async () => {
+    const beadId = 'bead-live-arch-001';
+    const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+
+    // PRIOR transition (Planning/formulate-plan) — aged, must be reclaimed.
+    const prior = writeRawArchive(tmpRoot, beadId, 'Planning', 'formulate-plan', oldMtime);
+    // The bead's CURRENT transition is Implementation/surgical-execution (different).
+    const es = fakeEventStoreWithCurrent({
+      [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
+    });
+
+    const cleanup = new RetentionCleanup(
+      tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
+    );
+    const result = await cleanup.run();
+
+    // The aged PRIOR archive is reclaimed even though the bead is LIVE.
+    expect(fs.existsSync(prior.resultJson)).toBe(false);
+    expect(fs.existsSync(prior.mcpRaw)).toBe(false);
+    expect(fs.existsSync(prior.actionDir)).toBe(false);
+    const toolArea = result.areas.find(a => a.area === 'pi/tool-output');
+    expect(toolArea!.bytesReclaimed).toBeGreaterThan(0);
+  });
+
+  it('AC4: preserves the live bead scratch (current transition) while reclaiming the prior archive', async () => {
+    const beadId = 'bead-live-arch-002';
+    const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+
+    const prior = writeRawArchive(tmpRoot, beadId, 'Planning', 'formulate-plan', oldMtime);
+    // CURRENT transition is also AGED on disk — but must be preserved because it
+    // is the current state/action (gate may not have run).
+    const current = writeRawArchive(tmpRoot, beadId, 'Implementation', 'surgical-execution', oldMtime);
+
+    const es = fakeEventStoreWithCurrent({
+      [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
+    });
+    const cleanup = new RetentionCleanup(
+      tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
+    );
+    await cleanup.run();
+
+    // Prior aged archive reclaimed; current-transition scratch preserved.
+    expect(fs.existsSync(prior.resultJson)).toBe(false);
+    expect(fs.existsSync(current.resultJson)).toBe(true);
+    expect(fs.existsSync(current.mcpRaw)).toBe(true);
+  });
+
+  it('AC5 (NEGATIVE): a live bead CURRENT (fresh, non-aged) raw archive SURVIVES one reclaim cycle', async () => {
+    const beadId = 'bead-live-arch-003';
+    const freshMtime = NOW_MS - ONE_HOUR_MS; // well within the age threshold
+
+    // CURRENT transition, fresh — survives both because it is current AND fresh.
+    const current = writeRawArchive(tmpRoot, beadId, 'Implementation', 'surgical-execution', freshMtime);
+
+    const es = fakeEventStoreWithCurrent({
+      [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
+    });
+    const cleanup = new RetentionCleanup(
+      tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
+    );
+    const result = await cleanup.run();
+
+    expect(fs.existsSync(current.resultJson)).toBe(true);
+    expect(fs.existsSync(current.mcpRaw)).toBe(true);
+    const toolArea = result.areas.find(a => a.area === 'pi/tool-output');
+    expect(toolArea!.bytesReclaimed).toBe(0); // nothing reclaimed for this bead
+  });
+
+  it('AC5 (gate-before-reclaim invariant): the CURRENT transition is exempt EVEN WHEN aged, while a PRIOR aged transition is reclaimed (different code paths)', async () => {
+    // This documents the binding invariant: the coordinator verify() gate for a
+    // transition runs while it is the bead's CURRENT state/action. Its outputFiles
+    // must NOT be reclaimed before the gate has run. We therefore exempt the
+    // CURRENT subtree from reclaim regardless of mtime, and only PRIOR (already
+    // past-gate) transitions age out.
+    const beadId = 'bead-gate-invariant';
+    const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+
+    // Both subtrees are equally AGED on disk — the ONLY difference is which one is
+    // current. This proves the carve-out keys off current state/action, NOT mtime.
+    const prior = writeRawArchive(tmpRoot, beadId, 'Planning', 'formulate-plan', oldMtime);
+    const current = writeRawArchive(tmpRoot, beadId, 'Implementation', 'surgical-execution', oldMtime);
+
+    const es = fakeEventStoreWithCurrent({
+      [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
+    });
+    const cleanup = new RetentionCleanup(
+      tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
+    );
+    await cleanup.run();
+
+    // Aged PRIOR transition reclaimed (past its gate).
+    expect(fs.existsSync(prior.actionDir)).toBe(false);
+    // Aged CURRENT transition exempt (its gate may not have run) — survives.
+    expect(fs.existsSync(current.actionDir)).toBe(true);
+    expect(fs.existsSync(current.resultJson)).toBe(true);
+  });
+
+  it('fail-safe: when the current state/action cannot be projected, the whole live bead dir is preserved', async () => {
+    const beadId = 'bead-no-projection';
+    const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const arch = writeRawArchive(tmpRoot, beadId, 'Planning', 'formulate-plan', oldMtime);
+
+    // currentState undefined → cannot key the carve-out → preserve everything.
+    const es = fakeEventStoreWithCurrent({ [beadId]: { currentState: undefined } });
+    const cleanup = new RetentionCleanup(
+      tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
+    );
+    await cleanup.run();
+
+    expect(fs.existsSync(arch.resultJson)).toBe(true);
+    expect(fs.existsSync(arch.actionDir)).toBe(true);
+  });
+});

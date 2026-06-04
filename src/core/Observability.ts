@@ -70,11 +70,26 @@ class SessionIdGenerator implements IdGenerator {
   }
 }
 
-class JsonlSpanExporter implements SpanExporter {
+/**
+ * Exported for testability: the gate-before-reclaim/ENOSPC error-handler test
+ * (a1j1 AC#1) constructs an exporter and simulates a stream 'error' event to
+ * assert the handler swallows it rather than crashing the process.
+ */
+export class JsonlSpanExporter implements SpanExporter {
   private readonly stream: fs.WriteStream;
 
   constructor(private readonly filePath: string) {
     this.stream = fs.createWriteStream(filePath, { flags: 'a' });
+    // A WriteStream with no 'error' listener re-throws as an uncaught exception
+    // when the underlying write fails (e.g. ENOSPC on a full disk), crashing the
+    // process. Observability is best-effort telemetry: log and swallow the error
+    // so a failed trace write never takes down the harness.
+    this.stream.on('error', error => {
+      Logger.warn(Component.OBSERVABILITY, 'OTEL JSONL trace stream write failed', {
+        filePath: this.filePath,
+        error: String(error)
+      });
+    });
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: { code: ExportResultCode; error?: Error }) => void): void {

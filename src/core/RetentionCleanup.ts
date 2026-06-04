@@ -8,6 +8,7 @@ import {
   DomainEventName,
   EventStoreDefaults,
   OperationalArtifactPath,
+  ProjectToolDefaults,
   REPLAY_CRITICAL_EVENT_TYPES,
   RetentionDefaults
 } from '../constants/index.js';
@@ -80,7 +81,11 @@ const TOOL_OUTPUT_DIR = OperationalArtifactPath.PI_TOOL_OUTPUT_DIR;
 const RETENTION_AREAS: readonly RetentionArea[] = [
   { name: 'logs', relativePath: OperationalArtifactPath.PI_LOGS_DIR },
   { name: 'tmp', relativePath: OperationalArtifactPath.TEMP_DIR },
-  { name: 'trash', relativePath: OperationalArtifactPath.PI_TRASH_DIR }
+  { name: 'trash', relativePath: OperationalArtifactPath.PI_TRASH_DIR },
+  // OTEL traces (.pi/otel/traces-*.jsonl) grow unbounded otherwise; subject to
+  // the same max-age reclaim as the other harness-owned areas, plus a max-bytes
+  // rotation pass (see scanOtelArea).
+  { name: 'otel', relativePath: OperationalArtifactPath.PI_OTEL_DIR }
 ] as const;
 
 /**
@@ -253,6 +258,150 @@ function scanArea(areaRoot: string, areaName: string, nowMs: number, maxAgeMs: n
 }
 
 /**
+ * Max-bytes rotation pass for OTEL trace files (`.pi/otel/traces-*.jsonl`).
+ *
+ * The standard age-based scan (RETENTION_AREAS `otel` entry) removes traces that
+ * are older than maxAgeMs, but an active process can write a single trace file
+ * that grows without bound while still being recent.  This pass bounds the size:
+ * any `traces-*.jsonl` whose size exceeds `maxBytes` is removed (rotated), so the
+ * next span write recreates a fresh file.
+ *
+ * Only top-level `traces-*.jsonl` files are considered — directories, symlinks,
+ * and non-trace files are left untouched.  Bytes removed are added to the same
+ * `otel` area summary so the caller's totals stay accurate.
+ */
+function scanOtelMaxBytesArea(otelRoot: string, maxBytes: number, summary: RetentionAreaSummary): void {
+  if (!fs.existsSync(otelRoot)) return;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(otelRoot, { withFileTypes: true });
+  } catch (error) {
+    summary.errors++;
+    Logger.debug(Component.RETENTION, 'Failed to read otel dir for max-bytes rotation', { error: String(error) });
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!entry.name.startsWith('traces-') || !entry.name.endsWith('.jsonl')) continue;
+
+    const filePath = path.join(otelRoot, entry.name);
+    let stat: fs.Stats;
+    try {
+      // lstatSync: never follow a symlink masquerading as a trace file.
+      stat = fs.lstatSync(filePath);
+    } catch (error) {
+      summary.errors++;
+      Logger.debug(Component.RETENTION, 'Failed to stat otel trace file', { error: String(error) });
+      continue;
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) continue;
+    if (stat.size <= maxBytes) continue;
+
+    const bytes = stat.size;
+    const removeCounts = { filesRemoved: 0, dirsRemoved: 0, errors: 0 };
+    removeRecursive(filePath, removeCounts);
+    summary.filesRemoved += removeCounts.filesRemoved;
+    summary.errors += removeCounts.errors;
+    if (removeCounts.filesRemoved > 0) summary.bytesReclaimed += bytes;
+  }
+}
+
+/**
+ * Sanitize a state/action identifier into the on-disk path segment produced by
+ * ToolCallPathFactory, so the live-bead current-transition carve-out matches the
+ * directory names actually written under .pi/tool-output/{bead}/{state}/{action}.
+ */
+function toolOutputSegment(value: string | undefined, fallback: string): string {
+  const sanitized = (value || fallback)
+    .replace(ProjectToolDefaults.UNSAFE_PATH_SEGMENT_PATTERN, '-')
+    .replace(/^-+|-+$/g, '');
+  return sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : fallback;
+}
+
+/**
+ * Reclaim AGED prior-transition subtrees under a LIVE bead's tool-output dir,
+ * while EXEMPTING the bead's CURRENT (latest) state/action subtree.
+ *
+ * GATE-BEFORE-RECLAIM (binding, a1j1 NOTES):
+ * The coordinator verify() gate for a transition runs while that transition is
+ * the bead's CURRENT state/action.  Its outputFiles (result.json / mcp-raw.json
+ * under .pi/tool-output/{bead}/{currentState}/{currentAction}/…) MUST NOT be
+ * reclaimed before the gate has run.  We therefore key the carve-out off the
+ * bead's CURRENT state/action (NOT pure mtime): the current subtree is exempt
+ * regardless of age, and only already-passed PRIOR transitions age out.
+ *
+ * Fail-safe: when the current state/action is unknown (currentState undefined,
+ * e.g. no events projected yet) the whole live bead dir is preserved — we never
+ * reclaim a live bead's archive when we cannot prove which transition is current.
+ */
+function reclaimLiveBeadPriorTransitions(
+  beadDirPath: string,
+  currentState: string | undefined,
+  currentActionId: string | undefined,
+  nowMs: number,
+  maxAgeMs: number,
+  summary: RetentionAreaSummary
+): void {
+  // Cannot determine the current transition — preserve the entire live bead dir.
+  if (!currentState) return;
+
+  const exemptState = toolOutputSegment(currentState, ProjectToolDefaults.UNSPECIFIED_STATE_ID);
+  const exemptAction = toolOutputSegment(currentActionId, ProjectToolDefaults.UNSPECIFIED_ACTION_ID);
+
+  let stateDirs: fs.Dirent[];
+  try {
+    stateDirs = fs.readdirSync(beadDirPath, { withFileTypes: true });
+  } catch (error) {
+    summary.errors++;
+    Logger.debug(Component.RETENTION, 'Failed to read live bead dir for prior-transition reclaim', { error: String(error) });
+    return;
+  }
+
+  for (const stateEntry of stateDirs) {
+    if (!stateEntry.isDirectory()) continue;
+    const statePath = path.join(beadDirPath, stateEntry.name);
+
+    let actionDirs: fs.Dirent[];
+    try {
+      actionDirs = fs.readdirSync(statePath, { withFileTypes: true });
+    } catch (error) {
+      summary.errors++;
+      Logger.debug(Component.RETENTION, 'Failed to read live bead state dir during reclaim', { error: String(error) });
+      continue;
+    }
+
+    for (const actionEntry of actionDirs) {
+      if (!actionEntry.isDirectory()) continue;
+      // GATE-BEFORE-RECLAIM carve-out: never reclaim the CURRENT state/action
+      // subtree of a live bead — its coordinator gate may not have run yet.
+      if (stateEntry.name === exemptState && actionEntry.name === exemptAction) continue;
+
+      const actionPath = path.join(statePath, actionEntry.name);
+      let mtimeMs: number;
+      try {
+        mtimeMs = fs.lstatSync(actionPath).mtimeMs;
+      } catch (error) {
+        summary.errors++;
+        Logger.debug(Component.RETENTION, 'Failed to stat live bead action dir during reclaim', { error: String(error) });
+        continue;
+      }
+
+      if (nowMs - mtimeMs < maxAgeMs) continue; // not yet aged out
+
+      const bytes = calcSizeBytes(actionPath);
+      const removeCounts = { filesRemoved: 0, dirsRemoved: 0, errors: 0 };
+      removeRecursive(actionPath, removeCounts);
+      summary.filesRemoved += removeCounts.filesRemoved;
+      summary.dirsRemoved += removeCounts.dirsRemoved;
+      summary.errors += removeCounts.errors;
+      summary.bytesReclaimed += bytes;
+    }
+  }
+}
+
+/**
  * Special-case scanner for `.pi/tool-output` (0yt5.27).
  *
  * The top-level `tool-output` dir mtime only bumps when a NEW per-bead subdir is
@@ -262,7 +411,12 @@ function scanArea(areaRoot: string, areaName: string, nowMs: number, maxAgeMs: n
  *
  * Instead this function descends ONE level to the per-bead dirs
  * (`.pi/tool-output/{beadId}`) and:
- *   - SKIPS any {beadId} dir whose beadId is in the live set (never removed).
+ *   - For LIVE beads, reclaims AGED PRIOR-transition subtrees
+ *     (`{beadId}/{state}/{action}`) while EXEMPTING the bead's CURRENT
+ *     state/action subtree (gate-before-reclaim carve-out — see
+ *     reclaimLiveBeadPriorTransitions).  The current transition's outputFiles
+ *     are never reclaimed before the coordinator gate has run.  When the current
+ *     state/action is unknown the whole live bead dir is preserved (fail-safe).
  *   - For non-live bead dirs, removes the dir if its own mtime is older than
  *     the age threshold (the per-bead dir mtime bumps when new state subdirs are
  *     created inside it — adequate as a conservative proxy for "active").
@@ -277,7 +431,8 @@ function scanToolOutputArea(
   toolOutputRoot: string,
   nowMs: number,
   maxAgeMs: number,
-  liveBeadIds: Set<string> | null
+  liveBeadIds: Set<string> | null,
+  currentTransitions: Map<string, { currentState?: string; currentActionId?: string }>
 ): RetentionAreaSummary {
   const summary: RetentionAreaSummary = {
     area: 'pi/tool-output',
@@ -313,8 +468,22 @@ function scanToolOutputArea(
     const beadId = entry.name;
     summary.entriesScanned++;
 
-    // Never delete a live bead's scratch tree, regardless of mtime.
-    if (liveBeadIds.has(beadId)) continue;
+    // LIVE bead: never blanket-delete its tree.  Instead reclaim only AGED
+    // PRIOR-transition subtrees, exempting the CURRENT state/action subtree
+    // (gate-before-reclaim carve-out).  The current transition is keyed off the
+    // bead's projected current state/action, NOT mtime.
+    if (liveBeadIds.has(beadId)) {
+      const current = currentTransitions.get(beadId);
+      reclaimLiveBeadPriorTransitions(
+        beadDirPath,
+        current?.currentState,
+        current?.currentActionId,
+        nowMs,
+        maxAgeMs,
+        summary
+      );
+      continue;
+    }
 
     let mtimeMs: number;
     try {
@@ -582,6 +751,7 @@ export class RetentionCleanup {
   private readonly compactionEnabled: boolean;
   private readonly compactionWindowMs: number;
   private readonly diskHealthWarnBytes: number;
+  private readonly otelMaxBytes: number = RetentionDefaults.OTEL_MAX_BYTES;
 
   constructor(
     private readonly projectRoot: string,
@@ -622,15 +792,27 @@ export class RetentionCleanup {
     for (const area of RETENTION_AREAS) {
       const areaRoot = resolveProjectFrom(this.projectRoot, area.relativePath);
       const summary = scanArea(areaRoot, area.name, nowMs, this.maxAgeMs);
+      // Bound OTEL traces by size as well as age: a recent-but-huge traces-*.jsonl
+      // is rotated even though the age scan above would keep it.
+      if (area.name === 'otel') {
+        scanOtelMaxBytesArea(areaRoot, this.otelMaxBytes, summary);
+      }
       areas.push(summary);
     }
 
+    // Resolve the CURRENT (latest) state/action for each live bead so the
+    // tool-output scan can exempt the in-flight transition subtree from reclaim
+    // (gate-before-reclaim carve-out). Failures per bead leave the entry absent,
+    // which makes scanToolOutputArea preserve that whole live bead dir (safe).
+    const currentTransitions = await this.resolveCurrentTransitions(resolvedLiveBeadIds);
+
     // 0yt5.27: the single PROJECT-scoped tool-output archive (.pi/tool-output) is
     // scanned per-bead with live-bead awareness — its first path segment is the
-    // beadId, so a running bead's outputs are never reclaimed. If liveBeadIds
-    // resolution failed (resolvedLiveBeadIds === null) the whole area is skipped.
+    // beadId. For a live bead, only AGED PRIOR-transition subtrees are reclaimed;
+    // the CURRENT state/action subtree is exempt. If liveBeadIds resolution failed
+    // (resolvedLiveBeadIds === null) the whole area is skipped.
     const toolOutputRoot = resolveProjectFrom(this.projectRoot, TOOL_OUTPUT_DIR);
-    areas.push(scanToolOutputArea(toolOutputRoot, nowMs, this.maxAgeMs, resolvedLiveBeadIds));
+    areas.push(scanToolOutputArea(toolOutputRoot, nowMs, this.maxAgeMs, resolvedLiveBeadIds, currentTransitions));
 
     const totalFilesRemoved = areas.reduce((acc, a) => acc + a.filesRemoved, 0);
     const totalDirsRemoved = areas.reduce((acc, a) => acc + a.dirsRemoved, 0);
@@ -750,5 +932,40 @@ export class RetentionCleanup {
     }
 
     return result;
+  }
+
+  /**
+   * Project the CURRENT (latest) state/action for each live bead from the event
+   * store. This is the load-bearing input to the gate-before-reclaim carve-out:
+   * the returned state/action identifies the in-flight transition subtree that
+   * tool-output reclaim must EXEMPT (its coordinator gate may not have run yet).
+   *
+   * Per-bead projection errors are isolated — a missing entry causes
+   * scanToolOutputArea to preserve that live bead's entire dir (fail-safe).
+   * Returns an empty map when there are no live beads or the live set is null.
+   */
+  private async resolveCurrentTransitions(
+    liveBeadIds: Set<string> | null
+  ): Promise<Map<string, { currentState?: string; currentActionId?: string }>> {
+    const map = new Map<string, { currentState?: string; currentActionId?: string }>();
+    if (!liveBeadIds || liveBeadIds.size === 0) return map;
+
+    for (const beadId of liveBeadIds) {
+      try {
+        const projection = await this.eventStore.projectBeadStateChart(beadId);
+        map.set(beadId, {
+          currentState: projection.currentState,
+          currentActionId: projection.activeActionId
+        });
+      } catch (error) {
+        Logger.debug(Component.RETENTION, 'Failed to project current transition for live bead; its tool-output dir will be fully preserved', {
+          beadId,
+          error: String(error)
+        });
+        // Leave the entry absent — scanToolOutputArea preserves the whole dir.
+      }
+    }
+
+    return map;
   }
 }

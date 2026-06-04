@@ -1225,6 +1225,8 @@ export const RetentionDefaults = {
   COMPACTION_ENABLED: false,
   /** Disk-usage health event is emitted when total bytes reclaimed exceeds this threshold in a single run. */
   DISK_HEALTH_WARN_BYTES: 50 * 1024 * 1024, // 50 MiB
+  /** An OTEL traces-*.jsonl file larger than this is rotated/removed even when within MAX_AGE_MS (max-bytes bound). */
+  OTEL_MAX_BYTES: 50 * 1024 * 1024, // 50 MiB
 } as const;
 
 /**
