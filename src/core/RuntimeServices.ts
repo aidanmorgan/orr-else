@@ -70,6 +70,10 @@ export interface RuntimeServices {
    * (PROJECT_ROOT env var) or process.cwd(). All path resolution in the coordinator
    * process flows from this single value — no mutable module global needed. */
   projectRoot: string;
+  /** The injected runtime environment (env-var accessor) used for all path/root
+   * resolution. Exposed so collaborators (e.g. PathContext) resolve roots through
+   * the same injected env rather than reading process.env directly. */
+  env: RuntimeEnvironment;
   configLoader: ConfigLoader;
   contextInjector: ContextInjector;
   eventStore: EventStore;
@@ -290,6 +294,7 @@ export function assembleRuntimeServices(
 
   return {
     projectRoot,
+    env,
     configLoader,
     contextInjector: new ContextInjector(),
     eventStore,

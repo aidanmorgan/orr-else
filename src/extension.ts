@@ -2393,7 +2393,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.readPathContextToolRegistered) {
       session.readPathContextToolRegistered = true;
-      const pathContext = new PathContext(services.projectRoot);
+      const pathContext = new PathContext(services.projectRoot, services.env);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.READ_PATH_CONTEXT,
         description:

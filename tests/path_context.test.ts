@@ -681,6 +681,116 @@ describe('PathContext', () => {
     expect(skeleton).toContain('{ ... }');
   });
 
+  it('(R1) operational .pi paths resolve from the project root while cwd is the bead worktree', () => {
+    const projectRoot = path.join(root, 'project');
+    const worktreeRoot = path.join(projectRoot, 'worktrees', 'bd-1');
+    const artifactPath = path.join(projectRoot, '.pi', 'artifacts', 'bd-1', 'plan-contract.json');
+    fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    fs.writeFileSync(artifactPath, '{"kind":"project-root-artifact"}\n');
+
+    const previousCwd = process.cwd();
+    process.env[EnvVars.PROJECT_ROOT] = projectRoot;
+    process.env[EnvVars.WORKTREE_PATH] = worktreeRoot;
+    try {
+      process.chdir(worktreeRoot);
+      const result = new PathContext(projectRoot).resolve({
+        filePath: '.pi/artifacts/bd-1/plan-contract.json',
+        offset: 1,
+        limit: 1
+      });
+
+      expect(result.status).toBe('found');
+      if (result.status !== 'found') throw new Error('unexpected status');
+      expect(result.canonicalRelativePath).toBe(path.join('.pi', 'artifacts', 'bd-1', 'plan-contract.json'));
+      expect(result.slice).toContain('project-root-artifact');
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it('(R2) ordinary relative source paths still prefer the active bead worktree', () => {
+    const projectRoot = path.join(root, 'project');
+    const worktreeRoot = path.join(projectRoot, 'worktrees', 'bd-2');
+    const relativeSourcePath = path.join('packages', 'example.py');
+    fs.mkdirSync(path.join(projectRoot, 'packages'), { recursive: true });
+    fs.mkdirSync(path.join(worktreeRoot, 'packages'), { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, relativeSourcePath), 'origin = "project"\n');
+    fs.writeFileSync(path.join(worktreeRoot, relativeSourcePath), 'origin = "worktree"\n');
+
+    const previousCwd = process.cwd();
+    process.env[EnvVars.PROJECT_ROOT] = projectRoot;
+    process.env[EnvVars.WORKTREE_PATH] = worktreeRoot;
+    try {
+      process.chdir(worktreeRoot);
+      const result = new PathContext(projectRoot).resolve({
+        filePath: relativeSourcePath,
+        offset: 1,
+        limit: 1
+      });
+
+      expect(result.status).toBe('found');
+      if (result.status !== 'found') throw new Error('unexpected status');
+      expect(result.canonicalRelativePath).toBe(relativeSourcePath);
+      expect(result.slice).toContain('worktree');
+      expect(result.slice).not.toContain('project');
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
+  it('(R3) a source path that exists ONLY in the project root must NOT cross into it from a worktree', () => {
+    // Boundary-crossing regression (d5b2/g9ye): a teammate worktree that is
+    // missing a source file must NOT silently read the project-root copy.
+    const projectRoot = path.join(root, 'project');
+    const worktreeRoot = path.join(projectRoot, 'worktrees', 'bd-3');
+    const relativeSourcePath = path.join('packages', 'only_in_project.py');
+    fs.mkdirSync(path.join(projectRoot, 'packages'), { recursive: true });
+    fs.mkdirSync(worktreeRoot, { recursive: true });
+    // File exists ONLY in the project root, NOT in the worktree.
+    fs.writeFileSync(path.join(projectRoot, relativeSourcePath), 'origin = "project"\n');
+
+    const env = {
+      env: (name: string): string | undefined => {
+        if (name === EnvVars.PROJECT_ROOT) return projectRoot;
+        if (name === EnvVars.WORKTREE_PATH) return worktreeRoot;
+        return undefined;
+      }
+    };
+    const result = new PathContext(projectRoot, env).resolve({ filePath: relativeSourcePath, offset: 1, limit: 1 });
+    // Must resolve to the worktree (where the file is absent) → not_found.
+    // It must NEVER report 'found' by reading the project-root copy.
+    expect(result.status).toBe('not_found');
+  });
+
+  it('(R4) resolution uses the injected RuntimeEnvironment, not process.env', () => {
+    const projectRoot = path.join(root, 'project');
+    const worktreeRoot = path.join(projectRoot, 'worktrees', 'bd-4');
+    const rel = path.join('src', 'app.py');
+    fs.mkdirSync(path.join(worktreeRoot, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(worktreeRoot, rel), 'x = "in worktree"\n');
+
+    // process.env points WORKTREE_PATH elsewhere; the injected env must win.
+    const previousWorktree = process.env[EnvVars.WORKTREE_PATH];
+    process.env[EnvVars.WORKTREE_PATH] = path.join(root, 'somewhere-else');
+    try {
+      const env = {
+        env: (name: string): string | undefined => {
+          if (name === EnvVars.PROJECT_ROOT) return projectRoot;
+          if (name === EnvVars.WORKTREE_PATH) return worktreeRoot;
+          return undefined;
+        }
+      };
+      const result = new PathContext(projectRoot, env).resolve({ filePath: rel, offset: 1, limit: 1 });
+      expect(result.status).toBe('found');
+      if (result.status !== 'found') throw new Error('unexpected status');
+      expect(result.slice).toContain('in worktree');
+    } finally {
+      if (previousWorktree === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousWorktree;
+    }
+  });
+
   // ── S1/S2: unknown-language and no-extension files → skeletonFallback ────
 
   it('(S1) Go source file (.go) → skeletonFallback:true, no body-assignment leaked', () => {

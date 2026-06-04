@@ -21,6 +21,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { EnvVars } from '../constants/index.js';
+import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
 
 // ─── Caps (named constants — no magic numbers) ────────────────────────────────
 
@@ -555,12 +556,7 @@ function isPathInside(childPath: string, rootPath: string): boolean {
  * sub-directory — the path-context tool scopes to the whole worktree and
  * project root because it is a general file-discovery helper.
  */
-function allowedRoots(projectRoot: string): string[] {
-  const worktreePath =
-    process.env[EnvVars.WORKTREE_PATH] ||
-    process.env[EnvVars.PROJECT_ROOT] ||
-    projectRoot;
-
+function allowedRoots(projectRoot: string, worktreePath: string): string[] {
   // Deduplicate in case worktree and project root coincide.
   const candidates = [
     canonicalPath(worktreePath),
@@ -572,6 +568,37 @@ function allowedRoots(projectRoot: string): string[] {
     seen.add(root);
     return true;
   });
+}
+
+/**
+ * Operational/system paths are shared, project-root-scoped artifacts (event log,
+ * scratch, worktrees registry, harness config) — NOT per-teammate source. They
+ * resolve against the project root regardless of which worktree is active.
+ */
+function operationalProjectRelativePath(value: string): boolean {
+  const normalized = value.replace(/\\/g, '/').replace(/^\.\//, '');
+  return (
+    normalized === 'harness.yaml' ||
+    normalized.startsWith('.pi/') ||
+    normalized.startsWith('.tmp/') ||
+    normalized.startsWith('worktrees/')
+  );
+}
+
+/**
+ * Resolve a relative path to EXACTLY ONE deterministic root by path class —
+ * never an existsSync race across roots (d5b2/g9ye):
+ *   - operational/system paths → the shared project root
+ *   - everything else (source) → the active teammate worktree ONLY
+ * A source file missing from the worktree therefore resolves to a (non-existent)
+ * worktree path and is reported not_found — it must NEVER silently fall through
+ * to the project-root copy and cross the teammate boundary. Absolute paths are
+ * taken as-is and validated by the caller's scope check.
+ */
+function resolveCandidatePath(filePath: string, projectRoot: string, worktreePath: string): string {
+  if (path.isAbsolute(filePath)) return filePath;
+  const root = operationalProjectRelativePath(filePath) ? projectRoot : worktreePath;
+  return path.resolve(root, filePath);
 }
 
 // ─── Nearest-match search ──────────────────────────────────────────────────────
@@ -797,7 +824,20 @@ export type PathContextResult = PathContextFound | PathContextNotFound | PathCon
 // ─── PathContext class ────────────────────────────────────────────────────────
 
 export class PathContext {
-  constructor(private readonly projectRoot: string) {}
+  constructor(
+    private readonly projectRoot: string,
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+  ) {}
+
+  /** The active teammate worktree root, resolved from the injected environment.
+   * Falls back to the project root when no worktree is set (e.g. coordinator). */
+  private worktreeRoot(): string {
+    return (
+      this.env.env(EnvVars.WORKTREE_PATH) ||
+      this.env.env(EnvVars.PROJECT_ROOT) ||
+      this.projectRoot
+    );
+  }
 
   /**
    * Resolve a candidate path and validate optional read offsets.
@@ -822,12 +862,10 @@ export class PathContext {
   }
 
   private resolveInner(input: PathContextInput): PathContextResult {
-    const roots = allowedRoots(this.projectRoot);
+    const worktreePath = this.worktreeRoot();
+    const roots = allowedRoots(this.projectRoot, worktreePath);
 
-    // Resolve the candidate: absolute as-is, relative against cwd.
-    const resolved = path.isAbsolute(input.filePath)
-      ? input.filePath
-      : path.resolve(input.filePath);
+    const resolved = resolveCandidatePath(input.filePath, this.projectRoot, worktreePath);
 
     // Scope check — must be inside at least one allowed root.
     const inScope = roots.some(root => isPathInside(resolved, root));
