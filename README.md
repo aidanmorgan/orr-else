@@ -673,11 +673,17 @@ The harness ships plugin tools for its own control plane:
 
 ### Common Tools The Harness Owns
 
-Beyond the control-plane plugins above, the generic harness ships exactly three **common project tools** that it owns and that are useful to any consuming project, regardless of language or framework:
+> **Status — decided contract, extraction in progress.** This section describes
+> the decided post-extraction contract (epic *Extract ALL cerdiwen-specific
+> tooling from the generic orr-else harness*). Items marked _(pending)_ are the
+> target end-state being delivered by that epic; the current code does not yet
+> match them fully.
 
-- `git_history` — read-only Git history/blame inspection (implementation lives in the orr-else source).
-- `artifact_validator` — a generic artifact-presence/validation tool. It is framework-agnostic; the consuming project configures which artifacts it gates.
-- `read_path_context` — resolves path existence, total lines, valid read offsets, and nearest matches before a read.
+Beyond the control-plane plugins above, the generic harness will ship exactly three **common project tools** that it owns and that are useful to any consuming project, regardless of language or framework:
+
+- `git_history` — read-only Git history/blame inspection _(pending: implementation being moved into the orr-else source)_.
+- `artifact_validator` — a generic artifact-presence/validation tool. It is framework-agnostic; the consuming project configures which artifacts it gates _(pending: a generic implementation shipped by the harness)_.
+- `read_path_context` — resolves path existence, total lines, valid read offsets, and nearest matches before a read (implemented and registered today).
 
 The harness self-registers each common tool's `verify()` callback at load, so their evidence participates in `requiredTools`/`validationRules` and artifact gating without any per-project wiring.
 
@@ -685,7 +691,7 @@ Every other domain-specific tool — `codemap`, `python_lsp`, `sonarqube`, `ast_
 
 ### Tool Result Contract
 
-Tools are **dual-mode**: each is a standalone CLI (a `main` entry point invokable on the command line) and also exports a `verify()` callback the harness can call directly. The harness does **no** result truncation, no result recognition, and no result steering: it does not parse, summarize, or rewrite a tool's output, and it does not inject tool-specific decision logic. Each tool is responsible for its own bounded output and for the structured evidence it returns; the harness only records that evidence and applies the configured validation rules.
+Tools are **dual-mode**: each is a standalone CLI (a `main` entry point invokable on the command line) and also exports a `verify()` callback the harness can call directly. Under the decided contract the harness does **no** result truncation, no result recognition, and no result steering: it does not parse, summarize, or rewrite a tool's output, and it does not inject tool-specific decision logic. Each tool is responsible for its own bounded output and for the structured evidence it returns; the harness only records that evidence and applies the configured validation rules. _(Pending: some harness-side result summarization/steering for legacy cerdiwen tools is still being removed as the per-tool parsing moves into the owning tools.)_
 
 ### Configured Command Tools
 
