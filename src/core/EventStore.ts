@@ -32,7 +32,6 @@ export type {
 
 import type {
   DomainEvent,
-  EventData,
   LatestEventFilterOptions,
   ProjectToolFailureLimitFilterOptions,
   ProjectionCapableStore,
