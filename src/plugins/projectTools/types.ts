@@ -59,7 +59,7 @@ export interface SerializedMcpLockTimeoutMetadata {
  */
 export interface SerializedCommandLockTimeoutMetadata {
   scope: 'project';
-  reason: 'shared_backend_symbol_operations';
+  reason: 'serialized_tool';
   waitedMs: number;
   tool: string;
   lockRef: string;

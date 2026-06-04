@@ -52,7 +52,7 @@ import {
 } from './pathNormalization.js';
 import { projectToolEnvironment } from './contextHelpers.js';
 import { resolveStructuredInvocation } from './structuredInvocation.js';
-import { COMMAND_TOOL_LOCK_DIR, SERIAL_MCP_LOCK_REASON, SERIAL_MCP_LOCK_SCOPE } from './constants.js';
+import { COMMAND_TOOL_LOCK_DIR, SERIAL_TOOL_LOCK_REASON, SERIAL_MCP_LOCK_SCOPE } from './constants.js';
 import { SerializedToolLockTimeoutError, withSerializedToolLock } from './serializedToolLock.js';
 
 // ---- Argument normalization ----
@@ -626,7 +626,7 @@ export class SerializedCommandToolLockTimeoutError extends Error {
     this.name = 'SerializedCommandToolLockTimeoutError';
     this.lockMetadata = {
       scope: SERIAL_MCP_LOCK_SCOPE,
-      reason: SERIAL_MCP_LOCK_REASON,
+      reason: SERIAL_TOOL_LOCK_REASON,
       waitedMs: cause.waitedMs,
       tool: definition.name,
       lockRef: cause.lockRef,
@@ -673,7 +673,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
         logFields: {
           tool: definition.name,
           lockScope: SERIAL_MCP_LOCK_SCOPE,
-          lockReason: SERIAL_MCP_LOCK_REASON
+          lockReason: SERIAL_TOOL_LOCK_REASON
         }
       },
       `Timed out acquiring serialized project-tool lock for ${definition.name}`,

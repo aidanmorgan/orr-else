@@ -243,6 +243,8 @@ export const SERIAL_MCP_LOCK_RETRY_MAX_MS = 1000;
 export const SERIAL_MCP_REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
 export const SERIAL_MCP_LOCK_SCOPE = 'project' as const;
 export const SERIAL_MCP_LOCK_REASON = 'shared_backend_symbol_operations' as const;
+// Generic reason for serialized COMMAND/tsProjectTool locks (no MCP backend semantics).
+export const SERIAL_TOOL_LOCK_REASON = 'serialized_tool' as const;
 
 export const ProjectToolParameter = {
   ARGUMENTS: 'arguments',
