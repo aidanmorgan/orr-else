@@ -853,6 +853,17 @@ export const ObservabilityDefaults = {
   SPAN_ATTRIBUTE_MAX_CHARS: 1024
 } as const;
 
+/**
+ * Defaults for the meta plugin-manager tool, which writes new plugin source
+ * files. The directory is a project-relative source location resolved against
+ * the injected PROJECT_ROOT — declared here so the path is not a bare literal
+ * scattered across the plugin code.
+ */
+export const MetaPluginDefaults = {
+  PLUGIN_SOURCE_DIR_SEGMENTS: ['src', 'plugins'] as const,
+  PLUGIN_FILE_EXTENSION: '.ts'
+} as const;
+
 export const OperationalArtifactPath = {
   TEMP_DIR: '.tmp',
   PI_EVENTS_DIR: '.pi/events',

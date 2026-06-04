@@ -3,7 +3,8 @@ import * as path from 'path';
 import { BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { EventStore } from './EventStore.js';
-import { Component, DomainEventName } from '../constants/index.js';
+import { resolveProjectFrom } from './Paths.js';
+import { Component, DomainEventName, OperationalLogPath } from '../constants/index.js';
 
 const readFileAsync = fs.promises.readFile;
 const appendFileAsync = fs.promises.appendFile;
@@ -12,18 +13,25 @@ const existsSync = fs.existsSync;
 export class WorklogManager {
   private readonly baseDir: string;
 
+  /**
+   * Worklogs are an operational log artifact resolved against the injected
+   * PROJECT_ROOT (shared, coordinator-visible) — never via process.cwd() or a
+   * hard-coded directory literal. The directory name comes from the
+   * OperationalLogPath constant so there is a single source of truth.
+   */
   constructor(
     private readonly eventStore: EventStore,
-    baseDir: string = 'worklogs'
+    projectRoot: string,
+    baseDir: string = OperationalLogPath.WORKLOG_DIR
   ) {
-    this.baseDir = path.join(process.cwd(), baseDir);
+    this.baseDir = path.isAbsolute(baseDir) ? baseDir : resolveProjectFrom(projectRoot, baseDir);
     if (!existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
     }
   }
 
   private getFilePath(beadId: BeadId): string {
-    return path.join(this.baseDir, `${beadId}.log.md`);
+    return path.join(this.baseDir, `${beadId}${OperationalLogPath.WORKLOG_FILE_SUFFIX}`);
   }
 
   public getWorklogPath(beadId: BeadId): string {

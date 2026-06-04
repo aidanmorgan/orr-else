@@ -1240,7 +1240,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     configuredRequiredItems,
     dynamicChecklistItemsForRun(beadProjection as Bead, stateId, action.id)
   ).requiredItems;
-  const worklogManager = new WorklogManager(services.eventStore);
+  const worklogManager = new WorklogManager(services.eventStore, services.projectRoot);
   const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
 
   // Generate directories for declared artifact types (ensureDir:true) so a teammate

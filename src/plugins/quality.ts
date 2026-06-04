@@ -4,6 +4,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { Logger } from '../core/Logger.js';
 import { Component, EnvVars, OperationalArtifactPath, PluginToolName } from '../constants/index.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
+import { resolveProjectFrom } from '../core/Paths.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
 // ── Deterministic reducers ───────────────────────────────────────────────────
@@ -66,16 +67,20 @@ export function reduceSessionLogs(rawLogs: string, rawLogFile: string): SessionL
 
 /**
  * Write complete raw content to a file under the harness-injected output dir.
- * Falls back to OperationalArtifactPath.PI_TOOL_OUTPUT_DIR if env var is unset.
- * Returns the absolute (or project-relative) path of the written file.
+ * Priority: the harness-injected PI_TOOL_OUTPUT_DIR env var (already absolute),
+ * else the project-scoped OperationalArtifactPath.PI_TOOL_OUTPUT_DIR resolved
+ * against the injected PROJECT_ROOT — never a bare cwd-relative literal.
+ * Returns the absolute path of the written file.
  */
 async function writeRawLogFile(
   fileName: string,
   content: string,
-  env: RuntimeEnvironment
+  env: RuntimeEnvironment,
+  projectRoot: string
 ): Promise<string> {
   const outputDir =
-    env.env(EnvVars.TOOL_OUTPUT_DIR) ?? OperationalArtifactPath.PI_TOOL_OUTPUT_DIR;
+    env.env(EnvVars.TOOL_OUTPUT_DIR)
+    ?? resolveProjectFrom(env.env(EnvVars.PROJECT_ROOT) || projectRoot, OperationalArtifactPath.PI_TOOL_OUTPUT_DIR);
   await mkdir(outputDir, { recursive: true });
   const filePath = path.join(outputDir, fileName);
   await writeFile(filePath, content, 'utf8');
@@ -84,7 +89,10 @@ async function writeRawLogFile(
 
 // ── Plugin factory ───────────────────────────────────────────────────────────
 
-export function createQualityPlugin(env: RuntimeEnvironment = nodeRuntimeEnvironment): RuntimePlugin {
+export function createQualityPlugin(
+  env: RuntimeEnvironment = nodeRuntimeEnvironment,
+  projectRoot: string = process.cwd()
+): RuntimePlugin {
   return {
   name: 'quality-assurance',
   tools: [
@@ -102,7 +110,7 @@ export function createQualityPlugin(env: RuntimeEnvironment = nodeRuntimeEnviron
         const rawLogFileName = `session-logs-${ts}.log`;
         let rawLogFile = rawLogFileName;
         try {
-          rawLogFile = await writeRawLogFile(rawLogFileName, logs, env);
+          rawLogFile = await writeRawLogFile(rawLogFileName, logs, env, projectRoot);
         } catch (writeErr) {
           Logger.error(Component.QUALITY, 'Failed to write raw session log', { error: writeErr });
         }

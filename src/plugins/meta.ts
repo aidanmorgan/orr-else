@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Type } from "@earendil-works/pi-ai";
 import { EventStore } from '../core/EventStore.js';
-import { DomainEventName, PluginToolName } from '../constants/index.js';
+import { DomainEventName, MetaPluginDefaults, PluginToolName } from '../constants/index.js';
+import { resolveProjectFrom } from '../core/Paths.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
 export interface CreatePluginResult {
@@ -27,10 +28,10 @@ export function createMetaPlugin(eventStore: EventStore, projectRoot: string): R
         const { name, content } = (params && typeof params === 'object' ? params : {}) as { name: string; content: string };
         try {
           const safeName = path.basename(name);
-          if (!safeName.endsWith('.ts') || safeName !== name) {
-            throw new Error('Plugin name must be a single TypeScript filename ending in .ts');
+          if (!safeName.endsWith(MetaPluginDefaults.PLUGIN_FILE_EXTENSION) || safeName !== name) {
+            throw new Error(`Plugin name must be a single TypeScript filename ending in ${MetaPluginDefaults.PLUGIN_FILE_EXTENSION}`);
           }
-          const pluginPath = path.join(projectRoot, 'src', 'plugins', safeName);
+          const pluginPath = resolveProjectFrom(projectRoot, ...MetaPluginDefaults.PLUGIN_SOURCE_DIR_SEGMENTS, safeName);
           fs.writeFileSync(pluginPath, content);
           await eventStore.record(DomainEventName.PLUGIN_FILE_CREATED, {
             pluginName: safeName,

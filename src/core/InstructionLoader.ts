@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import fg from 'fast-glob';
 import { SDLCState } from './domain/StateModels.js';
-import { resolveProjectFrom } from './Paths.js';
+import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { CompatibilityContextDefaults } from '../constants/index.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 
@@ -89,7 +89,10 @@ export class InstructionLoader {
   public loadRuleCategories(categories: string[]): string[] {
     const rules: string[] = [];
     const projectDir = resolveProjectFrom(this.projectRoot, '.pi', 'rules');
-    const installDir = path.join(process.cwd(), '.pi', 'rules');
+    // Bundled rules ship under the harness INSTALL root (PATH_INSTALL_ROOT), not
+    // the caller's cwd — resolve via resolveInstall so the lookup is independent
+    // of the working directory.
+    const installDir = resolveInstall('.pi', 'rules');
 
     const searchDirs = [];
     if (fs.existsSync(projectDir)) searchDirs.push(projectDir);

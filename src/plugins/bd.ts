@@ -50,7 +50,7 @@ function issuesJsonlPath(root: string): string {
  *
  * The filename is always bd-export-<timestamp>.jsonl to avoid collisions.
  */
-async function resolveExportOutputPath(callerOutputPath: string | undefined, root: string, env: RuntimeEnvironment): Promise<string> {
+export async function resolveExportOutputPath(callerOutputPath: string | undefined, root: string, env: RuntimeEnvironment): Promise<string> {
   if (callerOutputPath) return callerOutputPath;
   const baseDir = env.env(EnvVars.TOOL_OUTPUT_DIR)
     ?? path.join(root, OperationalArtifactPath.PI_TOOL_OUTPUT_DIR);
@@ -114,7 +114,7 @@ async function exportJsonlAfterMutation(client: BeadsClient, eventStore: EventSt
   }
 }
 
-async function runBd(client: BeadsClient, eventStore: EventStore, args: string[], options: { json?: boolean; input?: string; logErrors?: boolean; env?: RuntimeEnvironment; root: string } = { root: process.cwd() }): Promise<unknown> {
+async function runBd(client: BeadsClient, eventStore: EventStore, args: string[], options: { json?: boolean; input?: string; logErrors?: boolean; env?: RuntimeEnvironment; root: string }): Promise<unknown> {
   const finalArgs = ['-C', options.root, ...args];
   if (options.json !== false) finalArgs.push('--json');
 
@@ -537,7 +537,7 @@ async function getIssue(client: BeadsClient, eventStore: EventStore, id: string,
   return issue as BeadsIssueRecord;
 }
 
-async function updateIssueStatus(client: BeadsClient, eventStore: EventStore, id: string, status?: BeadStatus, notes?: string, env?: RuntimeEnvironment, root: string = process.cwd()): Promise<Bead | null> {
+async function updateIssueStatus(client: BeadsClient, eventStore: EventStore, id: string, status: BeadStatus | undefined, notes: string | undefined, env: RuntimeEnvironment | undefined, root: string): Promise<Bead | null> {
   Logger.info(Component.BEADS_CLI, 'Updating issue status', { id, status, notes });
   if (status === BeadStatus.COMPLETED) {
     const args = ['close', id];

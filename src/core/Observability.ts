@@ -28,7 +28,7 @@ import { Logger } from './Logger.js';
 import { resolveProjectFrom } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OtelAttr, ToolResultStatus } from '../constants/index.js';
+import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OperationalArtifactPath, OtelAttr, ToolResultStatus } from '../constants/index.js';
 
 export interface SpanContext {
   traceId: string;
@@ -172,7 +172,7 @@ export class Observability {
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd(),
+    private readonly injectedProjectRoot: string = process.cwd(),
     // Injected so the 'process.pid' span attribute is deterministic under test
     // rather than read from the global directly (pf7v).
     private readonly pid: number = process.pid
@@ -218,7 +218,27 @@ export class Observability {
 
   public getJsonlFilePath(): string {
     if (this.currentFilePath) return this.currentFilePath;
-    return path.join(resolveProjectFrom(this.projectRoot, '.pi/otel'), this.getJsonlFileName());
+    return path.join(this.resolveOtelDir(), this.getJsonlFileName());
+  }
+
+  /**
+   * Resolve the PROJECT_ROOT for artifact resolution. The injected env
+   * PROJECT_ROOT wins (consistent with ArtifactPaths/bd precedence), then the
+   * constructor-injected root — never a process.cwd()-relative join.
+   */
+  private projectRoot(): string {
+    return this.env.env(EnvVars.PROJECT_ROOT) || this.injectedProjectRoot;
+  }
+
+  /**
+   * Resolve the OTel JSONL directory against the injected PROJECT_ROOT via the
+   * OperationalArtifactPath constant. The observability.dir config setting may
+   * override the directory name (absolute paths are honored as-is); when unset it
+   * falls back to OperationalArtifactPath.PI_OTEL_DIR — never a bare literal.
+   */
+  private resolveOtelDir(configuredDir?: string): string {
+    const dir = configuredDir || OperationalArtifactPath.PI_OTEL_DIR;
+    return path.isAbsolute(dir) ? dir : resolveProjectFrom(this.projectRoot(), dir);
   }
 
   private toolResultPassed(result: unknown): boolean {
@@ -235,8 +255,7 @@ export class Observability {
       return false;
     }
 
-    const obsDir = observability?.dir || '.pi/otel';
-    const absoluteDir = path.isAbsolute(obsDir) ? obsDir : resolveProjectFrom(this.projectRoot, obsDir);
+    const absoluteDir = this.resolveOtelDir(observability?.dir);
     const fileName = this.resolveFileName(observability?.fileName);
     const filePath = path.join(absoluteDir, fileName);
     const collector = observability?.collector;
