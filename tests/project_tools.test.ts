@@ -8,8 +8,8 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
-import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_SAMPLE_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_SAMPLE_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
 import { attachProjectToolSteering, summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
@@ -1345,10 +1345,8 @@ process.exit(sawOther ? 0 : 1);
         terminal: true
       }
     });
-    expect(first.remediation).toEqual(expect.arrayContaining([
-      expect.stringContaining('Treat artifact_validator output as an authoritative gate'),
-      expect.stringContaining('Do not rerun artifact_validator unchanged')
-    ]));
+    // 0yt5.16: the harness no longer emits per-tool (artifact_validator-named)
+    // remediation recognition; the generic failure-category remediation remains.
     expect(second).toMatchObject({
       status: ToolResultStatus.REJECTED,
       failureCategory: ProjectToolFailureCategory.TERMINAL_GATE,
@@ -3712,15 +3710,14 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     expect(structuredResult.omissions).toBeDefined();
     expect(typeof structuredResult.omissions).toBe('string');
 
-    // Steering must return fetch_named_omission, NOT a generic rerun_narrower
-    expect(result.nextAction).toBe('fetch_named_omission');
+    // 0yt5.16: the harness no longer recognizes structuredResult.omissions to route a
+    // fetch_named_omission / rerun_narrower steering decision — that decision-evidence
+    // routing was removed.  The omissions text remains on the tool's own summarizer
+    // structuredResult as descriptive evidence; no fetch_named_omission steering is
+    // emitted, and the success default next-action is use_result.
+    expect(result.nextAction).toBe('use_result');
+    expect(result.nextAction).not.toBe('fetch_named_omission');
     expect(result.nextAction).not.toBe('rerun_narrower');
-
-    // Recovery must surface the omissions text
-    const recovery = (result as any).recovery as string[];
-    expect(recovery).toBeDefined();
-    expect(recovery.join('\n')).toContain('omissions');
-    expect(recovery.join('\n')).toContain('specific missing');
   });
 
   it('(cdw9-d) tool with NO structuredResult keeps existing truncation-based steering unchanged', async () => {
@@ -3757,50 +3754,13 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
   });
 });
 
-describe('structuredResultHasDecisionEvidence — counts guard (defensive hardening)', () => {
-  // Invariant: the diagnostic summarizer only emits 'counts' when diagnostics.length >= 1,
-  // so all-zero or empty counts are never produced today.  These tests verify the guard is
-  // self-enforcing for any future code path that might violate that invariant.
-
-  it('returns false when the only evidence-like field is an empty counts object', () => {
-    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: {} })).toBe(false);
-  });
-
-  it('returns false when counts is present but all values are zero', () => {
-    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 0, groups: 0 } })).toBe(false);
-  });
-
-  it('returns false when counts has mixed zero and non-numeric values only', () => {
-    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 0, label: 'none' } })).toBe(false);
-  });
-
-  it('returns true when counts contains at least one numeric value > 0 (current normal case)', () => {
-    expect(structuredResultHasDecisionEvidence({ status: 'ok', counts: { total: 3, parsed: 3, groups: 2 } })).toBe(true);
-  });
-
-  it('returns true when counts has a single positive numeric value', () => {
-    expect(structuredResultHasDecisionEvidence({ counts: { total: 1 } })).toBe(true);
-  });
-
-  it('returns false when value is not a record', () => {
-    expect(structuredResultHasDecisionEvidence(null)).toBe(false);
-    expect(structuredResultHasDecisionEvidence('counts')).toBe(false);
-    expect(structuredResultHasDecisionEvidence(42)).toBe(false);
-  });
-
-  it('returns true for other presence-based evidence fields regardless of counts', () => {
-    expect(structuredResultHasDecisionEvidence({ verdict: 'pass' })).toBe(true);
-    expect(structuredResultHasDecisionEvidence({ error: 'boom' })).toBe(true);
-    expect(structuredResultHasDecisionEvidence({ artifact: '/path/to/file' })).toBe(true);
-    expect(structuredResultHasDecisionEvidence({ findingsDetected: false })).toBe(true);
-    expect(structuredResultHasDecisionEvidence({ routingHint: 'retry' })).toBe(true);
-  });
-
-  it('returns false when no evidence fields are present', () => {
-    expect(structuredResultHasDecisionEvidence({ status: 'ok' })).toBe(false);
-    expect(structuredResultHasDecisionEvidence({})).toBe(false);
-  });
-});
+// 0yt5.16: the structuredResultHasDecisionEvidence recognizer has been removed.
+// The harness no longer inspects a tool's structuredResult fields for "decision
+// evidence" — semantic pass/fail comes from verify() callbacks, and the only
+// remaining (structural, tool-agnostic) precedence rule — a generic summarizer
+// fills in the bare metadata echo but never clobbers a tool's own richer
+// structuredResult — is covered by the summarizer-registry tests above (e.g.
+// "(f) pre-existing structuredPayloadSummary (rich gate evidence) is NOT clobbered").
 
 // pi-experiment-tk6i: commandFailureSummarizer — plain-text command failure grouper
 describe('commandFailureSummarizer', () => {
@@ -4879,21 +4839,19 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
       actionId: 'analyze'
     }, {} as any, undefined, new Map());
 
+    // 0yt5.16: the generic high-volume summarizer still fires to BOUND the output
+    // (its bounded structuredResult is applied), and the success default next-action
+    // is use_result.  The harness no longer injects narrow-rerun "recovery" steering
+    // text on the summarized result — that decision-evidence steering branch (which
+    // wired HIGH_VOLUME_NARROW_RERUN_RECOVERY) was removed; the omissions guidance now
+    // lives only on the tool's own summarizer structuredResult as descriptive evidence.
     expect(result.nextAction).toBe('use_result');
-
-    // Recovery text must be present and must be HIGH_VOLUME_NARROW_RERUN_RECOVERY.
-    // FIX 2: high-volume summarized results now wire the narrow-rerun recovery constant
-    // so agents get archive-section / selector guidance rather than generic archive text.
-    const recovery = (result as any).recovery as string[] | undefined;
-    expect(recovery).toBeDefined();
-    expect(Array.isArray(recovery)).toBe(true);
-    const recoveryText = (recovery ?? []).join('\n');
-    // The wired constant contains narrow-rerun / selector guidance
-    expect(recoveryText).toContain(HIGH_VOLUME_NARROW_RERUN_RECOVERY);
-    // Must NOT say "read the archive" as a first action
-    expect(recoveryText).not.toMatch(/read .*archive first|read .*archive before/i);
-    // Must mention rerunning narrower (from the wired constant)
-    expect(recoveryText).toMatch(/rerun.*narrower|narrow.*rerun/i);
+    const structuredResult = (result as any).structuredResult as any;
+    expect(structuredResult).toBeDefined();
+    expect(structuredResult.status).toBe('ok');
+    expect(structuredResult.counts.payloadBytes).toBeGreaterThan(0);
+    expect(typeof structuredResult.omissions).toBe('string');
+    expect(structuredResult.omissions).toMatch(/rerun with a narrower/i);
   });
 });
 
@@ -4979,10 +4937,11 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
     expect(structuredResult.counts.omittedLines).toBeGreaterThan(0);
   });
 
-  it('high-volume tool result with omissions → projectToolSteering routes use_result (not fetch_named_omission)', async () => {
-    // The generic high-volume summarizer now sets omissions, but steering must
-    // still route use_result (with HIGH_VOLUME_NARROW_RERUN_RECOVERY) for high-volume
-    // tools — the "named re-fetch" = rerun narrower, not archive section fetch.
+  it('high-volume tool result with omissions → summarizer sets omissions; success default is use_result (no fetch_named_omission steering)', async () => {
+    // 0yt5.16: the generic high-volume summarizer still sets omissions on the tool's
+    // own structuredResult to BOUND output, but the harness no longer recognizes that
+    // to route a fetch_named_omission steering decision — the success default is
+    // use_result and no narrow-rerun recovery steering text is injected.
     const matchLines = Array.from({ length: 150 }, (_, i) =>
       `src/module_${i}/index.ts:${i + 1}: match_result_${i}`
     );
@@ -5011,20 +4970,14 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
 
     const structuredResult = (result as any).structuredResult as any;
     expect(structuredResult).toBeDefined();
-    // omissions set (4eqg ensures this)
+    // omissions set (4eqg ensures this) — descriptive evidence on the tool's own
+    // summarizer structuredResult, not steering.
     expect(typeof structuredResult.omissions).toBe('string');
+    expect(structuredResult.omissions).toContain('lines omitted');
 
-    // Steering must be use_result (not fetch_named_omission)
+    // Success default next-action is use_result; no fetch_named_omission steering.
     expect(result.nextAction).toBe('use_result');
     expect(result.nextAction).not.toBe('fetch_named_omission');
-
-    // Recovery must include HIGH_VOLUME_NARROW_RERUN_RECOVERY
-    const recovery = (result as any).recovery as string[] | undefined;
-    expect(Array.isArray(recovery)).toBe(true);
-    const recoveryText = (recovery ?? []).join('\n');
-    expect(recoveryText).toContain(HIGH_VOLUME_NARROW_RERUN_RECOVERY);
-    // And the omissions text must be surfaced in recovery
-    expect(recoveryText).toContain('lines omitted');
   });
 
   it('high-volume tool result with exactly HIGH_VOLUME_SAMPLE_COUNT lines → no omissions (all inlined)', async () => {

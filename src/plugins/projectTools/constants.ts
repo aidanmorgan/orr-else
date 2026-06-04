@@ -125,8 +125,6 @@ export const PROJECT_TOOL_MODEL_CONTRACT = [
 export const PROJECT_TOOL_DESCRIPTION_SUFFIX =
   'Returns compact summaries and structured facts; raw output is referenced via stdoutFile/stderrFile, not inlined. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 
-export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
-
 // Compact sample budget used by the generic high-volume summarizer.
 // This is the byte limit for the tool-owned representative sample text injected
 // into compactSummary — not a generic byte cap on raw output.
@@ -141,14 +139,6 @@ export const HIGH_VOLUME_PAYLOAD_MIN_BYTES = 4 * 1024; // 4 KiB
 // Generic summarizer representative sample cap: how many entries (lines/items) to
 // surface in representativeSamples when the full content would exceed the preview budget.
 export const HIGH_VOLUME_SAMPLE_COUNT = 8;
-
-// Recovery guidance template for high-volume summarized tools: directs agents to
-// rerun with narrower args / path / range rather than reading the raw archive.
-export const HIGH_VOLUME_NARROW_RERUN_RECOVERY =
-  'This is a compact summary of a large result. Raw output is preserved in the harness tool-calls archive (referenced via stdoutFile/stderrFile). '
-  + 'To retrieve a specific section: rerun the same tool with a narrower path, range, symbol, '
-  + 'or operation argument. Do not read the raw archive directly — '
-  + 'use the narrow-rerun / selector path to fetch only the named missing fact.';
 
 // (wp8h) Recovery guidance for FAILED command results with an archived failure output.
 // The model must re-read the archived output (via its stdoutFile/stderrFile reference)
@@ -181,7 +171,6 @@ export const UNSUPPORTED_PROJECT_TOOL_OUTPUT_CONTROL_FLAGS = new Set<string>([
 
 export const ProjectToolNextAction = {
   RECORD_NO_MATCH: 'record_no_match',
-  RERUN_NARROWER: 'rerun_narrower',
   USE_RESULT: 'use_result',
   WAIT_FOR_IN_FLIGHT_RESULT: 'wait_for_in_flight_result',
   ROUTE_CONFIGURED_OUTCOME: 'route_configured_outcome',
@@ -189,8 +178,7 @@ export const ProjectToolNextAction = {
   FIX_ARGUMENTS: 'fix_arguments',
   ROUTE_BLOCKED: 'route_blocked',
   FIX_WORKTREE_STATE: 'fix_worktree_state',
-  FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure',
-  FETCH_NAMED_OMISSION: 'fetch_named_omission'
+  FIX_OR_ROUTE_FAILURE: 'fix_or_route_failure'
 } as const;
 
 export const NO_MATCH_STATUS = 'no_match';

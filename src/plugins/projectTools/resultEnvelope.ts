@@ -35,7 +35,6 @@ import {
   SEMGREP_PATH_COLLECTION_KEYS,
   SCAN_TARGET_SAMPLE_LIMIT,
   ZERO_TARGET_SCAN_MESSAGE_PREFIX,
-  ARTIFACT_VALIDATOR_TOOL_NAME,
   NO_MATCH_FILTERED_RECOVERY,
   CMD_FAIL_TEST_LINE_PATTERN,
   CMD_FAIL_PYTEST_SECTION_PATTERN,
@@ -50,7 +49,6 @@ import {
   CMD_FAIL_TRANSPORT_PATTERN,
   HIGH_VOLUME_PAYLOAD_MIN_BYTES,
   HIGH_VOLUME_SAMPLE_COUNT,
-  HIGH_VOLUME_NARROW_RERUN_RECOVERY,
   FAILURE_REREAD_ARCHIVE_RECOVERY,
   TOKEN_ESTIMATE_CHARS_PER_TOKEN
 } from './constants.js';
@@ -148,42 +146,6 @@ function statusFromToolResult(result: unknown): ToolResultStatus | undefined {
   if (!result || typeof result !== 'object' || Array.isArray(result)) return undefined;
   const status = (result as { status?: unknown }).status;
   return typeof status === 'string' ? status as ToolResultStatus : undefined;
-}
-
-// ---- structuredResultHasDecisionEvidence ----
-
-export function structuredResultHasDecisionEvidence(value: unknown): boolean {
-  if (!isJsonRecord(value)) return false;
-
-  const presenceFields = [
-    'artifact',
-    'path',
-    'message',
-    'error',
-    'verdict',
-    'blocking_count',
-    'total_errors',
-    'context_count',
-    'findingsDetected',
-    'routingHint',
-    'warnings',
-    'outputFilters',
-    ProjectToolResultKey.PASSED_CHECK_COUNT,
-    ProjectToolResultKey.REJECTED_CHECK_COUNT,
-    ProjectToolResultKey.REJECTED_CHECKS,
-    ProjectToolResultKey.SCANNED_TARGET_COUNT,
-    StructuredPayloadSummaryOutputKey.ERRORS_BY_TOOL,
-    StructuredPayloadSummaryOutputKey.ERRORS_BY_FILE,
-    StructuredPayloadSummaryOutputKey.TOOL_RESULTS
-  ];
-  if (presenceFields.some(key => value[key] !== undefined)) return true;
-
-  const counts = value['counts'];
-  if (isJsonRecord(counts)) {
-    return Object.values(counts).some(v => typeof v === 'number' && v > 0);
-  }
-
-  return false;
 }
 
 // ---- Diagnostic summarizer ----
@@ -1004,11 +966,10 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
 
       let representativeSamples: unknown[] | undefined;
 
-      // (4eqg) omissions string that names the sections/fields NOT inlined.
-      // For high-volume tools this is embedded in the recovery guidance and causes
-      // projectToolSteering to route USE_RESULT + HIGH_VOLUME_NARROW_RERUN_RECOVERY
-      // (not FETCH_NAMED_OMISSION — the named re-fetch for high-volume is a narrower
-      // rerun of the same tool with tighter arguments, not an archive section fetch).
+      // (4eqg) omissions string that names the sections/fields NOT inlined, so the
+      // tool's own structuredResult records which lines were elided when bounding a
+      // large payload.  The harness no longer steers on this — it is descriptive
+      // evidence only (0yt5.16).
       let omissionsText: string | undefined;
 
       if (text && text.trim().length > 0) {
@@ -1019,8 +980,7 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
         const omittedLineCount = lines.length - sampleLines.length;
         if (omittedLineCount > 0) {
           counts.omittedLines = omittedLineCount;
-          // Populate omissions: name the sections NOT inlined so the model can
-          // request a narrower rerun via HIGH_VOLUME_NARROW_RERUN_RECOVERY guidance.
+          // Populate omissions: name the sections NOT inlined as descriptive evidence.
           omissionsText = `${omittedLineCount} lines omitted from inline summary`
             + ` (${sampleLines.length} of ${lines.length} lines shown);`
             + ` full matches / entries preserved in outputArchive.`
@@ -1039,9 +999,8 @@ const genericHighVolumeSummarizer: ProjectToolSummarizer = {
       if (representativeSamples && representativeSamples.length > 0) {
         result.representativeSamples = representativeSamples;
       }
-      // (4eqg) Set omissions when lines were truncated.  projectToolSteering embeds
-      // the omissions text in the HIGH_VOLUME_NARROW_RERUN_RECOVERY guidance and
-      // routes USE_RESULT; it does NOT route FETCH_NAMED_OMISSION for high-volume tools.
+      // (4eqg) Set omissions when lines were truncated — descriptive evidence on the
+      // tool's own structuredResult; the harness does not steer on it (0yt5.16).
       if (omissionsText) {
         result.omissions = omissionsText;
       }
@@ -1359,11 +1318,6 @@ function projectToolRemediation(
   const guidance = new Set<string>();
   const toolName = definition.name;
 
-  if (toolName === ARTIFACT_VALIDATOR_TOOL_NAME) {
-    guidance.add('Treat artifact_validator output as an authoritative gate: use structuredResult, rejectedChecks, diagnosticFacts, and routingHint to revise the plan/artifact or route the configured failure edge.');
-    guidance.add('Do not rerun artifact_validator unchanged after a terminal gate rejection.');
-  }
-
   if (toolName === 'read') {
     guidance.add('For read failures, reduce the requested range and target only files inside the active bead worktree; use configured artifact/project tools for harness artifacts.');
   }
@@ -1427,66 +1381,11 @@ export function attachFailureCategory(definition: ProjectToolConfig, result: unk
 
 // ---- Steering ----
 
-function projectToolResultHasCompletePreview(record: Record<string, unknown>): boolean {
-  const value = record[ProjectToolResultKey.COMPACT_SUMMARY];
-  return typeof value === 'string'
-    && value.trim().length > 0
-    && !projectToolPreviewSuggestsNarrowing(value);
-}
-
-function projectToolPreviewSuggestsNarrowing(value: unknown): boolean {
-  return typeof value === 'string' && /\[truncated\b|too much data|rerun with narrower/i.test(value);
-}
-
-function projectToolMessageSuggestsNarrowing(value: unknown): boolean {
-  return typeof value === 'string' && /truncated|too much data|rerun with narrower/i.test(value);
-}
-
-function projectToolResultHasSufficientCompactEvidence(record: Record<string, unknown>): boolean {
-  if (record.maxBufferExceeded === true) return false;
-  if (projectToolResultHasCompletePreview(record)) return true;
-  return structuredResultHasDecisionEvidence(record[ProjectToolResultKey.STRUCTURED_RESULT]);
-}
-
-function projectToolResultHasPreviewNarrowingSignal(record: Record<string, unknown>): boolean {
-  return [
-    record[ProjectToolResultKey.COMPACT_SUMMARY]
-  ].some(projectToolPreviewSuggestsNarrowing);
-}
-
-function projectToolResultHasMessageNarrowingSignal(record: Record<string, unknown>): boolean {
-  const structuredResult = record[ProjectToolResultKey.STRUCTURED_RESULT];
-  const structuredMessage = isJsonRecord(structuredResult) ? structuredResult.message : undefined;
-  const structuredError = isJsonRecord(structuredResult) ? structuredResult.error : undefined;
-  return [
-    record.message,
-    structuredMessage,
-    structuredError
-  ].some(projectToolMessageSuggestsNarrowing);
-}
-
-// Minimum total raw bytes (stdout + stderr) that, in the absence of a compact
-// structuredResult, signal the model to rerun with narrower arguments.
-// Aligned with the old INLINE_RESULT_BYTES (4 KiB) threshold that previously
-// triggered the truncated path: results smaller than this are cheap to review inline.
+// Minimum total raw bytes (stdout + stderr) above which a failed command is
+// treated as "expensive" — the failure-path steering then nudges the model to
+// re-read the archived output before re-running.  Aligned with the old
+// INLINE_RESULT_BYTES (4 KiB) threshold.
 const NARROWING_RAW_BYTES_THRESHOLD = 4 * 1024;
-
-function projectToolResultNeedsNarrowing(record: Record<string, unknown>): boolean {
-  const hasSufficientCompactEvidence = projectToolResultHasSufficientCompactEvidence(record);
-  if (projectToolResultHasMessageNarrowingSignal(record)) return true;
-  if (!hasSufficientCompactEvidence && projectToolResultHasPreviewNarrowingSignal(record)) return true;
-  // s3wp.25: stdoutTruncated/stderrTruncated/maxBufferExceeded are no longer set by
-  // buildCommandResult.  Use raw byte counts as the narrowing signal instead:
-  // if the command produced more bytes than the narrowing threshold and there is no
-  // compact structured evidence, the model should rerun narrower.
-  const stdoutBytes = typeof record.stdoutBytes === 'number' ? record.stdoutBytes : 0;
-  const stderrBytes = typeof record.stderrBytes === 'number' ? record.stderrBytes : 0;
-  const totalBytes = stdoutBytes + stderrBytes;
-  if (totalBytes > NARROWING_RAW_BYTES_THRESHOLD) {
-    return !hasSufficientCompactEvidence;
-  }
-  return false;
-}
 
 function projectToolSteering(definition: ProjectToolConfig, result: unknown): Record<string, unknown> {
   const record = resultRecord(result);
@@ -1515,61 +1414,11 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
       };
     }
 
-    const structuredResultValue = record[ProjectToolResultKey.STRUCTURED_RESULT];
-    if (structuredResultHasDecisionEvidence(structuredResultValue)) {
-      const omissions = isJsonRecord(structuredResultValue) && typeof structuredResultValue.omissions === 'string'
-        ? structuredResultValue.omissions
-        : undefined;
-
-      // (4eqg) High-volume tools (genericHighVolumeSummarizer) now set omissions to name
-      // the sections that were NOT inlined.  For these tools the "named re-fetch" is
-      // accomplished by rerunning with narrower args (not a literal archive section fetch),
-      // so we route USE_RESULT + HIGH_VOLUME_NARROW_RERUN_RECOVERY even when omissions
-      // is set — the omissions text is already embedded in the recovery so the model
-      // can request a specific section via a narrower rerun.
-      // Diagnostics and other summarizers that set omissions still get FETCH_NAMED_OMISSION.
-      if (isGenericHighVolumeSummarizerResult(record)) {
-        const highVolumeRecovery = omissions
-          ? [`${HIGH_VOLUME_NARROW_RERUN_RECOVERY} Omitted sections: ${omissions}`]
-          : [HIGH_VOLUME_NARROW_RERUN_RECOVERY];
-        return {
-          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-          [ProjectToolResultKey.RECOVERY]: highVolumeRecovery
-        };
-      }
-
-      if (omissions) {
-        return {
-          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.FETCH_NAMED_OMISSION,
-          [ProjectToolResultKey.RECOVERY]: [
-            `structuredResult omissions: ${omissions}`,
-            'Fetch only the specific missing selector, path, or range identified in structuredResult.omissions; do not rerun the full tool call.'
-          ]
-        };
-      }
-      // s3wp.25: outputArchive/outputAccess are no longer in the model-facing result.
-      // Fire diagnostic recovery directly when diagnosticSummary is present.
-      if (record[DIAGNOSTIC_SUMMARY_KEY]) {
-        return {
-          [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-          [ProjectToolResultKey.RECOVERY]: [
-            'Cite the diagnosticSummary groups (source/code/count/locations) when reporting findings; inspect non-import groups before grouped reportMissingImports noise.',
-            'Raw diagnostic lines are in stderrFile/stdoutFile; rerun diagnostics narrowly only when representative locations in the diagnosticSummary are insufficient for a specific fix decision.'
-          ]
-        };
-      }
-      return {
-        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.USE_RESULT,
-        [ProjectToolResultKey.RECOVERY]: ['structuredResult contains sufficient decision evidence. Decide from structuredResult, compactSummary, and toolCalls; rerun narrower only if structuredResult.omissions names a specific missing fact.']
-      };
-    }
-
-    if (projectToolResultNeedsNarrowing(record)) {
-      return {
-        [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RERUN_NARROWER,
-        [ProjectToolResultKey.RECOVERY]: ['First decide from compactSummary, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read the raw stdoutFile/stderrFile archive just because the compact summary is small.']
-      };
-    }
+    // 0yt5.16: the harness no longer recognizes a "decision-evidence" envelope on
+    // the tool's structuredResult, nor does it second-guess output size to steer a
+    // narrower rerun (the removed narrow-rerun / sufficient-evidence pipeline).
+    // Semantic pass/fail and any "rerun narrower" decision come from verify()
+    // callbacks and the artifact-presence gate, not from result-field recognition.
     // s3wp.25: outputArchive/outputAccess no longer in model-facing result.
     // Fire diagnostic recovery directly when diagnosticSummary is present.
     if (record[DIAGNOSTIC_SUMMARY_KEY]) {
@@ -1778,14 +1627,6 @@ function commandPayloadPreviewText(record: Record<string, unknown>): string | un
     : undefined;
   if (stdout && stderr) return `stdout:\n${stdout}\n\nstderr:\n${stderr}`;
   return stdout || (stderr ? `stderr:\n${stderr}` : undefined);
-}
-
-function isGenericHighVolumeSummarizerResult(record: Record<string, unknown>): boolean {
-  if (record[DIAGNOSTIC_SUMMARY_KEY]) return false;
-  const sr = record[ProjectToolResultKey.STRUCTURED_RESULT];
-  if (!isJsonRecord(sr) || typeof sr['counts'] !== 'object') return false;
-  const counts = sr['counts'] as Record<string, unknown>;
-  return typeof counts['payloadBytes'] === 'number';
 }
 
 function compactSummaryText(
@@ -2065,6 +1906,24 @@ function applyHighVolumeModelSummary(
 // been removed: the model always receives the tool's own minimal schema, never a
 // generic truncated envelope.  See docs/raw-output-contract.md.
 
+// 0yt5.16: structural (NOT semantic) precedence check.  Returns true when the
+// existing structuredResult is absent or carries only the bare metadata that
+// structuredPayloadSummary always echoes from a command's stdout (tool/status/
+// exitCode/byte counts) — i.e. the tool did not supply its own richer envelope.
+// In that case a generic output-bounding summarizer may fill it in.  Any field
+// beyond this metadata set means the tool carried its own structuredResult, which
+// is preserved verbatim.  This makes no pass/fail judgement on the fields.
+const STRUCTURED_RESULT_METADATA_ECHO_KEYS = new Set<string>([
+  'tool', 'status', 'success', 'server', 'operation', 'exitCode',
+  'stdoutBytes', 'stderrBytes'
+]);
+
+function structuredResultIsBareMetadataEcho(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isJsonRecord(value)) return false;
+  return Object.keys(value).every(key => STRUCTURED_RESULT_METADATA_ECHO_KEYS.has(key));
+}
+
 export async function persistAndBoundResult(
   definition: ProjectToolConfig,
   result: unknown,
@@ -2077,9 +1936,16 @@ export async function persistAndBoundResult(
 
   const structuredResult = applyStructuredSummarizerRegistry(definition, policyResult, context);
 
+  // 0yt5.16: the harness no longer recognizes a "decision-evidence" envelope on the
+  // tool's structuredResult.  The only precedence rule kept here is structural and
+  // tool-agnostic: a generic summarizer's bounded structuredResult fills in / replaces
+  // the bare metadata echo that structuredPayloadSummary always produces (tool/status/
+  // exitCode/byte counts), but it never overwrites a richer structuredResult the tool
+  // itself carried (any field beyond that metadata).  This keeps the generic
+  // output-bounding summarizer working (0yt5.17's domain) without inspecting result
+  // fields for pass/fail meaning — semantic pass/fail is decided by verify().
   const existingStructuredResult = resultRecord(policyResult)[ProjectToolResultKey.STRUCTURED_RESULT];
-  const hasGateEvidence = structuredResultHasDecisionEvidence(existingStructuredResult);
-  const enrichedResult = (structuredResult && !hasGateEvidence)
+  const enrichedResult = (structuredResult && structuredResultIsBareMetadataEcho(existingStructuredResult))
     ? withoutUndefined({ ...resultRecord(policyResult), [ProjectToolResultKey.STRUCTURED_RESULT]: structuredResult })
     : policyResult;
 

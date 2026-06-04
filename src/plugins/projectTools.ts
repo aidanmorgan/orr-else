@@ -54,8 +54,7 @@ import {
   persistAndBoundResult,
   attachFailureCategory,
   attachProjectToolSteering,
-  summarizeToolResult,
-  structuredResultHasDecisionEvidence
+  summarizeToolResult
 } from './projectTools/resultEnvelope.js';
 import {
   projectToolFailureLimitSuggestedOutcome,
@@ -88,7 +87,6 @@ export { resolveContextField } from './projectTools/contextHelpers.js';
 export { normalizeCommandArguments } from './projectTools/commandExecutor.js';
 export { normalizeMcpPathArguments } from './projectTools/pathNormalization.js';
 export { shouldSerializeMcpTool, mcpToolRequestTimeoutMs } from './projectTools/mcpExecutor.js';
-export { structuredResultHasDecisionEvidence } from './projectTools/resultEnvelope.js';
 export { projectToolFailureLimitSuggestedOutcome } from './projectTools/preflight.js';
 export type { StructuredResult, ProjectToolSummarizer } from './projectTools/resultEnvelope.js';
 export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool } from './projectTools/commandExecutor.js';
