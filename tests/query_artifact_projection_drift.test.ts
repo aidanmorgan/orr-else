@@ -26,8 +26,47 @@ import { ArtifactQuery } from '../src/core/ArtifactQuery.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EnvVars } from '../src/constants/index.js';
+import { projections, type ProjectionDef } from '../src/contract.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-query-artifact-drift-test');
+
+/**
+ * Cerdiwen-style projection definitions, registered by THIS test (the caller)
+ * to exercise the registration-driven projection mechanism. The harness ships
+ * NONE of these — bead 0yt5.12 registers them from the cerdiwen extension. The
+ * test (re-)registers them in beforeEach; registration is last-wins idempotent
+ * on the singleton registry, so re-running is safe regardless of order.
+ */
+const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
+  writeSet: { selectors: ['writeSet'], description: 'Approved file write set for this implementation step' },
+  verifierObligations: { selectors: ['verifierObligations'], description: 'Verifier obligations that must pass before acceptance' },
+  implementationSteps: { selectors: ['implementationSteps', 'planSteps'], description: 'Ordered implementation steps from the plan' },
+  planSteps: { selectors: ['planSteps', 'implementationSteps'], description: 'Ordered plan steps' },
+  smtEvidence: { selectors: ['smtEvidence'], description: 'SMT/formal evidence associated with this plan' },
+  riskList: { selectors: ['riskList'], description: 'Identified risks and mitigations' },
+  evidenceReferences: { selectors: ['evidenceReferences'], description: 'Evidence references supporting the plan' },
+  acceptanceCriteria: { selectors: ['acceptanceCriteria'], description: 'Acceptance criteria for this bead' }
+};
+
+const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionDef> = {
+  requirementsInventory: { selectors: ['requirementsInventory'], description: 'Full inventory of discovered requirements' },
+  traceabilityReferences: { selectors: ['traceabilityReferences', 'traceability'], description: 'Traceability links' },
+  traceability: { selectors: ['traceability', 'traceabilityReferences'], description: 'Traceability map' },
+  gapFlags: { selectors: ['gapFlags', 'completenessGaps'], description: 'Flags indicating gaps in requirements coverage' },
+  completenessGaps: { selectors: ['completenessGaps', 'gapFlags'], description: 'Completeness gaps identified in requirements' },
+  referenceCitations: { selectors: ['referenceCitations'], description: 'Source citations referenced in the requirements analysis' },
+  unresolvedQuestions: { selectors: ['unresolvedQuestions', 'clarificationQuestions'], description: 'Open questions to resolve before planning' },
+  clarificationQuestions: { selectors: ['clarificationQuestions', 'unresolvedQuestions'], description: 'Clarification questions to be resolved' }
+};
+
+function registerCerdiwenProjections(): void {
+  for (const [name, def] of Object.entries(PLAN_CONTRACT_PROJECTIONS)) {
+    projections.register(`planContract:${name}`, def);
+  }
+  for (const [name, def] of Object.entries(REQUIREMENTS_ANALYSIS_PROJECTIONS)) {
+    projections.register(`requirementsAnalysis:${name}`, def);
+  }
+}
 
 function writeFile(relativePath: string, content: string): void {
   const target = path.join(root, relativePath);
@@ -154,6 +193,9 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     configLoader = new ConfigLoader(undefined, root);
     artifactPaths = new ArtifactPaths(configLoader, undefined, root);
     query = new ArtifactQuery(artifactPaths);
+
+    // The harness embeds NO projection schema; the caller registers them.
+    registerCerdiwenProjections();
 
     writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
     writeFile(

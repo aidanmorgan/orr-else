@@ -98,6 +98,30 @@ export type VerifyCallback = (ctx: VerifyContext) => VerifyResult | Promise<Veri
 /** A read_path_context skeleton extractor: source text → skeleton text. */
 export type SkeletonExtractor = (source: string) => string;
 
+/**
+ * A named artifact projection: a SCHEMA-FREE mapping from a model-facing
+ * projection name to the ordered list of candidate dot-path selectors that
+ * extract the relevant subtree from an artifact's JSON.
+ *
+ * This is deliberately generic — it embeds NO knowledge of any specific
+ * project's artifact schema. The harness query_artifact tool resolves a named
+ * projection by looking it up in the `projections` registry and trying each
+ * candidate selector against the artifact JSON in order, returning the first
+ * that resolves to a defined value. Consuming-project extensions register
+ * their own projections (e.g. cerdiwen's planContract/requirementsAnalysis
+ * projections) at load via `projections.register(name, def)`.
+ */
+export interface ProjectionDef {
+  /**
+   * Ordered list of candidate dot-paths to try against the artifact JSON.
+   * The first selector that resolves to a defined value wins.
+   * An empty string means "return the root".
+   */
+  selectors: [string, ...string[]];
+  /** Short human description for summaries / rejection hints. */
+  description?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Minimal lean logger.
 //
@@ -184,6 +208,20 @@ export const verifier = new Registry<VerifyCallback>('verifier');
  * extractor up by file extension and invokes it.
  */
 export const skeletons = new Registry<SkeletonExtractor>('skeletons');
+
+/**
+ * The harness-owned named-projection registry. Consuming-project extensions
+ * call `projections.register(name, def)` once per projection at load; the
+ * generic query_artifact tool looks a projection up via `projections.get(name)`
+ * and resolves its candidate selectors against the artifact JSON.
+ *
+ * Projection names are namespaced by artifact type using a `<artifactId>:<name>`
+ * key (e.g. `planContract:writeSet`) so the flat last-wins Registry can hold
+ * projections for any artifact type without coupling to a schema. The harness
+ * NEVER pre-registers any project's projections — an UNregistered named
+ * projection falls back to the generic dot-path selector.
+ */
+export const projections = new Registry<ProjectionDef>('projections');
 
 /** Exported for tests that need to assert registry behaviour generically. */
 export type { Registry };

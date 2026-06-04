@@ -4,9 +4,11 @@
  * Design goals:
  * - Agents fetch only requested fields from structured artifacts instead of
  *   whole contract blobs (token efficiency).
- * - Named projections for `planContract` and `requirementsAnalysis` are a
- *   first-class feature; a small registry maps artifact-type → projection-name
- *   → dot-path selector.
+ * - Named projections are GENERIC and registration-driven: a consuming-project
+ *   extension registers each projection (name → candidate dot-path selectors)
+ *   in the harness-owned `projections` registry (orr-else/contract). This tool
+ *   embeds NO project's artifact schema; an UNregistered named projection falls
+ *   back to the generic dot-path selector.
  * - A plain dot-path selector is also accepted for ad-hoc queries.
  * - If a result exceeds RESULT_MAX_BYTES the tool returns counts + up to
  *   SAMPLE_MAX_ITEMS representative items + a narrower-selector hint instead
@@ -21,6 +23,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/index.js';
+import { projections, type ProjectionDef } from '../contract.js';
 
 // ─── Path-safety helpers ──────────────────────────────────────────────────────
 
@@ -86,166 +89,57 @@ function allowedArtifactRoots(beadId: string): string[] {
   return [canonicalPath(beadArtifactDir), canonicalPath(worktreePath)];
 }
 
-// ─── Named projection registry ───────────────────────────────────────────────
+// ─── Named projection resolution ─────────────────────────────────────────────
+//
+// query_artifact is GENERIC: it embeds NO project's artifact schema. Named
+// projections are registration-driven via the harness-owned `projections`
+// registry in orr-else/contract. A consuming-project extension registers each
+// projection under a `<artifactId>:<name>` key (e.g. `planContract:writeSet`)
+// at load. An UNregistered named projection falls back to the generic dot-path
+// selector — there is NO built-in project default.
 
 /**
- * Registry entry: maps a human-readable projection name to the dot-path
- * selector that extracts the relevant subtree from the artifact JSON.
- *
- * A projection may have multiple candidate selectors to handle schema drift
- * across artifact schema versions. The tool tries each candidate selector in
- * order and returns the first that resolves to a non-undefined value. This is
- * a generic fallback mechanism — not consuming-project-specific leakage — so the same
- * pattern can be used for any artifact type whose schema has evolved.
+ * Build the namespaced registry key for a projection: `<artifactId>:<name>`.
+ * This lets the flat last-wins `projections` registry hold projections for any
+ * artifact type without the harness knowing any artifact schema.
  */
-interface ProjectionEntry {
-  /**
-   * Ordered list of candidate dot-paths to try against the artifact JSON.
-   * The first selector that resolves to a defined value wins.
-   * An empty string means "return the root".
-   *
-   * Using an array of candidates rather than a single selector is the key
-   * mechanism for handling schema drift: when an artifact uses a newer key
-   * (e.g. completenessGaps) instead of the original one (gapFlags), both
-   * names can coexist as candidates without coupling the registry to any one
-   * schema version.
-   */
-  selectors: [string, ...string[]];
-  /** Short human description for rejection hints. */
-  description: string;
+function projectionKey(artifactId: string, projectionName: string): string {
+  return `${artifactId}:${projectionName}`;
 }
 
 /**
- * Registry for planContract named projections (req 2).
- * Keys are stable model-facing names; values are entries with candidate selectors.
- *
- * Fallback lists cover both the original harness schema keys and the current
- * consuming-project planContract keys so queries succeed regardless of which schema
- * version produced the artifact.
- */
-const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionEntry> = {
-  writeSet: {
-    selectors: ['writeSet'],
-    description: 'Approved file write set for this implementation step'
-  },
-  verifierObligations: {
-    selectors: ['verifierObligations'],
-    description: 'Verifier obligations that must pass before acceptance'
-  },
-  implementationSteps: {
-    selectors: ['implementationSteps', 'planSteps'],
-    description: 'Ordered implementation steps from the plan'
-  },
-  planSteps: {
-    selectors: ['planSteps', 'implementationSteps'],
-    description: 'Ordered plan steps (consuming-project planContract schema)'
-  },
-  smtEvidence: {
-    selectors: ['smtEvidence'],
-    description: 'SMT/formal evidence associated with this plan'
-  },
-  riskList: {
-    selectors: ['riskList'],
-    description: 'Identified risks and mitigations'
-  },
-  evidenceReferences: {
-    selectors: ['evidenceReferences'],
-    description: 'Evidence references supporting the plan'
-  },
-  acceptanceCriteria: {
-    selectors: ['acceptanceCriteria'],
-    description: 'Acceptance criteria for this bead'
-  }
-} as const;
-
-/**
- * Registry for requirementsAnalysis named projections (req 3).
- *
- * Fallback lists cover both the original harness schema keys and the current
- * consuming-project requirementsAnalysis keys. For example, the projection "gapFlags"
- * also tries "completenessGaps" (the consuming-project key), and "unresolvedQuestions"
- * also tries "clarificationQuestions".
- */
-const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
-  requirementsInventory: {
-    selectors: ['requirementsInventory'],
-    description: 'Full inventory of discovered requirements'
-  },
-  traceabilityReferences: {
-    selectors: ['traceabilityReferences', 'traceability'],
-    description: 'Traceability links between requirements and source artifacts'
-  },
-  traceability: {
-    selectors: ['traceability', 'traceabilityReferences'],
-    description: 'Traceability map (consuming-project requirementsAnalysis schema)'
-  },
-  gapFlags: {
-    selectors: ['gapFlags', 'completenessGaps'],
-    description: 'Flags indicating gaps in requirements coverage'
-  },
-  completenessGaps: {
-    selectors: ['completenessGaps', 'gapFlags'],
-    description: 'Completeness gaps identified in requirements (consuming-project requirementsAnalysis schema)'
-  },
-  referenceCitations: {
-    selectors: ['referenceCitations'],
-    description: 'Source citations referenced in the requirements analysis'
-  },
-  unresolvedQuestions: {
-    selectors: ['unresolvedQuestions', 'clarificationQuestions'],
-    description: 'Open questions that require resolution before planning'
-  },
-  clarificationQuestions: {
-    selectors: ['clarificationQuestions', 'unresolvedQuestions'],
-    description: 'Clarification questions to be resolved (consuming-project requirementsAnalysis schema)'
-  }
-} as const;
-
-/**
- * Artifact-type → projection-name → entry.
- * Keys are the artifact identifiers as they appear in harness.yaml templates
- * (e.g. TransactionalStateDefaults.PLAN_CONTRACT_ARTIFACT_ID = 'planContract').
- */
-const PROJECTION_REGISTRY: Record<string, Record<string, ProjectionEntry>> = {
-  planContract: PLAN_CONTRACT_PROJECTIONS,
-  requirementsAnalysis: REQUIREMENTS_ANALYSIS_PROJECTIONS
-} as const;
-
-// ─── Projection resolution helpers ───────────────────────────────────────────
-
-/**
- * Try each candidate selector in `entry.selectors` against `root` in order.
+ * Try each candidate selector in `def.selectors` against `root` in order.
  * Returns the first that resolves to a defined value plus the selector used.
- * If no selector resolves, returns { value: undefined, resolvedSelector: entry.selectors[0] }
+ * If no selector resolves, returns { value: undefined, resolvedSelector: def.selectors[0] }
  * so callers have a primary selector for error messages.
  */
 function resolveProjectionValue(
   root: unknown,
-  entry: ProjectionEntry
+  def: ProjectionDef
 ): { value: unknown; resolvedSelector: string } {
-  for (const sel of entry.selectors) {
+  for (const sel of def.selectors) {
     const v = safeSelectPath(root, sel);
     if (v !== undefined) {
       return { value: v, resolvedSelector: sel };
     }
   }
-  return { value: undefined, resolvedSelector: entry.selectors[0] };
+  return { value: undefined, resolvedSelector: def.selectors[0] };
 }
 
 /**
  * Find the closest projection name to `name` by Levenshtein distance,
- * for use in retry hints. Returns undefined when the registry is empty or the
+ * for use in retry hints. Returns undefined when there are no candidates or the
  * closest match is too distant (> maxDistance edits) to be useful.
  */
 function closestProjection(
   name: string,
-  registry: Record<string, ProjectionEntry>,
+  candidates: string[],
   maxDistance = 4
 ): string | undefined {
   let best: string | undefined;
   let bestDist = maxDistance + 1;
 
-  for (const candidate of Object.keys(registry)) {
+  for (const candidate of candidates) {
     const dist = levenshtein(name.toLowerCase(), candidate.toLowerCase());
     if (dist < bestDist) {
       bestDist = dist;
@@ -587,9 +481,10 @@ export interface ArtifactQueryInput {
    * full content.  Use this BEFORE requesting a large projection inline so
    * agents can decide what to fetch within their context budget.
    *
-   * When combined with `artifactId`, the summary is schema-aware (lists
-   * named projections for planContract/requirementsAnalysis).  With
-   * `artifactPath` or unknown artifactId, lists top-level keys.
+   * When the artifact type has registered named projections, the summary is
+   * schema-aware (lists those registered projections).  When it has none (no
+   * registered projections, e.g. `artifactPath` or an unregistered artifactId),
+   * it lists top-level keys.
    *
    * Mutually exclusive with `projection`, `selector`, and `schema`.
    */
@@ -826,39 +721,47 @@ export class ArtifactQuery {
     let value: unknown;
 
     if (input.projection) {
-      const projEntry = this.lookupProjection(resolvedId, input.projection);
-      if (!projEntry) {
-        // "Unknown projection" — not in the registry at all.
-        const validProjections = this.validProjectionNames(resolvedId);
-        const registry = PROJECTION_REGISTRY[resolvedId];
-        const hint = registry ? closestProjection(input.projection, registry) : undefined;
-        const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
-        return {
-          status: 'rejected',
-          reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection name is not registered; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
-          validProjections,
-          artifactPath: resolvedPath,
-          exists: true
-        };
-      }
+      const projDef = this.lookupProjection(resolvedId, input.projection);
+      if (!projDef) {
+        // UNregistered named projection: fall back to the GENERIC dot-path
+        // selector. The harness embeds NO project's artifact schema, so an
+        // unregistered projection name is treated as a plain selector against
+        // the artifact JSON. (Consuming-project projections are registered via
+        // projections.register at extension load.)
+        effectiveSelector = normalizeSelectorToDotPath(input.projection);
+        value = safeSelectPath(parsed, effectiveSelector);
 
-      // Projection is registered — try each candidate selector.
-      const { value: projValue, resolvedSelector } = resolveProjectionValue(parsed, projEntry);
-      effectiveSelector = resolvedSelector;
-      value = projValue;
+        if (value === undefined) {
+          const validProjections = this.validProjectionNames(resolvedId);
+          const hint = closestProjection(input.projection, validProjections);
+          const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
+          return {
+            status: 'rejected',
+            reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection name is not registered and did not resolve as a dot-path selector; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
+            ...(validProjections.length > 0 ? { validProjections } : {}),
+            artifactPath: resolvedPath,
+            exists: true
+          };
+        }
+      } else {
+        // Projection is registered — try each candidate selector.
+        const { value: projValue, resolvedSelector } = resolveProjectionValue(parsed, projDef);
+        effectiveSelector = resolvedSelector;
+        value = projValue;
 
-      if (value === undefined) {
-        // "Registered projection whose selector is absent in this artifact."
-        // This is a schema-drift case, not an unknown-projection error.
-        const validProjections = this.validProjectionNames(resolvedId);
-        const candidateList = projEntry.selectors.join('", "');
-        return {
-          status: 'rejected',
-          reason: `Projection "${input.projection}" is registered but its selector(s) ["${candidateList}"] did not match any key in artifact "${resolvedId}". The artifact may use a different schema version. Try the "schema" or "summary" modes to inspect the actual artifact shape.`,
-          validProjections,
-          artifactPath: resolvedPath,
-          exists: true
-        };
+        if (value === undefined) {
+          // "Registered projection whose selector is absent in this artifact."
+          // This is a schema-drift case, not an unknown-projection error.
+          const validProjections = this.validProjectionNames(resolvedId);
+          const candidateList = projDef.selectors.join('", "');
+          return {
+            status: 'rejected',
+            reason: `Projection "${input.projection}" is registered but its selector(s) ["${candidateList}"] did not match any key in artifact "${resolvedId}". The artifact may use a different schema version. Try the "schema" or "summary" modes to inspect the actual artifact shape.`,
+            ...(validProjections.length > 0 ? { validProjections } : {}),
+            artifactPath: resolvedPath,
+            exists: true
+          };
+        }
       }
     } else {
       // Normalize JSON Pointer ("/foo/bar/0") to dot-path ("foo.bar.0") if needed
@@ -867,9 +770,8 @@ export class ArtifactQuery {
 
       if (value === undefined && effectiveSelector) {
         const validProjections = this.validProjectionNames(resolvedId);
-        // Provide a projection retry hint when the raw selector looks like a known projection name.
-        const registry = PROJECTION_REGISTRY[resolvedId];
-        const hint = registry ? closestProjection(effectiveSelector, registry) : undefined;
+        // Provide a projection retry hint when the raw selector looks like a registered projection name.
+        const hint = closestProjection(effectiveSelector, validProjections);
         const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
         return {
           status: 'rejected',
@@ -901,26 +803,27 @@ export class ArtifactQuery {
    * Build a schema-aware (or generic) summary of an artifact's projections
    * with per-projection size estimates but WITHOUT returning any content.
    *
-   * For known artifact types (planContract, requirementsAnalysis), lists each
-   * named projection from the registry — even when the artifact doesn't
-   * contain every key — so agents see the full menu and its cost.
+   * For artifact types with registered named projections, lists each
+   * registered projection — even when the artifact doesn't contain every key —
+   * so agents see the full menu and its cost.
    * Each entry includes an `available` flag indicating whether the projection's
    * selector resolves against this particular artifact (guards against stale
    * menus that list projections which don't exist in the artifact).
-   * For unknown types, lists top-level JSON keys.
+   * For artifact types with no registered projections, lists top-level JSON keys.
    */
   private buildSummary(parsed: unknown, artifactId: string, artifactPath: string): ArtifactSummary {
     const totalSerialized = serializeForMeasure(parsed);
     const totalSizeEstimate = sizeEstimate(totalSerialized);
-    const registry = PROJECTION_REGISTRY[artifactId];
-    const schemaAware = registry !== undefined;
+    const registeredNames = this.validProjectionNames(artifactId);
+    const schemaAware = registeredNames.length > 0;
 
     let projections: ProjectionSummaryEntry[];
 
     if (schemaAware) {
-      projections = Object.entries(registry).map(([name, entry]) => {
+      projections = registeredNames.map((name) => {
+        const def = this.lookupProjection(artifactId, name)!;
         // Try each candidate selector in order; use the first that resolves.
-        const { value, resolvedSelector } = resolveProjectionValue(parsed, entry);
+        const { value, resolvedSelector } = resolveProjectionValue(parsed, def);
         const available = value !== undefined;
         // Unavailable projections have no content → zero size estimate.
         const { byteCount: projBytes, tokenEstimate: projTokens } = available
@@ -928,7 +831,7 @@ export class ArtifactQuery {
           : { byteCount: 0, tokenEstimate: 0 };
         return {
           name,
-          description: entry.description,
+          ...(def.description !== undefined ? { description: def.description } : {}),
           available,
           resolvedSelector,
           sizeEstimate: { byteCount: projBytes, tokenEstimate: projTokens }
@@ -1068,16 +971,16 @@ export class ArtifactQuery {
     return { resolvedPath, resolvedId: artifactId };
   }
 
-  private lookupProjection(artifactId: string, projectionName: string): ProjectionEntry | undefined {
-    const registry = PROJECTION_REGISTRY[artifactId];
-    if (!registry) return undefined;
-    return registry[projectionName];
+  private lookupProjection(artifactId: string, projectionName: string): ProjectionDef | undefined {
+    return projections.get(projectionKey(artifactId, projectionName));
   }
 
   private validProjectionNames(artifactId: string): string[] {
-    const registry = PROJECTION_REGISTRY[artifactId];
-    if (!registry) return [];
-    return Object.keys(registry);
+    const prefix = `${artifactId}:`;
+    return projections
+      .names()
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => key.slice(prefix.length));
   }
 
   private rejection(

@@ -26,8 +26,42 @@ import {
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { ArtifactQueryDefaults, EnvVars } from '../src/constants/index.js';
+import { projections, type ProjectionDef } from '../src/contract.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-query-artifact-test');
+
+/**
+ * Named projections registered by THIS test (the caller). The harness embeds
+ * NO project artifact schema; named projections are registration-driven via
+ * the orr-else/contract `projections` registry. These mirror the fixtures
+ * below. Registration is last-wins idempotent on the singleton, so the
+ * beforeEach re-registration is safe regardless of test order.
+ */
+const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
+  writeSet: { selectors: ['writeSet'], description: 'Approved file write set for this implementation step' },
+  verifierObligations: { selectors: ['verifierObligations'], description: 'Verifier obligations that must pass before acceptance' },
+  implementationSteps: { selectors: ['implementationSteps'], description: 'Ordered implementation steps from the plan' },
+  riskList: { selectors: ['riskList'], description: 'Identified risks and mitigations' },
+  evidenceReferences: { selectors: ['evidenceReferences'], description: 'Evidence references supporting the plan' },
+  acceptanceCriteria: { selectors: ['acceptanceCriteria'], description: 'Acceptance criteria for this bead' }
+};
+
+const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionDef> = {
+  requirementsInventory: { selectors: ['requirementsInventory'], description: 'Full inventory of discovered requirements' },
+  traceabilityReferences: { selectors: ['traceabilityReferences'], description: 'Traceability links' },
+  gapFlags: { selectors: ['gapFlags'], description: 'Flags indicating gaps in requirements coverage' },
+  referenceCitations: { selectors: ['referenceCitations'], description: 'Source citations referenced in the requirements analysis' },
+  unresolvedQuestions: { selectors: ['unresolvedQuestions'], description: 'Open questions to resolve before planning' }
+};
+
+function registerProjections(): void {
+  for (const [name, def] of Object.entries(PLAN_CONTRACT_PROJECTIONS)) {
+    projections.register(`planContract:${name}`, def);
+  }
+  for (const [name, def] of Object.entries(REQUIREMENTS_ANALYSIS_PROJECTIONS)) {
+    projections.register(`requirementsAnalysis:${name}`, def);
+  }
+}
 
 function writeFile(relativePath: string, content: string): void {
   const target = path.join(root, relativePath);
@@ -103,6 +137,9 @@ describe('ArtifactQuery', () => {
     configLoader = new ConfigLoader(undefined, root);
     artifactPaths = new ArtifactPaths(configLoader, undefined, root);
     query = new ArtifactQuery(artifactPaths);
+
+    // The harness ships NO projection schema; the caller registers them.
+    registerProjections();
 
     writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
     writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
@@ -826,6 +863,9 @@ describe('ArtifactQuery — summary mode', () => {
     configLoader = new ConfigLoader(undefined, root);
     artifactPaths = new ArtifactPaths(configLoader, undefined, root);
     query = new ArtifactQuery(artifactPaths);
+
+    // The harness ships NO projection schema; the caller registers them.
+    registerProjections();
 
     writeFile('harness.yaml', MINIMAL_HARNESS_YAML);
     writeFile('.pi/artifacts/bd-1/planContract.json', JSON.stringify(PLAN_CONTRACT_FIXTURE));
