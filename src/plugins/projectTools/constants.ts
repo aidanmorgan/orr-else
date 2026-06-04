@@ -126,9 +126,6 @@ export const PROJECT_TOOL_DESCRIPTION_SUFFIX =
   'Returns compact summaries and structured facts; raw output is referenced via stdoutFile/stderrFile, not inlined. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 
 export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
-export const AST_GREP_TOOL_NAME = 'ast_grep';
-export const CODEMAP_TOOL_NAME = 'codemap';
-export const PYTHON_LSP_TOOL_NAME = 'python_lsp';
 
 // Compact sample budget used by the generic high-volume summarizer.
 // This is the byte limit for the tool-owned representative sample text injected
@@ -204,11 +201,8 @@ export const TOOL_INPUT_PROJECT_TOOL_FAILURE_PATTERN =
 export const WORKTREE_STATE_PROJECT_TOOL_FAILURE_PATTERN =
   /\b(?:dirty worktree|worktree state|outside approved|write set|untracked|unstaged|merge conflict|index lock|permission denied)\b/i;
 
-export const AST_GREP_NO_MATCH_MESSAGE =
-  'ast_grep found no matches (exit code 1 with empty output). This is accepted absence evidence only when the pattern is known valid; otherwise adjust the pattern, language, or path and rerun with narrower arguments.';
-
-export const AST_GREP_NO_MATCH_FILTERED_RECOVERY =
-  'The ast-grep pattern ran first and the wrapper-side outputFilters post-filtered stdout after the pattern executed. Empty output here means the pattern produced output that was then filtered out — it does NOT mean the pattern found no matches. Treat this as filter-eliminated output, not pattern-no-match. Rerun without the filter or with a narrower filter to see what the pattern matched.';
+export const NO_MATCH_FILTERED_RECOVERY =
+  'The tool ran first and the wrapper-side outputFilters post-filtered stdout after the tool executed. Empty output here means the tool produced output that was then filtered out — it does NOT mean the tool found no matches. Treat this as filter-eliminated output, not a genuine no-match. Rerun without the filter or with a narrower filter to see what the tool matched.';
 
 export const ZERO_TARGET_SCAN_MESSAGE_PREFIX =
   'INSUFFICIENT_EVIDENCE: configured security/evidence scan reported zero scanned targets.';

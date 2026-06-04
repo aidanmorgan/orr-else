@@ -10,7 +10,7 @@ import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, Project
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
 import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_SAMPLE_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
-import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
+import { attachProjectToolSteering, summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
 import { frameworkRootFromConfig } from '../src/plugins/projectTools/contextHelpers.js';
@@ -748,67 +748,47 @@ process.exit(sawOther ? 0 : 1);
     expect((result as any).stderrHint).toContain('missing path');
   });
 
-  it('labels ast_grep no-match results without making them look like tool failures', async () => {
-    const payload = {
-      tool: 'ast_grep',
-      status: ToolResultStatus.PASSED,
-      exitCode: 1,
-      stdout: '',
-      stderr: ''
-    };
-    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'ast_grep',
-      type: ProjectToolType.COMMAND,
-      command: process.execPath,
-      defaultArgs: ['-e', `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`],
-      successExitCodes: [0, 1],
-      cwd: CwdMode.WORKTREE
-    }, {
-      beadId: 'bd-1',
-      stateId: 'Planning',
-      actionId: 'analyze'
-    }, {} as any, undefined, new Map());
+  // The harness no longer recognizes no-match by tool name (the cerdiwen ast_grep
+  // tool self-parses and sets matchStatus in its own minimal result). These tests
+  // now assert the GENERIC no-match steering that remains: attachProjectToolSteering
+  // routes record_no_match for ANY tool result that already carries matchStatus.
+  it('routes no-match steering generically without making the result look like a tool failure', () => {
+    const result = attachProjectToolSteering(
+      { name: 'any_tool', type: ProjectToolType.COMMAND } as any,
+      {
+        tool: 'any_tool',
+        status: ToolResultStatus.PASSED,
+        matchStatus: 'no_match'
+      }
+    ) as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.matchStatus).toBe('no_match');
-    expect(result.message).toContain('ast_grep found no matches');
     expect(result.nextAction).toBe('record_no_match');
-    const recovery = (result as any).recovery as string[];
+    const recovery = result.recovery as string[];
     expect(recovery.join('\n')).not.toContain('outputFilters');
     expect(recovery).toEqual(['Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.']);
   });
 
-  it('explains filter-eliminated vs pattern-no-match when ast_grep no-match result includes outputFilters', async () => {
-    const payload = {
-      tool: 'ast_grep',
-      status: ToolResultStatus.PASSED,
-      exitCode: 1,
-      stdout: '',
-      stderr: '',
-      outputFilters: ['--filter', 'some_function']
-    };
-    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'ast_grep',
-      type: ProjectToolType.COMMAND,
-      command: process.execPath,
-      defaultArgs: ['-e', `process.stdout.write(${JSON.stringify(JSON.stringify(payload))});`],
-      successExitCodes: [0, 1],
-      cwd: CwdMode.WORKTREE
-    }, {
-      beadId: 'bd-1',
-      stateId: 'Planning',
-      actionId: 'analyze'
-    }, {} as any, undefined, new Map());
+  it('explains filter-eliminated vs genuine no-match generically when the result carries outputFilters', () => {
+    const result = attachProjectToolSteering(
+      { name: 'any_tool', type: ProjectToolType.COMMAND } as any,
+      {
+        tool: 'any_tool',
+        status: ToolResultStatus.PASSED,
+        matchStatus: 'no_match',
+        structuredResult: { outputFilters: ['--filter', 'some_function'] }
+      }
+    ) as any;
 
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.matchStatus).toBe('no_match');
     expect(result.nextAction).toBe('record_no_match');
-    const recovery = (result as any).recovery as string[];
+    const recovery = result.recovery as string[];
     const recoveryText = recovery.join('\n');
-    expect(recoveryText).toContain('ast-grep pattern ran first');
     expect(recoveryText).toContain('outputFilters post-filtered stdout');
     expect(recoveryText).toContain('filter-eliminated output');
-    expect(recoveryText).toContain('does NOT mean the pattern found no matches');
+    expect(recoveryText).toContain('does NOT mean the tool found no matches');
     expect(recovery).toEqual(expect.arrayContaining([
       expect.stringContaining('wrapper-side outputFilters post-filtered stdout')
     ]));

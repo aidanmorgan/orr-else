@@ -10,7 +10,6 @@ import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js'
 import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../../constants/index.js';
 import {
   ARTIFACT_VALIDATOR_TOOL_NAME,
-  AST_GREP_TOOL_NAME,
   COMMAND_DIAGNOSTIC_LINE_PATTERN,
   COMMAND_DIAGNOSTIC_MAX_MATCH_LINES,
   COMMAND_DIAGNOSTIC_SECTION_SUFFIX,
@@ -21,7 +20,6 @@ import {
   COMMAND_TRUNCATION_MARKER_PREFIX,
   COMMAND_TRUNCATION_STREAM_MARKER_SUFFIX,
   COMMAND_TRUNCATION_TEXT_MARKER_SUFFIX,
-  NO_MATCH_STATUS,
   ProjectToolParameter,
   ProjectToolResultKey,
   StructuredPayloadCollectionKey,
@@ -460,34 +458,6 @@ export function commandPathRejectionResult(
   };
 }
 
-function astGrepNoMatch(
-  definition: ProjectCommandToolConfig,
-  exitCode: number | undefined,
-  stdout: string,
-  stderr: string,
-  structuredStdout?: Record<string, unknown>
-): boolean {
-  if (definition.name !== AST_GREP_TOOL_NAME) return false;
-  if (exitCode === CommandExitCode.NO_MATCH && stdout.trim().length === 0 && stderr.trim().length === 0) return true;
-  return structuredStdout?.exitCode === CommandExitCode.NO_MATCH
-    && String(structuredStdout.stdout || '').trim().length === 0
-    && String(structuredStdout.stderr || '').trim().length === 0;
-}
-
-function commandResultAnnotations(
-  definition: ProjectCommandToolConfig,
-  exitCode: number | undefined,
-  stdout: string,
-  stderr: string,
-  structuredStdout?: Record<string, unknown>
-): Record<string, unknown> {
-  if (!astGrepNoMatch(definition, exitCode, stdout, stderr, structuredStdout)) return {};
-  return {
-    [ProjectToolResultKey.MATCH_STATUS]: NO_MATCH_STATUS,
-    message: 'ast_grep found no matches (exit code 1 with empty output). This is accepted absence evidence only when the pattern is known valid; otherwise adjust the pattern, language, or path and rerun with narrower arguments.'
-  };
-}
-
 function commandFailureStatus(error: any): ToolResultStatus {
   return error?.code === 'ENOENT' ? ToolResultStatus.UNAVAILABLE : ToolResultStatus.REJECTED;
 }
@@ -596,7 +566,6 @@ export function buildCommandResult(input: CommandResultInput): object {
     // JSON_EXTRACTION_MAX_BYTES (256 KiB) for memory-safe extraction.
     ...(boundedStdout.text ? { [ProjectToolResultKey.STDOUT]: boundedStdout.text } : {}),
     ...(boundedStderr.text ? { [ProjectToolResultKey.STDERR]: boundedStderr.text } : {}),
-    ...commandResultAnnotations(definition, exitCode, boundedStdout.text, boundedStderr.text, structuredStdout),
     ...(normalizedPathArguments.length > 0 ? { normalizedPathArguments } : {}),
     ...(structuredSummary ? { [ProjectToolResultKey.STRUCTURED_RESULT]: structuredSummary } : {}),
     ...(toolCalls ? { [ProjectToolResultKey.TOOL_CALLS]: toolCalls } : {})

@@ -10,7 +10,6 @@ import { Logger } from '../../core/Logger.js';
 import type { ProjectToolConfig } from '../../core/domain/StateModels.js';
 import { Component, ProjectToolDefaults, ToolResultStatus, WorkerDefaults } from '../../constants/index.js';
 import {
-  CODEMAP_TOOL_NAME,
   COMMAND_DIAGNOSTIC_LINE_PATTERN,
   COMMAND_DIAGNOSTIC_MAX_MATCH_LINES,
   COMMAND_DIAGNOSTIC_SECTION_SUFFIX,
@@ -26,7 +25,6 @@ import {
   NO_MATCH_STATUS,
   ProjectToolNextAction,
   ProjectToolResultKey,
-  PYTHON_LSP_TOOL_NAME,
   StructuredPayloadCollectionKey,
   StructuredPayloadIssueKey,
   StructuredPayloadSummaryKey,
@@ -38,8 +36,7 @@ import {
   SCAN_TARGET_SAMPLE_LIMIT,
   ZERO_TARGET_SCAN_MESSAGE_PREFIX,
   ARTIFACT_VALIDATOR_TOOL_NAME,
-  AST_GREP_NO_MATCH_FILTERED_RECOVERY,
-  AST_GREP_TOOL_NAME,
+  NO_MATCH_FILTERED_RECOVERY,
   CMD_FAIL_TEST_LINE_PATTERN,
   CMD_FAIL_PYTEST_SECTION_PATTERN,
   CMD_FAIL_ASSERTION_PATTERN,
@@ -78,7 +75,6 @@ import {
   nestedRecord,
   parseJsonRecord,
   resultRecord,
-  searchableFailureText,
   serializeProjectToolResult,
   stringField,
   truncateString,
@@ -476,22 +472,9 @@ function shouldSummarizeDiagnostics(
   record: Record<string, unknown>,
   text: string
 ): boolean {
-  const toolName = diagnosticToolName(definition, record);
   const operation = diagnosticOperationName(record);
-  return toolName.includes(PYTHON_LSP_TOOL_NAME)
-    || operation === 'diagnostics'
+  return operation === 'diagnostics'
     || /\bDiagnostics in File:\s*\d+\b/.test(text);
-}
-
-function diagnosticToolName(definition: ProjectToolConfig, record: Record<string, unknown>): string {
-  return [
-    definition.name,
-    stringField(record, 'tool'),
-    stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'tool')
-  ]
-    .filter((value): value is string => Boolean(value))
-    .join(' ')
-    .toLowerCase();
 }
 
 function diagnosticOperationName(record: Record<string, unknown>): string | undefined {
@@ -1375,22 +1358,10 @@ function projectToolRemediation(
 ): string[] {
   const guidance = new Set<string>();
   const toolName = definition.name;
-  const text = searchableFailureText(result);
 
   if (toolName === ARTIFACT_VALIDATOR_TOOL_NAME) {
     guidance.add('Treat artifact_validator output as an authoritative gate: use structuredResult, rejectedChecks, diagnosticFacts, and routingHint to revise the plan/artifact or route the configured failure edge.');
     guidance.add('Do not rerun artifact_validator unchanged after a terminal gate rejection.');
-  }
-
-  if (toolName === AST_GREP_TOOL_NAME) {
-    guidance.add(`For ${toolName} failures, adjust the pattern/language/path and rerun with narrower arguments; do not fall back to shell grep for configured project-tool coverage.`);
-    if (/exitCode["']?:?1|NO_MATCH|no match/i.test(text)) {
-      guidance.add(`Exit code 1 from ${toolName} usually means no match, not infrastructure failure; record the no-match evidence if that satisfies the check.`);
-    }
-  }
-
-  if (toolName === CODEMAP_TOOL_NAME) {
-    guidance.add(`For ${toolName} failures, pass worktree-relative paths or paths under the active bead worktree; do not pass project-root, sibling-worktree, or harness artifact paths.`);
   }
 
   if (toolName === 'read') {
@@ -1456,19 +1427,6 @@ export function attachFailureCategory(definition: ProjectToolConfig, result: unk
 
 // ---- Steering ----
 
-function codemapStructurePreviewHasOverview(preview: string, operation?: string): boolean {
-  if (operation && operation !== 'get_structure') return false;
-  return /\bFiles:\s*\d+\b/.test(preview)
-    && /\bTop Extensions:/.test(preview)
-    && /\n[^\s].*/.test(preview);
-}
-
-function pythonLspDiagnosticsPreviewHasEvidence(preview: string, operation?: string): boolean {
-  if (operation && operation !== 'diagnostics') return false;
-  return /\bDiagnostics in File:\s*\d+\b/.test(preview)
-    && /\b(?:ERROR|WARNING|INFO) at L\d+:C\d+:/i.test(preview);
-}
-
 function projectToolResultHasCompletePreview(record: Record<string, unknown>): boolean {
   const value = record[ProjectToolResultKey.COMPACT_SUMMARY];
   return typeof value === 'string'
@@ -1484,21 +1442,9 @@ function projectToolMessageSuggestsNarrowing(value: unknown): boolean {
   return typeof value === 'string' && /truncated|too much data|rerun with narrower/i.test(value);
 }
 
-function projectToolResultHasActionableTruncatedPreview(record: Record<string, unknown>): boolean {
-  const preview = record[ProjectToolResultKey.COMPACT_SUMMARY];
-  if (typeof preview !== 'string' || preview.trim().length === 0) return false;
-  const tool = stringField(record, 'tool') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'tool');
-  const operation = stringField(record, 'operation') || stringField(record[ProjectToolResultKey.STRUCTURED_RESULT], 'operation');
-
-  if (tool === CODEMAP_TOOL_NAME && codemapStructurePreviewHasOverview(preview, operation)) return true;
-  if (tool === PYTHON_LSP_TOOL_NAME && pythonLspDiagnosticsPreviewHasEvidence(preview, operation)) return true;
-  return false;
-}
-
 function projectToolResultHasSufficientCompactEvidence(record: Record<string, unknown>): boolean {
   if (record.maxBufferExceeded === true) return false;
   if (projectToolResultHasCompletePreview(record)) return true;
-  if (projectToolResultHasActionableTruncatedPreview(record)) return true;
   return structuredResultHasDecisionEvidence(record[ProjectToolResultKey.STRUCTURED_RESULT]);
 }
 
@@ -1558,7 +1504,7 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
         return {
           [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RECORD_NO_MATCH,
           [ProjectToolResultKey.RECOVERY]: [
-            AST_GREP_NO_MATCH_FILTERED_RECOVERY,
+            NO_MATCH_FILTERED_RECOVERY,
             'Record the no-match result as evidence if it satisfies the current check; otherwise rerun with a narrower or corrected pattern.'
           ]
         };
