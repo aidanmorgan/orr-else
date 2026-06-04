@@ -1,6 +1,6 @@
 {
   "name": "orr-else",
-  "version": "1.0.1-local.3",
+  "version": "1.0.1-local.4",
   "description": "An opinionated pi.dev orchestration harness with obsessive, rehearsed resilience (Orr Else).",
   "main": "./dist/extension.js",
   "type": "module",
