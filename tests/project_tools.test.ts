@@ -1202,7 +1202,7 @@ describe('project tool command arguments', () => {
     expect(result.remediation).toEqual(expect.arrayContaining([
       expect.stringContaining('structuredResult'),
       expect.stringContaining('compactSummary'),
-      expect.stringContaining('outputArchive.artifactRef'),
+      expect.stringContaining('stdoutFile/stderrFile'),
       expect.stringContaining('supported harness retrieval patterns')
     ]));
     expect(fs.existsSync(marker)).toBe(false);
@@ -2194,7 +2194,7 @@ describe('project tool command arguments', () => {
     expect(description).toContain('query defaults {"collection_name":"reference_docs"}');
     expect(description).toContain('query(path)');
     expect(description).toContain('Returned ids are Chroma document ids, not filesystem paths.');
-    expect(description).toContain('artifactRef or outputAccess text, treat it as archive guidance');
+    expect(description).toContain('raw-output file references (stdoutFile/stderrFile), treat them as archive guidance');
     expect(description).toContain('first decide from compactSummary, structuredResult, and toolCalls');
     expect(description).toContain('Prefer one narrow project-tool call at a time');
     expect(description).toContain('rerun narrower only for a named missing fact or decision blocker');

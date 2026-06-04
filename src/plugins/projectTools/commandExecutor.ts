@@ -428,8 +428,8 @@ export function unsupportedArtifactValidatorOutputControlResult(
     unsupportedOutputControlFlag: flag,
     [ProjectToolResultKey.FAILURE_CATEGORY]: ProjectToolFailureCategory.TOOL_INPUT_ERROR,
     [ProjectToolResultKey.REMEDIATION]: [
-      'Use structuredResult, compactSummary, diagnosticFacts, rejectedChecks, and outputArchive.artifactRef from the artifact_validator response instead of adding output-control flags.',
-      'Use supported harness retrieval patterns for archived output; artifactRef is an opaque harness handle, not a filesystem path.',
+      'Use structuredResult, compactSummary, diagnosticFacts, rejectedChecks, and the stdoutFile/stderrFile references from the artifact_validator response instead of adding output-control flags.',
+      'Use supported harness retrieval patterns for archived output; stdoutFile/stderrFile are harness file references, not content to inline.',
       'Rerun artifact_validator only with supported validator arguments or narrower artifact inputs.'
     ]
   };

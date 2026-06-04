@@ -1293,12 +1293,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     // Set when provenance resolution itself failed at init time — signals the
     // completion gate to warn only rather than hard-reject (the agent should not
     // be penalised for a harness resolution error).
-    promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined,
-    // Placeholder for project-level workflow_parity result. The parity tool is
-    // a project-level semantic check whose result is LINKED here when available;
-    // it is NOT replaced by provenance (they are complementary). Stored as null
-    // (rather than undefined) so the field survives JSON serialization.
-    workflowParityResult: null
+    promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined
   });
 }
 

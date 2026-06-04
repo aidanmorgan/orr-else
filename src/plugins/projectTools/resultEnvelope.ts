@@ -901,7 +901,7 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
 // ---- genericHighVolumeSummarizer ----
 //
 // Covers all high-volume tools that do NOT have a more specific summarizer
-// (codemap, ast_grep, reference_docs, git_history, workflow_parity).  For
+// (codemap, ast_grep, reference_docs, git_history).  For
 // any PASSED result whose raw payload exceeds HIGH_VOLUME_PAYLOAD_MIN_BYTES
 // this summarizer emits a compact {status, counts, representativeSamples,
 // omissions, nextAction} envelope before truncation so the model-facing
@@ -1621,7 +1621,7 @@ function projectToolSteering(definition: ProjectToolConfig, result: unknown): Re
     if (projectToolResultNeedsNarrowing(record)) {
       return {
         [ProjectToolResultKey.NEXT_ACTION]: ProjectToolNextAction.RERUN_NARROWER,
-        [ProjectToolResultKey.RECOVERY]: ['First decide from compactSummary, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read outputArchive.artifactRef just because the compact summary is small.']
+        [ProjectToolResultKey.RECOVERY]: ['First decide from compactSummary, structuredResult, and toolCalls. Rerun this same configured project tool with narrower path, pattern, operation, or arguments only when a named missing fact or decision blocker remains. Do not read the raw stdoutFile/stderrFile archive just because the compact summary is small.']
       };
     }
     // s3wp.25: outputArchive/outputAccess no longer in model-facing result.

@@ -113,18 +113,18 @@ export const StructuredPayloadSummaryOutputKey = {
 } as const;
 
 export const PROJECT_TOOL_OUTPUT_ACCESS_GUIDANCE =
-  'Archived by harness; artifactRef is an opaque handle, not a path. First decide from compactSummary, structuredResult, and toolCalls. Do not read the archive just because the compact summary is small; rerun with narrower arguments only for a named missing fact or decision blocker.';
+  'Raw output is archived by the harness and referenced via stdoutFile/stderrFile, not inlined. First decide from compactSummary, structuredResult, and toolCalls. Do not read the archive just because the compact summary is small; rerun with narrower arguments only for a named missing fact or decision blocker.';
 
 export const PROJECT_TOOL_MODEL_CONTRACT = [
   'Configured project tools are the supported route for project-specific command and MCP-backed capabilities.',
   'Do not replace them with shell, native MCP, or native reads of harness artifact paths.',
-  'If a PASSED result includes outputArchive.artifactRef or outputAccess text, treat it as archive guidance, not a tool failure. The artifactRef is an opaque harness handle, not a filesystem path; first decide from compactSummary, structuredResult, and toolCalls.',
+  'If a PASSED result includes raw-output file references (stdoutFile/stderrFile), treat them as archive guidance, not a tool failure. They are harness file references, not content to inline; first decide from compactSummary, structuredResult, and toolCalls.',
   'Prefer one narrow project-tool call at a time. If a preview is truncated, a wrapper warning is returned, or a broad codemap/ast_grep call returns too much data, use the available preview/summary/toolCalls first; rerun narrower only for a named missing fact or decision blocker.',
   'The Pi UI native MCP server count reports only Pi-adapter connections. It can show zero while Orr Else MCP-backed project tools are healthy; use the named configured project tool and route BLOCKED only when that tool itself reports unavailable/rejected.'
 ] as const;
 
 export const PROJECT_TOOL_DESCRIPTION_SUFFIX =
-  'Returns compact summaries and structured facts; outputArchive.artifactRef is an opaque harness handle, not a path to read. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
+  'Returns compact summaries and structured facts; raw output is referenced via stdoutFile/stderrFile, not inlined. Decide from compactSummary, structuredResult, and toolCalls before rerunning narrower for a named missing fact.';
 
 export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
 export const AST_GREP_TOOL_NAME = 'ast_grep';
@@ -132,7 +132,6 @@ export const CODEMAP_TOOL_NAME = 'codemap';
 export const PYTHON_LSP_TOOL_NAME = 'python_lsp';
 export const GIT_HISTORY_TOOL_NAME = 'git_history';
 export const REFERENCE_DOCS_TOOL_NAME = 'reference_docs';
-export const WORKFLOW_PARITY_TOOL_NAME = 'workflow_parity';
 
 // Compact sample budget used by the generic high-volume summarizer.
 // This is the byte limit for the tool-owned representative sample text injected
@@ -152,18 +151,18 @@ export const HIGH_VOLUME_SAMPLE_COUNT = 8;
 // Recovery guidance template for high-volume summarized tools: directs agents to
 // rerun with narrower args / path / range rather than reading the raw archive.
 export const HIGH_VOLUME_NARROW_RERUN_RECOVERY =
-  'This is a compact summary of a large result. Raw output is preserved in outputArchive. '
+  'This is a compact summary of a large result. Raw output is preserved in the harness tool-calls archive (referenced via stdoutFile/stderrFile). '
   + 'To retrieve a specific section: rerun the same tool with a narrower path, range, symbol, '
-  + 'or operation argument. Do not read outputArchive.artifactRef directly — '
+  + 'or operation argument. Do not read the raw archive directly — '
   + 'use the narrow-rerun / selector path to fetch only the named missing fact.';
 
 // (wp8h) Recovery guidance for FAILED command results with an archived failure output.
-// The model must re-read the archived output (via query_artifact / artifactRef handle)
+// The model must re-read the archived output (via its stdoutFile/stderrFile reference)
 // rather than re-running the expensive command (tests/build/etc.).
 // This is distinct from the SUCCESS-path guidance which steers toward preview/structuredResult.
 export const FAILURE_REREAD_ARCHIVE_RECOVERY =
-  'The command failed and the full failure output is preserved in outputArchive. '
-  + 'Re-read the archived failure output via query_artifact using the outputArchive.artifactRef handle '
+  'The command failed and the full failure output is preserved in the harness tool-calls archive. '
+  + 'Re-read the archived failure output via its stdoutFile/stderrFile reference '
   + 'to diagnose the root cause before deciding on a fix. '
   + 'Do NOT re-run the command until the failure is understood — '
   + 're-running an expensive failed build or test suite without first reading the archived output '

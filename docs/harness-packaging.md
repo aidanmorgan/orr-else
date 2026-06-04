@@ -41,9 +41,9 @@ Pi's package loader resolves this relative path and discovers the `"pi": { "exte
 
 `ORR_ELSE_FRAMEWORK_ROOT` is read by:
 - `frameworkRootFromConfig()` in `src/plugins/projectTools/contextHelpers.ts` — falls back to this env var when the YAML does not set `artifacts.templates.orrElseFrameworkRoot`.
-- `requireFrameworkRoot()` and `optionalFrameworkRoot()` in cerdiwen's `.pi/project-tools/_runtime_paths.ts` — directly consumed by `framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, `framework_semgrep`, and the `framework` repo target in `git_history`.
+- `requireFrameworkRoot()` and `optionalFrameworkRoot()` in cerdiwen's `.pi/project-tools/_runtime_paths.ts` — directly consumed by `framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, and the `framework` repo target in `git_history`.
 
-**Clarification on scope**: `ORR_ELSE_FRAMEWORK_ROOT` and the tools that use it (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, `framework_semgrep`) are **framework-development tools** — they exist so that cerdiwen (the dogfooding project) can run the orr-else build and test suite against the framework's own source. A normal consuming project that is *not* developing the harness itself does NOT need these tools and does NOT need `ORR_ELSE_FRAMEWORK_ROOT` to point at anything. The design must clearly separate "consume the harness" from "develop the harness".
+**Clarification on scope**: `ORR_ELSE_FRAMEWORK_ROOT` and the tools that use it (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`) are **framework-development tools** — they exist so that cerdiwen (the dogfooding project) can run the orr-else build and test suite against the framework's own source. A normal consuming project that is *not* developing the harness itself does NOT need these tools and does NOT need `ORR_ELSE_FRAMEWORK_ROOT` to point at anything. The design must clearly separate "consume the harness" from "develop the harness".
 
 ### 2.3 Worker extension path: `.pi/extensions/orr-else.ts`
 
@@ -190,7 +190,7 @@ The `bin` entry in `package.json` already exists (`"orr-else": "./dist/main.js"`
 
 ### 5.1 Framework-development tools vs. consumer tools
 
-`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, and `framework_semgrep` in cerdiwen's `.pi/project-tools/` are **framework-development tools**. They exist specifically so that cerdiwen — the dogfooding project — can build and test the `orr-else` framework source code as part of a bead's implementation workflow. They read files from `ORR_ELSE_FRAMEWORK_ROOT` (i.e., the source checkout).
+`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence` in cerdiwen's `.pi/project-tools/` are **framework-development tools**. They exist specifically so that cerdiwen — the dogfooding project — can build and test the `orr-else` framework source code as part of a bead's implementation workflow. They read files from `ORR_ELSE_FRAMEWORK_ROOT` (i.e., the source checkout).
 
 A consumer project that is *not* developing the harness has NO use for these tools and should NOT install them. The `orr-else init` scaffold does not copy these tools. The design doc and init message must state this clearly.
 
@@ -286,7 +286,7 @@ Currently cerdiwen has `@modelcontextprotocol/sdk` in `.pi/npm/node_modules/`. O
 
 ### Step 5: Retain framework-development tools as-is
 
-The framework-dev tools (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, `framework_semgrep`) remain in cerdiwen's `.pi/project-tools/` as project-owned code. They still require `ORR_ELSE_FRAMEWORK_ROOT` when cerdiwen is dogfooding changes to the harness itself. This is correct and intentional — cerdiwen is the harness's development project. Normal consumer projects do not have these tools.
+The framework-dev tools (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`) remain in cerdiwen's `.pi/project-tools/` as project-owned code. They still require `ORR_ELSE_FRAMEWORK_ROOT` when cerdiwen is dogfooding changes to the harness itself. This is correct and intentional — cerdiwen is the harness's development project. Normal consumer projects do not have these tools.
 
 ### Step 6: Fix test hard-coding
 
@@ -362,7 +362,7 @@ Steps:
 
 ## 9. What Stays Out of Scope
 
-- **framework-dev tools** (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`, `framework_semgrep`): These are cerdiwen-owned project tools for dogfooding. They are NOT shipped as part of the orr-else package, are NOT installed by `orr-else init`, and are NOT relevant to any consumer except the framework's own development project.
+- **framework-dev tools** (`framework_build`, `framework_regression_tests`, `orr_else_framework_evidence`): These are cerdiwen-owned project tools for dogfooding. They are NOT shipped as part of the orr-else package, are NOT installed by `orr-else init`, and are NOT relevant to any consumer except the framework's own development project.
 
 - **`ORR_ELSE_FRAMEWORK_ROOT` removal from harness core**: The env var and template token are harmless when unset. Removing them is a separate cleanup that can happen independently and is not blocking for packaging.
 

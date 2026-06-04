@@ -29,7 +29,7 @@
  *   counts.total    ← total_errors   (all findings)
  *   counts.warnings ← context_count  (advisory / context findings)
  *   tool            ← origin tool name (run_quality_checks, artifact_validator, …)
- *   evidenceRefs    ← opaque harness artifact handles (outputArchive.artifactRef)
+ *   evidenceRefs    ← opaque harness artifact handles (query_artifact artifactId/artifactPath)
  *
  * ## Adoption note (follow-on)
  *
@@ -64,9 +64,9 @@ export interface VerificationArtifact {
   counts: VerificationCounts;
 
   /**
-   * Opaque harness artifact handles (outputArchive.artifactRef) that a consumer
-   * can forward to query_artifact for detailed evidence.  Optional: not all
-   * verifier calls produce persistent artifacts.
+   * Opaque harness artifact handles (a query_artifact artifactId/artifactPath)
+   * that a consumer can forward to query_artifact for detailed evidence.
+   * Optional: not all verifier calls produce persistent artifacts.
    */
   evidenceRefs?: string[];
 

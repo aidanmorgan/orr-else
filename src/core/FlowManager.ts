@@ -75,13 +75,6 @@ export function isAdvanceOutcome(outcome: string | null | undefined, config: Har
   return outcomeCategory(outcome, config) === 'advance';
 }
 
-export interface FlowManagerResult {
-  status: BeadStatus;
-  notes: string;
-  retryCount: number;
-  removeWorktree: boolean;
-}
-
 export interface RestartTransitionResult {
   kind: RestartKind | string;
   event: string;
@@ -128,30 +121,6 @@ export class FlowManager {
     const fallbackStateId = stateId || EventName.RESTART;
     if (!state) return fallbackStateId;
     return state.on?.[event] || state.transitions[event] || fallbackStateId;
-  }
-
-  public resolveFailedTeammateEventRetry(
-    stateId: string,
-    transitionEvent: string,
-    bead: { retryCount: number },
-    maxRetries = 5
-  ): FlowManagerResult {
-    const retryCount = (bead.retryCount || 0) + 1;
-    if (retryCount >= maxRetries) {
-      return {
-        retryCount,
-        status: BeadStatus.BLOCKED,
-        notes: `CIRCUIT_BREAKER_TRIGGERED: Max retries reached.`,
-        removeWorktree: true
-      };
-    }
-
-    return {
-      retryCount,
-      status: stateId as BeadStatus, 
-      notes: `RETRY: Automated recovery initiated.`,
-      removeWorktree: false
-    };
   }
 
   public resolveRestartTransition(

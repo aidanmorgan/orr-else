@@ -77,19 +77,6 @@ describe('Pi-native extension surface', () => {
     expect(isHarnessTransientFailure('Codex SSE response headers timed out after 10000ms')).toBe(true);
   });
 
-  it('routes failed teammate events through the configured failure edge before retrying', () => {
-    const retry = new FlowManager().resolveFailedTeammateEventRetry(
-      'Implementation',
-      'FAILURE',
-      { retryCount: 1 }
-    );
-
-    expect(retry.retryCount).toBe(2);
-    expect(retry.status).toBe('Implementation');
-    expect(retry.notes).toContain('RETRY');
-    expect(retry.removeWorktree).toBe(false);
-  });
-
   it('distinguishes harness restart routes from context restart routes', () => {
     const config = {
       settings: {
@@ -1177,7 +1164,7 @@ states:
       const matchingTools = harness.tools.filter(tool => tool.name === 'run_quality_checks');
       expect(matchingTools).toHaveLength(1);
       expect(matchingTools[0].description).toContain('Project-owned quality gate.');
-      expect(matchingTools[0].description).toContain('artifactRef is an opaque harness handle');
+      expect(matchingTools[0].description).toContain('raw output is referenced via stdoutFile/stderrFile');
       expect(JSON.stringify(matchingTools[0].parameters)).toContain('arguments');
     } finally {
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();

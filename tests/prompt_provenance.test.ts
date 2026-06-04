@@ -398,10 +398,6 @@ states:
       expect(configEntry).toBeDefined();
       expect(typeof configEntry.sha256).toBe('string');
       expect(configEntry.sha256.length).toBeGreaterThan(0);
-
-      // workflowParityResult placeholder must be present (stored as null so it
-      // survives JSON serialization — undefined would be dropped).
-      expect(initEvent.data.workflowParityResult).toBeNull();
     } finally {
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await closeServer(server);

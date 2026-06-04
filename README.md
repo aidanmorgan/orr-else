@@ -446,7 +446,7 @@ tools:
     command: npm
     defaultArgs: ["test"]
     validationRules:
-      - tool: run_quality_checks
+      - tool: build_check
         condition: passed
         message: "Quality checks must pass first."
 ```
@@ -729,10 +729,6 @@ Project command tools can run in:
 - `project`: the project root.
 - `worktree`: the assigned worktree.
 - A configured explicit path.
-
-### Quality Checks
-
-The generic harness `run_quality_checks` helper runs `npm run build` and `npm test` by default. Projects that define a `run_quality_checks` tool in `harness.yaml` override the generic helper so the model receives the project-owned schema and command wrapper. Passing checks return `{ status: "PASSED" }`; failures return `{ status: "REJECTED" }`.
 
 ### Session Log Compression
 
