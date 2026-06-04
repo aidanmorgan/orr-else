@@ -149,27 +149,17 @@ settings:
     const records = [
       {
         id: 'e0',
-        type: DomainEventName.BEAD_METADATA_MERGED,
+        type: DomainEventName.BEAD_STATUS_UPDATED,
         timestamp: '2026-01-01T00:00:00.000Z',
         sessionId: 's1',
-        data: {
-          beadId: 'other',
-          patch: { status: 'Planning', handovers: { Planning: 'unrelated' } }
-        }
+        data: { beadId: 'other', status: 'Planning' }
       },
       {
         id: 'e1',
-        type: DomainEventName.BEAD_METADATA_MERGED,
+        type: DomainEventName.BEAD_STATUS_UPDATED,
         timestamp: '2026-01-01T00:00:01.000Z',
         sessionId: 's1',
-        data: {
-          beadId: 'bd-1',
-          patch: {
-            status: 'Planning',
-            retryCount: 2,
-            handovers: { Planning: 'ready for implementation' }
-          }
-        }
+        data: { beadId: 'bd-1', status: 'Planning' }
       },
       {
         id: 'e2',
@@ -184,13 +174,17 @@ settings:
       },
       {
         id: 'e3',
-        type: DomainEventName.BEAD_METADATA_MERGED,
+        type: DomainEventName.BEAD_STATUS_UPDATED,
         timestamp: '2026-01-01T00:00:03.000Z',
         sessionId: 's1',
-        data: {
-          beadId: 'bd-2',
-          patch: { status: 'Implementation', compactionCount: 1 }
-        }
+        data: { beadId: 'bd-2', status: 'Implementation' }
+      },
+      {
+        id: 'e4',
+        type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+        timestamp: '2026-01-01T00:00:04.000Z',
+        sessionId: 's1',
+        data: { beadId: 'bd-2', compactionCount: 1 }
       }
     ];
     fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\nnot-json\n`);
@@ -199,8 +193,6 @@ settings:
 
     expect(projections.get('bd-1')).toMatchObject({
       status: 'Planning',
-      retryCount: 2,
-      handovers: { Planning: 'ready for implementation' },
       checklists: {
         'Read project rules': {
           checked: true,
@@ -214,12 +206,12 @@ settings:
     });
     expect(projections.has('other')).toBe(false);
 
+    // includeDetails=false yields the compact projection: status is retained,
+    // but the detail-only checklists map is excluded.
     const summaries = await eventStore.projectBeads(['bd-1'], { includeDetails: false });
     expect(summaries.get('bd-1')).toMatchObject({
-      status: 'Planning',
-      retryCount: 2
+      status: 'Planning'
     });
-    expect(summaries.get('bd-1')?.handovers).toBeUndefined();
     expect(summaries.get('bd-1')?.checklists).toBeUndefined();
   });
 

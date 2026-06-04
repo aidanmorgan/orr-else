@@ -171,10 +171,6 @@ export enum DomainEventName {
   BEAD_CLAIMED = 'BEAD_CLAIMED',
   BEAD_CLOSED = 'BEAD_CLOSED',
   BEAD_CREATED = 'BEAD_CREATED',
-  /** REPLAY-ONLY / HISTORICAL: This event is no longer emitted by any live code path.
-   *  It exists solely so that old event logs containing it can still be replayed
-   *  by BeadStateProjection. No new code may record this event. */
-  BEAD_METADATA_MERGED = 'BEAD_METADATA_MERGED',
   BEAD_RELEASED = 'BEAD_RELEASED',
   BEAD_STATUS_UPDATED = 'BEAD_STATUS_UPDATED',
   BEAD_TOMBSTONED = 'BEAD_TOMBSTONED',
@@ -1017,13 +1013,6 @@ export const AgentFailureSummary = {
   EVENT_STORE_DETAILS: 'Full provider error remains in the event store.'
 } as const;
 
-export const EVENT_STORE_ONLY_METADATA_KEYS = [
-  'checklists',
-  'completedActionIds',
-  'dynamicChecklists',
-  'handovers'
-] as const;
-
 export const BeadsDefaults = {
   MAX_BUFFER_BYTES: 64 * DataSize.MIB,
   CLI_TIMEOUT_MS: 2 * TimeMs.MINUTE,
@@ -1274,8 +1263,6 @@ export const REPLAY_CRITICAL_EVENT_TYPES = new Set<string>([
   DomainEventName.BEAD_RELEASED,
   DomainEventName.BEAD_STATUS_UPDATED,
   DomainEventName.BEAD_TOMBSTONED,
-  // REPLAY-ONLY / HISTORICAL: consumed by projectBeadFromEvents for old logs
-  DomainEventName.BEAD_METADATA_MERGED,
   // State execution
   DomainEventName.STATE_RUN_INITIALIZED,
   DomainEventName.STATE_TRANSITION_APPLIED,

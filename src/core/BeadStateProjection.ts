@@ -9,7 +9,7 @@
  *  - Workflow-scoping helpers (actionKey prefix, eventAppliesToWorkflow, completedAction)
  */
 
-import { isRecord, mergeReplacingArraysAndDeletingUndefined, type UnknownRecord } from './RecordUtils.js';
+import { isRecord, mergeReplacingArraysAndDeletingUndefined } from './RecordUtils.js';
 import { isRestartTransition } from './EventUtils.js';
 import {
   ActionCompletionKey,
@@ -17,7 +17,6 @@ import {
   AgentFailureSummary,
   BeadStatus,
   DomainEventName,
-  EVENT_STORE_ONLY_METADATA_KEYS,
   EventName,
   EventProjectionDefaults,
   MergeAndCommitStatus,
@@ -61,14 +60,6 @@ export class BeadStateProjection {
   // ---------------------------------------------------------------------------
   // Text compaction helpers
   // ---------------------------------------------------------------------------
-
-  private compactMetadataPatch(patch: UnknownRecord): UnknownRecord {
-    const compacted = { ...patch };
-    for (const key of EVENT_STORE_ONLY_METADATA_KEYS) {
-      delete compacted[key];
-    }
-    return compacted;
-  }
 
   private includeDetails(options?: EventProjectionOptions): boolean {
     return options?.includeDetails !== false;
@@ -423,21 +414,6 @@ export class BeadStateProjection {
         projection.lastActivity = event.timestamp;
       }
       switch (event.type) {
-        // REPLAY-ONLY / HISTORICAL: BEAD_METADATA_MERGED is no longer emitted by
-        // any live code path. This consumer exists solely so that old event logs
-        // containing the event can still be replayed correctly. No new code may
-        // record BEAD_METADATA_MERGED.
-        case DomainEventName.BEAD_METADATA_MERGED:
-          Object.assign(
-            projection,
-            mergeReplacingArraysAndDeletingUndefined(
-              projection,
-              includeDetails
-                ? data.patch || {}
-                : this.compactMetadataPatch(data.patch || {})
-            )
-          );
-          break;
         case DomainEventName.BEAD_CLAIMED:
           Object.assign(projection, mergeReplacingArraysAndDeletingUndefined(projection, {
             status: data.stateId,

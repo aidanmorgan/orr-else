@@ -235,37 +235,6 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
 describe('BeadStateProjection.projectBeadFromEvents', () => {
   const projection = new BeadStateProjection();
 
-  it('merges BEAD_METADATA_MERGED patches in order', () => {
-    const events = [
-      makeEvent(DomainEventName.BEAD_METADATA_MERGED, { beadId: 'bd-1', patch: { notes: 'first', retryCount: 1 } }, { timestamp: '2026-01-01T00:00:01.000Z' }),
-      makeEvent(DomainEventName.BEAD_METADATA_MERGED, { beadId: 'bd-1', patch: { notes: 'second' } }, { timestamp: '2026-01-01T00:00:02.000Z' })
-    ];
-    const result = projection.projectBeadFromEvents('bd-1', events);
-    expect(result.notes).toBe('second');
-    expect(result.retryCount).toBe(1);
-  });
-
-  it('excludes event-store-only metadata keys when includeDetails=false', () => {
-    const events = [
-      makeEvent(DomainEventName.BEAD_METADATA_MERGED, {
-        beadId: 'bd-1',
-        patch: {
-          status: 'Planning',
-          handovers: { Planning: 'some handover' },
-          completedActionIds: ['action-1'],
-          checklists: { task: { checked: true } },
-          notes: 'visible'
-        }
-      })
-    ];
-    const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: false });
-    expect(result.status).toBe('Planning');
-    expect(result.notes).toBe('visible');
-    expect(result.handovers).toBeUndefined();
-    expect(result.completedActionIds).toBeUndefined();
-    expect(result.checklists).toBeUndefined();
-  });
-
   it('derives restart fields exclusively from the stateChart (WI-24 single source of truth)', () => {
     const events = [
       makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning' }, { timestamp: '2026-01-01T00:00:01.000Z' }),

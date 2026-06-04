@@ -652,7 +652,6 @@ describe('REPLAY_CRITICAL_EVENT_TYPES completeness', () => {
       DomainEventName.BEAD_CLOSED,
       DomainEventName.BEAD_RELEASED,
       DomainEventName.BEAD_TOMBSTONED,
-      DomainEventName.BEAD_METADATA_MERGED,
       // Slot-health pruning: Supervisor.hasDurableInactiveEvent (eventsForBeads)
       DomainEventName.TEAMMATE_PROCESS_EXITED,
       // Project-tool circuit breaker: projectToolFailureLimit (eventsForActiveProjectToolRun)

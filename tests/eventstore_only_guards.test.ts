@@ -14,7 +14,7 @@
  * If either rule fires, it means new code is constructing or accessing EventStore
  * outside the sanctioned composition roots — a regression that this test prevents.
  *
- * BEAD E (metadata-elimination) — four additional static guards:
+ * BEAD E (metadata-elimination) — additional static guards:
  *
  * Guard 3: bd_update_metadata / BD_UPDATE_METADATA / --metadata must not appear
  *   anywhere in src/** or harness.yaml. These patterns indicate a code path that
@@ -22,18 +22,16 @@
  *   event-store-only architecture.
  *
  * Guard 4: metadata.orr_else / metadata.micromanager / issue.metadata must not
- *   appear in src/**. The sole ALLOWLISTED consumer is the BEAD_METADATA_MERGED
- *   case handler in BeadStateProjection.ts, which exists only for replaying old
- *   event logs — it is explicitly NOT a live write path.
+ *   appear in src/**. These field-access patterns would read runtime statechart
+ *   state out of Beads native metadata instead of the event-store projections.
  *
  * Guard 5: MUTATING_BEADS_COMMANDS (src/constants/index.ts) must contain exactly
  *   the coarse set {close, create, import, update} — no more, no less.
  *   Additionally, no `bd update` invocation in src/ may include `--metadata`.
  *
- * Guard 6: BEAD_METADATA_MERGED must not appear as the first argument to any
- *   eventStore.record() call anywhere in src/. The only allowed reference is the
- *   case-consumer in BeadStateProjection.ts (switch/case on replay). Emitting
- *   BEAD_METADATA_MERGED would reintroduce a deleted write path.
+ * (The former Guard 6 — that the REPLAY-ONLY BEAD_METADATA_MERGED event was never
+ *  re-emitted — was removed when that event was deleted outright in
+ *  pi-experiment-vvuz: there is no longer any event to guard against.)
  */
 
 import { describe, expect, it } from 'vitest';
@@ -118,19 +116,6 @@ const APPROVED_INSTANTIATION_FILES = new Set([
 ]);
 
 // ─── Guard 3–6 allowlists ─────────────────────────────────────────────────────
-
-/**
- * ALLOWLIST for Guard 4 (metadata field access) and Guard 6 (BEAD_METADATA_MERGED reference).
- *
- * BeadStateProjection.ts is the sole sanctioned consumer of BEAD_METADATA_MERGED.
- * It exists ONLY to replay old event logs that predate the metadata-elimination bead.
- * No new code may record or produce the event; BeadStateProjection only READS it
- * inside a switch/case during projection (not a write path).
- *
- * The `metadata.orr_else` / `metadata.micromanager` / `issue.metadata` patterns
- * are similarly only acceptable inside this file for the same replay-consumer reason.
- */
-const BEAD_STATE_PROJECTION_FILE = 'src/core/BeadStateProjection.ts';
 
 /**
  * Expected members of MUTATING_BEADS_COMMANDS — exactly the coarse set.
@@ -300,14 +285,8 @@ describe('EventStore-only guard 4: no framework code reads banned metadata field
    * metadata.orr_else, metadata.micromanager, and issue.metadata are field-access
    * patterns that indicate a code path reading runtime statechart state out of
    * Beads native metadata. After the metadata-elimination bead these must not
-   * appear in framework code outside the single allowlisted replay consumer.
-   *
-   * ALLOWLIST: BeadStateProjection.ts contains a case DomainEventName.BEAD_METADATA_MERGED
-   * handler that reads `data.patch` — not `metadata.orr_else` — so it is NOT matched
-   * by these patterns. The allowlist is present as a documented contract: if any
-   * match IS found in BeadStateProjection.ts under these specific field-path patterns,
-   * it would still be a violation (the replay consumer reads data.patch, not the
-   * banned field paths).
+   * appear in framework code at all — runtime state is derived exclusively from
+   * event-store projections.
    *
    * Non-vacuity: these are real property-access chain patterns. The scanner would
    * catch a line like `const x = issue.metadata.orr_else` that a future developer
@@ -359,26 +338,6 @@ describe('EventStore-only guard 4: no framework code reads banned metadata field
         ...formatted
       ].join('\n')
     ).toEqual([]);
-  });
-
-  it('guard 4 is non-vacuous: the allowlisted replay consumer actually exists in BeadStateProjection.ts', () => {
-    // Prove the allowlist is not vacuous: BEAD_METADATA_MERGED must appear in
-    // BeadStateProjection.ts as a case consumer (switch/case, not a record call).
-    // If this test fails it means the replay consumer was removed and the allowlist
-    // entry no longer needs to exist — update BEAD_STATE_PROJECTION_FILE or this check.
-    const beadStateProjectionPath = path.join(ROOT_DIR, BEAD_STATE_PROJECTION_FILE);
-    expect(
-      fs.existsSync(beadStateProjectionPath),
-      `Expected allowlisted file '${BEAD_STATE_PROJECTION_FILE}' to exist on disk — the replay consumer may have been moved or renamed`
-    ).toBe(true);
-
-    const source = fs.readFileSync(beadStateProjectionPath, 'utf8');
-    // The consumer is a `case DomainEventName.BEAD_METADATA_MERGED:` line.
-    const hasCaseConsumer = /case\s+DomainEventName\.BEAD_METADATA_MERGED/.test(source);
-    expect(
-      hasCaseConsumer,
-      `Expected '${BEAD_STATE_PROJECTION_FILE}' to contain a 'case DomainEventName.BEAD_METADATA_MERGED' replay consumer — the guard allowlist is now vacuous and should be reviewed`
-    ).toBe(true);
   });
 });
 
@@ -450,101 +409,6 @@ describe('EventStore-only guard 5: MUTATING_BEADS_COMMANDS membership is exactly
         '',
         'Violations:',
         ...formatted
-      ].join('\n')
-    ).toEqual([]);
-  });
-});
-
-// ─── Guard 6: BEAD_METADATA_MERGED must not be RECORDED anywhere ─────────────
-
-describe('EventStore-only guard 6: BEAD_METADATA_MERGED is never recorded (emitted) in src/', () => {
-  /**
-   * BEAD_METADATA_MERGED is REPLAY-ONLY / HISTORICAL (documented in both constants/index.ts
-   * and BeadStateProjection.ts). The only legal reference is the case-consumer inside
-   * BeadStateProjection.ts's switch statement.
-   *
-   * This guard distinguishes RECORD/EMIT from CONSUME:
-   *   - Banned:   eventStore.record(DomainEventName.BEAD_METADATA_MERGED, ...)
-   *   - Banned:   eventStore.record('BEAD_METADATA_MERGED', ...)
-   *   - Allowed:  case DomainEventName.BEAD_METADATA_MERGED: (switch arm in BeadStateProjection.ts)
-   *   - Allowed:  BEAD_METADATA_MERGED = 'BEAD_METADATA_MERGED'  (enum declaration in constants)
-   *
-   * The pattern searches for .record( calls whose first argument is or contains
-   * BEAD_METADATA_MERGED. It does NOT match enum declarations, import statements,
-   * or case/switch consumers.
-   *
-   * Non-vacuity: a line like
-   *   `await eventStore.record(DomainEventName.BEAD_METADATA_MERGED, { ... })`
-   * would be caught by the pattern. We verify this below with an explicit pattern check.
-   */
-
-  /**
-   * Returns true if a line looks like a .record() call that includes
-   * BEAD_METADATA_MERGED as an argument (the first argument position is what
-   * matters — the second is the data payload and should not contain this string
-   * in practice, so we match the whole record call line to be conservative).
-   */
-  function isRecordEmission(line: string): boolean {
-    // Match lines that call .record( with BEAD_METADATA_MERGED anywhere in the
-    // argument region. The pattern is intentionally broad so it catches both
-    // `.record(DomainEventName.BEAD_METADATA_MERGED` and `.record('BEAD_METADATA_MERGED'`.
-    return /\.record\([\s\S]*BEAD_METADATA_MERGED/.test(line);
-  }
-
-  it('no file in src/ calls .record() with BEAD_METADATA_MERGED as a target', () => {
-    // We scan non-comment lines only (isCommentLine filters already applied).
-    const pattern = /\.record\([^)]*BEAD_METADATA_MERGED/;
-    const violations = scanSourceFiles(pattern);
-    const formatted = violations.map(v => `  ${v.file}:${v.line}  ${v.text}`);
-    expect(
-      formatted,
-      [
-        'BEAD_METADATA_MERGED found as a .record() argument in src/ — this event is REPLAY-ONLY.',
-        'No live code path may emit BEAD_METADATA_MERGED. The only allowed reference is',
-        `the case-consumer in '${BEAD_STATE_PROJECTION_FILE}' for replaying historical logs.`,
-        '',
-        'Violations:',
-        ...formatted
-      ].join('\n')
-    ).toEqual([]);
-  });
-
-  it('guard 6 is non-vacuous: the pattern correctly identifies a hypothetical record call', () => {
-    // Demonstrate that the guard pattern WOULD fire if a record call were introduced.
-    // We test the pattern against a planted hypothetical line (never present in source).
-    const hypotheticalLine = 'await eventStore.record(DomainEventName.BEAD_METADATA_MERGED, { beadId })';
-    expect(isRecordEmission(hypotheticalLine)).toBe(true);
-
-    // And that it does NOT fire on the legitimate case-consumer in BeadStateProjection.ts.
-    const legitimateConsumer = 'case DomainEventName.BEAD_METADATA_MERGED:';
-    expect(isRecordEmission(legitimateConsumer)).toBe(false);
-
-    // And that it does NOT fire on the enum declaration in constants/index.ts.
-    const enumDeclaration = "  BEAD_METADATA_MERGED = 'BEAD_METADATA_MERGED',";
-    expect(isRecordEmission(enumDeclaration)).toBe(false);
-  });
-
-  it('the allowlisted replay consumer in BeadStateProjection.ts is a case-consumer, not a record call', () => {
-    // Belt-and-suspenders: even the allowlisted file must not contain a record call.
-    const beadStateProjectionPath = path.join(ROOT_DIR, BEAD_STATE_PROJECTION_FILE);
-    if (!fs.existsSync(beadStateProjectionPath)) {
-      // If the file doesn't exist the guard-4 non-vacuity test above already fails.
-      return;
-    }
-    const source = fs.readFileSync(beadStateProjectionPath, 'utf8');
-    const lines = source.split('\n');
-    const recordEmissions = lines
-      .filter(line => !isCommentLine(line))
-      .filter(line => isRecordEmission(line));
-
-    expect(
-      recordEmissions,
-      [
-        `'${BEAD_STATE_PROJECTION_FILE}' must not contain a .record(BEAD_METADATA_MERGED) call.`,
-        'Even the replay-consumer file may only READ the event inside a switch/case, not emit it.',
-        '',
-        'Offending lines:',
-        ...recordEmissions.map(l => `  ${l.trim()}`)
       ].join('\n')
     ).toEqual([]);
   });
