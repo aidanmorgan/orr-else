@@ -1,0 +1,30 @@
+# In-repo fixture harness.yaml for the no-cap guardrail tests.
+#
+# This is NOT a real consuming-project harness. It is a deterministic, self-contained
+# fixture that exercises the SAME generic guard logic the no_cap_guardrails suite used
+# to run against an external checkout:
+#   - every declared tool maps to a SKILL.md on disk (under ./skills/<slug>/SKILL.md)
+#   - every declared tool has a description
+#   - the tool list parses to a non-empty array of named tools
+#   - the YAML contains zero forbidden cap-preview identifiers
+#
+# Slug rule: tool name with underscores -> hyphens, unless overridden in the test's
+# SKILL_SLUG_OVERRIDES map (here: shared_a / shared_b both resolve to the shared-skill dir).
+tools:
+  - name: clean_command_tool
+    type: command
+    description: A command-type project tool whose parser lives in project-tools/.
+    command: clean-command-tool
+  - name: clean_mcp_tool
+    type: mcp
+    description: An MCP-type project tool reaching the model via persistMcpRawResult.
+    server: fixture-server
+    operation: query
+  - name: shared_a
+    type: command
+    description: Shares a skill directory with shared_b (override -> shared-skill).
+    command: shared-a
+  - name: shared_b
+    type: command
+    description: Shares a skill directory with shared_a (override -> shared-skill).
+    command: shared-b

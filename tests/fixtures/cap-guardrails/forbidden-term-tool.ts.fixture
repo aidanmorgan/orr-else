@@ -1,0 +1,23 @@
+// In-repo fixture: a DIRTY project-tool source file (NEGATIVE test input, AC3).
+//
+// This file deliberately PLANTS a forbidden cap-preview identifier in PRODUCTION
+// code (not a comment, not a string). The cap-knob grep guard MUST detect it and
+// report >= 1 violation. If it ever reports zero, the guard mechanism has been
+// gutted and the negative test fails.
+//
+// Extension is `.ts.fixture` (not `.ts`) so it is never collected by collectTsFiles,
+// the vitest test glob, or any tsconfig include — it is read explicitly by the
+// negative test via scanFileForForbiddenTerms.
+
+export interface DirtyToolResult {
+  // FORBIDDEN: model-facing truncation flag — exactly what the guard must catch.
+  stdoutTruncated: boolean;
+  // FORBIDDEN: model-facing inline preview — second planted violation.
+  stdoutPreview: string;
+}
+
+export function buildDirtyToolResult(): DirtyToolResult {
+  const stdoutTruncated = true;
+  const stdoutPreview = 'first 4096 bytes...';
+  return { stdoutTruncated, stdoutPreview };
+}

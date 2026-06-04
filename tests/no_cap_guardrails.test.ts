@@ -1,20 +1,27 @@
 /**
  * s3wp.30: No-cap raw-output guardrails (non-vacuous edition).
  *
+ * This is a GENERIC harness test: it is fully self-contained and never reads any
+ * external consuming-project checkout. The externally-configured-project-tool
+ * concerns (tool->SKILL.md mapping, project-tool source cap-grep) are exercised
+ * against IN-REPO FIXTURES under tests/fixtures/cap-guardrails/, which deterministically
+ * model what a consuming project declares (a harness.yaml + .pi/skills + project-tools).
+ *
  * Three complementary guards:
  *
  *  1. INVENTORY ENUMERATION GUARD
  *     Enumerates 100% of Orr Else bundled tools (from RtkContract inventory /
- *     registered tool names) AND 100% of Cerdiwen project tools (from the
- *     resolved harness.yaml `tools:` section with ORR_ELSE_FRAMEWORK_ROOT set).
+ *     registered tool names) AND 100% of the fixture project tools (from the
+ *     fixture harness.yaml `tools:` section).
  *     Fails if any enumerated tool lacks: schema/type owner, SKILL.md interpreter
  *     path that EXISTS on disk, raw-output archival strategy, and a deterministic-
- *     compaction note.  For cerdiwen tools, maps each to its .pi/skills/SLUG/SKILL.md.
+ *     compaction note.  For fixture project tools, maps each to its skills/SLUG/SKILL.md.
  *
  *  2. CAP-KNOB GREP GUARD
  *     Fails on production references (non-comment, non-test) to forbidden
- *     cap-preview/output-control identifiers across orr-else src/ AND
- *     cerdiwen .pi/project-tools/ + harness.yaml.
+ *     cap-preview/output-control identifiers across orr-else src/ AND the in-repo
+ *     fixture project-tools/ + fixture harness.yaml. A NEGATIVE test feeds a
+ *     planted-violation fixture and asserts the guard catches it (proves non-vacuity).
  *
  *  3. LARGE-OUTPUT FIXTURE GUARD  (NON-VACUOUS — uses real production builders)
  *     Invokes the ACTUAL production builders/parsers to produce output, writes
@@ -36,20 +43,20 @@
  *       (h) Git history >10 MB — buildCommandResult, real file
  *       (i) Externally-configured live-service project tools — PROVEN AT CONFIG LEVEL
  *           (see label below). Name-agnostic: covers WHATEVER command/MCP project
- *           tools the external harness.yaml declares (e.g. static-analysis, code-map,
+ *           tools the fixture harness.yaml declares (e.g. static-analysis, code-map,
  *           reference-doc, LSP-diagnostic, or issue-scanner tools).
  *
- *     Category (i) covers external project-tools whose parsers live in the consuming
- *     project's .pi/project-tools/ (e.g. /Users/aidan/dev/bankwest/cerdiwen).  They reach
- *     the model via executeCommandTool/buildCommandResult (the same production
- *     code path as categories a/b/h).  Each is proven at two levels:
+ *     Category (i) covers externally-configured project-tools whose parsers live in a
+ *     consuming project's .pi/project-tools/. They reach the model via
+ *     executeCommandTool/buildCommandResult (the same production code path as
+ *     categories a/b/h). Modelled here with in-repo fixtures, each is proven at two levels:
  *       1. Structural: a SKILL.md exists on disk for the tool's skill slug.
- *       2. Grep: the cap-knob scan (Guard 2) runs over cerdiwen project-tools
+ *       2. Grep: the cap-knob scan (Guard 2) runs over the fixture project-tools
  *          and confirms ZERO forbidden cap-preview identifiers in production code.
- *     The cerdiwen tool's own committed tests (*.test.ts) further assert schema
+ *     A consuming project's own committed tests (*.test.ts) further assert schema
  *     and raw-output contract; those tests are authoritative for parser internals.
  *     >10 MB proof is impractical in a unit test for these categories because
- *     they require live external services (MCP server, LSP daemon, SonarQube API).
+ *     they require live external services (MCP server, LSP daemon, analysis API).
  *
  *  4. REGISTRATION-ANCHORED COVERAGE GUARD  (NEW — replaces enum-only check)
  *     Calls checkRtkInventoryCoverage with the COMPLETE list of tool names
@@ -148,10 +155,25 @@ import {
 // ---------------------------------------------------------------------------
 
 const ORR_ELSE_ROOT = path.resolve(process.env.ORR_ELSE_FRAMEWORK_ROOT ?? process.cwd());
-const CERDIWEN_ROOT = path.resolve('/Users/aidan/dev/bankwest/cerdiwen');
-const CERDIWEN_HARNESS_YAML = path.join(CERDIWEN_ROOT, 'harness.yaml');
-const CERDIWEN_SKILLS_DIR = path.join(CERDIWEN_ROOT, '.pi', 'skills');
-const CERDIWEN_PROJECT_TOOLS_DIR = path.join(CERDIWEN_ROOT, '.pi', 'project-tools');
+
+// In-repo fixtures (self-contained; NO external checkout). These deterministically
+// exercise the SAME generic guard logic the suite previously ran against an external
+// consuming-project checkout: project-tool enumeration -> SKILL.md mapping, tool
+// well-formedness, and the cap-knob grep over project-tool source files + harness.yaml.
+const FIXTURE_ROOT = path.join(ORR_ELSE_ROOT, 'tests', 'fixtures', 'cap-guardrails');
+const FIXTURE_HARNESS_YAML = path.join(FIXTURE_ROOT, 'harness.yaml');
+const FIXTURE_SKILLS_DIR = path.join(FIXTURE_ROOT, 'skills');
+const FIXTURE_PROJECT_TOOLS_DIR = path.join(FIXTURE_ROOT, 'project-tools');
+// A planted-violation fixture (production code containing forbidden cap identifiers)
+// used by the NEGATIVE test to prove the grep guard is not gutted.
+const FIXTURE_FORBIDDEN_TOOL = path.join(FIXTURE_ROOT, 'forbidden-term-tool.ts.fixture');
+
+// Slug overrides for fixture tools that intentionally share a skill directory,
+// mirroring the override mechanism a real consuming project uses.
+const FIXTURE_SKILL_SLUG_OVERRIDES: Record<string, string> = {
+  shared_a: 'shared-skill',
+  shared_b: 'shared-skill',
+};
 
 // ---------------------------------------------------------------------------
 // Guard 1: INVENTORY ENUMERATION
@@ -239,65 +261,40 @@ describe('inventory enumeration guard', () => {
     expect(entry.skillPath).toBeTruthy();
   });
 
-  // -- Cerdiwen project tools --
+  // -- Externally-configured project tools (in-repo fixtures) --
+  //
+  // A consuming project declares its project tools in a harness.yaml and documents
+  // each in a .pi/skills/<slug>/SKILL.md. The generic harness must enforce that
+  // tool->SKILL.md mapping mechanism WITHOUT depending on any external checkout.
+  // These tests run deterministically against in-repo fixtures (always present),
+  // so there is no conditional skip and no external path is touched.
 
-  describe('cerdiwen project tools', () => {
-    const cerdiwenAvailable = existsSync(CERDIWEN_HARNESS_YAML);
-    const skipReason = `cerdiwen not present at ${CERDIWEN_HARNESS_YAML}`;
+  describe('project tools (in-repo fixtures)', () => {
 
-    // NOTE: When ORR_ELSE_FRAMEWORK_ROOT is configured (cerdiwen loads this config),
-    // these tests are MANDATORY and will fail if any tool is missing a SKILL.md or
-    // has a cap-knob violation.  When cerdiwen is absent (e.g., a dev machine without
-    // the cerdiwen worktree), they skip with a visible reason rather than silently passing.
-    //
-    // IMPORTANT: We use it.skip (not a silent return) so the test runner shows a
-    // VISIBLE SKIP entry in the output — not a false green pass.
-
-    (cerdiwenAvailable ? it : it.skip)('cerdiwen harness.yaml is present and loadable', () => {
-      const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+    it('fixture harness.yaml is present and loadable', () => {
+      const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
       const parsed = yaml.parse(content);
       expect(parsed).toBeTruthy();
       expect(Array.isArray(parsed.tools), 'tools must be an array').toBe(true);
     });
 
-    (cerdiwenAvailable ? it : it.skip)('every cerdiwen tool has a SKILL.md that exists on disk', () => {
-      const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+    it('every fixture tool maps to a SKILL.md that exists on disk', () => {
+      const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
       const parsed = yaml.parse(content);
       const tools: Array<{ name: string; type?: string }> = parsed.tools ?? [];
 
-      // Map tool names (underscore) to skill directory paths (hyphen convention).
-      // Each cerdiwen tool is documented in a .pi/skills/<slug>/SKILL.md created during s3wp.29.
-      // Default slug: replace underscores with hyphens. Some tools share a skill directory
-      // (e.g. auto_fix and codemod both use the code-rewrite skill).
-      //
-      // Explicit overrides (tool_name -> skill directory slug):
-      //   auto_fix -> code-rewrite  (auto_fix is the non-AI rewrite tool; code-rewrite covers both)
-      //   codemod  -> code-rewrite  (codemod is the pattern-based rewrite; code-rewrite covers both)
-      //   framework_semgrep -> semgrep  (framework_semgrep is orr-else specific semgrep; shares skill)
-      //   framework_build -> framework-ci  (build + regression tests share the CI skill)
-      //   framework_regression_tests -> framework-ci
-      //   run_quality_checks -> run-quality-checks
-      //   orr_else_framework_evidence -> orr-else-framework-evidence
-      // (Tools whose slug is just the name with underscores->hyphens need no override,
-      //  e.g. a tool named foo_bar resolves to the foo-bar skill directory.)
-      const SKILL_SLUG_OVERRIDES: Record<string, string> = {
-        auto_fix: 'code-rewrite',
-        codemod: 'code-rewrite',
-        framework_semgrep: 'semgrep',
-        framework_build: 'framework-ci',
-        framework_regression_tests: 'framework-ci',
-        run_quality_checks: 'run-quality-checks',
-        orr_else_framework_evidence: 'orr-else-framework-evidence',
-      };
-
+      // Map tool names (underscore) to skill directory slugs (hyphen convention).
+      // Default slug: replace underscores with hyphens. Some tools share a skill
+      // directory (here shared_a / shared_b -> shared-skill), exercising the
+      // override path a real consuming project relies on.
       const missingSkills: string[] = [];
       const toolInventory: string[] = [];
 
       for (const tool of tools) {
         const toolName = tool.name;
         toolInventory.push(toolName);
-        const slug = SKILL_SLUG_OVERRIDES[toolName] ?? toolName.replace(/_/g, '-');
-        const skillPath = path.join(CERDIWEN_SKILLS_DIR, slug, 'SKILL.md');
+        const slug = FIXTURE_SKILL_SLUG_OVERRIDES[toolName] ?? toolName.replace(/_/g, '-');
+        const skillPath = path.join(FIXTURE_SKILLS_DIR, slug, 'SKILL.md');
         if (!existsSync(skillPath)) {
           missingSkills.push(`${toolName} -> ${skillPath}`);
         }
@@ -305,26 +302,32 @@ describe('inventory enumeration guard', () => {
 
       expect(
         missingSkills,
-        `Missing SKILL.md for cerdiwen tools:\n${missingSkills.join('\n')}\n\nInventory: ${toolInventory.join(', ')}`
+        `Missing SKILL.md for fixture tools:\n${missingSkills.join('\n')}\n\nInventory: ${toolInventory.join(', ')}`
       ).toHaveLength(0);
     });
 
-    (cerdiwenAvailable ? it : it.skip)('every cerdiwen tool has a description (schema/type owner)', () => {
-      const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+    it('every fixture tool has a description (schema/type owner)', () => {
+      const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
       const parsed = yaml.parse(content);
       const tools: Array<{ name: string; description?: string }> = parsed.tools ?? [];
       const noDesc: string[] = tools
         .filter(t => !t.description)
         .map(t => t.name);
-      expect(noDesc, `Cerdiwen tools missing description: ${noDesc.join(', ')}`).toHaveLength(0);
+      expect(noDesc, `Fixture tools missing description: ${noDesc.join(', ')}`).toHaveLength(0);
     });
 
-    (cerdiwenAvailable ? it : it.skip)('reports total cerdiwen tool count (expected: 18)', () => {
-      const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+    it('fixture tool enumeration is non-vacuous and every tool is well-formed', () => {
+      const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
       const parsed = yaml.parse(content);
-      const tools: unknown[] = parsed.tools ?? [];
-      console.info(`Cerdiwen tool count: ${tools.length}`);
-      expect(tools.length).toBeGreaterThan(0);
+      const tools = (parsed.tools as Array<{ name?: unknown }>) ?? [];
+      // Non-vacuous: a parse/shape regression yielding zero tools must fail the guard.
+      expect(tools.length, 'fixture harness.yaml must declare project tools').toBeGreaterThan(0);
+      for (const tool of tools) {
+        expect(
+          typeof tool.name === 'string' && tool.name.length > 0,
+          `tool missing name: ${JSON.stringify(tool)}`
+        ).toBe(true);
+      }
     });
   });
 
@@ -409,8 +412,8 @@ describe('registration-anchored RTK coverage guard', () => {
  *
  * These must not appear as active production code in:
  *   - orr-else src/ (excluding *.test.ts)
- *   - cerdiwen .pi/project-tools/ source files (excluding *.test.ts)
- *   - cerdiwen harness.yaml
+ *   - in-repo fixture project-tools/ source files (excluding *.test.ts)
+ *   - in-repo fixture harness.yaml
  *
  * "Production code" excludes:
  *   - Lines that are pure line comments (the forbidden term only appears after //)
@@ -576,39 +579,53 @@ describe('cap-knob grep guard', () => {
     ).toHaveLength(0);
   });
 
-  it('cerdiwen .pi/project-tools/ has zero production references to forbidden cap-preview identifiers', () => {
-    if (!existsSync(CERDIWEN_PROJECT_TOOLS_DIR)) {
-      console.warn('SKIP: cerdiwen project-tools not found at', CERDIWEN_PROJECT_TOOLS_DIR);
-      return;
-    }
-    const tsFiles = collectTsFiles(CERDIWEN_PROJECT_TOOLS_DIR);
+  // POSITIVE: a CLEAN in-repo project-tool fixture must report ZERO violations,
+  // proving the grep guard accepts compliant project-tool source files. This
+  // exercises the same collectTsFiles + scanFileForForbiddenTerms code path the
+  // suite previously ran over an external checkout — now self-contained.
+  it('clean in-repo project-tool fixture has zero forbidden cap-preview references', () => {
+    const tsFiles = collectTsFiles(FIXTURE_PROJECT_TOOLS_DIR);
+    expect(tsFiles.length, 'fixture project-tools dir must contain at least one .ts file').toBeGreaterThan(0);
     const violations: Array<{ file: string; lineNum: number; line: string; term: string }> = [];
     for (const f of tsFiles) {
-      violations.push(...scanFileForForbiddenTerms(f, CERDIWEN_ROOT));
+      violations.push(...scanFileForForbiddenTerms(f, FIXTURE_ROOT));
     }
     const report = violations.map(v =>
       `  ${v.file}:${v.lineNum} [${v.term}]\n    ${v.line}`
     ).join('\n');
     expect(
       violations,
-      `Found ${violations.length} production cap-preview references in cerdiwen .pi/project-tools/:\n${report}`
+      `Found ${violations.length} forbidden cap-preview references in clean fixture project-tools:\n${report}`
     ).toHaveLength(0);
   });
 
-  it('cerdiwen harness.yaml has no forbidden cap-preview identifiers', () => {
-    if (!existsSync(CERDIWEN_HARNESS_YAML)) {
-      console.warn('SKIP: cerdiwen harness.yaml not found');
-      return;
-    }
-    const violations: Array<{ file: string; lineNum: number; line: string; term: string }> = [];
-    violations.push(...scanFileForForbiddenTerms(CERDIWEN_HARNESS_YAML, CERDIWEN_ROOT));
+  it('fixture harness.yaml has no forbidden cap-preview identifiers', () => {
+    const violations = scanFileForForbiddenTerms(FIXTURE_HARNESS_YAML, FIXTURE_ROOT);
     const report = violations.map(v =>
       `  ${v.file}:${v.lineNum} [${v.term}]\n    ${v.line}`
     ).join('\n');
     expect(
       violations,
-      `Found ${violations.length} cap-preview references in cerdiwen harness.yaml:\n${report}`
+      `Found ${violations.length} cap-preview references in fixture harness.yaml:\n${report}`
     ).toHaveLength(0);
+  });
+
+  // NEGATIVE (AC3): the guard MUST adversarially catch a planted forbidden term.
+  // We feed an in-repo fixture whose PRODUCTION code (not comments/strings) declares
+  // forbidden cap identifiers and assert the scanner reports >= 1 violation. If the
+  // scanner were gutted (e.g. emptied FORBIDDEN_CAP_IDENTIFIERS or stopped reading the
+  // file), this test fails — proving the guard mechanism is retained, not vacuous.
+  it('NEGATIVE: scanFileForForbiddenTerms detects planted forbidden terms in an in-repo fixture', () => {
+    expect(existsSync(FIXTURE_FORBIDDEN_TOOL), 'forbidden-term fixture must exist').toBe(true);
+    const violations = scanFileForForbiddenTerms(FIXTURE_FORBIDDEN_TOOL, FIXTURE_ROOT);
+    expect(
+      violations.length,
+      'guard must catch at least one planted forbidden term in production code'
+    ).toBeGreaterThanOrEqual(1);
+    // It must catch the specific planted identifiers in code (not just any line).
+    const caughtTerms = new Set(violations.map(v => v.term));
+    expect(caughtTerms.has('stdoutTruncated'), 'must catch planted stdoutTruncated').toBe(true);
+    expect(caughtTerms.has('stdoutPreview'), 'must catch planted stdoutPreview').toBe(true);
   });
 
 });
@@ -1296,7 +1313,7 @@ describe('large-output fixture guard', () => {
    *     (command type) or executeMcpTool → persistMcpRawResult (MCP type). The
    *     raw-output contract for that execution layer is proven by categories (a)-(h).
    *   - Each declared tool has a SKILL.md on disk (also enforced generically by the
-   *     Guard 1 cerdiwen enumeration above).
+   *     Guard 1 fixture enumeration above).
    *   - The cap-knob grep (Guard 2) runs over the external .pi/project-tools/ and
    *     confirms zero production cap-preview references.
    *
@@ -1305,45 +1322,25 @@ describe('large-output fixture guard', () => {
    * cannot spin up those services; the consuming project's integration/E2E tests cover them.
    */
   it('(i) externally-configured project tools: raw-output contract proven at config-level (name-agnostic)', () => {
-    const cerdiwenAvailable = existsSync(CERDIWEN_HARNESS_YAML);
-    if (!cerdiwenAvailable) {
-      console.info(
-        'CONFIG-LEVEL PROOF (external harness absent — skipping skill/grep checks):\n' +
-        '  Externally-configured command/MCP project tools execute via\n' +
-        '  executeCommandTool/executeMcpTool. The execution-layer raw-output contract\n' +
-        '  is proven by categories (a)-(h). Skill and cap-grep checks require an\n' +
-        '  external harness present at ' + CERDIWEN_ROOT
-      );
-      return;
-    }
-
-    // Default slug rule mirrors Guard 1: tool name with underscores -> hyphens.
-    // Overrides match Guard 1's SKILL_SLUG_OVERRIDES for tools that share a skill dir.
-    const SKILL_SLUG_OVERRIDES: Record<string, string> = {
-      auto_fix: 'code-rewrite',
-      codemod: 'code-rewrite',
-      framework_semgrep: 'semgrep',
-      framework_build: 'framework-ci',
-      framework_regression_tests: 'framework-ci',
-      run_quality_checks: 'run-quality-checks',
-      orr_else_framework_evidence: 'orr-else-framework-evidence',
-    };
-
-    const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+    // Name-agnostic, self-contained: instead of reading an external checkout, we
+    // verify the config-level contract against an in-repo fixture harness.yaml. Every
+    // declared command/MCP project tool (whose >10 MB proof is impractical because it
+    // requires live services) reaches the model via executeCommandTool/executeMcpTool
+    // -> buildCommandResult/persistMcpRawResult; that execution-layer raw-output
+    // contract is proven by categories (a)-(h). Here we prove the config-level half:
+    // every declared tool maps to a SKILL.md on disk. We do not filter on tool
+    // type/identity, so the guard holds regardless of how a project models its tools.
+    const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
     const parsed = yaml.parse(content);
     const tools: Array<{ name: string; type?: string }> = parsed.tools ?? [];
 
-    // Name-agnostic: every declared project tool (the live-service tools whose >10 MB
-    // proof is impractical) reaches the model via the execution layer and must have a
-    // SKILL.md on disk. We do not filter on a specific tool type/identity so the guard
-    // holds regardless of how the external harness models its tools.
     const liveServiceTools = tools;
-    expect(liveServiceTools.length, 'external harness must declare project tools').toBeGreaterThan(0);
+    expect(liveServiceTools.length, 'fixture harness must declare project tools').toBeGreaterThan(0);
 
     const missingSkills: string[] = [];
     for (const tool of liveServiceTools) {
-      const slug = SKILL_SLUG_OVERRIDES[tool.name] ?? tool.name.replace(/_/g, '-');
-      const skillPath = path.join(CERDIWEN_SKILLS_DIR, slug, 'SKILL.md');
+      const slug = FIXTURE_SKILL_SLUG_OVERRIDES[tool.name] ?? tool.name.replace(/_/g, '-');
+      const skillPath = path.join(FIXTURE_SKILLS_DIR, slug, 'SKILL.md');
       if (!existsSync(skillPath)) missingSkills.push(`${tool.name} -> ${skillPath}`);
     }
     expect(
@@ -1352,12 +1349,12 @@ describe('large-output fixture guard', () => {
     ).toHaveLength(0);
 
     console.info(
-      'CONFIG-LEVEL PROOF (external harness present):\n' +
-      `  ${liveServiceTools.length} command/MCP project tool(s) each have a SKILL.md on disk.\n` +
-      '  Cap-knob grep in Guard 2 confirms zero forbidden references in the external\n' +
-      '  .pi/project-tools/ production code. Execution-layer raw-output contract proven\n' +
+      'CONFIG-LEVEL PROOF (in-repo fixture):\n' +
+      `  ${liveServiceTools.length} command/MCP project tool(s) each map to a SKILL.md on disk.\n` +
+      '  Cap-knob grep in Guard 2 confirms zero forbidden references in fixture\n' +
+      '  project-tools production code. Execution-layer raw-output contract proven\n' +
       '  by buildCommandResult/persistMcpRawResult (categories a-h). >10 MB proof\n' +
-      '  impractical: requires live services.'
+      '  impractical for live-service tools: requires live services.'
     );
   });
 
@@ -1392,23 +1389,18 @@ describe('tool count summary', () => {
     expect(pluginNames).not.toContain('run_quality_checks');
   });
 
-  // This guardrail must NOT hard-code an exact external cerdiwen tool count: the
-  // generic orr-else suite cannot depend on cerdiwen's evolving inventory (it
-  // drifts whenever cerdiwen adds/removes a tool, e.g. 792b removed
-  // framework_semgrep). We instead prove tool enumeration is non-vacuous and that
-  // every declared tool is well-formed — which is what this check is actually for.
-  it(existsSync(CERDIWEN_HARNESS_YAML) ? 'cerdiwen project tools enumerate non-vacuously and are well-formed' : 'cerdiwen project tools well-formed (SKIPPED — cerdiwen absent)', () => {
-    if (!existsSync(CERDIWEN_HARNESS_YAML)) {
-      console.warn('SKIP (cerdiwen absent): cerdiwen tool check requires cerdiwen at ' + CERDIWEN_ROOT);
-      return;
-    }
-    const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
+  // This guardrail must NOT hard-code an exact external tool count: the generic
+  // orr-else suite cannot depend on a consuming project's evolving inventory. We
+  // instead prove project-tool enumeration is non-vacuous and that every declared
+  // tool is well-formed, using a self-contained in-repo fixture (no external checkout).
+  it('externally-configured project tools enumerate non-vacuously and are well-formed', () => {
+    const content = readFileSync(FIXTURE_HARNESS_YAML, 'utf8');
     const parsed = yaml.parse(content);
     const tools = (parsed.tools as Array<{ name?: unknown }>) ?? [];
-    console.info(`Cerdiwen tool count: ${tools.length}`);
+    console.info(`Fixture project-tool count: ${tools.length}`);
     // Non-vacuous: enumeration must find tools (guards against a parse/shape
     // regression silently yielding zero), but the exact count is not asserted.
-    expect(tools.length, 'cerdiwen harness.yaml must declare project tools').toBeGreaterThan(0);
+    expect(tools.length, 'fixture harness.yaml must declare project tools').toBeGreaterThan(0);
     // Every declared tool must have a non-empty string name.
     for (const tool of tools) {
       expect(typeof tool.name === 'string' && tool.name.length > 0, `tool missing name: ${JSON.stringify(tool)}`).toBe(true);
