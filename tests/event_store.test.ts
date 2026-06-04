@@ -672,7 +672,7 @@ settings:
           fromState: 'Planning',
           nextState: 'Planning',
           transitionEvent: 'CONTEXT_RESTART',
-          actionKey: 'workflow=cerdiwen-codemap-v7/state=Planning/action=formulate-plan',
+          actionKey: 'workflow=fixture-workflow-v1/state=Planning/action=formulate-plan',
           handover: noisyUsageLimit
         }
       },
@@ -685,7 +685,7 @@ settings:
           beadId: 'bd-1',
           stateId: 'Implementation',
           transitionEvent: 'CONTEXT_RESTART',
-          actionKey: 'workflow=cerdiwen-codemap-v7/state=Implementation/action=surgical-execution',
+          actionKey: 'workflow=fixture-workflow-v1/state=Implementation/action=surgical-execution',
           handover: noisyContextOverflow
         }
       }
@@ -713,7 +713,7 @@ settings:
           fromState: 'Planning',
           nextState: 'Planning',
           transitionEvent: 'BLOCKED',
-          actionKey: 'workflow=cerdiwen-codemap-v7/state=Planning/action=formulate-plan',
+          actionKey: 'workflow=fixture-workflow-v1/state=Planning/action=formulate-plan',
           summary: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           evidence: 'Agent lifecycle failure during turn_end: WebSocket closed 1000'
         }
@@ -728,7 +728,7 @@ settings:
           stateId: 'Planning',
           targetState: 'Planning',
           transitionEvent: 'HARNESS_RESTART',
-          actionKey: 'workflow=cerdiwen-codemap-v7/state=Planning/action=formulate-plan',
+          actionKey: 'workflow=fixture-workflow-v1/state=Planning/action=formulate-plan',
           handover: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           summary: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           evidence: 'Agent lifecycle failure during turn_end: WebSocket closed 1000'

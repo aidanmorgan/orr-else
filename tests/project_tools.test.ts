@@ -1479,7 +1479,7 @@ process.exit(sawOther ? 0 : 1);
   });
 
   it('classifies representative project-tool failures for agent remediation', () => {
-    const tool = { name: 'codemap' } as ProjectCommandToolConfig;
+    const tool = { name: 'fixture_mcp_tool' } as ProjectCommandToolConfig;
 
     expect(classifyProjectToolFailure(tool, {
       status: ToolResultStatus.REJECTED,
@@ -1491,7 +1491,7 @@ process.exit(sawOther ? 0 : 1);
     })).toBe(ProjectToolFailureCategory.UNAVAILABLE);
     expect(classifyProjectToolFailure(tool, {
       status: ToolResultStatus.REJECTED,
-      message: 'MCP project tool codemap path argument path escapes configured root'
+      message: 'MCP project tool fixture_mcp_tool path argument path escapes configured root'
     })).toBe(ProjectToolFailureCategory.TOOL_INPUT_ERROR);
     expect(classifyProjectToolFailure(tool, {
       status: ToolResultStatus.REJECTED,
@@ -1697,8 +1697,8 @@ process.exit(sawOther ? 0 : 1);
     expect(structuredResult.rejectedCheckCount).toBe(0);
   });
 
-  it('uses actionable codemap structure previews even when they are truncated', async () => {
-    const codemapPreview = [
+  it('uses actionable structure previews even when they are truncated', async () => {
+    const structurePreview = [
       'tests',
       'Files: 542 | Size: 6.4MB',
       'Top Extensions: .py (519), .broken (7), .md (4)',
@@ -1711,17 +1711,17 @@ process.exit(sawOther ? 0 : 1);
       '[truncated 8217 characters; rerun with narrower arguments for more detail]'
     ].join('\n');
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'codemap',
+      name: 'fixture_structure_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'codemap',
+          tool: 'fixture_structure_tool',
           status: 'PASSED',
-          server: 'codemap',
+          server: 'fixture-structure-server',
           operation: 'get_structure',
-          stdout: ${JSON.stringify(codemapPreview)},
+          stdout: ${JSON.stringify(structurePreview)},
           filler: 'x'.repeat(20000)
         }))`
       ],
@@ -1745,7 +1745,7 @@ process.exit(sawOther ? 0 : 1);
     expect(typeof result.stdoutFile).toBe('string');
   });
 
-  it('uses file-scoped python_lsp diagnostics previews even when they are truncated', async () => {
+  it('uses file-scoped diagnostics previews even when they are truncated', async () => {
     const diagnosticsPreview = [
       path.join(tempWorktree, 'packages/example.py'),
       'Diagnostics in File: 257',
@@ -1756,15 +1756,15 @@ process.exit(sawOther ? 0 : 1);
       '[truncated 49125 characters; rerun with narrower arguments for more detail]'
     ].join('\n');
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(diagnosticsPreview)},
           stdoutBytes: 52055,
@@ -1789,10 +1789,10 @@ process.exit(sawOther ? 0 : 1);
     expect(result.compactSummary).toContain('reportMissingImports');
   });
 
-  it('groups noisy python_lsp missing-import diagnostics before model display', async () => {
+  it('groups noisy missing-import diagnostics before model display', async () => {
     const diagnosticFile = path.join(tempWorktree, 'packages/type_mapping.py');
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
@@ -1808,9 +1808,9 @@ process.exit(sawOther ? 0 : 1);
           ];
           const diagnostics = lines.join('\\n');
           console.log(JSON.stringify({
-            tool: 'python_lsp',
+            tool: 'fixture_diagnostic_tool',
             status: 'PASSED',
-            server: 'python-lsp',
+            server: 'fixture-diagnostic-server',
             operation: 'diagnostics',
             stdout: diagnostics,
             stdoutBytes: Buffer.byteLength(diagnostics),
@@ -1862,7 +1862,7 @@ process.exit(sawOther ? 0 : 1);
   it('keeps mixed actionable diagnostics ahead of grouped missing-import noise', async () => {
     const diagnosticFile = path.join(tempWorktree, 'packages/arithmetic_normalizer.py');
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
@@ -1882,9 +1882,9 @@ process.exit(sawOther ? 0 : 1);
           ];
           const diagnostics = lines.join('\\n');
           console.log(JSON.stringify({
-            tool: 'python_lsp',
+            tool: 'fixture_diagnostic_tool',
             status: 'PASSED',
-            server: 'python-lsp',
+            server: 'fixture-diagnostic-server',
             operation: 'diagnostics',
             stdout: diagnostics,
             stdoutBytes: Buffer.byteLength(diagnostics),
@@ -1926,7 +1926,7 @@ process.exit(sawOther ? 0 : 1);
   });
 
   it('keeps resultPreview compact when diagnosticSummary is present even with large raw MCP diagnostic content', async () => {
-    // This test targets the MCP python_lsp code path where record.result contains
+    // This test targets the MCP diagnostic-tool code path where record.result contains
     // MCP content with the full raw diagnostic text.  Before the fix, resultPreviewText
     // would pick record.result content (tens of KiB of raw lines) over the compact
     // diagnosticSummary preview already placed in RESULT_PREVIEW, causing token pressure.
@@ -1939,7 +1939,7 @@ process.exit(sawOther ? 0 : 1);
       )
     ].join('\n');
 
-    // Simulate the shape of an MCP python_lsp result: the MCP SDK wraps the
+    // Simulate the shape of an MCP diagnostic-tool result: the MCP SDK wraps the
     // response text in result.content[].text — the structure that
     // textFromMcpContent() extracts.
     const mcpContent = {
@@ -1947,15 +1947,15 @@ process.exit(sawOther ? 0 : 1);
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           result: ${JSON.stringify(mcpContent)},
           filler: 'x'.repeat(20000)
@@ -2019,15 +2019,15 @@ process.exit(sawOther ? 0 : 1);
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           result: ${JSON.stringify(mcpContent)},
           filler: 'x'.repeat(20000)
@@ -2083,21 +2083,21 @@ process.exit(sawOther ? 0 : 1);
       )
     ].join('\n');
 
-    // Simulate an MCP python_lsp result shape.
+    // Simulate an MCP diagnostic-tool result shape.
     const mcpContent = {
       content: [{ type: 'text', text: rawDiagnosticLines }]
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           result: ${JSON.stringify(mcpContent)}
         }))`
@@ -2137,17 +2137,17 @@ process.exit(sawOther ? 0 : 1);
     // DEFECT 1 guard: ensure hasDiagnosticSummary=false does not suppress normal MCP previews.
     // Uses a non-diagnostic MCP tool name so applyDiagnosticModelSummary returns no summary.
     const mcpContent = {
-      content: [{ type: 'text', text: 'symbol ceridwen_unique_codemap_symbol found at packages/engine.py:42' }]
+      content: [{ type: 'text', text: 'symbol fixture_unique_lookup_symbol found at packages/engine.py:42' }]
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'codemap',
+          tool: 'fixture_mcp_tool',
           status: 'PASSED',
           result: ${JSON.stringify(mcpContent)}
         }))`
@@ -2166,7 +2166,7 @@ process.exit(sawOther ? 0 : 1);
     expect(typeof result.stdoutFile).toBe('string');
     // Raw content IS available in the file
     const rawContent = fs.readFileSync(result.stdoutFile!, 'utf8');
-    expect(rawContent).toContain('ceridwen_unique_codemap_symbol');
+    expect(rawContent).toContain('fixture_unique_lookup_symbol');
   });
 
   it('cap-truncation: diagnosticSummaryPreview truncates gracefully when many groups exceed the byte cap', async () => {
@@ -2204,15 +2204,15 @@ process.exit(sawOther ? 0 : 1);
     ].join('\n');
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(allLines)},
           stdoutBytes: Buffer.byteLength(${JSON.stringify(allLines)}),
@@ -2378,10 +2378,10 @@ process.exit(sawOther ? 0 : 1);
           name: 'reference_docs',
           type: ProjectToolType.MCP,
           description: 'Query reference documentation.',
-          server: 'chroma',
+          server: 'fixture-vector-server',
           operations: {
-            query: 'chroma_query_documents',
-            get: 'chroma_get_documents'
+            query: 'fixture_query_documents',
+            get: 'fixture_get_documents'
           },
           argumentAllowlist: {
             query: ['collection_name', 'query_texts'],
@@ -2393,18 +2393,18 @@ process.exit(sawOther ? 0 : 1);
           pathArguments: {
             query: { path: { root: CwdMode.WORKTREE } }
           },
-          usageNotes: ['Returned ids are Chroma document ids, not filesystem paths.']
+          usageNotes: ['Returned ids are vector-store document ids, not filesystem paths.']
         }
       ]
     } as any);
 
-    expect(description).toContain('query -> chroma_query_documents');
-    expect(description).toContain('get -> chroma_get_documents');
+    expect(description).toContain('query -> fixture_query_documents');
+    expect(description).toContain('get -> fixture_get_documents');
     expect(description).toContain('query(collection_name, query_texts)');
     expect(description).toContain('get(collection_name, ids)');
     expect(description).toContain('query defaults {"collection_name":"reference_docs"}');
     expect(description).toContain('query(path)');
-    expect(description).toContain('Returned ids are Chroma document ids, not filesystem paths.');
+    expect(description).toContain('Returned ids are vector-store document ids, not filesystem paths.');
     expect(description).toContain('raw-output file references (stdoutFile/stderrFile), treat them as archive guidance');
     expect(description).toContain('first decide from compactSummary, structuredResult, and toolCalls');
     expect(description).toContain('Prefer one narrow project-tool call at a time');
@@ -2414,9 +2414,9 @@ process.exit(sawOther ? 0 : 1);
 
   it('normalizes configured MCP path arguments into the active worktree', () => {
     const result = normalizeMcpPathArguments({
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.MCP,
-      server: 'codemap',
+      server: 'fixture_mcp_tool',
       operations: { structure: 'get_structure' },
       pathArguments: {
         structure: {
@@ -2435,7 +2435,7 @@ process.exit(sawOther ? 0 : 1);
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze',
-      toolName: 'codemap'
+      toolName: 'fixture_mcp_tool'
     });
 
     expect(result.arguments).toEqual({
@@ -2445,11 +2445,11 @@ process.exit(sawOther ? 0 : 1);
     expect(result.normalizedPathArguments).toEqual(['path']);
   });
 
-  it('normalizes python_lsp filePath arguments into the active worktree', () => {
+  it('normalizes diagnostic-tool filePath arguments into the active worktree', () => {
     const result = normalizeMcpPathArguments({
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.MCP,
-      server: 'python-lsp',
+      server: 'fixture-diagnostic-server',
       operations: {
         diagnostics: 'diagnostics',
         hover: 'hover'
@@ -2488,7 +2488,7 @@ process.exit(sawOther ? 0 : 1);
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze',
-      toolName: 'python_lsp'
+      toolName: 'fixture_diagnostic_tool'
     });
 
     expect(result.arguments).toEqual({
@@ -2504,9 +2504,9 @@ process.exit(sawOther ? 0 : 1);
     fs.mkdirSync(path.join(frameworkRoot, 'tests'), { recursive: true });
 
     const result = normalizeMcpPathArguments({
-      name: 'framework_codemap',
+      name: 'framework_structure_tool',
       type: ProjectToolType.MCP,
-      server: 'codemap',
+      server: 'fixture_mcp_tool',
       operations: { context: 'get_file_context' },
       pathArguments: {
         context: {
@@ -2525,7 +2525,7 @@ process.exit(sawOther ? 0 : 1);
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze',
-      toolName: 'framework_codemap'
+      toolName: 'framework_structure_tool'
     });
 
     expect(result.arguments).toEqual({
@@ -2536,9 +2536,9 @@ process.exit(sawOther ? 0 : 1);
 
   it('rejects configured MCP path arguments outside the active worktree', () => {
     expect(() => normalizeMcpPathArguments({
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.MCP,
-      server: 'codemap',
+      server: 'fixture_mcp_tool',
       pathArguments: {
         get_structure: {
           path: {
@@ -2554,15 +2554,15 @@ process.exit(sawOther ? 0 : 1);
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze',
-      toolName: 'codemap'
+      toolName: 'fixture_mcp_tool'
     })).toThrow(/escapes configured worktree root/);
   });
 
-  it('rejects python_lsp filePath arguments outside the active worktree', () => {
+  it('rejects diagnostic-tool filePath arguments outside the active worktree', () => {
     const pythonLspTool: ProjectMcpToolConfig = {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.MCP,
-      server: 'python-lsp',
+      server: 'fixture-diagnostic-server',
       pathArguments: {
         diagnostics: {
           filePath: {
@@ -2582,7 +2582,7 @@ process.exit(sawOther ? 0 : 1);
       beadId: 'bd-1',
       stateId: 'Planning',
       actionId: 'analyze',
-      toolName: 'python_lsp'
+      toolName: 'fixture_diagnostic_tool'
     };
     const siblingWorktree = path.join(tempRoot, 'worktrees', 'bd-2');
     fs.mkdirSync(siblingWorktree, { recursive: true });
@@ -2922,15 +2922,15 @@ describe('per-tool structured summarizer registry', () => {
     ].join('\n');
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(diagnosticLines)},
           stdoutBytes: Buffer.byteLength(${JSON.stringify(diagnosticLines)}),
@@ -3012,7 +3012,7 @@ describe('per-tool structured summarizer registry', () => {
   // (c) parse_error path: summarizer returns parse_error, archive is preserved, no raw dump
   it('(c) diagnostic summarizer returns parse_error structured result for unrecognized diagnostic content and archive is preserved', async () => {
     // We test the parse_error path by producing a payload that triggers the diagnostic
-    // summarizer (tool name 'python_lsp') but with content that will parse to zero diagnostics
+    // summarizer (tool name 'fixture_diagnostic_tool') but with content that will parse to zero diagnostics
     // (so summarizeParsedDiagnostics returns undefined — summarizer returns null, not parse_error).
     // To hit parse_error we need to cause the summarize catch path.
     // The real parse_error path is exercised when summarizeParsedDiagnostics returns undefined
@@ -3067,15 +3067,15 @@ describe('per-tool structured summarizer registry', () => {
     ].join('\n');
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(diagnosticLines)},
           stdoutBytes: Buffer.byteLength(${JSON.stringify(diagnosticLines)}),
@@ -3142,15 +3142,15 @@ describe('per-tool structured summarizer registry', () => {
     const rawPayloadBytes = Buffer.byteLength(diagnosticText);
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(diagnosticText)},
           stdoutBytes: ${rawPayloadBytes},
@@ -3207,17 +3207,17 @@ describe('per-tool structured summarizer registry', () => {
     // The outer JSON stdout carries rich gate-evidence keys (artifact, verdict, errors_by_tool).
     // buildCommandResult feeds this to structuredPayloadSummary, which extracts them into
     // STRUCTURED_RESULT BEFORE persistAndBoundResult runs the summarizer registry.
-    // The diagnostic summarizer also fires (tool name 'python_lsp' matches shouldSummarizeDiagnostics).
+    // The diagnostic summarizer also fires (tool name 'fixture_diagnostic_tool' matches shouldSummarizeDiagnostics).
     // With the fix: the pre-existing rich structuredResult is preserved (precedence guard).
     // Without the fix: the registry overwrites it with the leaner diagnostic StructuredResult.
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'REJECTED',
           artifact: 'gate_evidence_artifact',
           verdict: 'fail',
@@ -3490,15 +3490,15 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           result: ${JSON.stringify(mcpContent)}
         }))`
@@ -3702,15 +3702,15 @@ describe('generalized structuredModelSummary suppression (b77h)', () => {
     ].join('\n');
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'python_lsp',
+      name: 'fixture_diagnostic_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'python_lsp',
+          tool: 'fixture_diagnostic_tool',
           status: 'PASSED',
-          server: 'python-lsp',
+          server: 'fixture-diagnostic-server',
           operation: 'diagnostics',
           stdout: ${JSON.stringify(diagnosticLines)},
           stdoutBytes: ${Buffer.byteLength(diagnosticLines)},
@@ -4120,7 +4120,7 @@ describe('commandFailureSummarizer', () => {
     // (structuredPayloadSummary might fire for JSON stdout, but this is plain text — no structured keys)
     expect(result.structuredResult).toBeUndefined();
 
-    // No diagnosticSummary (not a python_lsp diagnostic tool)
+    // No diagnosticSummary (not a diagnostic tool)
     expect(result.diagnosticSummary).toBeUndefined();
 
     // s3wp.25: stdout is always in stdoutFile, not inline in model-facing result
@@ -4546,7 +4546,7 @@ process.stdout.write(JSON.stringify(result));
 // ---------------------------------------------------------------------------
 // Generic high-volume summarizer regression metrics
 //
-// These tests verify that high-volume tools (codemap, ast_grep, reference_docs,
+// These tests verify that high-volume tools (structure-map, ast_grep, reference_docs,
 // git_history, workflow_parity) emit a compact structuredResult + use_result
 // steering when their MCP/JSON/text payload is large, and that the model-facing
 // size is within the per-tool preview budget.
@@ -4592,41 +4592,41 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  // Metric 1: codemap-style MCP result with large JSON body → compact structuredResult
+  // Metric 1: structure-map-style MCP result with large JSON body → compact structuredResult
   // + use_result (not rerun_narrower), model-facing size within HIGH_VOLUME_SAMPLE_BUDGET_BYTES.
-  it('codemap MCP result with large body → compact structuredResult + use_result, model-facing within budget', async () => {
-    // Simulate a large codemap MCP response: many lines of directory tree output
-    // delivered via MCP content wrapper (as a real codemap MCP tool would).
-    const codemapLines = [
+  it('high-volume MCP result with large body → compact structuredResult + use_result, model-facing within budget', async () => {
+    // Simulate a large structure-map MCP response: many lines of directory tree output
+    // delivered via MCP content wrapper (as a real high-volume MCP tool would).
+    const structureMapLines = [
       'src',
       'Files: 320 | Size: 2.1MB',
       'Top Extensions: .ts (210), .json (45), .md (30)',
       ...Array.from({ length: 200 }, (_, i) => `|-- module_${i}/`),
       ...Array.from({ length: 100 }, (_, i) => `    |-- file_${i}.ts`)
     ];
-    const largeCodemapText = codemapLines.join('\n');
+    const largeStructureMapText = structureMapLines.join('\n');
 
     // MCP content wrapper (as textFromMcpContent would decode)
     const mcpContent = {
-      content: [{ type: 'text', text: largeCodemapText }]
+      content: [{ type: 'text', text: largeStructureMapText }]
     };
 
-    const rawTextBytes = Buffer.byteLength(largeCodemapText);
+    const rawTextBytes = Buffer.byteLength(largeStructureMapText);
     expect(rawTextBytes).toBeGreaterThan(4 * 1024); // confirms it's high-volume
 
     // Test the summarizer via the command tool path with MCP-shaped output.
     // (The MCP transport path is not testable here; the summarizer logic operates
     // on the result record regardless of how the tool was invoked.)
     const result2 = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'codemap',
+          tool: 'fixture_mcp_tool',
           status: 'PASSED',
-          server: 'codemap',
+          server: 'fixture_mcp_tool',
           operation: 'get_structure',
           result: ${JSON.stringify(mcpContent)}
         }))`
@@ -4824,14 +4824,14 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
 
   // (gate-evidence guard) generic summarizer does NOT clobber a pre-existing
   // structuredPayloadSummary (rich gate evidence) on a high-volume tool.
-  it('gate-evidence guard: pre-existing rich structuredResult on codemap is NOT clobbered by generic summarizer', async () => {
+  it('gate-evidence guard: pre-existing rich structuredResult on a high-volume tool is NOT clobbered by generic summarizer', async () => {
     // Payload has rich gate-evidence keys (artifact, verdict) which trigger
     // structuredPayloadSummary BEFORE persistAndBoundResult runs the registry.
     // The generic summarizer must be blocked by the hasGateEvidence guard.
     const richPayload = {
-      tool: 'codemap',
+      tool: 'fixture_mcp_tool',
       status: 'PASSED',
-      artifact: 'codemap_analysis',
+      artifact: 'structure_map_analysis',
       verdict: 'pass',
       checks: [
         { name: 'structure', status: 'PASSED', message: 'ok' }
@@ -4842,7 +4842,7 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
@@ -4861,7 +4861,7 @@ describe('generic high-volume summarizer — regression metrics (wf9j)', () => {
     expect(structuredResult).toBeDefined();
 
     // Rich gate-evidence fields from structuredPayloadSummary must be present
-    expect(structuredResult.artifact).toBe('codemap_analysis');
+    expect(structuredResult.artifact).toBe('structure_map_analysis');
     expect(structuredResult.verdict).toBe('pass');
     expect(typeof structuredResult.passedCheckCount).toBe('number');
 
@@ -5010,13 +5010,13 @@ describe('genericHighVolumeSummarizer emits omissions (4eqg)', () => {
     const mcpContent = { content: [{ type: 'text', text: largeText }] };
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'codemap',
+      name: 'fixture_mcp_tool',
       type: ProjectToolType.COMMAND,
       command: process.execPath,
       defaultArgs: [
         '-e',
         `console.log(JSON.stringify({
-          tool: 'codemap',
+          tool: 'fixture_mcp_tool',
           status: 'PASSED',
           result: ${JSON.stringify(mcpContent)}
         }))`

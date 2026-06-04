@@ -181,9 +181,9 @@ settings:
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 tools:
-  - name: python_lsp
+  - name: fixture_mcp_tool
     type: mcp
-    server: python-lsp
+    server: fixture-mcp-server
     timeoutMs: 180000
     wrapperTimeoutMs: 600000
 states: {}

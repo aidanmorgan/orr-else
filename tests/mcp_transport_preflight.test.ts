@@ -55,7 +55,7 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   it('returns healthy when the bridge probe succeeds', async () => {
     setBridgeProbeForTest(passingProbe());
     const recordEvent = vi.fn(async () => {});
-    const health = await checkMcpBridgeHealth(['codemap', 'python_lsp'], recordEvent);
+    const health = await checkMcpBridgeHealth(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
 
     expect(health.healthy).toBe(true);
     expect(health.affectedToolNames).toEqual([]);
@@ -65,10 +65,10 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   it('returns unhealthy with affected tool names when bridge probe fails', async () => {
     setBridgeProbeForTest(failingProbe());
     const recordEvent = vi.fn(async () => {});
-    const health = await checkMcpBridgeHealth(['codemap', 'python_lsp'], recordEvent);
+    const health = await checkMcpBridgeHealth(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
 
     expect(health.healthy).toBe(false);
-    expect(health.affectedToolNames).toEqual(expect.arrayContaining(['codemap', 'python_lsp']));
+    expect(health.affectedToolNames).toEqual(expect.arrayContaining(['fixture_mcp_tool_a', 'fixture_mcp_tool_b']));
     expect(health.message).toBeDefined();
     expect(health.remediation).toBeDefined();
   });
@@ -78,8 +78,8 @@ describe('s3wp.32 — McpTransportPreflight', () => {
     const recordEvent = vi.fn(async () => {});
 
     // Simulate 3 workers all discovering the same failure
-    await checkMcpBridgeHealth(['codemap'], recordEvent);
-    await checkMcpBridgeHealth(['python_lsp'], recordEvent);
+    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent);
+    await checkMcpBridgeHealth(['fixture_mcp_tool_b'], recordEvent);
     await checkMcpBridgeHealth(['reference_docs'], recordEvent);
 
     // Only ONE event recorded regardless of how many times it is called
@@ -90,13 +90,13 @@ describe('s3wp.32 — McpTransportPreflight', () => {
     setBridgeProbeForTest(failingProbe());
     const recordEvent = vi.fn(async () => {});
 
-    await checkMcpBridgeHealth(['codemap'], recordEvent);
-    const health2 = await checkMcpBridgeHealth(['python_lsp'], recordEvent);
+    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent);
+    const health2 = await checkMcpBridgeHealth(['fixture_mcp_tool_b'], recordEvent);
     const health3 = await checkMcpBridgeHealth(['reference_docs'], recordEvent);
 
     // Latest result includes all tool names seen since the first failure
     expect(health3.affectedToolNames).toEqual(
-      expect.arrayContaining(['codemap', 'python_lsp', 'reference_docs'])
+      expect.arrayContaining(['fixture_mcp_tool_a', 'fixture_mcp_tool_b', 'reference_docs'])
     );
     // Still only one event
     expect(recordEvent).toHaveBeenCalledTimes(1);
@@ -115,7 +115,7 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   it('resets correctly: after resetMcpBridgeHealthCache a new probe is issued', async () => {
     setBridgeProbeForTest(failingProbe());
     const recordEvent1 = vi.fn(async () => {});
-    await checkMcpBridgeHealth(['codemap'], recordEvent1);
+    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent1);
     expect(recordEvent1).toHaveBeenCalledTimes(1);
 
     // Reset cache + change probe to passing
@@ -123,7 +123,7 @@ describe('s3wp.32 — McpTransportPreflight', () => {
     setBridgeProbeForTest(passingProbe());
 
     const recordEvent2 = vi.fn(async () => {});
-    const health2 = await checkMcpBridgeHealth(['codemap'], recordEvent2);
+    const health2 = await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent2);
 
     expect(health2.healthy).toBe(true);
     expect(recordEvent2).not.toHaveBeenCalled();
@@ -134,18 +134,18 @@ describe('s3wp.32 — McpTransportPreflight', () => {
 
 describe('s3wp.32 — mcpBackedRequiredToolNames', () => {
   const projectTools = [
-    { name: 'codemap', type: ProjectToolType.MCP },
-    { name: 'python_lsp', type: ProjectToolType.MCP },
+    { name: 'fixture_mcp_tool_a', type: ProjectToolType.MCP },
+    { name: 'fixture_mcp_tool_b', type: ProjectToolType.MCP },
     { name: 'run_quality_checks', type: ProjectToolType.COMMAND },
     { name: 'artifact_validator', type: ProjectToolType.COMMAND }
   ];
 
   it('filters required tools to MCP-backed tools only', () => {
     const result = mcpBackedRequiredToolNames(
-      ['codemap', 'run_quality_checks', 'python_lsp'],
+      ['fixture_mcp_tool_a', 'run_quality_checks', 'fixture_mcp_tool_b'],
       projectTools
     );
-    expect(result).toEqual(expect.arrayContaining(['codemap', 'python_lsp']));
+    expect(result).toEqual(expect.arrayContaining(['fixture_mcp_tool_a', 'fixture_mcp_tool_b']));
     expect(result).not.toContain('run_quality_checks');
   });
 
@@ -163,7 +163,7 @@ describe('s3wp.32 — mcpBackedRequiredToolNames', () => {
   });
 
   it('returns empty when project tool config is empty', () => {
-    const result = mcpBackedRequiredToolNames(['codemap'], []);
+    const result = mcpBackedRequiredToolNames(['fixture_mcp_tool_a'], []);
     expect(result).toEqual([]);
   });
 });
@@ -271,7 +271,7 @@ describe('s3wp.32 — Supervisor MCP spawn gating', () => {
     ];
     const { supervisor, spawnTeammateInTmux } = buildSupervisorForMcpGating({
       backlogBeads,
-      requiredToolsForState: ['codemap'],
+      requiredToolsForState: ['fixture_mcp_tool_a'],
       bridgeProbe: passingProbe()
     });
 
@@ -288,7 +288,7 @@ describe('s3wp.32 — Supervisor MCP spawn gating', () => {
     ];
     const { supervisor, spawnTeammateInTmux, records } = buildSupervisorForMcpGating({
       backlogBeads,
-      requiredToolsForState: ['codemap'],
+      requiredToolsForState: ['fixture_mcp_tool_a'],
       bridgeProbe: failingProbe()
     });
 
@@ -312,7 +312,7 @@ describe('s3wp.32 — Supervisor MCP spawn gating', () => {
     ];
     const { supervisor, spawnTeammateInTmux, records } = buildSupervisorForMcpGating({
       backlogBeads,
-      requiredToolsForState: ['codemap'],
+      requiredToolsForState: ['fixture_mcp_tool_a'],
       bridgeProbe: failingProbe()
     });
 

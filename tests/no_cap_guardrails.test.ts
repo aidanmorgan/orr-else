@@ -34,14 +34,13 @@
  *       (f) Mailbox large bodies — NativeMailbox.listMessagesFor, real messages
  *       (g) Quality logs >10 MB — reduceSessionLogs, real content
  *       (h) Git history >10 MB — buildCommandResult, real file
- *       (i) Semgrep findings — PROVEN AT CONFIG LEVEL (see label below)
- *       (j) Codemap results — PROVEN AT CONFIG LEVEL
- *       (k) Reference docs — PROVEN AT CONFIG LEVEL
- *       (l) LSP diagnostics — PROVEN AT CONFIG LEVEL
- *       (m) SonarQube issues — PROVEN AT CONFIG LEVEL
+ *       (i) Externally-configured live-service project tools — PROVEN AT CONFIG LEVEL
+ *           (see label below). Name-agnostic: covers WHATEVER command/MCP project
+ *           tools the external harness.yaml declares (e.g. static-analysis, code-map,
+ *           reference-doc, LSP-diagnostic, or issue-scanner tools).
  *
- *     Categories (i-m) are cerdiwen project-tools whose parsers live in
- *     /Users/aidan/dev/bankwest/cerdiwen/.pi/project-tools/.  They reach
+ *     Category (i) covers external project-tools whose parsers live in the consuming
+ *     project's .pi/project-tools/ (e.g. /Users/aidan/dev/bankwest/cerdiwen).  They reach
  *     the model via executeCommandTool/buildCommandResult (the same production
  *     code path as categories a/b/h).  Each is proven at two levels:
  *       1. Structural: a SKILL.md exists on disk for the tool's skill slug.
@@ -279,7 +278,8 @@ describe('inventory enumeration guard', () => {
       //   framework_regression_tests -> framework-ci
       //   run_quality_checks -> run-quality-checks
       //   orr_else_framework_evidence -> orr-else-framework-evidence
-      //   python_lsp -> python-lsp
+      // (Tools whose slug is just the name with underscores->hyphens need no override,
+      //  e.g. a tool named foo_bar resolves to the foo-bar skill directory.)
       const SKILL_SLUG_OVERRIDES: Record<string, string> = {
         auto_fix: 'code-rewrite',
         codemod: 'code-rewrite',
@@ -288,7 +288,6 @@ describe('inventory enumeration guard', () => {
         framework_regression_tests: 'framework-ci',
         run_quality_checks: 'run-quality-checks',
         orr_else_framework_evidence: 'orr-else-framework-evidence',
-        python_lsp: 'python-lsp',
       };
 
       const missingSkills: string[] = [];
@@ -894,9 +893,9 @@ describe('large-output fixture guard', () => {
 
       // ASSERT: the model-facing MCP result shape has no forbidden keys
       const modelFacingMcpResult: Record<string, unknown> = {
-        tool: 'codemap',
+        tool: 'fixture_mcp_tool',
         status: ToolResultStatus.PASSED,
-        server: 'codemap-server',
+        server: 'fixture-mcp-server',
         operation: 'query',
         droppedArguments: [],
         normalizedPathArguments: [],
@@ -913,13 +912,13 @@ describe('large-output fixture guard', () => {
    * CATEGORY (d): MCP structuredContent >10 MB
    *
    * PROOF METHOD: same as (c) but with a large structuredContent payload
-   * (array of structured objects, like what a semgrep or sonarqube MCP tool returns).
+   * (array of structured objects, like what a high-volume structured MCP tool returns).
    * The complete callTool result (including structuredContent) is persisted to mcp-raw.json.
    */
   it('(d) MCP structuredContent >10 MB: persistMcpRawResult writes complete file; archive envelope has no forbidden keys', async () => {
     const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 's3wp30-mcp-structured-'));
     try {
-      // Simulate a large MCP structuredContent response (like sonarqube issues)
+      // Simulate a large MCP structuredContent response (many structured issue records)
       // ~55000 issues × ~220 bytes/issue ≈ 12 MB (target >10 MiB = 10,485,760 bytes)
       const issueCount = 55000;
       const largeStructuredContent = Array.from({ length: issueCount }, (_, i) => ({
@@ -968,9 +967,9 @@ describe('large-output fixture guard', () => {
 
       // ASSERT: full model-facing MCP result shape has no forbidden keys
       const modelFacingMcpResult: Record<string, unknown> = {
-        tool: 'sonarqube',
+        tool: 'fixture_structured_mcp_tool',
         status: ToolResultStatus.PASSED,
-        server: 'sonarqube-mcp',
+        server: 'fixture-structured-mcp-server',
         operation: 'get_issues',
         droppedArguments: [],
         normalizedPathArguments: [],
@@ -1284,85 +1283,81 @@ describe('large-output fixture guard', () => {
   }, 90000);
 
   /**
-   * CATEGORIES (i-m): Cerdiwen tool categories — semgrep, codemap, reference_docs,
-   *                   python_lsp (LSP diagnostics), sonarqube
+   * CATEGORY (i): Externally-configured project tools (live-service tools) —
+   *               proven at config level, name-agnostic.
    *
    * PROOF METHOD: Config-level verification (proven where + why documented).
    *
-   * These cerdiwen project-tools use command or MCP types.  Their production execution
-   * goes through executeCommandTool → buildCommandResult (command type) or
-   * executeMcpTool → persistMcpRawResult (MCP type).  The raw-output contract is thus
-   * proven for the execution layer by categories (a)-(h) above.
+   * The generic harness suite must NOT depend on any specific external project-tool
+   * identity (those belong to the consuming project's own suite). Instead, this guard
+   * proves the raw-output contract holds for WHATEVER command/MCP project tools the
+   * externally-configured harness.yaml declares:
+   *   - Their production execution goes through executeCommandTool → buildCommandResult
+   *     (command type) or executeMcpTool → persistMcpRawResult (MCP type). The
+   *     raw-output contract for that execution layer is proven by categories (a)-(h).
+   *   - Each declared tool has a SKILL.md on disk (also enforced generically by the
+   *     Guard 1 cerdiwen enumeration above).
+   *   - The cap-knob grep (Guard 2) runs over the external .pi/project-tools/ and
+   *     confirms zero production cap-preview references.
    *
-   * At the cerdiwen tool level, the contract is proven by:
-   *   1. SKILL.md exists on disk (checked in Guard 1 cerdiwen tests above)
-   *   2. Cap-knob grep (Guard 2) runs over cerdiwen .pi/project-tools/ and confirms
-   *      zero production cap-preview references
-   *   3. Each cerdiwen tool's committed test file (*.test.ts) asserts schema
-   *      and raw-output contract for that specific tool
-   *
-   * Reason >10 MB fixture is impractical for these categories:
-   *   - semgrep: requires a live semgrep binary scanning actual code files
-   *   - codemap: requires a live codemap MCP server
-   *   - reference_docs: requires a live Chroma MCP server with loaded embeddings
-   *   - python_lsp: requires a live Python LSP daemon and project environment
-   *   - sonarqube: requires a live SonarQube API endpoint
-   *   Unit tests cannot spin up these services.  Integration/E2E tests in cerdiwen cover this.
-   *
-   * This test records the config-level proof that these categories are covered.
+   * Reason a >10 MB fixture is impractical for these tools: they require live external
+   * services (e.g. an MCP server, an LSP daemon, an external analysis API). Unit tests
+   * cannot spin up those services; the consuming project's integration/E2E tests cover them.
    */
-  it('(i-m) cerdiwen tool categories (semgrep/codemap/reference_docs/python_lsp/sonarqube): proven at config-level', () => {
+  it('(i) externally-configured project tools: raw-output contract proven at config-level (name-agnostic)', () => {
     const cerdiwenAvailable = existsSync(CERDIWEN_HARNESS_YAML);
     if (!cerdiwenAvailable) {
       console.info(
-        'CONFIG-LEVEL PROOF (cerdiwen absent — skipping skill/grep checks):\n' +
-        '  Categories i-m (semgrep, codemap, reference_docs, python_lsp, sonarqube)\n' +
-        '  are cerdiwen project-tools executed via executeCommandTool/executeMcpTool.\n' +
-        '  Raw-output contract for the execution layer is proven by categories (a)-(h).\n' +
-        '  Skill and cap-grep checks require cerdiwen present at ' + CERDIWEN_ROOT
+        'CONFIG-LEVEL PROOF (external harness absent — skipping skill/grep checks):\n' +
+        '  Externally-configured command/MCP project tools execute via\n' +
+        '  executeCommandTool/executeMcpTool. The execution-layer raw-output contract\n' +
+        '  is proven by categories (a)-(h). Skill and cap-grep checks require an\n' +
+        '  external harness present at ' + CERDIWEN_ROOT
       );
       return;
     }
 
-    // (i) Semgrep
-    const semgrepSkill = path.join(CERDIWEN_SKILLS_DIR, 'semgrep', 'SKILL.md');
-    expect(existsSync(semgrepSkill), `semgrep SKILL.md must exist at ${semgrepSkill}`).toBe(true);
+    // Default slug rule mirrors Guard 1: tool name with underscores -> hyphens.
+    // Overrides match Guard 1's SKILL_SLUG_OVERRIDES for tools that share a skill dir.
+    const SKILL_SLUG_OVERRIDES: Record<string, string> = {
+      auto_fix: 'code-rewrite',
+      codemod: 'code-rewrite',
+      framework_semgrep: 'semgrep',
+      framework_build: 'framework-ci',
+      framework_regression_tests: 'framework-ci',
+      run_quality_checks: 'run-quality-checks',
+      orr_else_framework_evidence: 'orr-else-framework-evidence',
+    };
 
-    // (j) Codemap
-    const codemapSkill = path.join(CERDIWEN_SKILLS_DIR, 'codemap', 'SKILL.md');
-    expect(existsSync(codemapSkill), `codemap SKILL.md must exist at ${codemapSkill}`).toBe(true);
-
-    // (k) Reference docs
-    const referenceDocsSkill = path.join(CERDIWEN_SKILLS_DIR, 'reference-docs', 'SKILL.md');
-    expect(existsSync(referenceDocsSkill), `reference-docs SKILL.md must exist at ${referenceDocsSkill}`).toBe(true);
-
-    // (l) LSP diagnostics (python_lsp)
-    const pythonLspSkill = path.join(CERDIWEN_SKILLS_DIR, 'python-lsp', 'SKILL.md');
-    expect(existsSync(pythonLspSkill), `python-lsp SKILL.md must exist at ${pythonLspSkill}`).toBe(true);
-
-    // (m) SonarQube issues
-    const sonarqubeSkill = path.join(CERDIWEN_SKILLS_DIR, 'sonarqube', 'SKILL.md');
-    expect(existsSync(sonarqubeSkill), `sonarqube SKILL.md must exist at ${sonarqubeSkill}`).toBe(true);
-
-    // VERIFY: All 5 cerdiwen tools appear in the harness.yaml tools section
     const content = readFileSync(CERDIWEN_HARNESS_YAML, 'utf8');
     const parsed = yaml.parse(content);
-    const toolNames = new Set((parsed.tools as Array<{ name: string }>).map(t => t.name));
+    const tools: Array<{ name: string; type?: string }> = parsed.tools ?? [];
 
-    for (const toolName of ['semgrep', 'codemap', 'reference_docs', 'python_lsp', 'sonarqube']) {
-      expect(
-        toolNames.has(toolName),
-        `cerdiwen harness.yaml must declare tool '${toolName}'`
-      ).toBe(true);
+    // Name-agnostic: every declared project tool (the live-service tools whose >10 MB
+    // proof is impractical) reaches the model via the execution layer and must have a
+    // SKILL.md on disk. We do not filter on a specific tool type/identity so the guard
+    // holds regardless of how the external harness models its tools.
+    const liveServiceTools = tools;
+    expect(liveServiceTools.length, 'external harness must declare project tools').toBeGreaterThan(0);
+
+    const missingSkills: string[] = [];
+    for (const tool of liveServiceTools) {
+      const slug = SKILL_SLUG_OVERRIDES[tool.name] ?? tool.name.replace(/_/g, '-');
+      const skillPath = path.join(CERDIWEN_SKILLS_DIR, slug, 'SKILL.md');
+      if (!existsSync(skillPath)) missingSkills.push(`${tool.name} -> ${skillPath}`);
     }
+    expect(
+      missingSkills,
+      `Externally-configured project tools missing SKILL.md:\n${missingSkills.join('\n')}`
+    ).toHaveLength(0);
 
     console.info(
-      'CONFIG-LEVEL PROOF (cerdiwen present):\n' +
-      '  Categories i-m: SKILL.md exists for semgrep, codemap, reference_docs,\n' +
-      '  python_lsp, sonarqube. Cap-knob grep in Guard 2 confirms zero forbidden\n' +
-      '  references in cerdiwen .pi/project-tools/ production code.\n' +
-      '  Execution-layer raw-output contract proven by buildCommandResult/persistMcpRawResult\n' +
-      '  (categories a-h). >10 MB proof impractical: requires live services.'
+      'CONFIG-LEVEL PROOF (external harness present):\n' +
+      `  ${liveServiceTools.length} command/MCP project tool(s) each have a SKILL.md on disk.\n` +
+      '  Cap-knob grep in Guard 2 confirms zero forbidden references in the external\n' +
+      '  .pi/project-tools/ production code. Execution-layer raw-output contract proven\n' +
+      '  by buildCommandResult/persistMcpRawResult (categories a-h). >10 MB proof\n' +
+      '  impractical: requires live services.'
     );
   });
 

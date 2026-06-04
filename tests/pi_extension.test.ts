@@ -430,15 +430,15 @@ states:
 settings:
   startState: Planning
 tools:
-  - name: codemap
+  - name: fixture_mcp_tool
     type: mcp
-    server: codemap
+    server: fixture-mcp-server
     operations: [get_structure]
   - name: reference_docs
     type: mcp
-    server: chroma
+    server: fixture-vector-server
     operations:
-      query: chroma_query_documents
+      query: fixture_query_documents
   - name: ast_grep
     type: command
     command: node
@@ -491,7 +491,7 @@ states:
       expect(status.details.configuredProjectTools).toMatchObject({
         total: 4,
         mcpBacked: 2,
-        mcpBackedToolNames: expect.arrayContaining(['codemap', 'reference_docs']),
+        mcpBackedToolNames: expect.arrayContaining(['fixture_mcp_tool', 'reference_docs']),
         command: 1,
         nativeExtension: 1,
         nativeMcpFooterMeaning: expect.stringContaining('does not report Orr Else configured MCP-backed project tools')
@@ -2284,14 +2284,14 @@ describe('pre_signal_audit — s3wp.32: MCP bridge unavailability (3rd required 
     const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-psa-mcp-down-')));
     const worktreePath = path.join(tempRoot, 'worktree');
     fs.mkdirSync(worktreePath);
-    // harness.yaml with an MCP-type required tool (codemap)
+    // harness.yaml with an MCP-type required tool (fixture_mcp_tool)
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
 tools:
-  - name: codemap
+  - name: fixture_mcp_tool
     type: mcp
-    server: codemap-server
+    server: fixture-mcp-server
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -2300,7 +2300,7 @@ states:
       - id: formulate-plan
         type: prompt
         prompt: "Plan"
-    requiredTools: [codemap]
+    requiredTools: [fixture_mcp_tool]
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     let harness: ReturnType<typeof fakePi> | undefined;
@@ -2322,7 +2322,7 @@ states:
       const preSignalAudit = harness.tools.find((t: any) => t.name === BuiltInToolName.PRE_SIGNAL_AUDIT);
       expect(preSignalAudit).toBeDefined();
 
-      // Do NOT invoke codemap — audit should report it as unavailable (not never_invoked)
+      // Do NOT invoke fixture_mcp_tool — audit should report it as unavailable (not never_invoked)
       // because the MCP bridge is down
       const auditResult = await preSignalAudit.execute('audit-mcp-down', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
       const audit = auditResult.details;
@@ -2330,17 +2330,17 @@ states:
       // ready must be false — MCP unavailability is a blocking infra condition
       expect(audit.ready).toBe(false);
 
-      // The required tool entry for codemap must have state='unavailable'
-      const codemapEntry = audit.requiredTools?.find((t: any) => t.name === 'codemap');
-      expect(codemapEntry).toBeDefined();
-      expect(codemapEntry?.state).toBe('unavailable');
+      // The required tool entry for fixture_mcp_tool must have state='unavailable'
+      const mcpToolEntry = audit.requiredTools?.find((t: any) => t.name === 'fixture_mcp_tool');
+      expect(mcpToolEntry).toBeDefined();
+      expect(mcpToolEntry?.state).toBe('unavailable');
       // reason must name the bridge failure
-      expect(codemapEntry?.reason).toContain('MCP bridge down');
+      expect(mcpToolEntry?.reason).toContain('MCP bridge down');
 
       // blockingEvidence must surface the infra blocker with tool name and remediation
       expect(audit.blockingEvidence).toEqual(
         expect.arrayContaining([
-          expect.stringContaining('codemap')
+          expect.stringContaining('fixture_mcp_tool')
         ])
       );
       expect(audit.blockingEvidence.some((e: string) => e.includes('MCP bridge down'))).toBe(true);
@@ -2386,9 +2386,9 @@ states:
 settings:
   startState: Planning
 tools:
-  - name: codemap
+  - name: fixture_mcp_tool
     type: mcp
-    server: codemap-server
+    server: fixture-mcp-server
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -2397,7 +2397,7 @@ states:
       - id: formulate-plan
         type: prompt
         prompt: "Plan"
-    requiredTools: [codemap]
+    requiredTools: [fixture_mcp_tool]
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     let harness: ReturnType<typeof fakePi> | undefined;
@@ -2419,15 +2419,15 @@ states:
       const preSignalAudit = harness.tools.find((t: any) => t.name === BuiltInToolName.PRE_SIGNAL_AUDIT);
       expect(preSignalAudit).toBeDefined();
 
-      // codemap not invoked — bridge is healthy so state should be never_invoked (not unavailable)
+      // fixture_mcp_tool not invoked — bridge is healthy so state should be never_invoked (not unavailable)
       const auditResult = await preSignalAudit.execute('audit-mcp-healthy', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
       const audit = auditResult.details;
 
-      // The codemap entry must be never_invoked (not unavailable)
-      const codemapEntry = audit.requiredTools?.find((t: any) => t.name === 'codemap');
-      expect(codemapEntry).toBeDefined();
-      expect(codemapEntry?.state).toBe('never_invoked');
-      expect(codemapEntry?.reason).toBeUndefined();
+      // The fixture_mcp_tool entry must be never_invoked (not unavailable)
+      const mcpToolEntry = audit.requiredTools?.find((t: any) => t.name === 'fixture_mcp_tool');
+      expect(mcpToolEntry).toBeDefined();
+      expect(mcpToolEntry?.state).toBe('never_invoked');
+      expect(mcpToolEntry?.reason).toBeUndefined();
 
       // blockingEvidence must NOT mention MCP bridge
       expect(audit.blockingEvidence.some((e: string) => e.includes('MCP bridge down'))).toBe(false);

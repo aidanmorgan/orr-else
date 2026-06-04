@@ -158,7 +158,7 @@ describe('ProtocolInjector MCP distinction', () => {
     const cfg: HarnessConfig = {
       ...baseConfig(),
       tools: [
-        { name: 'codemap', type: ProjectToolType.MCP } as any,
+        { name: 'fixture_mcp_tool_a', type: ProjectToolType.MCP } as any,
         { name: 'reference_docs', type: ProjectToolType.MCP } as any
       ]
     };
@@ -198,7 +198,7 @@ describe('ProtocolInjector MCP distinction', () => {
         pi: { mcp: { allowToolCalls: false } }
       },
       tools: [
-        { name: 'python_lsp', type: ProjectToolType.MCP } as any
+        { name: 'fixture_mcp_tool_b', type: ProjectToolType.MCP } as any
       ]
     };
     const protocol = injector.inject(stateFor('Implementation'), cfg);
@@ -211,7 +211,7 @@ describe('ProtocolInjector MCP distinction', () => {
     const cfg: HarnessConfig = {
       ...baseConfig(),
       tools: [
-        { name: 'codemap', type: ProjectToolType.MCP } as any
+        { name: 'fixture_mcp_tool_a', type: ProjectToolType.MCP } as any
       ]
     };
     const protocol = injector.inject(stateFor('Implementation'), cfg);
