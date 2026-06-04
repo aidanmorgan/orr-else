@@ -194,6 +194,14 @@ export interface RequiredToolCondition {
 export interface ConditionalRequiredTool {
   name: string;
   when?: RequiredToolCondition;
+  /**
+   * When true, this required tool EXPECTS a registered verify() callback: the
+   * coordinator-side artifact-presence gate (0yt5.20) fails fast at startup if no
+   * callback is registered under `name`. Presence-only tools (ast_grep / codemap
+   * etc.) that ship NO verify() omit this flag (or set it false) and load cleanly
+   * — for them the gate enforces tool-result presence only.
+   */
+  expectsVerify?: boolean;
 }
 
 export type RequiredTool = string | ConditionalRequiredTool;

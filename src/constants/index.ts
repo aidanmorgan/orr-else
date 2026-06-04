@@ -249,6 +249,13 @@ export enum DomainEventName {
   RETENTION_DISK_HEALTH = 'RETENTION_DISK_HEALTH',
   DIST_ARTIFACT_STALE = 'DIST_ARTIFACT_STALE',
   PATH_CONTEXT_RESOLVED = 'PATH_CONTEXT_RESOLVED',
+  /**
+   * Recorded once per COORDINATOR-side verifier gate run (0yt5.20 AC6). Carries
+   * { beadId, stateId, actionId, perTool: [{tool, verdict, reasons, durationMs,
+   * timedOut?, threw?}], blocked }. Diagnostic only — the gate verdict is the
+   * binding authority; this event explains WHY a transition was blocked/advanced.
+   */
+  VERIFY_EVALUATED = 'VERIFY_EVALUATED',
   PRE_SIGNAL_AUDIT_PERFORMED = 'PRE_SIGNAL_AUDIT_PERFORMED',
   SIGNAL_INTENT_RECONCILED = 'SIGNAL_INTENT_RECONCILED',
   /**

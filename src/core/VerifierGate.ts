@@ -80,6 +80,23 @@ export interface VerifierGateFailure {
   failureOutcome?: string;
 }
 
+/**
+ * Per-tool diagnostic for the VERIFY_EVALUATED observability event (0yt5.20 AC6).
+ * One entry per required tool the loop considered, in tool order.
+ */
+export interface VerifierGatePerTool {
+  tool: string;
+  /** The verify() verdict, when a callback ran. Absent for did-not-run blocks. */
+  verdict?: VerifyVerdict;
+  reasons: string[];
+  /** Wall-clock duration of the verify() callback (0 when no callback ran). */
+  durationMs: number;
+  /** True when the verify() callback exceeded the per-verify timeout. */
+  timedOut?: boolean;
+  /** True when the verify() callback threw (converted to FAIL). */
+  threw?: boolean;
+}
+
 /** The aggregate result of running the verifier loop over the required tools. */
 export interface VerifierGateResult {
   /** True when the transition may proceed (all-PASS / NA, every tool ran). */
@@ -88,6 +105,8 @@ export interface VerifierGateResult {
   failures: VerifierGateFailure[];
   /** A single rendered reject message; empty string when `pass` is true. */
   rejectMessage: string;
+  /** Per-tool diagnostics (verdict/reasons/timing) for the VERIFY_EVALUATED event. */
+  perTool: VerifierGatePerTool[];
 }
 
 /** The PATHS-ONLY inputs the caller already knows for this transition. */
@@ -105,6 +124,101 @@ export interface VerifierGateContext {
 export interface VerifierGateOptions {
   /** Override the verify() registry (defaults to the module-level singleton). */
   registry?: Pick<Registry<VerifyCallback>, 'get'>;
+  /**
+   * Per-verify ISOLATION timeout in milliseconds (0yt5.20 AC5). When set and a
+   * verify() callback does not settle within this window, the gate ABANDONS the
+   * in-flight promise (attaching a no-op .catch so a late rejection never raises
+   * unhandledRejection) and records the tool as a FAIL with timedOut:true. When
+   * unset (the default), the gate awaits the callback indefinitely (the prior
+   * 0yt5.5 behaviour). A throwing verify() is always caught and converted to a
+   * FAIL regardless of this option.
+   */
+  verifyTimeoutMs?: number;
+}
+
+/** Sentinel resolved by the timeout race when a verify() exceeds verifyTimeoutMs. */
+const VERIFY_TIMEOUT = Symbol('verify-timeout');
+
+/**
+ * Run a single verify() callback under per-verify ISOLATION (0yt5.20 AC5):
+ *  - a THROW (sync or async rejection) is caught and converted to a FAIL;
+ *  - a TIMEOUT (when verifyTimeoutMs is set) abandons the in-flight promise with
+ *    a no-op .catch so a late resolve/reject never surfaces as unhandledRejection,
+ *    and yields a FAIL with timedOut:true.
+ * Returns the verify result plus timing/threw/timedOut diagnostics.
+ */
+async function runIsolatedVerify(
+  verify: VerifyCallback,
+  verifyContext: VerifyContext,
+  verifyTimeoutMs: number | undefined
+): Promise<{ result: VerifyResult; durationMs: number; timedOut: boolean; threw: boolean }> {
+  const startedAt = Date.now();
+  // Invoke inside try/catch so a SYNC throw is captured the same as an async one.
+  let pending: Promise<VerifyResult>;
+  try {
+    pending = Promise.resolve(verify(verifyContext));
+  } catch (error) {
+    return {
+      result: { verdict: VerifyVerdict.FAIL, reasons: [`verify() threw: ${String(error)}`] },
+      durationMs: Date.now() - startedAt,
+      timedOut: false,
+      threw: true
+    };
+  }
+
+  if (verifyTimeoutMs === undefined || verifyTimeoutMs <= 0) {
+    try {
+      const result = await pending;
+      return { result, durationMs: Date.now() - startedAt, timedOut: false, threw: false };
+    } catch (error) {
+      return {
+        result: { verdict: VerifyVerdict.FAIL, reasons: [`verify() threw: ${String(error)}`] },
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        threw: true
+      };
+    }
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof VERIFY_TIMEOUT>(resolve => {
+    timer = setTimeout(() => resolve(VERIFY_TIMEOUT), verifyTimeoutMs);
+  });
+
+  try {
+    const settled = await Promise.race([
+      pending.then(result => ({ result }), (error: unknown) => ({ error })),
+      timeout
+    ]);
+
+    if (settled === VERIFY_TIMEOUT) {
+      // ABANDON the in-flight verify: attach a no-op .catch so a late rejection
+      // cannot surface as an unhandledRejection. A late resolve is simply ignored.
+      pending.catch(() => { /* abandoned: late result is intentionally discarded */ });
+      return {
+        result: {
+          verdict: VerifyVerdict.FAIL,
+          reasons: [`verify() did not settle within ${verifyTimeoutMs}ms (timed out; result abandoned).`]
+        },
+        durationMs: Date.now() - startedAt,
+        timedOut: true,
+        threw: false
+      };
+    }
+
+    if ('error' in settled) {
+      return {
+        result: { verdict: VerifyVerdict.FAIL, reasons: [`verify() threw: ${String(settled.error)}`] },
+        durationMs: Date.now() - startedAt,
+        timedOut: false,
+        threw: true
+      };
+    }
+
+    return { result: settled.result, durationMs: Date.now() - startedAt, timedOut: false, threw: false };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -164,6 +278,7 @@ export async function runVerifierGate(
 ): Promise<VerifierGateResult> {
   const registry = options.registry ?? defaultVerifier;
   const failures: VerifierGateFailure[] = [];
+  const perTool: VerifierGatePerTool[] = [];
 
   // De-duplicate tool names while preserving first-seen order.
   const tools = [...new Set(requiredTools.filter(Boolean))];
@@ -196,22 +311,18 @@ export async function runVerifierGate(
 
     // (1) Did the tool RUN at all this attempt? No event ⇒ not invoked ⇒ block.
     if (!event) {
-      failures.push({
-        tool,
-        kind: VerifierGateBlockKind.TOOL_NOT_INVOKED,
-        reasons: [`Required tool "${tool}" has no tool-result event for this attempt (it was not invoked).`]
-      });
+      const reasons = [`Required tool "${tool}" has no tool-result event for this attempt (it was not invoked).`];
+      failures.push({ tool, kind: VerifierGateBlockKind.TOOL_NOT_INVOKED, reasons });
+      perTool.push({ tool, reasons, durationMs: 0 });
       continue;
     }
 
     // (2) Did the tool run to completion? REJECTED ⇒ it ran and failed ⇒ block.
     const { status } = readToolRun(event);
     if (status === ToolResultStatus.REJECTED) {
-      failures.push({
-        tool,
-        kind: VerifierGateBlockKind.TOOL_REJECTED,
-        reasons: [`Required tool "${tool}" did not run to completion (latest tool-result status === REJECTED).`]
-      });
+      const reasons = [`Required tool "${tool}" did not run to completion (latest tool-result status === REJECTED).`];
+      failures.push({ tool, kind: VerifierGateBlockKind.TOOL_REJECTED, reasons });
+      perTool.push({ tool, reasons, durationMs: 0 });
       continue;
     }
 
@@ -221,10 +332,21 @@ export async function runVerifierGate(
       // No registered callback: the tool ran (presence satisfied) and there is
       // no semantic verifier to consult, so it cannot FAIL. This is a PASS for
       // the loop's aggregate — the harness applies no tool-specific policy.
+      perTool.push({ tool, verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['no registered verify() callback'], durationMs: 0 });
       continue;
     }
 
-    const result: VerifyResult = await verify(verifyContext);
+    // Run under per-verify isolation: a throw or timeout becomes a FAIL without
+    // hanging or crashing the gate (AC5).
+    const { result, durationMs, timedOut, threw } = await runIsolatedVerify(verify, verifyContext, options.verifyTimeoutMs);
+    perTool.push({
+      tool,
+      verdict: result.verdict,
+      reasons: result.reasons,
+      durationMs,
+      ...(timedOut ? { timedOut: true } : {}),
+      ...(threw ? { threw: true } : {})
+    });
     if (result.verdict === VerifyVerdict.FAIL) {
       failures.push({
         tool,
@@ -240,6 +362,7 @@ export async function runVerifierGate(
   return {
     pass: failures.length === 0,
     failures,
-    rejectMessage: renderRejectMessage(failures)
+    rejectMessage: renderRejectMessage(failures),
+    perTool
   };
 }

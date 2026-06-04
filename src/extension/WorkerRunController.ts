@@ -274,10 +274,20 @@ function requiredToolsForRun(run: ActiveRun): import('../core/domain/StateModels
 }
 
 /**
- * Shared gate predicate that evaluates whether signal_completion would ACCEPT
- * or REJECT a given outcome. This is the single source of truth for the gate
- * decision — both signal_completion and pre_signal_audit call this function so
- * that audit.ready is guaranteed equivalent to the real gate accept condition.
+ * Shared WORKER-side gate predicate that evaluates whether signal_completion
+ * would ACCEPT or REJECT a given outcome. Both signal_completion and
+ * pre_signal_audit call this so that audit.ready matches the worker-side accept
+ * condition.
+ *
+ * ADVISORY (pi-experiment-0yt5.20 decision B / AC3): this predicate reads the
+ * WORKER's in-memory tool-result map (obs.getToolResult) and is a NON-BINDING
+ * pre-check only. It can still inform the worker (fail-fast before signaling),
+ * but the BINDING artifact-presence authority is the COORDINATOR-side verifier
+ * gate (evaluateCoordinatorGate, run in handleTeammateEvent before
+ * STATE_TRANSITION_APPLIED), which re-evaluates the completing (state, action)
+ * against DURABLE state. A worker that passes this local pre-check is still
+ * BLOCKED by the coordinator when the durable tool-result event / artifact is
+ * absent — the coordinator is the sole binding authority.
  *
  * IMPORTANT: This function is read-only. It does NOT record domain events,
  * does NOT auto-restore unapproved paths, does NOT post any signals, and does

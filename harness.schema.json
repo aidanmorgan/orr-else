@@ -747,6 +747,10 @@
                   "additionalProperties": false,
                   "properties": {
                     "name": { "type": "string" },
+                    "expectsVerify": {
+                      "type": "boolean",
+                      "description": "When true, the coordinator artifact-presence gate fails fast at startup if no verify() callback is registered for this tool. Presence-only tools omit this flag."
+                    },
                     "when": {
                       "type": "object",
                       "additionalProperties": false,
