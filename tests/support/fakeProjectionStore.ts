@@ -25,6 +25,7 @@ export function fakeProjectionStore(
     latestEventsForBeads: vi.fn(async () => new Map()),
     latestEventByType: vi.fn(async () => undefined),
     latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
+    latestToolResultEvent: vi.fn(async () => undefined),
     ...overrides
   };
 }
