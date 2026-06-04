@@ -921,6 +921,125 @@ states:
     }
   });
 
+  // glsw/orap: when the terminal failure-limit suggestedOutcome is NOT routable
+  // from the current state (the literal LessonCapture/cerdiwen-gfg bug — FAILURE
+  // had no transition), the worker guidance must name the concrete state/action,
+  // report the outcome as not routable, and steer to request_harness_restart
+  // (NOT signal_completion FAILURE). It must never render "state undefined".
+  it('steers a non-routable terminal failure-limit to request_harness_restart (no signal FAILURE)', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-nonroutable-terminal-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // LessonCapture-shaped state: only SUCCESS is routable; the terminal tool
+    // suggests FAILURE, which has NO transition here → suggestedOutcomeValid=false.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: LessonCapture
+tools:
+  - name: artifact_validator
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'artifact_validator', status: 'REJECTED' })); process.exit(1);"
+    failureLimit:
+      maxFailuresPerState: 1
+      suggestedOutcome: FAILURE
+      terminal: true
+  - name: followup_probe
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'followup_probe', status: 'PASSED' }));"
+states:
+  LessonCapture:
+    identity: { role: "Capturer", expertise: "Lessons", constraints: [] }
+    baseInstructions: "Capture"
+    actions:
+      - id: capture-lesson
+        type: prompt
+        prompt: "Capture"
+    requiredTools: []
+    transitions: { SUCCESS: "completed" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-nonroutable-terminal';
+      process.env[EnvVars.STATE_ID] = 'LessonCapture';
+      process.env[EnvVars.ACTION_ID] = 'capture-lesson';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const validator = harness.tools.find(tool => tool.name === 'artifact_validator');
+      const followupProbe = harness.tools.find(tool => tool.name === 'followup_probe');
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      const verifier = await validator.execute('gate-fail', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const blockedTool = await followupProbe.execute('followup', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      const failureSignal = await signalCompletion.execute('signal-failure', {
+        outcome: 'FAILURE',
+        summary: 'terminal validator failure'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(verifier.details).toMatchObject({
+        status: 'REJECTED',
+        failureLimit: {
+          failureCount: 1,
+          maxFailures: 1,
+          suggestedOutcome: 'FAILURE',
+          terminal: true
+        }
+      });
+      // Worker guidance names the concrete state/action and reports the outcome
+      // as not routable, steering to request_harness_restart — never signal FAILURE.
+      expect(blockedTool.details).toContain('terminal failure limit already reached');
+      expect(blockedTool.details).toContain('LessonCapture/capture-lesson');
+      expect(blockedTool.details).toContain('is not routable here');
+      expect(blockedTool.details).toContain(BuiltInToolName.REQUEST_HARNESS_RESTART);
+      expect(blockedTool.details).not.toContain('state undefined');
+      // signal_completion FAILURE is rejected because FAILURE has no transition;
+      // the rejection names the concrete state, never "state undefined".
+      expect(failureSignal.details).toContain('REJECTED');
+      expect(failureSignal.details).toContain('LessonCapture');
+      expect(failureSignal.details).not.toContain('state undefined');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it('enforces recorded project-tool routing hints before generic failure-limit outcomes', async () => {
     const previousCwd = process.cwd();
     const previousEnv = {
