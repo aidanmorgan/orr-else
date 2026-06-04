@@ -1513,7 +1513,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       return;
     }
 
-    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
+    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent, event.stateId) : event.stateId;
     const transitionEventData = {
       beadId,
       workerId: event.workerId,
@@ -1558,7 +1558,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   if (event.type === TeammateEventType.STATE_FAILED || event.type === TeammateEventType.STATE_BLOCKED) {
     const state = config.states[event.stateId];
-    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
+    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent, event.stateId) : event.stateId;
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
       beadId,
       workerId: event.workerId,
@@ -1644,7 +1644,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   if (event.type === TeammateEventType.CONTEXT_RESTART_REQUESTED) {
     const state = config.states[event.stateId];
-    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
+    const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
     await services.eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
       beadId,
       workerId: event.workerId,
@@ -1662,7 +1662,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   if (event.type === TeammateEventType.HARNESS_RESTART_REQUESTED) {
     const state = config.states[event.stateId];
-    const nextState = state ? services.flowManager.nextState(state, event.transitionEvent) : event.stateId;
+    const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
     await services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
       beadId,
       workerId: event.workerId,

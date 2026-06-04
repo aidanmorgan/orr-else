@@ -89,7 +89,9 @@ function buildSupervisor(
       flowManager: {},
       scheduler: {},
       eventStore: {
-        record: vi.fn(async (event: string, data: unknown) => records.push({ event, data }))
+        record: vi.fn(async (event: string, data: unknown) => records.push({ event, data })),
+        latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
+        eventsForBead: vi.fn(async () => [])
       },
       beadsPort: fakeBeadsPort({ claim, release }),
       worktreePort: fakeWorktreePort({ createWorktree }),

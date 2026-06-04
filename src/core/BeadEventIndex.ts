@@ -21,7 +21,10 @@ const rmAsync = fs.promises.rm;
 
 /** Stored in the <beadId>.jsonl.ready marker; tracks per-source-file read offsets. */
 export interface BeadIndexMarker {
+  version?: number;
+  generatedAt?: string;
   sources?: Record<string, number>;
+  [key: string]: unknown;
 }
 
 /** The subset of an event-store location that BeadEventIndex needs. */
@@ -75,16 +78,65 @@ export class BeadEventIndex {
   // Write
   // ---------------------------------------------------------------------------
 
-  async append(location: BeadIndexLocation, beadId: string, event: DomainEvent): Promise<void> {
+  private async removeIndexState(indexPath: string, readyPath: string): Promise<void> {
+    await rmAsync(indexPath, { force: true, recursive: true }).catch(() => {});
+    await rmAsync(readyPath, { force: true, recursive: true }).catch(() => {});
+  }
+
+  private async advanceReadyMarker(
+    location: BeadIndexLocation,
+    beadId: string,
+    sourcePath: string,
+    indexPath: string,
+    readyPath: string
+  ): Promise<void> {
+    if (!existsSync(readyPath)) return;
+
+    const marker = await this.readMarker(location, beadId);
+    if (marker === undefined) return;
+
+    const sourceBasename = path.basename(sourcePath);
+    const currentSize = fs.statSync(sourcePath).size;
+    const sources = {
+      ...(marker.sources ?? {}),
+      [sourceBasename]: Math.max(marker.sources?.[sourceBasename] ?? 0, currentSize)
+    };
+    const nextMarker: BeadIndexMarker = {
+      ...marker,
+      version: typeof marker.version === 'number' ? marker.version : 1,
+      generatedAt: new Date().toISOString(),
+      sources
+    };
+    const tempPath = `${readyPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+
+    try {
+      await fs.promises.writeFile(tempPath, JSON.stringify(nextMarker));
+      await fs.promises.rename(tempPath, readyPath);
+    } catch (error) {
+      await rmAsync(tempPath, { force: true }).catch(() => {});
+      await this.removeIndexState(indexPath, readyPath);
+      Logger.warn(Component.CORE, 'Removed stale bead event index after ready marker update failure', {
+        beadId,
+        indexPath,
+        readyPath,
+        sourcePath,
+        error: String(error)
+      });
+    }
+  }
+
+  async append(location: BeadIndexLocation, beadId: string, event: DomainEvent, sourcePath?: string): Promise<void> {
     const dir = this.indexDir(location);
     await mkdirAsync(dir, { recursive: true });
     const iPath = this.indexPath(location, beadId);
     const rPath = this.indexReadyPath(location, beadId);
     try {
       await this.eventLog.append(iPath, event);
+      if (sourcePath) {
+        await this.advanceReadyMarker(location, beadId, sourcePath, iPath, rPath);
+      }
     } catch (error) {
-      await rmAsync(iPath, { force: true }).catch(() => {});
-      await rmAsync(rPath, { force: true }).catch(() => {});
+      await this.removeIndexState(iPath, rPath);
       Logger.warn(Component.CORE, 'Removed stale bead event index after append failure', {
         beadId,
         indexPath: iPath,

@@ -86,9 +86,11 @@ states:
       EventStoreDefaults.BEAD_INDEX_DIR,
       `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
     );
+    const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
+    const eventFileName = path.basename(eventsPath);
     fs.writeFileSync(`${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`, JSON.stringify({
       sources: {
-        'project.jsonl': 0
+        [eventFileName]: 0
       }
     }));
 
@@ -107,6 +109,9 @@ states:
       DomainEventName.BEAD_CLAIMED,
       DomainEventName.CHECKLIST_ITEM_TICKED
     ]);
+
+    const marker = JSON.parse(fs.readFileSync(`${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`, 'utf8'));
+    expect(marker.sources[eventFileName]).toBe(fs.statSync(eventsPath).size);
   });
 
   it('keeps writing to the resolved event path after a temporary config validation failure', async () => {

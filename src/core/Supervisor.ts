@@ -16,6 +16,7 @@ import type { HarnessConfig } from './ConfigLoader.js';
 import type { WorktreeProvisioningMode } from './domain/StateModels.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
+import { projectToolFailureLimitSuggestedOutcome } from './ProjectToolFailureLimit.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
@@ -44,6 +45,8 @@ interface QuarantineEntry {
    * Composed of the bead's status + updatedAt (or similar stable field) at the
    * time of quarantine so that a bead re-assignment or status change lifts the block. */
   signature: string;
+  /** Optional diagnostic fields recorded with the quarantine event. */
+  details?: Record<string, unknown>;
 }
 
 interface MissingStartedRestartDetails {
@@ -52,6 +55,22 @@ interface MissingStartedRestartDetails {
   restartFromState?: string;
   restartTargetState?: string;
   sourceEventType?: string;
+}
+
+interface NonRoutableTerminalFailureLimitQuarantineDetails extends Record<string, unknown> {
+  stateId: string;
+  actionId: string;
+  toolName: string;
+  suggestedOutcome: string;
+  configuredOutcomes: string[];
+  suggestedOutcomeTransitionError: string;
+  restartTargetState: string;
+  restartEvent?: string;
+  sourceEventType: string;
+  sourceEventId?: string;
+  sourceIdempotencyKey?: string;
+  terminalFailureEventId?: string;
+  terminalFailureEventTimestamp?: string;
 }
 
 /** Typed value object returned by `collectSlotHealthSnapshot`. Contains all
@@ -486,18 +505,136 @@ export class Supervisor {
   /** Quarantine a bead with a structured reason + its current signature.
    * Emits a bounded BEAD_QUARANTINED event exactly once per quarantine entry
    * (subsequent ticks skip silently until the signature changes). */
-  private async quarantineBead(bead: Bead, reason: QuarantineReason): Promise<void> {
+  private async quarantineBead(bead: Bead, reason: QuarantineReason, details: Record<string, unknown> = {}): Promise<void> {
     const signature = this.quarantineSignatureFor(bead);
-    this.quarantine.set(bead.id, { reason, signature });
+    this.quarantine.set(bead.id, { reason, signature, details });
     await this.services.eventStore.record(DomainEventName.BEAD_QUARANTINED, {
       beadId: bead.id,
       reason,
-      signature
+      signature,
+      ...details
     }).catch(() => {});
-    Logger.warn(Component.SUPERVISOR, 'Bead quarantined after worktree-creation failure', {
+    Logger.warn(Component.SUPERVISOR, 'Bead quarantined by supervisor preflight', {
       beadId: bead.id,
-      reason
+      reason,
+      ...details
     });
+  }
+
+  private configuredOutcomesForState(stateId: string, config: HarnessConfig): string[] {
+    const state = config.states?.[stateId];
+    if (!state) return [];
+    return [...new Set([
+      ...Object.keys(state.on || {}),
+      ...Object.keys(state.transitions || {})
+    ])].sort();
+  }
+
+  private restartEventMatchesTarget(event: DomainEvent, stateId: string): boolean {
+    const data = event.data || {};
+    const targetState = String(data.targetState || data.restartTargetState || data.stateId || '');
+    return targetState === stateId;
+  }
+
+  private latestHarnessRestartRequestEvent(events: DomainEvent[], stateId: string): DomainEvent | undefined {
+    for (const event of [...events].reverse()) {
+      const data = event.data || {};
+      if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED && this.restartEventMatchesTarget(event, stateId)) {
+        return event;
+      }
+      if (
+        event.type === DomainEventName.TEAMMATE_EVENT &&
+        data.type === TeammateEventType.HARNESS_RESTART_REQUESTED &&
+        data.processingDecision === TeammateEventDecisionAction.ACCEPT &&
+        this.restartEventMatchesTarget(event, stateId)
+      ) {
+        return event;
+      }
+    }
+    return undefined;
+  }
+
+  private eventAtOrAfter(candidate: DomainEvent, reference: DomainEvent): boolean {
+    const candidateMs = Date.parse(candidate.timestamp);
+    const referenceMs = Date.parse(reference.timestamp);
+    if (Number.isFinite(candidateMs) && Number.isFinite(referenceMs) && candidateMs !== referenceMs) {
+      return candidateMs > referenceMs;
+    }
+    return String(candidate.id || '').localeCompare(String(reference.id || '')) >= 0;
+  }
+
+  private async nonRoutableTerminalFailureLimitRestartDetails(
+    bead: ScoredBead & { stateId: string },
+    config: HarnessConfig
+  ): Promise<NonRoutableTerminalFailureLimitQuarantineDetails | undefined> {
+    const stateId = bead.stateId;
+    const state = config.states?.[stateId];
+    if (!state) return undefined;
+
+    const terminalFailureEvent = await this.services.eventStore.latestProjectToolFailureLimitEvent(bead.id, {
+      stateId,
+      terminalOnly: true
+    }).catch((error: unknown) => {
+      Logger.warn(Component.SUPERVISOR, 'Unable to inspect terminal tool failure-limit before spawn', {
+        beadId: bead.id,
+        stateId,
+        error: String(error)
+      });
+      return undefined;
+    });
+    if (!terminalFailureEvent) return undefined;
+
+    const events = await this.services.eventStore.eventsForBead(bead.id).catch((error: unknown) => {
+      Logger.warn(Component.SUPERVISOR, 'Unable to inspect restart events before spawn', {
+        beadId: bead.id,
+        stateId,
+        error: String(error)
+      });
+      return [];
+    });
+    const restartEvent = this.latestHarnessRestartRequestEvent(events, stateId);
+    if (!restartEvent || !this.eventAtOrAfter(restartEvent, terminalFailureEvent)) return undefined;
+
+    const terminalData = terminalFailureEvent.data || {};
+    const result = terminalData.result || {};
+    const failureLimit = result.failureLimit || {};
+    const actionId = typeof terminalData.actionId === 'string' ? terminalData.actionId : '';
+    if (!actionId) return undefined;
+
+    const toolName = typeof terminalData.tool === 'string'
+      ? terminalData.tool
+      : typeof result.tool === 'string'
+        ? result.tool
+        : 'unknown';
+    const toolDefinition = config.tools?.find(tool => tool.name === toolName);
+    const suggestedOutcome = typeof failureLimit.suggestedOutcome === 'string'
+      ? failureLimit.suggestedOutcome
+      : projectToolFailureLimitSuggestedOutcome(toolDefinition, stateId, actionId) || EventName.BLOCKED;
+
+    let suggestedOutcomeTransitionError = '';
+    try {
+      this.services.flowManager.nextState(state, suggestedOutcome, stateId);
+      return undefined;
+    } catch (error) {
+      suggestedOutcomeTransitionError = String(error);
+    }
+
+    const restartData = restartEvent.data || {};
+    return {
+      stateId,
+      actionId,
+      toolName,
+      suggestedOutcome,
+      configuredOutcomes: this.configuredOutcomesForState(stateId, config),
+      suggestedOutcomeTransitionError,
+      restartTargetState: String(restartData.targetState || restartData.restartTargetState || restartData.stateId || stateId),
+      restartEvent: String(restartData.transitionEvent || ''),
+      sourceEventType: String(restartEvent.type),
+      sourceEventId: restartEvent.id,
+      sourceIdempotencyKey: typeof restartData.idempotencyKey === 'string' ? restartData.idempotencyKey : undefined,
+      terminalFailureEventId: terminalFailureEvent.id,
+      terminalFailureEventTimestamp: terminalFailureEvent.timestamp
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -907,6 +1044,16 @@ export class Supervisor {
           beadId: bead.id,
           reason: this.quarantine.get(bead.id)?.reason
         });
+        continue;
+      }
+
+      const terminalRestartDetails = await this.nonRoutableTerminalFailureLimitRestartDetails(bead, config);
+      if (terminalRestartDetails) {
+        await this.quarantineBead(
+          bead,
+          QuarantineReason.NON_ROUTABLE_TERMINAL_FAILURE_LIMIT,
+          terminalRestartDetails
+        );
         continue;
       }
 

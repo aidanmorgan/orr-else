@@ -132,18 +132,17 @@ export function exactSession(sessionName: string): string {
 }
 
 /**
- * Verify that a tmux session with the given name exists and resolves to exactly
- * that name (not a prefix-colliding session).
+ * Verify that a tmux session with the given name exists, using exact-match
+ * targeting so a prefix-colliding session cannot satisfy the check.
  *
- * Runs `tmux display-message -p -t =<sessionName> '#{session_name}'` and
- * compares the output to `sessionName`.  Returns false when the command fails
- * (session absent) or when the resolved name differs (should not happen with
- * exact-match targeting, but guards against edge cases).
+ * `display-message -p -t =<sessionName> '#{session_name}'` returns an empty
+ * string on some tmux builds even when the exact session exists. `has-session`
+ * is the purpose-built existence probe and exits non-zero when absent.
  */
 async function verifyExactSession(sessionName: string): Promise<boolean> {
   try {
-    const resolved = await tmux(['display-message', '-p', '-t', exactSession(sessionName), '#{session_name}']);
-    return resolved.trim() === sessionName;
+    await tmux([TmuxCommand.HAS_SESSION, '-t', exactSession(sessionName)]);
+    return true;
   } catch {
     return false;
   }

@@ -33,6 +33,15 @@ import type {
   BeadStateTransitionProjection
 } from './EventStoreTypes.js';
 
+/**
+ * Event types that represent supervisor-internal scheduling bookkeeping rather
+ * than genuine bead activity, and therefore must NOT advance `lastActivity`.
+ * See the quarantine self-invalidation regression (kwdh).
+ */
+const NON_ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
+  DomainEventName.BEAD_QUARANTINED
+]);
+
 /** Shape of each entry inside a dynamicChecklists run-bucket's `items` array. */
 interface DynamicChecklistItem {
   text: string;
@@ -405,7 +414,14 @@ export class BeadStateProjection {
     const includeDetails = this.includeDetails(options);
     for (const event of events) {
       const data = event.data || {};
-      projection.lastActivity = event.timestamp;
+      // lastActivity tracks genuine bead activity. Supervisor-internal scheduling
+      // bookkeeping (e.g. BEAD_QUARANTINED) must NOT advance it: the quarantine
+      // signature is derived from status+lastActivity, so bumping lastActivity on
+      // the quarantine event itself would clear the quarantine on the next scan
+      // and churn the bead every tick (kwdh).
+      if (!NON_ACTIVITY_EVENT_TYPES.has(event.type)) {
+        projection.lastActivity = event.timestamp;
+      }
       switch (event.type) {
         // REPLAY-ONLY / HISTORICAL: BEAD_METADATA_MERGED is no longer emitted by
         // any live code path. This consumer exists solely so that old event logs

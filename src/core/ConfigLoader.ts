@@ -604,7 +604,8 @@ export class ConfigLoader {
       gate.checklist = this.resolveChecklistReference(gate.checklist);
     }
 
-    for (const state of Object.values(config.states || {})) {
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      state.id = state.id || stateId;
       state.harnessRestartPrompt = this.resolveTextReference(state.harnessRestartPrompt) as string | undefined;
       state.contextRestartPrompt = this.resolveTextReference(state.contextRestartPrompt) as string | undefined;
       state.checklist = this.resolveChecklistReference(state.checklist);

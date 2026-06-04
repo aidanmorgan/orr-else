@@ -196,7 +196,7 @@ export class EventStore {
       await this.eventLog.append(location.path, entry);
       const beadId = this.beadIdFor(entry);
       if (beadId) {
-        await this.beadIndex.append(location, beadId, entry);
+        await this.beadIndex.append(location, beadId, entry, location.path);
       }
     }
 

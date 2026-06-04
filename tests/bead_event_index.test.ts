@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -80,6 +80,93 @@ describe('BeadEventIndex', () => {
     expect(lines).toHaveLength(2);
     expect(JSON.parse(lines[0]).id).toBe('e1');
     expect(JSON.parse(lines[1]).id).toBe('e2');
+  });
+
+  it('advances an existing ready marker to the current primary file size on append', async () => {
+    const primaryPath = path.join(tempDir, 'project.jsonl');
+    const event = makeDomainEvent({ id: 'e1', data: { beadId: 'bd-1' } });
+    fs.writeFileSync(primaryPath, `${JSON.stringify(event)}\n`);
+    const primarySize = fs.statSync(primaryPath).size;
+
+    const indexDir = path.join(tempDir, EventStoreDefaults.BEAD_INDEX_DIR);
+    fs.mkdirSync(indexDir, { recursive: true });
+    const indexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    const readyPath = `${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+    fs.writeFileSync(indexPath, '');
+    fs.writeFileSync(readyPath, JSON.stringify({
+      version: 1,
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      sources: { 'project.jsonl': 0, 'other.jsonl': 42 }
+    }));
+
+    await index.append(location, 'bd-1', event, primaryPath);
+
+    const marker = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
+    expect(marker.sources['project.jsonl']).toBe(primarySize);
+    expect(marker.sources['other.jsonl']).toBe(42);
+    expect(marker.version).toBe(1);
+    expect(marker.generatedAt).not.toBe('2026-01-01T00:00:00.000Z');
+  });
+
+  it('uses unique temp marker paths even when append updates share the same millisecond', async () => {
+    const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(1780498935534);
+    try {
+      const primaryPath = path.join(tempDir, 'project.jsonl');
+      const e1 = makeDomainEvent({ id: 'e1', data: { beadId: 'bd-1' } });
+      fs.writeFileSync(primaryPath, `${JSON.stringify(e1)}\n`);
+
+      const indexDir = path.join(tempDir, EventStoreDefaults.BEAD_INDEX_DIR);
+      fs.mkdirSync(indexDir, { recursive: true });
+      const indexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+      const readyPath = `${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+      fs.writeFileSync(indexPath, '');
+      fs.writeFileSync(readyPath, JSON.stringify({ version: 1, sources: { 'project.jsonl': 0 } }));
+
+      await index.append(location, 'bd-1', e1, primaryPath);
+      const e2 = makeDomainEvent({ id: 'e2', timestamp: '2026-01-01T00:00:01.000Z', data: { beadId: 'bd-1' } });
+      fs.appendFileSync(primaryPath, `${JSON.stringify(e2)}\n`);
+      await index.append(location, 'bd-1', e2, primaryPath);
+
+      expect(fs.existsSync(indexPath)).toBe(true);
+      expect(fs.existsSync(readyPath)).toBe(true);
+      const marker = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
+      expect(marker.sources['project.jsonl']).toBe(fs.statSync(primaryPath).size);
+    } finally {
+      dateSpy.mockRestore();
+    }
+  });
+
+  it('does not create a ready marker when append receives a primary path but no marker exists', async () => {
+    const primaryPath = path.join(tempDir, 'project.jsonl');
+    const event = makeDomainEvent({ id: 'e1', data: { beadId: 'bd-1' } });
+    fs.writeFileSync(primaryPath, `${JSON.stringify(event)}\n`);
+
+    await index.append(location, 'bd-1', event, primaryPath);
+
+    const readyPath = path.join(
+      tempDir,
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`
+    );
+    expect(fs.existsSync(readyPath)).toBe(false);
+  });
+
+  it('removes index and ready marker when ready marker advancement fails', async () => {
+    const primaryPath = path.join(tempDir, 'project.jsonl');
+    const event = makeDomainEvent({ id: 'e1', data: { beadId: 'bd-1' } });
+    fs.writeFileSync(primaryPath, `${JSON.stringify(event)}\n`);
+
+    const indexDir = path.join(tempDir, EventStoreDefaults.BEAD_INDEX_DIR);
+    fs.mkdirSync(indexDir, { recursive: true });
+    const indexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    const readyPath = `${indexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+    fs.writeFileSync(indexPath, '');
+    fs.mkdirSync(readyPath);
+
+    await index.append(location, 'bd-1', event, primaryPath);
+
+    expect(fs.existsSync(indexPath)).toBe(false);
+    expect(fs.existsSync(readyPath)).toBe(false);
   });
 
   it('sanitises bead IDs that contain unsafe path characters', async () => {

@@ -89,6 +89,10 @@ export interface RestartTransitionResult {
 }
 
 export class FlowManager {
+  private stateLabel(state: SDLCState, fallbackStateId?: string): string {
+    return state.id || fallbackStateId || '<unknown>';
+  }
+
   public initialState(config: HarnessConfig): string {
     const startState = config.settings.startState;
     if (!startState) {
@@ -111,13 +115,19 @@ export class FlowManager {
     throw new Error(`Bead ${bead.id} has status/state ${bead.status}, which is not configured as a runnable state.`);
   }
 
-  public nextState(state: SDLCState, outcome: string): string {
+  public nextState(state: SDLCState, outcome: string, fallbackStateId?: string): string {
     const explicit = state.on?.[outcome];
     const transition = explicit || state.transitions[outcome];
     if (!transition) {
-      throw new Error(`No transition configured for outcome ${outcome} in state ${state.id}.`);
+      throw new Error(`No transition configured for outcome ${outcome} in state ${this.stateLabel(state, fallbackStateId)}.`);
     }
     return transition;
+  }
+
+  public restartTargetState(state: SDLCState | undefined, stateId: string | undefined, event: string): string {
+    const fallbackStateId = stateId || EventName.RESTART;
+    if (!state) return fallbackStateId;
+    return state.on?.[event] || state.transitions[event] || fallbackStateId;
   }
 
   public resolveFailedTeammateEventRetry(
@@ -152,10 +162,9 @@ export class FlowManager {
     const event = kind === RestartKind.HARNESS
       ? config.settings.harnessRestartEvent
       : config.settings.contextRestartEvent;
-    const state = config.states[bead.restartFromState || bead.status];
-    const targetStateId = state
-      ? this.nextState(state, event)
-      : bead.restartTargetState || bead.status || EventName.RESTART;
+    const stateId = bead.restartFromState || bead.status;
+    const state = config.states[stateId];
+    const targetStateId = this.restartTargetState(state, bead.restartTargetState || stateId, event);
     return { kind, event, targetStateId };
   }
 

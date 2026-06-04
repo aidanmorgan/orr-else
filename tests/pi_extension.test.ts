@@ -137,6 +137,46 @@ describe('Pi-native extension surface', () => {
     });
   });
 
+  it('defaults restart routes to the current state when no restart edge is declared', () => {
+    const config = {
+      settings: {
+        harnessRestartEvent: 'HARNESS_RESTART',
+        contextRestartEvent: 'CONTEXT_RESTART'
+      },
+      states: {
+        LessonCapture: {
+          transitions: { SUCCESS: 'Implementation' }
+        },
+        Implementation: {
+          transitions: { SUCCESS: 'completed', FAILURE: 'Implementation' }
+        }
+      }
+    } as any;
+    const bead = {
+      id: 'pi-experiment-restart-fallback' as any,
+      title: 'restart fallback',
+      status: 'LessonCapture',
+      changed_files: [],
+      logs: [],
+      dependencies: [],
+      retryCount: 0,
+      compactionCount: 0,
+      lastActivity: '2026-06-03T00:00:00.000Z',
+      totalExecutionTimeMs: 0,
+      handovers: {},
+      completedActionIds: []
+    };
+
+    const flowManager = new FlowManager();
+    expect(flowManager.resolveRestartTransition({ ...bead, restartKind: 'harness' }, config)).toMatchObject({
+      kind: 'harness',
+      event: 'HARNESS_RESTART',
+      targetStateId: 'LessonCapture'
+    });
+    expect(() => flowManager.nextState(config.states.LessonCapture, 'FAILURE', 'LessonCapture'))
+      .toThrow('No transition configured for outcome FAILURE in state LessonCapture.');
+  });
+
   it('blocks teammate access to framework runtime artifacts', async () => {
     const previousCwd = process.cwd();
     const previousEnv = {

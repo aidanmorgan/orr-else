@@ -1508,7 +1508,9 @@ describe('Supervisor', () => {
         },
         eventStore: {
           record: vi.fn(async () => {}),
-          eventsForBeads: vi.fn(async () => new Map())
+          eventsForBeads: vi.fn(async () => new Map()),
+          latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
+          eventsForBead: vi.fn(async () => [])
         },
         beadsPort: {
           ...fakeBeadsPort({ claim, release }),

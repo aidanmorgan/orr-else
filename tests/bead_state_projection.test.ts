@@ -39,6 +39,32 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
     expect(result.restartRequested).toBe(false);
   });
 
+  // ---------------------------------------------------------------------------
+  // lastActivity — supervisor scheduling bookkeeping must not count as activity
+  // (regression: BEAD_QUARANTINED bumped lastActivity, which is the quarantine
+  //  signature, so the quarantine self-invalidated and the bead churned. kwdh)
+  // ---------------------------------------------------------------------------
+
+  it('does not advance lastActivity for a BEAD_QUARANTINED scheduling event', () => {
+    const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Implementation' }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
+      makeEvent(DomainEventName.BEAD_QUARANTINED, { beadId: 'bd-1', reason: 'ALREADY_CHECKED_OUT' }, { id: 'e2', timestamp: '2026-01-01T00:00:09.000Z' })
+    ];
+    const result = projection.projectBeadFromEvents('bd-1', events);
+    // lastActivity must stay at the last genuine activity (the claim), NOT the
+    // quarantine event — otherwise the quarantine signature changes every tick.
+    expect(result.lastActivity).toBe('2026-01-01T00:00:01.000Z');
+  });
+
+  it('still advances lastActivity for genuine activity events', () => {
+    const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning' }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, { beadId: 'bd-1', fromState: 'Planning', nextState: 'Implementation', transitionEvent: 'SUCCESS', actionId: 'plan' }, { id: 'e2', timestamp: '2026-01-01T00:00:05.000Z' })
+    ];
+    const result = projection.projectBeadFromEvents('bd-1', events);
+    expect(result.lastActivity).toBe('2026-01-01T00:00:05.000Z');
+  });
+
   it('advances currentState through STATE_TRANSITION_APPLIED', () => {
     const events = [
       makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning' }, { timestamp: '2026-01-01T00:00:01.000Z' }),

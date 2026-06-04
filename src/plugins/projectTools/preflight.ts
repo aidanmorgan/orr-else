@@ -23,25 +23,14 @@ import { summarizeToolResult, attachFailureCategory, attachProjectToolSteering, 
 import { reserveProjectToolCall, projectToolBackpressureResult } from './contextHelpers.js';
 import type { ProjectToolExecutionContext, ProjectToolFailureLimitResult } from './types.js';
 import { isJsonRecord } from './utils.js';
+// projectToolFailureLimitSuggestedOutcome lives in core so that core
+// orchestration (Supervisor) can use it without a core->plugin import.
+// Re-exported here to preserve the existing plugin/barrel import surface.
+import { projectToolFailureLimitSuggestedOutcome } from '../../core/ProjectToolFailureLimit.js';
 
 // ---- failure-limit helpers (exported) ----
 
-export function projectToolFailureLimitSuggestedOutcome(
-  definition: ProjectToolConfig | undefined,
-  stateId?: string,
-  actionId?: string
-): string {
-  const failureLimit = definition?.failureLimit;
-  const byAction = failureLimit?.suggestedOutcomeByAction || {};
-  const stateActionKey = stateId && actionId ? `${stateId}/${actionId}` : undefined;
-  if (stateActionKey && byAction[stateActionKey]) return byAction[stateActionKey];
-  if (actionId && byAction[actionId]) return byAction[actionId];
-
-  const byState = failureLimit?.suggestedOutcomeByState || {};
-  if (stateId && byState[stateId]) return byState[stateId];
-
-  return failureLimit?.suggestedOutcome || 'BLOCKED';
-}
+export { projectToolFailureLimitSuggestedOutcome };
 
 export function buildProjectToolFailureLimitResult(
   definition: ProjectToolConfig,

@@ -865,7 +865,7 @@ states:
     // Verify that new-window and list-windows both use exact-match targeting.
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' }; // no Agents window
       if (args.includes('new-window')) return { stdout: '', stderr: '' };
       if (args.includes('split-window')) return { stdout: '%1\n', stderr: '' };
@@ -891,12 +891,68 @@ states:
     expect(newWindowArgs[tIdx + 1]).toMatch(/^=/);
   });
 
+  it('(s33/session-reuse) existing exact teammate session is reused for additional worker spawns', async () => {
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\nAgents\n', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '%1\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, 'orr-else', currentExtensionPath);
+    const first = await factory.spawnTeammateInTmux('bead-reuse-one' as any, 'Planning', worktreePath);
+    const second = await factory.spawnTeammateInTmux('bead-reuse-two' as any, 'Planning', worktreePath);
+
+    expect(first.success).toBe(true);
+    expect(second.success).toBe(true);
+
+    const newSessionCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('new-session'));
+    expect(newSessionCalls).toHaveLength(0);
+
+    const hasSessionCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('has-session'));
+    expect(hasSessionCalls).toHaveLength(2);
+    for (const call of hasSessionCalls) {
+      const args = call[1] as string[];
+      expect(args[args.indexOf('-t') + 1]).toBe('=orr-else');
+    }
+
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('split-window'));
+    expect(splitCalls).toHaveLength(2);
+    for (const call of splitCalls) {
+      const args = call[1] as string[];
+      expect(args[args.indexOf('-t') + 1]).toBe('=orr-else:Agents');
+    }
+  });
+
+  it('(s33/missing-session) creates the teammate tmux session when exact has-session fails', async () => {
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('has-session')) throw new Error('no such session');
+      if (args.includes('list-windows')) return { stdout: 'Coordinator\nAgents\n', stderr: '' };
+      if (args.includes('new-session')) return { stdout: '', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+
+    const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, 'orr-else', currentExtensionPath);
+    const result = await factory.ensureAgentsWindow();
+
+    expect(result.ok).toBe(true);
+    const newSessionCalls = vi.mocked(execa).mock.calls.filter(([, args]) => (args as string[]).includes('new-session'));
+    expect(newSessionCalls).toHaveLength(1);
+    const args = newSessionCalls[0]![1] as string[];
+    expect(args).toContain('-s');
+    expect(args[args.indexOf('-s') + 1]).toBe('orr-else');
+    expect(args).toContain('-n');
+    expect(args[args.indexOf('-n') + 1]).toBe('Coordinator');
+  });
+
   it('(s33/hard-failure) ensureAgentsWindow returns { ok: false } when new-window fails', async () => {
-    // Simulate: display-message succeeds (session exists), list-windows returns no Agents window,
+    // Simulate: has-session succeeds (session exists), list-windows returns no Agents window,
     // new-window throws (e.g. fork failed: Device not configured).
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
       if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
       return { stdout: '', stderr: '' };
@@ -916,7 +972,7 @@ states:
     const records: Array<{ event: string; data: any }> = [];
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
       if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
       return { stdout: '', stderr: '' };
@@ -955,7 +1011,7 @@ states:
     const records: Array<{ event: string; data: any }> = [];
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) return { stdout: 'Coordinator\n', stderr: '' };
       if (args.includes('new-window')) throw new Error('fork failed: Device not configured');
       return { stdout: '', stderr: '' };
@@ -1002,7 +1058,7 @@ states:
     let newWindowShouldFail = true;
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) {
         // After the fix call, return Agents in the list.
         return { stdout: newWindowShouldFail ? 'Coordinator\n' : 'Coordinator\nAgents\n', stderr: '' };
@@ -1059,7 +1115,7 @@ states:
     let listWindowsCallCount = 0;
     vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
       if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
-      if (args.includes('display-message')) return { stdout: 'orr-else', stderr: '' };
+      if (args.includes('has-session')) return { stdout: '', stderr: '' };
       if (args.includes('list-windows')) {
         listWindowsCallCount += 1;
         // First call (check): no Agents; second call (verify): also no Agents (creation silent-failed).

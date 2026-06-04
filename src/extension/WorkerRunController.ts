@@ -95,6 +95,8 @@ export function preloadTerminalFailureLimit(run: ActiveRun, services: RuntimeSer
 export interface TerminalFailureLimitContext {
   failedTool: string;
   suggestedOutcome: string;
+  suggestedOutcomeValid: boolean;
+  suggestedOutcomeTransitionError?: string;
   stateId: string;
   actionId: string;
 }
@@ -160,9 +162,19 @@ export async function terminalFailureLimitContext(
     run.action.id
   );
   const suggestedOutcome = recordedSuggestedOutcome || configuredSuggestedOutcome || EventName.BLOCKED;
+  let suggestedOutcomeValid = true;
+  let suggestedOutcomeTransitionError: string | undefined;
+  try {
+    services.flowManager.nextState(run.state, suggestedOutcome, run.stateId);
+  } catch (error) {
+    suggestedOutcomeValid = false;
+    suggestedOutcomeTransitionError = String(error);
+  }
   return {
     failedTool,
     suggestedOutcome,
+    suggestedOutcomeValid,
+    suggestedOutcomeTransitionError,
     stateId: run.stateId,
     actionId: run.action.id
   };
@@ -178,6 +190,14 @@ export async function terminalFailureLimitRejection(
   if (terminalFailureAllowedTools.has(toolName)) return null;
   const terminal = await terminalFailureLimitContext(services, session, isWorker);
   if (!terminal) return null;
+
+  if (!terminal.suggestedOutcomeValid) {
+    return `PROTOCOL VIOLATION: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
+      `in ${terminal.stateId}/${terminal.actionId}. Do not call \`${toolName}\` or gather more evidence in this state. ` +
+      `The configured failure outcome \`${terminal.suggestedOutcome}\` is not routable here: ` +
+      `${terminal.suggestedOutcomeTransitionError}. Use \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with this failure-limit ` +
+      `evidence, then \`${BuiltInToolName.REQUEST_HARNESS_RESTART}\` with the same summary.`;
+  }
 
   return `PROTOCOL VIOLATION: terminal failure limit already reached for project tool \`${terminal.failedTool}\` ` +
     `in ${terminal.stateId}/${terminal.actionId}. Do not call \`${toolName}\` or gather more evidence in this state. ` +
@@ -198,6 +218,8 @@ export interface TerminalFailureLimitAudit {
   reached: boolean;
   failedTool?: string;
   suggestedOutcome?: string;
+  suggestedOutcomeValid?: boolean;
+  suggestedOutcomeTransitionError?: string;
 }
 
 /**
@@ -277,7 +299,7 @@ export async function evaluateGateReadiness(
   let transitionValid = true;
   let transitionError: string | undefined;
   try {
-    services.flowManager.nextState(activeRun.state, outcome);
+    services.flowManager.nextState(activeRun.state, outcome, activeRun.stateId);
   } catch (error) {
     transitionValid = false;
     transitionError = String(error);
@@ -287,8 +309,21 @@ export async function evaluateGateReadiness(
   // ── 2. Terminal failure limit ─────────────────────────────────────────────
   const terminal = await terminalFailureLimitContext(services, session, isWorker);
   const terminalFailureLimit: TerminalFailureLimitAudit = terminal
-    ? { reached: true, failedTool: terminal.failedTool, suggestedOutcome: terminal.suggestedOutcome }
+    ? {
+        reached: true,
+        failedTool: terminal.failedTool,
+        suggestedOutcome: terminal.suggestedOutcome,
+        suggestedOutcomeValid: terminal.suggestedOutcomeValid,
+        suggestedOutcomeTransitionError: terminal.suggestedOutcomeTransitionError
+      }
     : { reached: false };
+  if (terminal && !terminal.suggestedOutcomeValid) {
+    blockingEvidence.push(
+      `Terminal failure limit outcome \`${terminal.suggestedOutcome}\` is not routable from ` +
+      `${terminal.stateId}/${terminal.actionId}: ${terminal.suggestedOutcomeTransitionError}. ` +
+      `Use \`${BuiltInToolName.REQUEST_HARNESS_RESTART}\` after checkpointing the failure-limit evidence.`
+    );
+  }
   if (terminal && outcome !== terminal.suggestedOutcome) {
     blockingEvidence.push(
       `Terminal failure limit reached for \`${terminal.failedTool}\`. ` +

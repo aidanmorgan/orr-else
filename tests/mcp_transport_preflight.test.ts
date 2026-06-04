@@ -230,6 +230,8 @@ function buildSupervisorForMcpGating(options: {
         record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
         eventsForBeads: vi.fn(async () => new Map()),
         latestEventsForBeads: vi.fn(async () => new Map()),
+        latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
+        eventsForBead: vi.fn(async () => []),
         readAll: vi.fn(async () => []),
         projectBead: vi.fn(async () => ({}))
       },

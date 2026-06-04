@@ -141,6 +141,8 @@ export enum QuarantineReason {
   ALREADY_CHECKED_OUT = 'ALREADY_CHECKED_OUT',
   /** Target worktree path already exists on disk. */
   WORKTREE_PATH_TAKEN = 'WORKTREE_PATH_TAKEN',
+  /** Restart would respawn into the same non-routable terminal tool failure. */
+  NON_ROUTABLE_TERMINAL_FAILURE_LIMIT = 'NON_ROUTABLE_TERMINAL_FAILURE_LIMIT',
   /** Worktree creation failed for an unclassified reason. */
   UNKNOWN = 'UNKNOWN'
 }

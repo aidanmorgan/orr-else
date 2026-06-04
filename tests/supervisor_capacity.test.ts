@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { BeadStatus, DomainEventName, TimeMs } from '../src/constants/index.js';
+import { BeadStatus, DomainEventName, EventName, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 
@@ -293,6 +293,218 @@ describe('Supervisor capacity pause handling', () => {
     });
     expect((supervisor as any).startedBeads.has('bead-live')).toBe(true);
     expect((supervisor as any).startedBeads.has('bead-restart')).toBe(true);
+  });
+
+  it('quarantines non-routable terminal failure-limit restart requests before respawn', async () => {
+    const clock = createFakeClock();
+    const records: Array<{ event: string; data: any }> = [];
+    const terminalFailure = {
+      id: 'terminal-1',
+      type: DomainEventName.PROJECT_TOOL_FAILED,
+      timestamp: '2026-01-02T03:04:01.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bead-loop',
+        stateId: 'LessonCapture',
+        actionId: 'capture-lesson',
+        tool: 'artifact_validator',
+        result: {
+          failureLimit: {
+            terminal: true,
+            suggestedOutcome: EventName.FAILURE
+          }
+        }
+      }
+    };
+    const restartRequest = {
+      id: 'restart-1',
+      type: DomainEventName.HARNESS_RESTART_REQUESTED,
+      timestamp: '2026-01-02T03:04:02.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bead-loop',
+        stateId: 'LessonCapture',
+        targetState: 'LessonCapture',
+        transitionEvent: EventName.HARNESS_RESTART,
+        idempotencyKey: 'restart-key'
+      }
+    };
+    const claim = vi.fn(async () => ({ id: 'bead-loop', status: 'LessonCapture' } as any));
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%2' }));
+    const nextState = vi.fn(() => {
+      throw new Error('No transition configured for outcome FAILURE in state LessonCapture.');
+    });
+
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      {
+        id: 'bead-loop',
+        stateId: 'LessonCapture',
+        score: 8,
+        status: 'LessonCapture',
+        lastActivity: '2026-01-02T03:04:00.000Z'
+      }
+    ]);
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        getAvailableSlots: vi.fn(async () => 1),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {},
+            states: {
+              LessonCapture: {
+                actions: [],
+                on: { [EventName.HARNESS_RESTART]: 'LessonCapture' },
+                transitions: { [EventName.HARNESS_RESTART]: 'LessonCapture' }
+              }
+            },
+            tools: [{ name: 'artifact_validator', type: 'command' }]
+          })
+        },
+        flowManager: { nextState },
+        scheduler: {},
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          latestProjectToolFailureLimitEvent: vi.fn(async () => terminalFailure),
+          eventsForBead: vi.fn(async () => [terminalFailure, restartRequest])
+        },
+        beadsPort: fakeBeadsPort({ claim }),
+        worktreePort: fakeWorktreePort({ createWorktree })
+      } as any,
+      { maxSlots: 1, clock }
+    );
+
+    await (supervisor as any).scanAndSpawn();
+    await (supervisor as any).scanAndSpawn();
+    await (supervisor as any).scanAndSpawn();
+
+    expect(claim).not.toHaveBeenCalled();
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(spawnTeammateInTmux).not.toHaveBeenCalled();
+    expect(nextState).toHaveBeenCalledTimes(1);
+
+    const quarantineEvents = records.filter(record => record.event === DomainEventName.BEAD_QUARANTINED);
+    expect(quarantineEvents).toHaveLength(1);
+    expect(quarantineEvents[0].data).toMatchObject({
+      beadId: 'bead-loop',
+      reason: 'NON_ROUTABLE_TERMINAL_FAILURE_LIMIT',
+      stateId: 'LessonCapture',
+      actionId: 'capture-lesson',
+      toolName: 'artifact_validator',
+      suggestedOutcome: EventName.FAILURE,
+      configuredOutcomes: [EventName.HARNESS_RESTART],
+      restartTargetState: 'LessonCapture',
+      sourceEventId: 'restart-1',
+      sourceIdempotencyKey: 'restart-key',
+      terminalFailureEventId: 'terminal-1'
+    });
+    expect(quarantineEvents[0].data.suggestedOutcomeTransitionError).toContain('No transition configured');
+  });
+
+  it('does not quarantine routable terminal failure-limit restart requests', async () => {
+    const clock = createFakeClock();
+    const terminalFailure = {
+      id: 'terminal-routable',
+      type: DomainEventName.PROJECT_TOOL_FAILED,
+      timestamp: '2026-01-02T03:04:01.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bead-routable',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        tool: 'artifact_validator',
+        result: {
+          failureLimit: {
+            terminal: true,
+            suggestedOutcome: EventName.FAILURE
+          }
+        }
+      }
+    };
+    const restartRequest = {
+      id: 'restart-routable',
+      type: DomainEventName.HARNESS_RESTART_REQUESTED,
+      timestamp: '2026-01-02T03:04:02.000Z',
+      sessionId: 's1',
+      data: {
+        beadId: 'bead-routable',
+        stateId: 'Planning',
+        targetState: 'Planning',
+        transitionEvent: EventName.HARNESS_RESTART
+      }
+    };
+    const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId } as any));
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%2' }));
+    const nextState = vi.fn(() => 'Planning');
+
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      {
+        id: 'bead-routable',
+        stateId: 'Planning',
+        score: 5,
+        status: 'Planning',
+        lastActivity: '2026-01-02T03:04:00.000Z'
+      }
+    ]);
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        getAvailableSlots: vi.fn(async () => 1),
+        getActiveTeammateCount: vi.fn(async () => 1),
+        spawnTeammateInTmux
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {},
+            states: {
+              Planning: {
+                actions: [],
+                on: {},
+                transitions: {
+                  [EventName.FAILURE]: 'Planning',
+                  [EventName.HARNESS_RESTART]: 'Planning'
+                }
+              }
+            },
+            tools: [{ name: 'artifact_validator', type: 'command' }]
+          })
+        },
+        flowManager: { nextState },
+        scheduler: {},
+        eventStore: {
+          record: vi.fn(async () => undefined),
+          latestProjectToolFailureLimitEvent: vi.fn(async () => terminalFailure),
+          eventsForBead: vi.fn(async () => [terminalFailure, restartRequest])
+        },
+        beadsPort: fakeBeadsPort({ claim }),
+        worktreePort: fakeWorktreePort({ createWorktree })
+      } as any,
+      { maxSlots: 1, clock }
+    );
+
+    await (supervisor as any).scanAndSpawn();
+
+    expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-routable' }), expect.anything());
+    expect(createWorktree).toHaveBeenCalledWith('bead-routable', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-routable', 'Planning', '/tmp/worktree', expect.anything());
+    expect(nextState).toHaveBeenCalledWith(expect.anything(), EventName.FAILURE, 'Planning');
   });
 
   it('excludes beads in inactive-restart backoff without consuming open capacity', async () => {
