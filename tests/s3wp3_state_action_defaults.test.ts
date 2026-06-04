@@ -24,8 +24,10 @@ import {
   ActionContextMode,
   ActionRunContext,
   ActionType,
+  DomainEventName,
   EventName,
-  HandoverRequiredDefaults
+  HandoverRequiredDefaults,
+  ToolResultStatus
 } from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
@@ -446,5 +448,164 @@ describe('handoverRequired gate — evaluateGateReadiness (s3wp.3 non-inert fix)
     // handoverSatisfied reflects the resolved value (false because handoverRequired=true and no summary)
     // but the gate must NOT push to blockingEvidence because FAILURE is not an advance outcome
     expect(gate.blockingEvidence.some(e => e.includes('handoverRequired'))).toBe(false);
+  });
+});
+
+// ── 0yt5.33: artifact-presence required-tool audit (evaluateGateReadiness) ────
+//
+// Proves the migrated required-tool readiness surface (pre_signal_audit's
+// shared predicate) reports, PER required tool, its artifact-presence gate
+// status sourced from the SAME inputs the coordinator binding gate uses:
+//   - a MISSING required artifact (no tool-result event for this attempt) blocks
+//     with the tool name + "never invoked" reason.
+//   - a PRESENT-but-FAIL required artifact (latest tool-result status REJECTED)
+//     blocks with the tool name + "did not pass" reason.
+// Both are reported in requiredTools (state) AND blockingEvidence (tool + reason).
+
+/**
+ * Services double whose required-tool resolver returns the given tool names and
+ * whose EventStore.latestToolResultEvent returns the supplied per-tool events.
+ * All non-required-tool sub-gates are mocked to PASS so the only variable is the
+ * artifact-presence required-tool dimension.
+ */
+function makeRequiredToolServices(
+  state: SDLCState,
+  toolNames: string[],
+  eventByTool: Record<string, any | undefined>
+) {
+  const config = makeConfig();
+  (config.states as Record<string, SDLCState>)['TestState'] = {
+    ...state,
+    transitions: { SUCCESS: 'completed', FAILURE: 'TestState' }
+  };
+
+  const services = {
+    flowManager: { nextState: vi.fn().mockReturnValue('completed') },
+    eventStore: {
+      latestProjectToolFailureLimitEvent: vi.fn().mockResolvedValue(undefined),
+      projectBead: vi.fn().mockResolvedValue({ checklists: {} }),
+      eventsForBead: vi.fn().mockResolvedValue([
+        {
+          type: 'STATE_RUN_INITIALIZED',
+          data: { beadId: 'bd-test', stateId: 'TestState', actionId: 'a1', promptProvenanceResolutionFailed: true }
+        }
+      ]),
+      // The artifact-presence audit reuses runVerifierGate, which reads the
+      // latest tool-result event per required tool from here.
+      latestToolResultEvent: vi.fn().mockImplementation(
+        (_beadId: string, _stateId: string, _actionId: string, tool: string) =>
+          Promise.resolve(eventByTool[tool])
+      )
+    },
+    requiredToolResolver: { resolve: vi.fn().mockResolvedValue({ toolNames }) },
+    artifactPaths: { resolve: vi.fn().mockResolvedValue({ artifactPaths: {} }) },
+    planWriteSet: {
+      validatePlanContract: vi.fn().mockResolvedValue({ passed: true }),
+      resolve: vi.fn().mockResolvedValue({ allowedWriteSet: [] })
+    },
+    transactionalStateGuard: { validateSuccessReadOnly: vi.fn().mockResolvedValue({ passed: true }) },
+    configLoader: {
+      load: vi.fn().mockResolvedValue(config),
+      getConfigPath: vi.fn().mockReturnValue('/fake/harness.yaml')
+    },
+    projectRoot: '/fake/root'
+  } as any;
+
+  const obs = { getToolResult: vi.fn().mockReturnValue(undefined) } as any;
+  return { services, obs, config };
+}
+
+describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.33)', () => {
+  it('reports a MISSING required artifact AND a present-but-FAIL artifact, each with the tool name + reason', async () => {
+    const MISSING_TOOL = 'missing_tool';
+    const FAIL_TOOL = 'fail_tool';
+
+    const action = makeAction();
+    const state = makeState({ actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: true,
+      handoverSummary: 'A detailed substantive checkpoint summary so the handover gate does not interfere here.'
+    });
+
+    // MISSING_TOOL: no tool-result event (artifact absent / did-not-run).
+    // FAIL_TOOL: a tool-result event whose run status is REJECTED (present but FAIL).
+    const { services, obs, config } = makeRequiredToolServices(
+      state,
+      [MISSING_TOOL, FAIL_TOOL],
+      {
+        [MISSING_TOOL]: undefined,
+        [FAIL_TOOL]: {
+          type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
+          data: {
+            beadId: 'bd-test',
+            stateId: 'TestState',
+            actionId: 'a1',
+            tool: FAIL_TOOL,
+            status: ToolResultStatus.REJECTED,
+            outputFile: '.pi/tool-output/bd-test/TestState/a1/fail_tool/inv/out.json'
+          }
+        }
+      }
+    );
+
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.ready).toBe(false);
+
+    // Per-tool structured state.
+    const missingEntry = gate.requiredTools.find(t => t.name === MISSING_TOOL);
+    const failEntry = gate.requiredTools.find(t => t.name === FAIL_TOOL);
+    expect(missingEntry?.state).toBe('never_invoked');
+    expect(failEntry?.state).toBe('failed');
+
+    // The MISSING artifact block names the tool + carries a reason.
+    const missingBlock = gate.blockingEvidence.find(e => e.includes(MISSING_TOOL));
+    expect(missingBlock).toBeDefined();
+    expect(missingBlock).toContain('never invoked');
+
+    // The present-but-FAIL block names the tool + carries a reason.
+    const failBlock = gate.blockingEvidence.find(e => e.includes(FAIL_TOOL));
+    expect(failBlock).toBeDefined();
+    expect(failBlock).toMatch(/did not pass|REJECTED/);
+
+    // toolAuditFailures (reused verbatim by signal_completion) also names both.
+    expect(gate.toolAuditFailures.some(f => f.includes(MISSING_TOOL))).toBe(true);
+    expect(gate.toolAuditFailures.some(f => f.includes(FAIL_TOOL))).toBe(true);
+  });
+
+  it('reports a present + passing required artifact as passed (no block)', async () => {
+    const OK_TOOL = 'ok_tool';
+    const action = makeAction();
+    const state = makeState({ actions: [action] });
+    const run = makeActiveRun({
+      action,
+      state,
+      checkpointAccepted: true,
+      handoverSummary: 'A detailed substantive checkpoint summary so the handover gate does not interfere here.'
+    });
+
+    // Present, status PASSED, and no registered verify() callback ⇒ passes the
+    // artifact-presence gate (presence satisfied, no semantic verifier to fail).
+    const { services, obs, config } = makeRequiredToolServices(state, [OK_TOOL], {
+      [OK_TOOL]: {
+        type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
+        data: {
+          beadId: 'bd-test',
+          stateId: 'TestState',
+          actionId: 'a1',
+          tool: OK_TOOL,
+          status: ToolResultStatus.PASSED,
+          outputFile: '.pi/tool-output/bd-test/TestState/a1/ok_tool/inv/out.json'
+        }
+      }
+    });
+
+    const gate = await evaluateGateReadiness(run, 'SUCCESS', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.requiredTools.find(t => t.name === OK_TOOL)?.state).toBe('passed');
+    expect(gate.blockingEvidence.some(e => e.includes(OK_TOOL))).toBe(false);
+    expect(gate.ready).toBe(true);
   });
 });

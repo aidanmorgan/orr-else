@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import orrElseExtension, { isHarnessTransientFailure, shouldPersistBlockedBeadStatus } from '../src/extension.js';
+import { verifier, VerifyVerdict } from '../src/contract.js';
 import { FlowManager } from '../src/core/FlowManager.js';
 import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
@@ -718,7 +719,13 @@ states:
     }
   });
 
-  it('rejects SUCCESS when the latest required tool result failed after an earlier pass', async () => {
+  // 0yt5.33: under the ARTIFACT-PRESENCE gate model the required-tool readiness
+  // surface no longer recognizes a tool's self-reported `{status:REJECTED}`
+  // payload — a tool that RAN to completion (presence satisfied) is blocked only
+  // by its registered verify() callback. This test registers a verify() that
+  // FAILs for `evidence_gate` and asserts signal_completion's REJECTED message
+  // names the tool + the verify() reason (the VERIFY_FAIL path of the gate).
+  it('rejects SUCCESS when a required tool ran but its verify() callback FAILs', async () => {
     const previousCwd = process.cwd();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
@@ -728,6 +735,12 @@ states:
       projectRoot: process.env[EnvVars.PROJECT_ROOT],
       worktreePath: process.env[EnvVars.WORKTREE_PATH]
     };
+    // Register a verify() that FAILs for evidence_gate (last-wins; tool-name
+    // scoped so it does not affect other tests that use a different tool name).
+    verifier.register('evidence_gate', () => ({
+      verdict: VerifyVerdict.FAIL,
+      reasons: ['evidence_gate verify(): the produced evidence did not satisfy the gate']
+    }));
     const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-required-tool-latest-')));
     const worktreePath = path.join(tempRoot, 'worktree');
     fs.mkdirSync(worktreePath);
@@ -773,18 +786,24 @@ states:
       const evidenceGate = harness.tools.find(tool => tool.name === 'evidence_gate');
       const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
 
-      const passResult = await evidenceGate.execute('gate-pass', { arguments: { argv: ['pass'] } }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
-      const failResult = await evidenceGate.execute('gate-fail', { arguments: { argv: ['fail'] } }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      // The tool RAN to completion (presence satisfied) — but its registered
+      // verify() returns FAIL, so the artifact-presence gate blocks SUCCESS.
+      const ran = await evidenceGate.execute('gate-run', { arguments: { argv: ['pass'] } }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
       const completion = await signalCompletion.execute('signal-success', {
         outcome: 'SUCCESS',
         summary: 'done'
       }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
 
-      expect(passResult.details.status).toBe('PASSED');
-      expect(failResult.details.status).toBe('REJECTED');
+      expect(ran.details.status).toBe('PASSED');
       expect(completion.details).toContain('REJECTED: Protocol Violation');
-      expect(completion.details).toContain('Tool `evidence_gate` did not pass');
+      // The reject names the tool AND surfaces the verify() reason.
+      expect(completion.details).toContain('evidence_gate');
+      expect(completion.details).toContain('did not satisfy the gate');
     } finally {
+      // Best-effort teardown of the global verify() registration: the contract
+      // registry is last-wins with no removal, so overwrite with a NOT_APPLICABLE
+      // no-op so a leaked evidence_gate verify() cannot affect later tests.
+      verifier.register('evidence_gate', () => ({ verdict: VerifyVerdict.NOT_APPLICABLE, reasons: [] }));
       await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
       await new Promise(resolve => setTimeout(resolve, 25));
       process.chdir(previousCwd);

@@ -21,15 +21,30 @@ import {
   EventName,
   BuiltInToolName,
   Component,
-  WorkerDefaults,
   HandoverRequiredDefaults,
   PromptProvenanceDefaults
 } from '../constants/index.js';
 import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PiIntegration.js';
 import { projectToolFailureLimitSuggestedOutcome } from '../plugins/projectTools.js';
-import { resultIndicatesSuccess, resultIndicatesFailure, isRecord } from './PiEventAdapters.js';
+import { isRecord } from './PiEventAdapters.js';
 import { resolveActionHandoverRequired } from './CoordinatorController.js';
+import {
+  runVerifierGate,
+  VerifierGateBlockKind,
+  type VerifierGateContext
+} from '../core/VerifierGate.js';
 import type { ActiveRun } from './SessionTypes.js';
+
+// 0yt5.33: resultIndicatesSuccess / resultIndicatesFailure are NO LONGER imported
+// here. The pre_signal_audit + evaluateGateReadiness required-tool readiness
+// surface has been migrated to the artifact-presence gate model: it now reuses
+// `runVerifierGate` (the same loop the COORDINATOR-side binding gate runs) over
+// the durable tool-result events + registered verify() callbacks, rather than
+// re-classifying an in-memory tool result with resultIndicates*. Those two
+// helpers are RETAINED in PiEventAdapters for their non-gate consumers
+// (span-status, the SUCCEEDED validation rule, the persisted-result `failed`
+// flag, and sequenced-action failure detection in extension.ts) which are
+// unrelated to the artifact-presence gate.
 
 // 0yt5.16/0yt5.17: the zero-target-scan guard has been REMOVED. It was harness-side
 // result-field recognition (reading the tool result's scanned-target count to
@@ -262,26 +277,148 @@ function requiredToolsForRun(run: ActiveRun): import('../core/domain/StateModels
   return requiredTools.length > 0 ? requiredTools : undefined;
 }
 
+/** What the advisory required-tool audit returns for one evaluation. */
+interface RequiredToolAdvisoryAudit {
+  entries: RequiredToolAuditEntry[];
+  /** Verbatim per-tool failure strings reused by signal_completion's REJECTED message. */
+  toolAuditFailures: string[];
+  /** User-facing blocking strings (tool name + reason) for the audit result. */
+  blockingEvidence: string[];
+}
+
+/**
+ * Advisory required-tool audit on the ARTIFACT-PRESENCE gate model (0yt5.33).
+ *
+ * Re-points the worker-side readiness surface at the SAME inputs the COORDINATOR
+ * binding gate uses (0yt5.20): the latest durable tool-result event per required
+ * tool (outputFile + run status) plus that tool's registered verify() callback.
+ * It reuses `runVerifierGate` directly — the identical loop — so a worker can
+ * PREVIEW the likely coordinator verdict before signaling.
+ *
+ * Per required tool it reports exactly one of three states:
+ *  - present + verdict PASS / NOT_APPLICABLE  → `passed`
+ *  - absent (no tool-result event this attempt) → `never_invoked`
+ *  - present but did-not-run (REJECTED) or verify() FAIL → `failed` (+ reasons)
+ *
+ * READ-ONLY: unlike evaluateCoordinatorGate this does NOT record a
+ * VERIFY_EVALUATED event — the worker advisory has no side effects. The
+ * write-set + declared-artifact PATHS are resolved best-effort (the same as the
+ * coordinator), degrading to empty on any failure; the load-bearing inputs are
+ * the tool-result events + verify() callbacks, never the write-set.
+ */
+async function auditRequiredToolsArtifactPresence(
+  activeRun: ActiveRun,
+  toolNames: string[],
+  services: RuntimeServices
+): Promise<RequiredToolAdvisoryAudit> {
+  const entries: RequiredToolAuditEntry[] = [];
+  const toolAuditFailures: string[] = [];
+  const blockingEvidence: string[] = [];
+
+  if (toolNames.length === 0) {
+    return { entries, toolAuditFailures, blockingEvidence };
+  }
+
+  const actionId = activeRun.action.id;
+
+  // Resolve the paths-only verify() context best-effort (mirrors the coordinator
+  // gate). A failure degrades to an empty map/array rather than blocking.
+  let artifacts: Record<string, string> = {};
+  try {
+    const resolution = await services.artifactPaths.resolve({
+      beadId: activeRun.beadId,
+      stateId: activeRun.stateId,
+      actionId,
+      includeContent: false
+    });
+    artifacts = resolution.artifactPaths ?? {};
+  } catch {
+    artifacts = {};
+  }
+
+  let writeSet: string[] = [];
+  try {
+    const resolution = await services.planWriteSet.resolve({
+      beadId: activeRun.beadId,
+      stateId: activeRun.stateId,
+      worktreePath: activeRun.worktreePath || services.projectRoot,
+      projectRoot: services.projectRoot
+    });
+    writeSet = resolution.allowedWriteSet ?? [];
+  } catch {
+    writeSet = [];
+  }
+
+  const ctx: VerifierGateContext = {
+    beadId: activeRun.beadId,
+    stateId: activeRun.stateId,
+    actionId,
+    writeSet,
+    artifacts
+  };
+
+  const gate = await runVerifierGate(ctx, toolNames, services.eventStore);
+
+  // Index failures by tool for the per-tool state mapping below.
+  const failureByTool = new Map(gate.failures.map(failure => [failure.tool, failure] as const));
+
+  for (const toolName of toolNames) {
+    const failure = failureByTool.get(toolName);
+    if (!failure) {
+      // No failure for this tool ⇒ it ran (presence satisfied) and its verify()
+      // returned PASS / NOT_APPLICABLE (or there was no callback).
+      entries.push({ name: toolName, state: 'passed' });
+      continue;
+    }
+
+    const reasonText = failure.reasons.length > 0 ? failure.reasons.join('; ') : '(no reason reported)';
+
+    if (failure.kind === VerifierGateBlockKind.TOOL_NOT_INVOKED) {
+      // Artifact ABSENT — the tool did not run this attempt.
+      entries.push({ name: toolName, state: 'never_invoked' });
+      toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
+      blockingEvidence.push(`Required tool \`${toolName}\` was never invoked: ${reasonText}`);
+      continue;
+    }
+
+    // Present but FAIL: either the run did not complete (REJECTED) or its
+    // registered verify() returned FAIL. Surface the tool name + reason(s) and,
+    // when present, the verify() verdict.
+    const verdictLabel = failure.verdict ? ` (verdict=${failure.verdict})` : '';
+    entries.push({ name: toolName, state: 'failed' });
+    toolAuditFailures.push(`Tool \`${toolName}\` did not pass${verdictLabel}: ${reasonText}`);
+    blockingEvidence.push(`Required tool \`${toolName}\` did not pass${verdictLabel}: ${reasonText}`);
+  }
+
+  return { entries, toolAuditFailures, blockingEvidence };
+}
+
 /**
  * Shared WORKER-side gate predicate that evaluates whether signal_completion
  * would ACCEPT or REJECT a given outcome. Both signal_completion and
  * pre_signal_audit call this so that audit.ready matches the worker-side accept
  * condition.
  *
- * ADVISORY (pi-experiment-0yt5.20 decision B / AC3): this predicate reads the
- * WORKER's in-memory tool-result map (obs.getToolResult) and is a NON-BINDING
- * pre-check only. It can still inform the worker (fail-fast before signaling),
- * but the BINDING artifact-presence authority is the COORDINATOR-side verifier
- * gate (evaluateCoordinatorGate, run in handleTeammateEvent before
+ * ADVISORY (pi-experiment-0yt5.20 decision B / AC3, 0yt5.33): the required-tool
+ * dimension of this predicate now runs the ARTIFACT-PRESENCE gate — it reuses
+ * `runVerifierGate` over the DURABLE tool-result events + registered verify()
+ * callbacks (the same inputs the coordinator gate uses), so it PREVIEWS the
+ * likely coordinator verdict. It remains a NON-BINDING pre-check: the BINDING
+ * artifact-presence authority is the COORDINATOR-side verifier gate
+ * (evaluateCoordinatorGate, run in handleTeammateEvent before
  * STATE_TRANSITION_APPLIED), which re-evaluates the completing (state, action)
  * against DURABLE state. A worker that passes this local pre-check is still
- * BLOCKED by the coordinator when the durable tool-result event / artifact is
+ * BLOCKED by the coordinator when a required artifact / tool-result event is
  * absent — the coordinator is the sole binding authority.
  *
  * IMPORTANT: This function is read-only. It does NOT record domain events,
  * does NOT auto-restore unapproved paths, does NOT post any signals, and does
  * NOT modify any state. It calls validateSuccessReadOnly (not validateSuccess)
- * on the transactional state guard so that no git restore side effects occur.
+ * on the transactional state guard so that no git restore side effects occur,
+ * and (unlike evaluateCoordinatorGate) records NO VERIFY_EVALUATED event.
+ *
+ * `obs` is retained for signature stability with the prior worker-side surface;
+ * the required-tool audit no longer reads the in-memory tool-result map.
  */
 export async function evaluateGateReadiness(
   activeRun: ActiveRun,
@@ -292,6 +429,7 @@ export async function evaluateGateReadiness(
   config: HarnessConfig,
   isWorker: boolean
 ): Promise<GateReadiness> {
+  void obs;
   const blockingEvidence: string[] = [];
 
   // ── 1. nextState transition validity ─────────────────────────────────────
@@ -357,37 +495,24 @@ export async function evaluateGateReadiness(
         config
       }
     );
-    // Build the structured audit entries and collect tool failures in two
-    // complementary formats:
+    // 0yt5.33: ARTIFACT-PRESENCE required-tool audit (advisory). Re-points the
+    // readiness surface at the SAME inputs the coordinator binding gate uses —
+    // the latest durable tool-result event per required tool (outputFile + run
+    // status) plus the registered verify() callback — instead of re-classifying
+    // an in-memory tool result. Per tool it reports present+verdict (passed) /
+    // absent (never_invoked) / present-but-FAIL (failed, with the tool name +
+    // reason), in two complementary formats:
     //  - toolAuditFailures: verbatim per-tool strings reused by signal_completion
-    //    for its "REJECTED: Protocol Violation" message (original exact wording).
-    //  - blockingEvidence: user-facing strings pushed into the audit result; uses
-    //    a consistent "Required tool `X` was never invoked / did not pass" form
-    //    that the existing pre_signal_audit tests assert against.
-    requiredToolEntries = requiredToolResolution.toolNames.map(toolName => {
-      const result = obs.getToolResult(toolName);
-      let state: 'passed' | 'failed' | 'never_invoked';
-      if (result === undefined) {
-        state = 'never_invoked';
-        toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
-        blockingEvidence.push(`Required tool \`${toolName}\` was never invoked.`);
-      } else if (resultIndicatesSuccess(result)) {
-        state = 'passed';
-      } else if (typeof result === 'string' && (result.startsWith('Error') || result.startsWith('Failed'))) {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` failed: ${result}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      } else if (resultIndicatesFailure(result)) {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` did not pass: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      } else {
-        state = 'failed';
-        toolAuditFailures.push(`Tool \`${toolName}\` did not record a passing result: ${JSON.stringify(result).slice(0, WorkerDefaults.TOOL_AUDIT_PREVIEW_CHARS)}`);
-        blockingEvidence.push(`Required tool \`${toolName}\` did not pass.`);
-      }
-      return { name: toolName, state };
-    });
+    //    for its "REJECTED: Protocol Violation" message.
+    //  - blockingEvidence: user-facing strings (tool name + reason) for the audit.
+    const toolAudit = await auditRequiredToolsArtifactPresence(
+      activeRun,
+      requiredToolResolution.toolNames,
+      services
+    );
+    requiredToolEntries = toolAudit.entries;
+    toolAuditFailures.push(...toolAudit.toolAuditFailures);
+    blockingEvidence.push(...toolAudit.blockingEvidence);
   }
 
   // ── 4. advance-outcome-only: plan write-set preflight (read-only, pure) ────
