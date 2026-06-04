@@ -450,6 +450,7 @@
               "type": { "const": "mcp" },
               "server": { "type": "string" },
               "configPath": { "type": "string" },
+              "serialize": { "type": "boolean", "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)." },
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "argumentDefaults": {

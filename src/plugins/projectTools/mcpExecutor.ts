@@ -29,8 +29,7 @@ import {
   SERIAL_MCP_LOCK_RETRY_MIN_MS,
   SERIAL_MCP_LOCK_SCOPE,
   SERIAL_MCP_LOCK_STALE_MS,
-  SERIAL_MCP_REQUEST_TIMEOUT_MS,
-  SERIAL_MCP_TOOL_NAMES
+  SERIAL_MCP_REQUEST_TIMEOUT_MS
 } from './constants.js';
 import type { McpConfigFile, McpServerDefinition, ProjectToolExecutionContext, SerializedMcpLockMetadata } from './types.js';
 import { projectToolEnvironment } from './contextHelpers.js';
@@ -64,11 +63,11 @@ export class SerializedMcpToolLockTimeoutError extends Error {
 
 // ---- Exported helpers ----
 
-export function shouldSerializeMcpTool(definition: Pick<ProjectMcpToolConfig, 'name' | 'type'>): boolean {
-  return definition.type === 'mcp' && SERIAL_MCP_TOOL_NAMES.has(definition.name);
+export function shouldSerializeMcpTool(definition: Pick<ProjectMcpToolConfig, 'type' | 'serialize'>): boolean {
+  return definition.type === 'mcp' && definition.serialize === true;
 }
 
-export function mcpToolRequestTimeoutMs(definition: Pick<ProjectMcpToolConfig, 'name' | 'type' | 'timeoutMs'>): number {
+export function mcpToolRequestTimeoutMs(definition: Pick<ProjectMcpToolConfig, 'type' | 'timeoutMs' | 'serialize'>): number {
   if (typeof definition.timeoutMs === 'number' && Number.isFinite(definition.timeoutMs) && definition.timeoutMs > 0) {
     return definition.timeoutMs;
   }

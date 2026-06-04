@@ -146,6 +146,13 @@ export interface ProjectMcpToolConfig extends BaseProjectToolConfig {
   server: string;
   // Client-side MCP request timeout for the remote tools/call operation.
   timeoutMs?: number;
+  /**
+   * When true, calls to this MCP tool are serialized across teammates via a
+   * cross-process lock (for stateful/non-concurrent-safe MCP servers). This is a
+   * generic, config-driven replacement for the old hard-coded SERIAL_MCP_TOOL_NAMES
+   * set — the consuming project declares which of its tools need serialization.
+   */
+  serialize?: boolean;
   operations?: Record<string, string> | string[];
   configPath?: string;
   argumentDefaults?: Record<string, Record<string, unknown>>;

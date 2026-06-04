@@ -424,30 +424,33 @@ describe('project tool command arguments', () => {
     expect(isSuccessfulCommandExitCode(tool, 8)).toBe(false);
   });
 
-  it('serializes python-lsp MCP project-tool calls', () => {
-    expect(shouldSerializeMcpTool({ name: 'python_lsp', type: ProjectToolType.MCP })).toBe(true);
-    expect(shouldSerializeMcpTool({ name: 'codemap', type: ProjectToolType.MCP })).toBe(false);
-    expect(shouldSerializeMcpTool({ name: 'python_lsp', type: ProjectToolType.COMMAND })).toBe(false);
+  it('serializes MCP project-tool calls when the config sets serialize:true (generic, name-agnostic)', () => {
+    expect(shouldSerializeMcpTool({ type: ProjectToolType.MCP, serialize: true })).toBe(true);
+    expect(shouldSerializeMcpTool({ type: ProjectToolType.MCP, serialize: false })).toBe(false);
+    expect(shouldSerializeMcpTool({ type: ProjectToolType.MCP })).toBe(false);
+    // serialize only applies to MCP tools, never command tools.
+    expect(shouldSerializeMcpTool({ type: ProjectToolType.COMMAND, serialize: true } as any)).toBe(false);
   });
 
-  it('keeps serialized MCP tool client timeouts above python-lsp server timeouts', () => {
-    const pythonLspTool: ProjectMcpToolConfig = {
-      name: 'python_lsp',
+  it('keeps serialized MCP tool client timeouts above the server timeout (driven by serialize flag)', () => {
+    const serializedTool: ProjectMcpToolConfig = {
+      name: 'stateful_tool',
       type: ProjectToolType.MCP,
-      server: 'python-lsp'
+      server: 'stateful-server',
+      serialize: true
     };
-    const codemapTool: ProjectMcpToolConfig = {
-      name: 'codemap',
+    const concurrentTool: ProjectMcpToolConfig = {
+      name: 'concurrent_tool',
       type: ProjectToolType.MCP,
-      server: 'codemap'
+      server: 'concurrent-server'
     };
 
-    expect(mcpToolRequestTimeoutMs(pythonLspTool)).toBeGreaterThan(120_000);
-    expect(mcpToolRequestTimeoutMs(codemapTool)).toBe(60_000);
-    expect(mcpToolRequestTimeoutMs({ ...pythonLspTool, timeoutMs: 240_000 })).toBe(240_000);
+    expect(mcpToolRequestTimeoutMs(serializedTool)).toBeGreaterThan(120_000);
+    expect(mcpToolRequestTimeoutMs(concurrentTool)).toBe(60_000);
+    expect(mcpToolRequestTimeoutMs({ ...serializedTool, timeoutMs: 240_000 })).toBe(240_000);
   });
 
-  it('returns structured backpressure when python_lsp serialized lock acquisition times out', async () => {
+  it('returns structured backpressure when a serialize:true MCP lock acquisition times out', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_000);
     // Reject ONLY the MCP project-tool lock; let the shared events-JSONL append
     // lock (a .jsonl path) succeed so event recording is unaffected (13op).
@@ -458,9 +461,10 @@ describe('project tool command arguments', () => {
       return (async () => {}) as () => Promise<void>;
     });
     const tool: ProjectMcpToolConfig = {
-      name: 'python_lsp',
+      name: 'stateful_tool',
       type: ProjectToolType.MCP,
-      server: 'python-lsp'
+      server: 'stateful-server',
+      serialize: true
     };
     const context = {
       beadId: 'bd-1',
@@ -475,8 +479,8 @@ describe('project tool command arguments', () => {
     }, {} as any, undefined, new Map());
 
     expect(result).toMatchObject({
-      tool: 'python_lsp',
-      server: 'python-lsp',
+      tool: 'stateful_tool',
+      server: 'stateful-server',
       status: ToolResultStatus.REJECTED,
       failureCategory: ProjectToolFailureCategory.BACKPRESSURE,
       lockTimeout: true,
@@ -486,8 +490,8 @@ describe('project tool command arguments', () => {
     expect((result as any).lockMetadata).toMatchObject({
       scope: 'project',
       waitedMs: 0,
-      tool: 'python_lsp',
-      server: 'python-lsp'
+      tool: 'stateful_tool',
+      server: 'stateful-server'
     });
     expect(JSON.stringify((result as any).lockMetadata)).not.toContain(tempRoot);
     expect(JSON.stringify((result as any).lockMetadata)).not.toContain(tempWorktree);
@@ -495,7 +499,7 @@ describe('project tool command arguments', () => {
     const events = await eventStore.eventsForBead('bd-1');
     const failed = events.find(event =>
       event.type === DomainEventName.PROJECT_TOOL_FAILED &&
-      event.data?.tool === 'python_lsp'
+      event.data?.tool === 'stateful_tool'
     );
     expect(failed?.data?.failureCategory).toBe(ProjectToolFailureCategory.BACKPRESSURE);
     expect(failed?.data?.result).toMatchObject({
@@ -505,8 +509,8 @@ describe('project tool command arguments', () => {
       lockMetadata: {
         scope: 'project',
         waitedMs: 0,
-        tool: 'python_lsp',
-        server: 'python-lsp'
+        tool: 'stateful_tool',
+        server: 'stateful-server'
       },
       nextAction: 'wait_for_in_flight_result'
     });
