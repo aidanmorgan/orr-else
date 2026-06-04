@@ -22,6 +22,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { BuiltInToolName, EnvVars, PiEventName } from '../src/constants/index.js';
 import { skeletons } from '../src/contract.js';
+import { Logger } from '../src/core/Logger.js';
 import orrElseExtension from '../src/extension.js';
 
 function fakePi() {
@@ -72,8 +73,13 @@ states:
   });
 
   afterEach(async () => {
-    // Let the best-effort async event/logger writes settle before tearing down
-    // the temp dir, so a late write does not ENOENT against a removed directory.
+    // The tool's execute records a domain event, which logs through the winston
+    // DailyRotateFile transport (a buffered, async-flushing file stream). If we
+    // rmSync the temp project root while a flush is pending, winston emits an
+    // EventEmitter 'error' (ENOENT on .pi/logs/*.log) — an unhandled error, not a
+    // catchable promise rejection. Close the transport, then let any in-flight
+    // flush settle, before removing the dir. (Mirrors tests/event_store.test.ts.)
+    Logger.close();
     await new Promise(resolve => setTimeout(resolve, 200));
     process.chdir(previousCwd);
     if (prevProjectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
