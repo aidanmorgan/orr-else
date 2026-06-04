@@ -854,7 +854,6 @@ export const ObservabilityDefaults = {
 } as const;
 
 export const OperationalArtifactPath = {
-  LEGACY_STATE_DIR: 'state',
   TEMP_DIR: '.tmp',
   PI_EVENTS_DIR: '.pi/events',
   PI_LOGS_DIR: '.pi/logs',

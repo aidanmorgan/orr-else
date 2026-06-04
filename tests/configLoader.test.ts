@@ -518,24 +518,23 @@ describe('resolveProviderName', () => {
 });
 
 // ---------------------------------------------------------------------------
-// s3wp.24: inlineResultBytes deprecation-warning path
+// qkjm: removed output-cap knobs HARD-REJECT (no warn-and-strip shim)
 // ---------------------------------------------------------------------------
-describe('s3wp.24 inlineResultBytes deprecation-warning migration', () => {
+describe('qkjm removed output-cap knobs hard-reject at config validation', () => {
   let tempRoot: string;
 
   beforeEach(() => {
-    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-s3wp24-'));
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-qkjm-'));
   });
 
   afterEach(() => {
     if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('logs a deprecation warning and strips inlineResultBytes so the config still loads', async () => {
-    // Write a harness.yaml that declares inlineResultBytes on a command tool.
-    // The field was removed in s3wp.24; the ConfigLoader must emit a deprecation
-    // warning (IGNORE-WITH-DEPRECATION-WARNING policy) and strip it so AJV schema
-    // validation does not fail.
+  it('throws (does NOT warn-and-strip) when a tool declares the removed inlineResultBytes knob', () => {
+    // inlineResultBytes was removed in s3wp.24. The former IGNORE-WITH-DEPRECATION-WARNING
+    // shim was deleted in qkjm (v0.1, no users): the field is now an unknown property and
+    // AJV schema validation (tools have additionalProperties:false) must HARD-REJECT it.
     const harnessYaml = `
 settings:
   startState: Planning
@@ -550,38 +549,12 @@ tools:
     type: command
     command: pytest
     inlineResultBytes: 1000
-  - name: codemap
-    type: command
-    command: codemap
-    inlineResultBytes: 2048
 `;
     const configPath = path.join(tempRoot, 'harness.yaml');
     fs.writeFileSync(configPath, harnessYaml);
 
-    // Spy on Logger.warn to capture deprecation messages
-    const { Logger } = await import('../src/core/Logger.js');
-    const warnSpy = vi.spyOn(Logger, 'warn');
-
     const loader = new ConfigLoader(undefined, tempRoot);
-    // Load must succeed (no exception thrown — IGNORE-WITH-DEPRECATION-WARNING)
-    let config: ReturnType<typeof loader.load> | undefined;
-    expect(() => { config = loader.load(configPath); }).not.toThrow();
-    expect(config).toBeDefined();
-
-    // At least one deprecation warning must have been emitted naming 'inlineResultBytes'
-    const warnCalls = warnSpy.mock.calls;
-    const deprecationWarnings = warnCalls.filter(call =>
-      String(call[1] ?? '').includes('inlineResultBytes')
-    );
-    expect(deprecationWarnings.length).toBeGreaterThanOrEqual(2); // one per tool
-
-    // The field must be stripped so it does not appear on the loaded tool configs
-    const toolConfigs = (config as any).tools as any[];
-    for (const tool of toolConfigs) {
-      expect(tool.inlineResultBytes).toBeUndefined();
-    }
-
-    warnSpy.mockRestore();
+    expect(() => loader.load(configPath)).toThrow(/Configuration validation failed/);
   });
 });
 

@@ -5,7 +5,6 @@
 
 export const DEFAULT_MCP_CONFIG_PATH = '{{projectRoot}}/.pi/mcp/config.json';
 export const MCP_SERVER_CONFIG_KEY = 'mcpServers';
-export const LEGACY_MCP_SERVER_CONFIG_KEY = 'mcp-servers';
 export const MCP_SSE_TRANSPORT = 'sse';
 export const COMMAND_STDOUT_FILE_NAME = 'stdout.log';
 export const COMMAND_STDERR_FILE_NAME = 'stderr.log';

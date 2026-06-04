@@ -218,7 +218,7 @@ states:
       const stateLog = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.READ,
         toolCallId: 'read-state-log',
-        input: { path: path.join(tempRoot, 'state/logs/orr-else-2026-05-24.log') }
+        input: { path: path.join(tempRoot, '.pi/logs/orr-else-2026-05-24.log') }
       });
 
       expect(stateLog).toMatchObject({ block: true });
@@ -333,7 +333,7 @@ states:
       const removeState = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.BASH,
         toolCallId: 'remove-state',
-        input: { command: `rm -rf ${path.join(tempRoot, 'state')}` }
+        input: { command: `rm -rf ${path.join(tempRoot, '.pi/events')}` }
       });
 
       expect(removeState).toMatchObject({ block: true });

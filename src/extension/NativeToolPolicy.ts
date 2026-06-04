@@ -61,7 +61,6 @@ export const NATIVE_OPERATIONAL_MUTATION_TOOLS = new Set<string>([
 ]);
 
 export const OPERATIONAL_READ_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
   OperationalArtifactPath.PI_EVENTS_DIR,
   OperationalArtifactPath.PI_LOGS_DIR,
   OperationalArtifactPath.PI_MAILBOX_DIR,
@@ -71,7 +70,6 @@ export const OPERATIONAL_READ_DIRS = [
 ] as const;
 
 export const OPERATIONAL_MUTATION_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
   OperationalArtifactPath.PI_EVENTS_DIR,
   OperationalArtifactPath.PI_LOGS_DIR,
   OperationalArtifactPath.PI_MAILBOX_DIR,
@@ -276,7 +274,7 @@ export function operationalArtifactReadPolicyRejection(event: ToolCallEvent, isW
 
   return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read framework runtime artifacts ` +
     `(\`${OperationalLogPath.PROGRESS_FILE}\`, \`${OperationalLogPath.WORKLOG_DIR}/*${OperationalLogPath.WORKLOG_FILE_SUFFIX}\`, ` +
-    `\`${OperationalArtifactPath.LEGACY_STATE_DIR}/\`, \`${OperationalArtifactPath.PI_EVENTS_DIR}/\`, ` +
+    `\`${OperationalArtifactPath.PI_EVENTS_DIR}/\`, ` +
     `\`${OperationalArtifactPath.PI_LOGS_DIR}/\`, \`${OperationalArtifactPath.PI_MAILBOX_DIR}/\`, ` +
     `\`${OperationalArtifactPath.PI_OTEL_DIR}/\`, \`${OperationalArtifactPath.PI_ARTIFACTS_DIR}/\`, ` +
     `or \`${OperationalArtifactPath.PI_TOOL_OUTPUT_DIR}/\`) ` +

@@ -5111,14 +5111,11 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
     expect(typeof accounting.reductionRatio).toBe('number');
     expect(typeof accounting.rawExceededBudget).toBe('boolean');
     expect(typeof accounting.tool).toBe('string');
-    expect(typeof accounting.resultBudgetBytes).toBe('number');
 
     expect(accounting.rawBytes).toBeGreaterThan(0);
     expect(accounting.modelFacingBytes).toBeGreaterThan(0);
     expect(accounting.tokenEstimate).toBe(Math.ceil(accounting.modelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN));
     expect(accounting.reductionRatio).toBeCloseTo(accounting.modelFacingBytes / accounting.rawBytes, 5);
-    // s3wp.24: resultBudgetBytes is now always 0 (the byte-budget threshold has been removed)
-    expect(accounting.resultBudgetBytes).toBe(0);
     expect(accounting.tool).toBe('run_tests');
   });
 
@@ -5131,11 +5128,9 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
       tokenEstimate: Math.ceil(400 / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
       reductionRatio: 400 / 400,
       rawExceededBudget: 400 > 400,  // false: no compaction occurred
-      tool: 'run_tests',
-      resultBudgetBytes: 0  // obsolete field; always 0 after s3wp.24
+      tool: 'run_tests'
     };
     expect(smallAccounting.rawExceededBudget).toBe(false);
-    expect(smallAccounting.resultBudgetBytes).toBe(0);
   });
 
   it('rawExceededBudget is true when rawBytes exceeds modelFacingBytes (compaction occurred)', () => {
@@ -5148,12 +5143,10 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
       tokenEstimate: Math.ceil(compactModelFacingBytes / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
       reductionRatio: compactModelFacingBytes / largeRawBytes,
       rawExceededBudget: largeRawBytes > compactModelFacingBytes,  // true: significant compaction
-      tool: 'run_checks',
-      resultBudgetBytes: 0  // obsolete field; always 0 after s3wp.24
+      tool: 'run_checks'
     };
     expect(largeAccounting.rawExceededBudget).toBe(true);
     expect(largeAccounting.rawBytes).toBeGreaterThan(largeAccounting.modelFacingBytes);
-    expect(largeAccounting.resultBudgetBytes).toBe(0);
   });
 
   it('ResultAccounting has only the expected compact fields (no large payloads)', () => {
@@ -5164,8 +5157,7 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
       tokenEstimate: Math.ceil(1_200 / TOKEN_ESTIMATE_CHARS_PER_TOKEN),
       reductionRatio: 1_200 / 5_000,
       rawExceededBudget: false,
-      tool: 'run_checks',
-      resultBudgetBytes: 0  // obsolete — always 0 after s3wp.24
+      tool: 'run_checks'
     };
 
     // Accounting must serialize to under 512 bytes (a few numbers + tool name + boolean)
@@ -5176,7 +5168,7 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
     const accountingKeys = Object.keys(accounting);
     const allowedKeys: (keyof ResultAccounting)[] = [
       'rawBytes', 'modelFacingBytes', 'tokenEstimate', 'reductionRatio',
-      'rawExceededBudget', 'tool', 'resultBudgetBytes'
+      'rawExceededBudget', 'tool'
     ];
     for (const key of accountingKeys) {
       expect(allowedKeys).toContain(key);
@@ -5186,14 +5178,14 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
   it('summarizeResultAccounting ranks tools by leakiness (rawExceededBudgetCount then reductionRatio)', () => {
     const records: ResultAccounting[] = [
       // Tool A: well-behaved, no exceedance, good reduction
-      { tool: 'tool_a', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false, resultBudgetBytes: 3_000 },
-      { tool: 'tool_a', rawBytes: 8_000, modelFacingBytes: 900, tokenEstimate: 225, reductionRatio: 0.1125, rawExceededBudget: false, resultBudgetBytes: 3_000 },
+      { tool: 'tool_a', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false },
+      { tool: 'tool_a', rawBytes: 8_000, modelFacingBytes: 900, tokenEstimate: 225, reductionRatio: 0.1125, rawExceededBudget: false },
       // Tool B: leaky — raw exceeds budget on both samples, poor reduction
-      { tool: 'tool_b', rawBytes: 12_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.233, rawExceededBudget: true, resultBudgetBytes: 3_000 },
-      { tool: 'tool_b', rawBytes: 15_000, modelFacingBytes: 2_900, tokenEstimate: 725, reductionRatio: 0.193, rawExceededBudget: true, resultBudgetBytes: 3_000 },
+      { tool: 'tool_b', rawBytes: 12_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.233, rawExceededBudget: true },
+      { tool: 'tool_b', rawBytes: 15_000, modelFacingBytes: 2_900, tokenEstimate: 725, reductionRatio: 0.193, rawExceededBudget: true },
       // Tool C: moderate — 1 raw exceedance out of 2 samples
-      { tool: 'tool_c', rawBytes: 6_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.467, rawExceededBudget: true, resultBudgetBytes: 3_000 },
-      { tool: 'tool_c', rawBytes: 2_000, modelFacingBytes: 1_500, tokenEstimate: 375, reductionRatio: 0.75, rawExceededBudget: false, resultBudgetBytes: 3_000 }
+      { tool: 'tool_c', rawBytes: 6_000, modelFacingBytes: 2_800, tokenEstimate: 700, reductionRatio: 0.467, rawExceededBudget: true },
+      { tool: 'tool_c', rawBytes: 2_000, modelFacingBytes: 1_500, tokenEstimate: 375, reductionRatio: 0.75, rawExceededBudget: false }
     ];
 
     const report = summarizeResultAccounting(records);
@@ -5227,8 +5219,8 @@ describe('per-tool-result token accounting + summarizeResultAccounting (9g8z)', 
   it('summarizeResultAccounting ranks by reductionRatio when rawExceededBudgetCount are equal', () => {
     const records: ResultAccounting[] = [
       // Two tools with 0 raw exceedances — rank by avgReductionRatio descending (worse = higher ratio)
-      { tool: 'leaky', rawBytes: 10_000, modelFacingBytes: 8_000, tokenEstimate: 2_000, reductionRatio: 0.8, rawExceededBudget: false, resultBudgetBytes: 10_000 },
-      { tool: 'efficient', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false, resultBudgetBytes: 10_000 }
+      { tool: 'leaky', rawBytes: 10_000, modelFacingBytes: 8_000, tokenEstimate: 2_000, reductionRatio: 0.8, rawExceededBudget: false },
+      { tool: 'efficient', rawBytes: 10_000, modelFacingBytes: 1_000, tokenEstimate: 250, reductionRatio: 0.1, rawExceededBudget: false }
     ];
 
     const report = summarizeResultAccounting(records);

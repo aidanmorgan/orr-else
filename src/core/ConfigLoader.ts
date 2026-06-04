@@ -163,11 +163,6 @@ export class ConfigLoader {
 
       const fileContent = fs.readFileSync(configPath, 'utf8');
       const parsed = yaml.parse(fileContent) || {};
-      // s3wp.24: strip deprecated inline byte-cap fields before schema validation.
-      // Configs that still declare inlineResultBytes (or sibling caps) are handled
-      // with a deprecation warning rather than a hard error so existing configs keep
-      // loading without modification.  The field is silently ignored at runtime.
-      this.warnAndStripDeprecatedOutputCapFields(parsed, configPath);
       // s3wp.10: expand tsProjectTool shorthand before merging with defaults
       // so that the merged+validated config only ever sees type: command tools.
       this.expandTsProjectToolsInRaw(parsed);
@@ -323,45 +318,6 @@ export class ConfigLoader {
       }
 
       toolsList[i] = expanded;
-    }
-  }
-
-  /**
-   * s3wp.24 migration: check the raw parsed config for deprecated output-cap fields
-   * (inlineResultBytes and any sibling inline byte-cap knobs removed in s3wp.24).
-   * Logs a deprecation warning naming each found field, then strips the field from
-   * the config object in-place so AJV schema validation does not reject the file.
-   *
-   * Migration choice: IGNORE-WITH-DEPRECATION-WARNING.
-   * - The field is silently removed; the harness runs as if it was never set.
-   * - A warning is logged that names the field and the tool(s) where it appeared.
-   * - No exception is thrown, so existing configs keep loading without modification.
-   */
-  private warnAndStripDeprecatedOutputCapFields(parsed: unknown, configPath: string): void {
-    // Deprecated fields that were removed in s3wp.24.
-    const DEPRECATED_OUTPUT_CAP_FIELDS = ['inlineResultBytes'];
-
-    if (typeof parsed !== 'object' || parsed === null) return;
-    const record = parsed as Record<string, unknown>;
-    const toolsList = record['tools'];
-    if (!Array.isArray(toolsList)) return;
-
-    for (const tool of toolsList) {
-      if (typeof tool !== 'object' || tool === null) continue;
-      const toolRecord = tool as Record<string, unknown>;
-      const toolName = typeof toolRecord['name'] === 'string' ? toolRecord['name'] : '<unknown>';
-      for (const field of DEPRECATED_OUTPUT_CAP_FIELDS) {
-        if (toolRecord[field] !== undefined) {
-          Logger.warn(Component.CONFIG,
-            `Deprecated config field "${field}" in tool "${toolName}" (${configPath}). ` +
-            `This field has been removed in s3wp.24 — the harness no longer caps model-facing ` +
-            `output by a byte budget. The field is ignored and the config will load normally. ` +
-            `Remove "${field}" from your harness.yaml to suppress this warning.`,
-            { tool: toolName, field, configPath }
-          );
-          delete toolRecord[field];
-        }
-      }
     }
   }
 

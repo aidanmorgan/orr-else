@@ -33,7 +33,6 @@ export interface McpServerDefinition {
 
 export interface McpConfigFile {
   mcpServers?: Record<string, McpServerDefinition>;
-  'mcp-servers'?: Record<string, McpServerDefinition>;
 }
 
 export interface SerializedMcpLockMetadata {

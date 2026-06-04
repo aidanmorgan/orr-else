@@ -19,7 +19,6 @@ import { Logger } from '../../core/Logger.js';
 import { Component, Defaults, ToolResultStatus } from '../../constants/index.js';
 import {
   DEFAULT_MCP_CONFIG_PATH,
-  LEGACY_MCP_SERVER_CONFIG_KEY,
   MCP_RAW_FILE_NAME,
   MCP_SERVER_CONFIG_KEY,
   MCP_SSE_TRANSPORT,
@@ -200,7 +199,7 @@ async function loadMcpConfig(configPath: string): Promise<McpConfigFile> {
 }
 
 function getMcpServers(config: McpConfigFile): Record<string, McpServerDefinition> {
-  return config[MCP_SERVER_CONFIG_KEY] || config[LEGACY_MCP_SERVER_CONFIG_KEY] || {};
+  return config[MCP_SERVER_CONFIG_KEY] || {};
 }
 
 function resolveConfiguredPath(value: string, templateContext: import('../../core/PiIntegration.js').TemplateContext): string {

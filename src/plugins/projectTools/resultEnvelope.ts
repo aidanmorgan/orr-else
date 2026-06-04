@@ -1977,9 +1977,6 @@ export interface ResultAccounting {
   rawExceededBudget: boolean;
   /** Tool name for aggregation. */
   tool: string;
-  /** Kept for backward compatibility with existing event-store readers; always 0
-   *  after s3wp.24 (the byte-budget threshold has been removed). */
-  resultBudgetBytes: number;
 }
 
 export interface ResultAccountingLeakReport {
@@ -2063,8 +2060,7 @@ function computeResultAccounting(
     tokenEstimate,
     reductionRatio,
     rawExceededBudget,
-    tool: toolName,
-    resultBudgetBytes: 0 // obsolete — kept for backward compat with event-store readers
+    tool: toolName
   };
 }
 

@@ -50,7 +50,6 @@ const NATIVE_PATH_INPUT_KEYS = [
   'target_file'
 ] as const;
 const OPERATIONAL_MUTATION_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
   OperationalArtifactPath.TEMP_DIR,
   OperationalArtifactPath.PI_EVENTS_DIR,
   OperationalArtifactPath.PI_LOGS_DIR,
@@ -60,7 +59,6 @@ const OPERATIONAL_MUTATION_DIRS = [
   OperationalArtifactPath.PI_TOOL_OUTPUT_DIR
 ] as const;
 const OPERATIONAL_READ_DIRS = [
-  OperationalArtifactPath.LEGACY_STATE_DIR,
   OperationalArtifactPath.PI_EVENTS_DIR,
   OperationalArtifactPath.PI_LOGS_DIR,
   OperationalArtifactPath.PI_MAILBOX_DIR,
