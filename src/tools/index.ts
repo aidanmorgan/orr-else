@@ -14,6 +14,7 @@
  * tool's verify() under the SAME key the tool reports as its `tool` name.
  */
 import { verifier } from '../contract.js';
+import { ARTIFACT_VALIDATOR_TOOL, artifactValidatorVerify } from './artifact_validator.js';
 import { GIT_HISTORY_TOOL_NAME, gitHistoryVerify } from './git_history.js';
 
 /**
@@ -22,6 +23,7 @@ import { GIT_HISTORY_TOOL_NAME, gitHistoryVerify } from './git_history.js';
  */
 export function registerBuiltInVerifiers(): void {
   verifier.register(GIT_HISTORY_TOOL_NAME, gitHistoryVerify);
+  verifier.register(ARTIFACT_VALIDATOR_TOOL, artifactValidatorVerify);
 }
 
 // Self-register at module load so merely importing the harness built-in tools

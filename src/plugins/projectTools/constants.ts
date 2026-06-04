@@ -172,7 +172,10 @@ export const TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 // now always reflects whether the raw payload was non-trivial (>0 bytes) relative
 // to the model-facing result, without a fixed byte cap.  See resultEnvelope.ts.
 
-export const UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS = new Set<string>([
+// Output-control flags rejected for ALL project command tools: project-tool
+// output is already bounded and archived by the harness, so a model-supplied
+// harness output-control flag has no effect (generic, not per-tool).
+export const UNSUPPORTED_PROJECT_TOOL_OUTPUT_CONTROL_FLAGS = new Set<string>([
   '--output-limit'
 ]);
 

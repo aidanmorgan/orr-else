@@ -9,7 +9,6 @@ import { resolveTemplateString } from '../../core/PiIntegration.js';
 import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
 import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../../constants/index.js';
 import {
-  ARTIFACT_VALIDATOR_TOOL_NAME,
   COMMAND_DIAGNOSTIC_LINE_PATTERN,
   COMMAND_DIAGNOSTIC_MAX_MATCH_LINES,
   COMMAND_DIAGNOSTIC_SECTION_SUFFIX,
@@ -27,7 +26,7 @@ import {
   StructuredPayloadSummaryOutputKey,
   StructuredPayloadIssueKey,
   StructuredPayloadToolResultKey,
-  UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS,
+  UNSUPPORTED_PROJECT_TOOL_OUTPUT_CONTROL_FLAGS,
   PROJECT_TOOL_CONTROL_PARAMETERS,
   SCAN_TARGET_COUNT_KEYS,
   SCAN_TARGET_COLLECTION_KEYS,
@@ -408,29 +407,32 @@ function commandArgumentFlagName(argument: string): string | undefined {
   return token.replace(/=.*$/, '');
 }
 
-function unsupportedArtifactValidatorOutputControlFlag(definition: ProjectCommandToolConfig, suppliedArgs: string[]): string | undefined {
-  if (definition.name !== ARTIFACT_VALIDATOR_TOOL_NAME) return undefined;
+function unsupportedProjectToolOutputControlFlag(_definition: ProjectCommandToolConfig, suppliedArgs: string[]): string | undefined {
+  // Output-control flags are unsupported for ALL project command tools:
+  // project-tool output is already bounded and archived by the harness, so a
+  // model-supplied harness output-control flag has no effect and is rejected
+  // generically (no per-tool name match).
   for (const argument of suppliedArgs) {
     const flag = commandArgumentFlagName(argument);
-    if (flag && UNSUPPORTED_ARTIFACT_VALIDATOR_OUTPUT_CONTROL_FLAGS.has(flag)) return flag;
+    if (flag && UNSUPPORTED_PROJECT_TOOL_OUTPUT_CONTROL_FLAGS.has(flag)) return flag;
   }
   return undefined;
 }
 
-export function unsupportedArtifactValidatorOutputControlResult(
+export function unsupportedProjectToolOutputControlResult(
   definition: ProjectCommandToolConfig,
   flag: string
 ): Record<string, unknown> {
   return {
     tool: definition.name,
     status: ToolResultStatus.REJECTED,
-    message: `Project tool ${definition.name} does not support output-control flag ${flag}. Project-tool output is already bounded and archived by the harness; do not pass harness output-control flags to artifact_validator.`,
+    message: `Project tool ${definition.name} does not support output-control flag ${flag}. Project-tool output is already bounded and archived by the harness; do not pass harness output-control flags to project tools.`,
     unsupportedOutputControlFlag: flag,
     [ProjectToolResultKey.FAILURE_CATEGORY]: ProjectToolFailureCategory.TOOL_INPUT_ERROR,
     [ProjectToolResultKey.REMEDIATION]: [
-      'Use structuredResult, compactSummary, diagnosticFacts, rejectedChecks, and the stdoutFile/stderrFile references from the artifact_validator response instead of adding output-control flags.',
+      `Use structuredResult, compactSummary, diagnosticFacts, rejectedChecks, and the stdoutFile/stderrFile references from the ${definition.name} response instead of adding output-control flags.`,
       'Use supported harness retrieval patterns for archived output; stdoutFile/stderrFile are harness file references, not content to inline.',
-      'Rerun artifact_validator only with supported validator arguments or narrower artifact inputs.'
+      `Rerun ${definition.name} only with supported tool arguments or narrower inputs.`
     ]
   };
 }
@@ -664,9 +666,9 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
   const stderrFile = path.join(context.outputDir, COMMAND_STDERR_FILE_NAME);
   const suppliedArgs = normalizeCommandArguments(args?.[ProjectToolParameter.ARGUMENTS])
     .map(arg => resolveTemplateString(arg, templateContext));
-  const unsupportedOutputControlFlag = unsupportedArtifactValidatorOutputControlFlag(definition, suppliedArgs);
+  const unsupportedOutputControlFlag = unsupportedProjectToolOutputControlFlag(definition, suppliedArgs);
   if (unsupportedOutputControlFlag) {
-    return unsupportedArtifactValidatorOutputControlResult(definition, unsupportedOutputControlFlag);
+    return unsupportedProjectToolOutputControlResult(definition, unsupportedOutputControlFlag);
   }
 
   const scopedArgs = definition.allowArgs
