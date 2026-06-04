@@ -1636,7 +1636,7 @@ export class Supervisor {
    * cleanup failure must not disrupt the supervisor poll loop.
    *
    * Supplies the live bead ID set from the teammate spawner so that the
-   * .tmp/tool-calls per-bead directories of running beads are never deleted.
+   * .pi/tool-output per-bead directories of running beads are never deleted.
    */
   private async runRetentionCleanupIfDue(): Promise<void> {
     const now = this.clock.now();

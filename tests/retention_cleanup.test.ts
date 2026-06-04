@@ -181,10 +181,10 @@ describe('RetentionCleanup', () => {
     expect(fs.existsSync(newFile)).toBe(true);
   });
 
-  it('removes old directory trees in .tmp (non-tool-calls entries)', async () => {
-    // Place the old dir directly under .tmp (not inside tool-calls), so the
-    // generic top-level age scan applies.  The tool-calls subdir requires a live
-    // bead supplier (tested separately in the live-bead protection suite).
+  it('removes old directory trees in .tmp', async () => {
+    // Place the old dir directly under .tmp.  The .pi/tool-output per-bead area
+    // requires a live bead supplier (tested separately in the live-bead
+    // protection suite) and is no longer a subdir of .tmp (0yt5.27).
     const oldDir = path.join(tmpRoot, '.tmp', 'scratch-old');
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
     const nestedFile = path.join(oldDir, 'some-output.json');
@@ -199,8 +199,8 @@ describe('RetentionCleanup', () => {
     expect(result.totalDirsRemoved).toBeGreaterThanOrEqual(1);
   });
 
-  it('removes old tool-calls bead dirs in .tmp when a live-bead supplier is provided with an empty live set', async () => {
-    const beadDir = path.join(tmpRoot, '.tmp', 'tool-calls', 'bead-1');
+  it('removes old tool-output bead dirs in .pi/tool-output when a live-bead supplier is provided with an empty live set', async () => {
+    const beadDir = path.join(tmpRoot, '.pi', 'tool-output', 'bead-1');
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
     const nestedFile = path.join(beadDir, 'state', 'output.json');
     writeFileWithMtime(nestedFile, '{}', oldMtime);
@@ -446,10 +446,10 @@ describe('RetentionCleanup symlink confinement', () => {
 });
 
 // ---------------------------------------------------------------------------
-// FIX 2: Live-bead protection for .tmp/tool-calls
+// FIX 2: Live-bead protection for .pi/tool-output (0yt5.27)
 // ---------------------------------------------------------------------------
 
-describe('RetentionCleanup tool-calls live-bead protection', () => {
+describe('RetentionCleanup tool-output live-bead protection', () => {
   let tmpRoot: string;
 
   beforeEach(() => {
@@ -460,9 +460,9 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
-  it('preserves a tool-calls bead dir whose beadId is in the live set even when mtime is old', async () => {
+  it('preserves a tool-output bead dir whose beadId is in the live set even when mtime is old', async () => {
     const liveBeadId = 'bead-live-001';
-    const liveBeadDir = path.join(tmpRoot, '.tmp', 'tool-calls', liveBeadId);
+    const liveBeadDir = path.join(tmpRoot, '.pi', 'tool-output', liveBeadId);
     const liveFile = path.join(liveBeadDir, 'Planning', 'tool-output.json');
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
     writeFileWithMtime(liveFile, '{}', oldMtime);
@@ -483,9 +483,9 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
     expect(fs.existsSync(liveFile)).toBe(true);
   });
 
-  it('removes a tool-calls bead dir whose beadId is NOT in the live set when mtime is old', async () => {
+  it('removes a tool-output bead dir whose beadId is NOT in the live set when mtime is old', async () => {
     const deadBeadId = 'bead-dead-002';
-    const deadBeadDir = path.join(tmpRoot, '.tmp', 'tool-calls', deadBeadId);
+    const deadBeadDir = path.join(tmpRoot, '.pi', 'tool-output', deadBeadId);
     const deadFile = path.join(deadBeadDir, 'Planning', 'tool-output.json');
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
     writeFileWithMtime(deadFile, '{}', oldMtime);
@@ -505,16 +505,16 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
     expect(result.totalDirsRemoved).toBeGreaterThanOrEqual(1);
   });
 
-  it('preserves a live bead dir while removing a dead bead dir in the same tool-calls area', async () => {
+  it('preserves a live bead dir while removing a dead bead dir in the same tool-output area', async () => {
     const liveBeadId = 'bead-live-003';
     const deadBeadId = 'bead-dead-003';
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
 
-    const liveBeadDir = path.join(tmpRoot, '.tmp', 'tool-calls', liveBeadId);
+    const liveBeadDir = path.join(tmpRoot, '.pi', 'tool-output', liveBeadId);
     writeFileWithMtime(path.join(liveBeadDir, 'out.json'), '{}', oldMtime);
     makeDirWithMtime(liveBeadDir, oldMtime);
 
-    const deadBeadDir = path.join(tmpRoot, '.tmp', 'tool-calls', deadBeadId);
+    const deadBeadDir = path.join(tmpRoot, '.pi', 'tool-output', deadBeadId);
     writeFileWithMtime(path.join(deadBeadDir, 'out.json'), '{}', oldMtime);
     makeDirWithMtime(deadBeadDir, oldMtime);
 
@@ -532,11 +532,11 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
     expect(fs.existsSync(deadBeadDir)).toBe(false);
   });
 
-  it('does NOT remove the tool-calls parent directory itself', async () => {
-    const toolCallsRoot = path.join(tmpRoot, '.tmp', 'tool-calls');
-    fs.mkdirSync(toolCallsRoot, { recursive: true });
+  it('does NOT remove the tool-output parent directory itself', async () => {
+    const toolOutputRoot = path.join(tmpRoot, '.pi', 'tool-output');
+    fs.mkdirSync(toolOutputRoot, { recursive: true });
     const oldMtimeSec = (NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS) / 1000;
-    fs.utimesSync(toolCallsRoot, oldMtimeSec, oldMtimeSec);
+    fs.utimesSync(toolOutputRoot, oldMtimeSec, oldMtimeSec);
 
     const es = fakeEventStore();
     const cleanup = new RetentionCleanup(
@@ -548,13 +548,13 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
     );
     await cleanup.run();
 
-    // The tool-calls parent dir must never be deleted by retention cleanup.
-    expect(fs.existsSync(toolCallsRoot)).toBe(true);
+    // The tool-output parent dir must never be deleted by retention cleanup.
+    expect(fs.existsSync(toolOutputRoot)).toBe(true);
   });
 
-  it('skips the entire tool-calls area when liveBeadIds supplier throws (fail-safe)', async () => {
+  it('skips the entire tool-output area when liveBeadIds supplier throws (fail-safe)', async () => {
     const beadId = 'bead-would-be-deleted';
-    const beadDir = path.join(tmpRoot, '.tmp', 'tool-calls', beadId);
+    const beadDir = path.join(tmpRoot, '.pi', 'tool-output', beadId);
     const beadFile = path.join(beadDir, 'out.json');
     const oldMtime = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
     writeFileWithMtime(beadFile, '{}', oldMtime);
@@ -569,7 +569,7 @@ describe('RetentionCleanup tool-calls live-bead protection', () => {
       () => { throw new Error('beadsPort unavailable'); }
     );
 
-    // Must not throw; fail-safe skips tool-calls area entirely.
+    // Must not throw; fail-safe skips tool-output area entirely.
     const result = await cleanup.run();
     expect(result).toMatchObject({ totalErrors: expect.any(Number) });
 

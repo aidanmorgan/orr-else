@@ -2627,7 +2627,7 @@ process.exit(sawOther ? 0 : 1);
     // s3wp.25: stdout is in stdoutFile, not inline on the model-facing result
     const stdoutContent = fs.readFileSync(result.stdoutFile!, 'utf8');
     const payload = JSON.parse(stdoutContent);
-    const expectedCallDir = path.join(tempRoot, '.tmp/tool-calls/bd-1/Planning/analyze/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
+    const expectedCallDir = path.join(tempRoot, '.pi/tool-output/bd-1/Planning/analyze/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
     const expectedOutputDir = path.join(expectedCallDir, 'output');
 
     expect(payload[EnvProbeField.CWD]).toBe(tempWorktree);
@@ -2657,7 +2657,7 @@ process.exit(sawOther ? 0 : 1);
     // s3wp.25: stdout is in stdoutFile
     const stdoutContent2 = fs.readFileSync(result.stdoutFile!, 'utf8');
     const payload = JSON.parse(stdoutContent2);
-    const expectedCallDir = path.join(tempRoot, '.tmp/tool-calls/bd-2/AdversarialPostReview/quality/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
+    const expectedCallDir = path.join(tempRoot, '.pi/tool-output/bd-2/AdversarialPostReview/quality/env_probe', payload[EnvProbeField.TOOL_INVOCATION_ID]);
     const expectedOutputDir = path.join(expectedCallDir, 'output');
 
     expect(payload[EnvProbeField.CWD]).toBe(tempRoot);
@@ -2691,8 +2691,8 @@ process.exit(sawOther ? 0 : 1);
     expect(firstPayload[EnvProbeField.TOOL_INVOCATION_ID]).not.toBe(secondPayload[EnvProbeField.TOOL_INVOCATION_ID]);
     expect(firstPayload[EnvProbeField.CALL_DIR]).not.toBe(secondPayload[EnvProbeField.CALL_DIR]);
     expect(firstPayload[EnvProbeField.OUTPUT_FILE]).not.toBe(secondPayload[EnvProbeField.OUTPUT_FILE]);
-    expect(firstPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.tmp/tool-calls/bd-3/Planning/repeat/env_probe'));
-    expect(secondPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.tmp/tool-calls/bd-3/Planning/repeat/env_probe'));
+    expect(firstPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.pi/tool-output/bd-3/Planning/repeat/env_probe'));
+    expect(secondPayload[EnvProbeField.OUTPUT_FILE]).toContain(path.join(tempRoot, '.pi/tool-output/bd-3/Planning/repeat/env_probe'));
   });
 });
 
@@ -4361,7 +4361,7 @@ describe('commandFailureSummarizer', () => {
 // Bounded-storage / scratch-cleanup tests
 //
 // ROOT CAUSE recap: the per-invocation CALL_DIR_TEMPLATE allocates a unique
-// dir at .tmp/tool-calls/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}.
+// dir at .pi/tool-output/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}.
 // The harness sets TMPDIR/TMP/TEMP → <callDir>/tmp/ so child processes write
 // caches there.  Before this fix, that tmpDir was never cleaned, so repeated
 // reference_docs calls accumulated one full uv-cache tree per invocation.
@@ -4447,7 +4447,7 @@ process.stdout.write(JSON.stringify(result));
     await new Promise(resolve => setTimeout(resolve, 200));
 
     // The tmpDir (scratch) should have been removed.
-    const toolCallRoot = path.join(tempRoot, '.tmp', 'tool-calls');
+    const toolCallRoot = path.join(tempRoot, '.pi', 'tool-output');
     const callDirs = fs.readdirSync(path.join(toolCallRoot, 'bd-scratch', 'Impl', 'build', 'cache_sim'));
     // There should be at most one callDir (the one we just ran).
     expect(callDirs.length).toBeGreaterThanOrEqual(1);
@@ -4480,7 +4480,7 @@ process.stdout.write(JSON.stringify(result));
     await new Promise(resolve => setTimeout(resolve, 400));
 
     const scratchToolDir = path.join(
-      tempRoot, '.tmp', 'tool-calls', 'bd-scratch', 'Impl', 'build', 'cache_sim'
+      tempRoot, '.pi', 'tool-output', 'bd-scratch', 'Impl', 'build', 'cache_sim'
     );
     const callDirs = fs.readdirSync(scratchToolDir);
     // All three invocations ran, each gets its own callDir keyed by toolInvocationId.
@@ -4526,7 +4526,7 @@ process.stdout.write(JSON.stringify(result));
     // Both invocations should have their output/ JSON intact.
     for (const action of ['parallel-a', 'parallel-b']) {
       const scratchToolDir = path.join(
-        tempRoot, '.tmp', 'tool-calls', 'bd-scratch', 'Impl', action, 'cache_sim'
+        tempRoot, '.pi', 'tool-output', 'bd-scratch', 'Impl', action, 'cache_sim'
       );
       const callDirs = fs.readdirSync(scratchToolDir);
       expect(callDirs.length).toBe(1);

@@ -66,7 +66,11 @@ const OPERATIONAL_READ_DIRS = [
   OperationalArtifactPath.PI_ARTIFACTS_DIR,
   OperationalArtifactPath.PI_TOOL_OUTPUT_DIR
 ] as const;
-const PROJECT_TOOL_CALL_OUTPUT_DIR = `${OperationalArtifactPath.TEMP_DIR}/tool-calls`;
+// 0yt5.27: per-invocation tool-output archives moved from .tmp/tool-calls to the
+// single PROJECT-scoped .pi/tool-output location. The worker still may not read
+// these archives directly via the native READ tool (this guidance fires first,
+// before the generic operational-read path); the coordinator-only gate reads them.
+const PROJECT_TOOL_CALL_OUTPUT_DIR = OperationalArtifactPath.PI_TOOL_OUTPUT_DIR;
 const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
   `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read project-tool output archives directly. ` +
   'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';

@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { ProjectToolDefaults } from '../constants/index.js';
+import { OperationalArtifactPath, ProjectToolDefaults } from '../constants/index.js';
 import { resolveTemplateString, type TemplateContext } from './PiIntegration.js';
 
 export interface ToolCallPathAllocation {
@@ -22,8 +22,15 @@ function pathSegment(value: string | undefined, fallback: string): string {
   return sanitized && sanitized !== '.' && sanitized !== '..' ? sanitized : fallback;
 }
 
+/**
+ * Root of the single PROJECT-scoped tool-output archive (0yt5.27).
+ * Resolved against PROJECT_ROOT (the caller passes the PROJECT_ROOT-derived
+ * `projectRoot`), NOT WORKTREE_PATH: tool outputs are SHARED/project-scoped,
+ * keyed by beadId, so the coordinator-only gate can read worker-produced
+ * outputs and concurrent worktrees never collide.
+ */
 function toolCallRoot(projectRoot: string): string {
-  return path.resolve(projectRoot, '.tmp', 'tool-calls');
+  return path.resolve(projectRoot, ...OperationalArtifactPath.PI_TOOL_OUTPUT_DIR.split('/'));
 }
 
 function isInsidePath(root: string, candidate: string): boolean {

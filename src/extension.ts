@@ -34,6 +34,8 @@ import {
   registerConfiguredProjectTools
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME, ARTIFACT_VALIDATOR_TOOL_NAME } from './plugins/projectTools/constants.js';
+import type { ToolResultBase } from './contract.js';
+import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer } from './core/SignalingServer.js';
@@ -604,51 +606,51 @@ async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn:
 // native Pi tools is therefore handled at the event-observer level (pi tool
 // observer), not here.  This note documents explicitly that the observe-only path
 // cannot use the wrapPluginTool hook.
+// 0yt5.27: the plugin path now persists its raw result to the SAME single
+// PROJECT-scoped tool-output location used by command/MCP tools — via the shared
+// ToolCallPathFactory — and returns the typed ToolResultBase so wrapPluginTool can
+// record outputFile/status in the tool-result event (no throwaway id, no
+// double-persist across .pi/tool-output AND .tmp/tool-calls).
 async function persistPluginToolRawResult(
+  factory: ToolCallPathFactory,
   toolName: string,
   beadId: string | undefined,
   stateId: string | undefined,
   actionId: string | undefined,
   projectRoot: string,
-  payload: unknown
-): Promise<void> {
+  payload: unknown,
+  status: ToolResultBase['status'],
+  failureCategory?: ToolResultBase['failureCategory']
+): Promise<ToolResultBase> {
+  const invocationId = uuidv7();
+  let serialized: string;
   try {
-    const sanitize = (v: string | undefined, fallback: string): string => {
-      const s = ((v || fallback)
-        .replace(ProjectToolDefaults.UNSAFE_PATH_SEGMENT_PATTERN, '-')
-        .replace(/^-+|-+$/g, '') || fallback);
-      return (s === '.' || s === '..') ? fallback : s;
-    };
-    const invocationId = uuidv7();
-    const templateContext = {
-      beadId: sanitize(beadId, ProjectToolDefaults.UNASSIGNED_BEAD_ID),
-      stateId: sanitize(stateId, ProjectToolDefaults.UNSPECIFIED_STATE_ID),
-      actionId: sanitize(actionId, ProjectToolDefaults.UNSPECIFIED_ACTION_ID),
-      toolName: sanitize(toolName, toolName),
-      toolInvocationId: invocationId,
-      projectRoot,
-      worktreePath: projectRoot
-    };
-    // Resolve the call-dir template the same way ToolCallPathFactory does.
-    const callDirTemplate = ProjectToolDefaults.CALL_DIR_TEMPLATE;
-    const callDirRel = callDirTemplate
-      .replace(/\{\{beadId\}\}/g, templateContext.beadId)
-      .replace(/\{\{stateId\}\}/g, templateContext.stateId)
-      .replace(/\{\{actionId\}\}/g, templateContext.actionId)
-      .replace(/\{\{toolName\}\}/g, templateContext.toolName)
-      .replace(/\{\{toolInvocationId\}\}/g, templateContext.toolInvocationId);
-    const outputDir = path.join(projectRoot, callDirRel, ProjectToolDefaults.OUTPUT_DIR_NAME);
-    await fs.promises.mkdir(outputDir, { recursive: true });
+    serialized = JSON.stringify(payload);
+  } catch {
+    serialized = JSON.stringify({ serializationError: 'payload could not be JSON-serialized', toolName });
+  }
+  const rawBytes = Buffer.byteLength(serialized, 'utf8');
 
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(payload);
-    } catch {
-      serialized = JSON.stringify({ serializationError: 'payload could not be JSON-serialized', toolName });
-    }
-    const rawFile = path.join(outputDir, PLUGIN_RAW_FILE_NAME);
+  // Allocate the single canonical per-invocation path under
+  // {PROJECT_ROOT}/.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}.
+  // The raw file lives in the allocation's output dir as plugin-raw.json so the
+  // coordinator gate can locate it deterministically.
+  const allocation = factory.allocate({
+    beadId,
+    stateId,
+    actionId,
+    toolName,
+    toolInvocationId: invocationId,
+    projectRoot,
+    // Tool-output is PROJECT-scoped; worktreePath is unused by the factory's
+    // path math but TemplateContext requires it.
+    worktreePath: projectRoot
+  });
+  const rawFile = path.join(allocation.outputDir, PLUGIN_RAW_FILE_NAME);
+
+  try {
+    await fs.promises.mkdir(allocation.outputDir, { recursive: true });
     await fs.promises.writeFile(rawFile, serialized);
-    const rawBytes = Buffer.byteLength(serialized, 'utf8');
     const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
     Logger.debug(Component.PROJECT_TOOLS, 'Persisted plugin tool raw result', {
       tool: toolName, rawFile, rawBytes, rawChecksum
@@ -658,6 +660,8 @@ async function persistPluginToolRawResult(
       tool: toolName, error: String(error)
     });
   }
+
+  return { tool: toolName, status, outputFile: rawFile, outputFileBytes: rawBytes, ...(failureCategory ? { failureCategory } : {}) };
 }
 
 function wrapPluginTool(
@@ -785,14 +789,27 @@ function wrapPluginTool(
             run.terminalFailureLimitScanned = true;
           }
 
-          if (resultIndicatesFailure(result)) {
+          const failed = resultIndicatesFailure(result);
+          // 0yt5.27: persist the raw result to the single PROJECT-scoped tool-output
+          // location and record the typed ToolResultBase (tool/status/outputFile/
+          // outputFileBytes) ON the tool-result event — like command/MCP. status here
+          // means "did the tool RUN to completion". A returned failure result still
+          // RAN (status PASSED); only a thrown exception (catch block below) is a
+          // REJECTED run. The semantic verdict is the verifier's job, not this field.
+          const toolResultHandle = await persistPluginToolRawResult(
+            services.toolCallPathFactory,
+            tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
+            ToolResultStatus.PASSED
+          );
+          if (failed) {
             if (breakerEnabled) {
               session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
             }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
               beadId,
               tool: tool.name,
-              result: summarizeForEvent(result)
+              result: summarizeForEvent(result),
+              toolResult: toolResultHandle
             });
             if (typeof result === 'string') {
               if (c.hasUI) c.ui.notify(result, 'error');
@@ -807,7 +824,8 @@ function wrapPluginTool(
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
               tool: tool.name,
-              result: summarizeForEvent(result)
+              result: summarizeForEvent(result),
+              toolResult: toolResultHandle
             });
           }
           return result;
@@ -821,9 +839,9 @@ function wrapPluginTool(
 
       try {
         const result = await tracedExecute(params, ctx);
-        // s3wp.26: persist complete raw result to the harness-managed tool-calls dir
-        // before the model receives it.  Fire-and-forget — never blocks the result.
-        void persistPluginToolRawResult(tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result);
+        // 0yt5.27: raw persistence + typed ToolResultBase event already happened
+        // inside tracedExecute (success branch). No second persist here — the
+        // single PROJECT-scoped tool-output archive is written exactly once.
         // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
         // Does NOT mutate `result`; accounting is harness-side only.
         void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
@@ -834,21 +852,30 @@ function wrapPluginTool(
         if (breakerEnabled) {
           session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
         }
+        // 0yt5.27: a thrown exception is a tool that could NOT run to completion —
+        // persist the error envelope to the single PROJECT-scoped location and
+        // record the typed ToolResultBase with status:REJECTED + failureCategory:INFRA.
+        const errorHandle = await persistPluginToolRawResult(
+          services.toolCallPathFactory,
+          tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot,
+          {
+            error: String(error),
+            errorType: error instanceof Error ? error.constructor.name : typeof error,
+            tool: tool.name
+          },
+          ToolResultStatus.REJECTED,
+          'INFRA'
+        );
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
-          error: String(error)
+          error: String(error),
+          toolResult: errorHandle
         }).catch(() => {});
         if (ctx.hasUI) {
           ctx.ui.setWorkingMessage(undefined);
           ctx.ui.notify(`Tool ${tool.name} error: ${String(error)}`, 'error');
         }
-        // s3wp.26: persist the thrown error as an error envelope on failure.
-        void persistPluginToolRawResult(tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, {
-          error: String(error),
-          errorType: error instanceof Error ? error.constructor.name : typeof error,
-          tool: tool.name
-        });
         return toolResult(`Error: ${String(error)}`);
       }
     }

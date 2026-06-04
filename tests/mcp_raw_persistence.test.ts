@@ -219,8 +219,8 @@ describe('s3wp.26: MCP raw result persistence', () => {
     expect(rawContent).toBe(expectedSerialized);
     expect(Buffer.byteLength(rawContent, 'utf8')).toBe(result.rawBytes);
     expect(sha256Hex16(rawContent)).toBe(result.rawChecksum);
-    // 5. The raw file is under the tool-calls directory tree.
-    expect(rawFilePath).toContain('.tmp/tool-calls');
+    // 5. The raw file is under the single PROJECT-scoped tool-output tree (0yt5.27).
+    expect(rawFilePath).toContain('.pi/tool-output');
     expect(path.basename(rawFilePath)).toBe(MCP_RAW_FILE_NAME);
     // 6. Model-facing result has standard compact fields.
     expect(result.tool).toBe('test_mcp_tool');
@@ -319,8 +319,8 @@ describe('s3wp.26: MCP raw result persistence', () => {
     expect(result.tool).toBe('test_mcp_tool');
     expect(result.server).toBe(SERVER_NAME);
     expect(result.operation).toBe('query');
-    // rawFile path is under .tmp/tool-calls.
-    expect(rawFilePath).toContain('.tmp/tool-calls');
+    // rawFile path is under the single PROJECT-scoped .pi/tool-output tree (0yt5.27).
+    expect(rawFilePath).toContain('.pi/tool-output');
   });
 
   // ---- (d) Cached/repeated invocation ----

@@ -84,7 +84,7 @@ function baseContext(overrides: Partial<TemplateContext> = {}): TemplateContext 
 }
 
 function executionCtxFromTemplateContext(tc: TemplateContext): ProjectToolExecutionContext {
-  const callDir = path.join(tc.projectRoot, '.tmp', 'tool-calls', 'test');
+  const callDir = path.join(tc.projectRoot, '.pi', 'tool-output', 'test');
   const outputDir = path.join(callDir, 'output');
   return {
     templateContext: tc,

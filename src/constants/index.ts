@@ -1067,7 +1067,13 @@ export const ArtifactPathDefaults = {
 } as const;
 
 export const ProjectToolDefaults = {
-  CALL_DIR_TEMPLATE: '.tmp/tool-calls/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}',
+  // 0yt5.27: single PROJECT-scoped tool-output location. The per-invocation raw
+  // archive lives under {PROJECT_ROOT}/.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}.
+  // Resolved against PROJECT_ROOT (NOT WORKTREE_PATH) so the coordinator-only gate
+  // (0yt5.20) can read worker-produced outputs across worktrees; keyed by beadId so
+  // concurrent worktrees never collide. This replaces the former .tmp/tool-calls
+  // location and removes the plugin-path double-persist.
+  CALL_DIR_TEMPLATE: '.pi/tool-output/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}',
   TMP_DIR_NAME: 'tmp',
   OUTPUT_DIR_NAME: 'output',
   OUTPUT_FILE_NAME_TEMPLATE: '{{toolName}}-{{toolInvocationId}}.json',
@@ -1108,7 +1114,7 @@ export const ProjectToolDefaults = {
   // Bounded-storage / scratch-cleanup constants.
   //
   // ROOT CAUSE: Each project-tool invocation allocates a unique scratch dir at
-  //   .tmp/tool-calls/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}
+  //   .pi/tool-output/{{beadId}}/{{stateId}}/{{actionId}}/{{toolName}}/{{toolInvocationId}}
   // The harness exports TMPDIR/TMP/TEMP pointing at the `tmp/` sub-directory of
   // that callDir so child processes (e.g. `uv`, Python pip) use it for their
   // caches.  Once persistAndBoundResult() writes the structured JSON output to

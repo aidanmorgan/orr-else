@@ -104,7 +104,7 @@ describe('protocol raw-output contract — prompt assembly', () => {
     const protocol = protocolInjector.inject(minimalState(), minimalConfig());
     // Verify the key claim in the new guidance is present.
     expect(protocol).toContain('minimal schema');
-    expect(protocol).toContain('tool-calls storage');
+    expect(protocol).toContain('tool-output storage');
   });
 
   it('(4) combined context contains no duplicate "ORR ELSE PROTOCOL" header', () => {

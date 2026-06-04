@@ -198,6 +198,11 @@ export async function executeConfiguredProjectTool(
           type: definition.type,
           status,
           failureCategory: status === ToolResultStatus.PASSED ? undefined : classifyProjectToolFailure(definition, finalResult),
+          // 0yt5.27: record the single PROJECT-scoped per-invocation output path so the
+          // coordinator-only gate can resolve the latest event per (bead,state,action,tool)
+          // => outputFile + status. The file lives under {PROJECT_ROOT}/.pi/tool-output/…
+          // and persistAndBoundResult wrote the full result to it.
+          outputFile: context.outputFile,
           result: summarizeToolResult(finalResult)
         }
       );
@@ -213,7 +218,11 @@ export async function executeConfiguredProjectTool(
         actionId,
         tool: definition.name,
         type: definition.type,
+        status: ToolResultStatus.REJECTED,
         failureCategory,
+        // 0yt5.27: deterministic per-invocation path (partial output may or may not
+        // be present when the run threw) so the gate's latest-event read is consistent.
+        outputFile: context.outputFile,
         error: String(error)
       }).catch(() => {});
       throw error;

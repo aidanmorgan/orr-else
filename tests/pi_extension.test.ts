@@ -236,7 +236,7 @@ states:
       const readProjectToolOutput = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.READ,
         toolCallId: 'read-project-tool-output',
-        input: { path: path.join(tempRoot, '.tmp/tool-calls/bd-1/Planning/tool/result.json'), limit: 80 }
+        input: { path: path.join(tempRoot, '.pi/tool-output/bd-1/Planning/analyze/tool/result.json'), limit: 80 }
       });
 
       expect(readProjectToolOutput).toMatchObject({ block: true });
@@ -263,7 +263,7 @@ states:
       const editTemp = await harness.callbacks[PiEventName.TOOL_CALL]?.({
         toolName: NativePiToolName.EDIT,
         toolCallId: 'edit-temp',
-        input: { filePath: path.join(tempRoot, '.tmp/tool-calls/output.json') }
+        input: { filePath: path.join(tempRoot, '.tmp/scratch-output.json') }
       });
 
       expect(editTemp).toMatchObject({ block: true });

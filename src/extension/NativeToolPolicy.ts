@@ -78,7 +78,9 @@ export const OPERATIONAL_MUTATION_DIRS = [
   OperationalArtifactPath.TEMP_DIR
 ] as const;
 
-export const PROJECT_TOOL_CALL_OUTPUT_DIR = `${OperationalArtifactPath.TEMP_DIR}/tool-calls`;
+// 0yt5.27: per-invocation tool-output archives moved from .tmp/tool-calls to the
+// single PROJECT-scoped .pi/tool-output location.
+export const PROJECT_TOOL_CALL_OUTPUT_DIR = OperationalArtifactPath.PI_TOOL_OUTPUT_DIR;
 export const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
   `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` may not read project-tool output archives directly. ` +
   'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';

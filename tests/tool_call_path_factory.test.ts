@@ -19,7 +19,8 @@ function context(overrides: Partial<TemplateContext> = {}): TemplateContext {
 }
 
 function expectedPaths(projectRoot: string, segments: string[], outputFileName: string): ToolCallPathAllocation {
-  const callDir = path.join(projectRoot, '.tmp', 'tool-calls', ...segments);
+  // 0yt5.27: single PROJECT-scoped tool-output archive at .pi/tool-output.
+  const callDir = path.join(projectRoot, '.pi', 'tool-output', ...segments);
   const outputDir = path.join(callDir, 'output');
   return {
     invocationId: segments[4],
@@ -31,7 +32,7 @@ function expectedPaths(projectRoot: string, segments: string[], outputFileName: 
 }
 
 function expectAllocationUnderToolCallRoot(allocation: ToolCallPathAllocation, projectRoot: string): void {
-  const toolCallRoot = path.join(projectRoot, '.tmp', 'tool-calls');
+  const toolCallRoot = path.join(projectRoot, '.pi', 'tool-output');
   for (const candidate of [allocation.callDir, allocation.outputDir, allocation.tmpDir, allocation.outputFile]) {
     const relativePath = path.relative(toolCallRoot, candidate);
     expect(relativePath === '' || (relativePath !== '..' && !relativePath.startsWith(`..${path.sep}`) && !path.isAbsolute(relativePath))).toBe(true);
