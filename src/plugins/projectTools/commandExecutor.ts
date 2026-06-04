@@ -399,7 +399,7 @@ export function toolCallsFromRecord(record: Record<string, unknown>): unknown[] 
   return toolCallsFromRecord(stdoutRecord);
 }
 
-// ---- ast_grep annotations ----
+// ---- command no-match annotations ----
 
 function commandArgumentFlagName(argument: string): string | undefined {
   const trimmed = argument.trim();
@@ -647,8 +647,8 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
   const spawnArgs = structuredHandler ? structuredHandler.augmentedArgs : finalArgs;
 
   // Helper: read the byte count and a small text sample from a persisted output
-  // file.  The text sample is used only for in-process semantic extraction (ast_grep
-  // annotations, structuredPayloadSummary).  It is NOT included in the model-facing
+  // file.  The text sample is used only for in-process semantic extraction (command
+  // no-match annotations, structuredPayloadSummary).  It is NOT included in the model-facing
   // result.  Reading the complete file here is acceptable because jsonRecordFromFile
   // already caps at JSON_EXTRACTION_MAX_BYTES and the diagnostic pattern matching is
   // bounded by the file itself.  For very large files the sample is truncated purely

@@ -453,8 +453,8 @@ function diagnosticsTextFromRecord(record: Record<string, unknown>): string | un
   const mcpText = textFromMcpContent(record.result);
   const mcpJson = parseJsonRecord(mcpText);
   const stdoutRecord = parseJsonRecord(record[ProjectToolResultKey.STDOUT]);
-  // For tools that wrap MCP content inside their JSON stdout (e.g. python_lsp
-  // command-wrapper tests), extract the nested MCP text from stdoutRecord.result.
+  // For tools that wrap MCP content inside their JSON stdout (e.g. a configured
+  // command-wrapper tool), extract the nested MCP text from stdoutRecord.result.
   const nestedMcpText = textFromMcpContent(stdoutRecord?.result);
   const candidates = [
     record[ProjectToolResultKey.COMPACT_SUMMARY],
@@ -900,8 +900,8 @@ const commandFailureSummarizer: ProjectToolSummarizer = {
 
 // ---- genericHighVolumeSummarizer ----
 //
-// Covers all high-volume tools that do NOT have a more specific summarizer
-// (codemap, ast_grep, reference_docs, git_history).  For
+// Covers all high-volume configured project tools that do NOT have a more
+// specific summarizer.  For
 // any PASSED result whose raw payload exceeds HIGH_VOLUME_PAYLOAD_MIN_BYTES
 // this summarizer emits a compact {status, counts, representativeSamples,
 // omissions, nextAction} envelope before truncation so the model-facing
@@ -1383,14 +1383,14 @@ function projectToolRemediation(
   }
 
   if (toolName === AST_GREP_TOOL_NAME) {
-    guidance.add('For ast_grep failures, adjust the pattern/language/path and rerun with narrower arguments; do not fall back to shell grep for configured project-tool coverage.');
+    guidance.add(`For ${toolName} failures, adjust the pattern/language/path and rerun with narrower arguments; do not fall back to shell grep for configured project-tool coverage.`);
     if (/exitCode["']?:?1|NO_MATCH|no match/i.test(text)) {
-      guidance.add('Exit code 1 from ast-grep usually means no match, not infrastructure failure; record the no-match evidence if that satisfies the check.');
+      guidance.add(`Exit code 1 from ${toolName} usually means no match, not infrastructure failure; record the no-match evidence if that satisfies the check.`);
     }
   }
 
   if (toolName === CODEMAP_TOOL_NAME) {
-    guidance.add('For codemap failures, pass worktree-relative paths or paths under the active bead worktree; do not pass project-root, sibling-worktree, or harness artifact paths.');
+    guidance.add(`For ${toolName} failures, pass worktree-relative paths or paths under the active bead worktree; do not pass project-root, sibling-worktree, or harness artifact paths.`);
   }
 
   if (toolName === 'read') {

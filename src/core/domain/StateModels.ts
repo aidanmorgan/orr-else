@@ -53,7 +53,7 @@ export interface BaseProjectToolConfig {
   // worker session keyed by `(toolName, JSON.stringify(params))`. Cache is
   // invalidated whenever any non-cacheable tool runs (assumed to potentially
   // mutate state). Intended for stable read-only structural queries
-  // (e.g. bd_get_bead, codemap, get_artifact_paths) that the LLM otherwise
+  // (e.g. bd_get_bead, get_artifact_paths, and configured read-only project tools) that the LLM otherwise
   // re-issues on every turn.
   cacheable?: boolean;
   failureLimit?: {

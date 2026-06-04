@@ -1114,7 +1114,7 @@ export const ProjectToolDefaults = {
   // caches.  Once persistAndBoundResult() writes the structured JSON output to
   // `output/<name>-<id>.json`, the raw scratch tree (uv-cache, package
   // environments, pip download dirs) is no longer needed by the harness and is
-  // never removed.  Repeated reference_docs calls therefore accumulate one full
+  // never removed.  Repeated project-tool calls therefore accumulate one full
   // uv-cache/package-env tree per invocation.
   //
   // FIX: after the output JSON is safely persisted, remove only the `tmp/`

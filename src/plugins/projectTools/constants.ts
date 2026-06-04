@@ -118,7 +118,7 @@ export const PROJECT_TOOL_MODEL_CONTRACT = [
   'Configured project tools are the supported route for project-specific command and MCP-backed capabilities.',
   'Do not replace them with shell, native MCP, or native reads of harness artifact paths.',
   'If a PASSED result includes raw-output file references (stdoutFile/stderrFile), treat them as archive guidance, not a tool failure. They are harness file references, not content to inline; first decide from compactSummary, structuredResult, and toolCalls.',
-  'Prefer one narrow project-tool call at a time. If a preview is truncated, a wrapper warning is returned, or a broad codemap/ast_grep call returns too much data, use the available preview/summary/toolCalls first; rerun narrower only for a named missing fact or decision blocker.',
+  'Prefer one narrow project-tool call at a time. If a preview is truncated, a wrapper warning is returned, or a broad project-tool call returns too much data, use the available preview/summary/toolCalls first; rerun narrower only for a named missing fact or decision blocker.',
   'The Pi UI native MCP server count reports only Pi-adapter connections. It can show zero while Orr Else MCP-backed project tools are healthy; use the named configured project tool and route BLOCKED only when that tool itself reports unavailable/rejected.'
 ] as const;
 
@@ -129,8 +129,6 @@ export const ARTIFACT_VALIDATOR_TOOL_NAME = 'artifact_validator';
 export const AST_GREP_TOOL_NAME = 'ast_grep';
 export const CODEMAP_TOOL_NAME = 'codemap';
 export const PYTHON_LSP_TOOL_NAME = 'python_lsp';
-export const GIT_HISTORY_TOOL_NAME = 'git_history';
-export const REFERENCE_DOCS_TOOL_NAME = 'reference_docs';
 
 // Compact sample budget used by the generic high-volume summarizer.
 // This is the byte limit for the tool-owned representative sample text injected

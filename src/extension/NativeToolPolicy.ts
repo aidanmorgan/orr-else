@@ -289,5 +289,5 @@ export function oversizedReadPolicyRejection(event: ToolCallEvent, isWorker: boo
 
   return `PROTOCOL VIOLATION: \`${NativePiToolName.READ}\` limit ${Math.floor(limit)} exceeds ` +
     `${NativeReadPolicyDefaults.MAX_LIMIT_LINES} lines inside a teammate context. ` +
-    'Use smaller targeted reads, codemap, ast_grep, reference_docs, or artifact validators instead of loading broad file slices.';
+    'Use smaller targeted reads, configured project tools, or artifact validators instead of loading broad file slices.';
 }
