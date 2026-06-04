@@ -22,6 +22,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { EnvVars } from '../constants/index.js';
 import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
+import { skeletons } from '../contract.js';
 
 // ─── Caps (named constants — no magic numbers) ────────────────────────────────
 
@@ -37,465 +38,34 @@ export const PATH_CONTEXT_MAX_SLICE_LINES = 400;
 /** Maximum byte length of the skeleton output (body-elided code structure). */
 export const SKELETON_MAX_BYTES = 32_000;
 
-// ─── Skeleton mode: source-code extensions (data formats excluded) ────────────
-
-/**
- * File extensions recognized as TypeScript / JavaScript source code.
- * Only these receive the body-elision treatment in skeleton mode.
- */
-const TS_JS_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.mts', '.cts']);
-
-/**
- * File extensions recognized as Python source code.
- * Only these receive the Python-specific skeleton extraction.
- */
-const PYTHON_EXTENSIONS = new Set(['.py', '.pyi']);
-
-/**
- * Data-format extensions that must NEVER be body-stripped in skeleton mode.
- * For these extensions skeleton mode is a no-op (falls back to bounded read).
- */
-const DATA_FORMAT_EXTENSIONS = new Set([
-  '.json', '.yaml', '.yml', '.toml',
-  '.md', '.txt', '.csv', '.xml', '.html', '.htm',
-  '.lock', '.env', '.ini', '.cfg', '.conf'
-]);
-
-// ─── Skeleton extraction: TypeScript / JavaScript ─────────────────────────────
-
-/**
- * Placeholder inserted in place of elided function/method bodies.
- */
-const BODY_ELISION_PLACEHOLDER = '{ ... }';
-
-/**
- * Extract a structural skeleton from TypeScript/JavaScript source code.
- *
- * Kept lines (signature-level structure):
- *   - import / require statements
- *   - export declarations (const, let, function, class, interface, type, enum)
- *   - class / interface / type / enum declarations (top-level and nested)
- *   - function / method SIGNATURES (the signature line, opening brace replaced
- *     by the elision placeholder)
- *   - Blank lines between top-level declarations (for readability)
- *   - Decorator lines (@...)
- *
- * Elided:
- *   - Function/method bodies (everything between { and matching })
- *
- * Strategy: a context stack tracks whether each brace depth is a "transparent"
- * container (class/interface body — signatures within are emitted) or an
- * "opaque" body (function/method body — all content suppressed).
- *
- * Stack entries:
- *   'class'    → inside a class/interface/enum body: emit method signatures
- *   'function' → inside a function/method body: suppress all lines
- *   'other'    → inside another block (if, while, etc.): suppress
- */
-function extractTsJsSkeleton(source: string): string {
-  const lines = source.split('\n');
-  const result: string[] = [];
-
-  // Patterns matched against the raw line
-  const IMPORT_RE = /^\s*(import\b|export\s+(type\s+)?\{|export\s+\*)/;
-  const EXPORT_FROM_RE = /^\s*export\s+/;
-  const CLASS_DECL_RE =
-    /^\s*(export\s+)?(default\s+)?(abstract\s+)?class\s+\w+/;
-  const INTERFACE_DECL_RE =
-    /^\s*(export\s+)?interface\s+\w+/;
-  const TYPE_DECL_RE =
-    /^\s*(export\s+)?type\s+\w+\s*[=<]/;
-  const ENUM_DECL_RE =
-    /^\s*(export\s+)?(const\s+)?enum\s+\w+/;
-  const FUNCTION_DECL_RE =
-    /^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*\w*/;
-  const METHOD_RE =
-    /^\s*(public|private|protected|static|async|override|abstract|get|set|\*)\s+[\w[\]]/;
-  const CONSTRUCTOR_RE = /^\s*(public\s+)?constructor\s*\(/;
-  const DECORATOR_RE = /^\s*@\w+/;
-  const ARROW_EXPORT_RE =
-    /^\s*(export\s+)?(const|let|var)\s+\w+(\s*:\s*[\w<>[\]|&,. ]+)?\s*=/;
-
-  // Context stack: each entry is the type of block we're inside
-  type BlockKind = 'class' | 'function' | 'other';
-  const stack: BlockKind[] = [];
-
-  // Count { and } on a single line, ignoring those inside strings OR comments.
-  //
-  // Heuristic for comment detection:
-  //   - '//' line comment: once seen (outside a string), ignore everything to EOL.
-  //   - '/* */' block comment: track state across the call via `inBlockComment`
-  //     (caller passes current state in, receives updated state out).
-  //   - String literals (", ', `): skip until the matching closing quote.
-  //
-  // Error-lean policy: when in doubt, we prefer NOT to count a brace.
-  //   - A missed closing brace keeps us *inside* the suppressed body (safe —
-  //     no leak; we just suppress one extra line at most).
-  //   - A spurious closing brace would pop us *out* of the body early (unsafe
-  //     — the remaining body lines would be emitted verbatim, i.e. a leak).
-  // Therefore we err toward keeping the counter higher rather than lower.
-  function countBraces(s: string, inBlockComment: boolean): [number, number, boolean] {
-    let open = 0, close = 0;
-    let inStr: string | null = null;
-    let blockComment = inBlockComment;
-    for (let i = 0; i < s.length; i++) {
-      const ch = s[i]!;
-
-      if (blockComment) {
-        // Inside /* … */ — look for the closing */
-        if (ch === '*' && s[i + 1] === '/') {
-          blockComment = false;
-          i++; // skip '/'
-        }
-        // Braces inside block comments are ignored
-        continue;
-      }
-
-      if (inStr) {
-        // Inside a string literal — skip until matching unescaped closing quote
-        if (ch === inStr && s[i - 1] !== '\\') inStr = null;
-        continue;
-      }
-
-      // Not in a comment or string
-      if (ch === '/' && s[i + 1] === '/') {
-        // Line comment — ignore rest of line (braces here are not real)
-        break;
-      }
-      if (ch === '/' && s[i + 1] === '*') {
-        // Block comment start
-        blockComment = true;
-        i++; // skip '*'
-        continue;
-      }
-      if (ch === '"' || ch === "'" || ch === '`') {
-        inStr = ch;
-      } else if (ch === '{') {
-        open++;
-      } else if (ch === '}') {
-        close++;
-      }
-    }
-    return [open, close, blockComment];
-  }
-
-  // Determine if a line looks like it opens a class-like body
-  function isClassLikeLine(line: string): boolean {
-    return (
-      CLASS_DECL_RE.test(line) ||
-      INTERFACE_DECL_RE.test(line) ||
-      ENUM_DECL_RE.test(line)
-    );
-  }
-
-  // Determine if a line looks like a function/method signature
-  function isFunctionLike(line: string): boolean {
-    return (
-      FUNCTION_DECL_RE.test(line) ||
-      METHOD_RE.test(line) ||
-      CONSTRUCTOR_RE.test(line) ||
-      ARROW_EXPORT_RE.test(line)
-    );
-  }
-
-  // Is this line structural at the level we're currently processing?
-  function isStructural(line: string, trimmed: string, currentKind: BlockKind | undefined): boolean {
-    if (currentKind === undefined || currentKind === 'class') {
-      // At top level or inside a class body: emit signatures and declarations
-      return (
-        IMPORT_RE.test(line) ||
-        EXPORT_FROM_RE.test(line) ||
-        CLASS_DECL_RE.test(line) ||
-        INTERFACE_DECL_RE.test(line) ||
-        TYPE_DECL_RE.test(line) ||
-        ENUM_DECL_RE.test(line) ||
-        FUNCTION_DECL_RE.test(line) ||
-        METHOD_RE.test(line) ||
-        CONSTRUCTOR_RE.test(line) ||
-        ARROW_EXPORT_RE.test(line) ||
-        DECORATOR_RE.test(line) ||
-        trimmed === '' ||
-        trimmed === '{' ||
-        trimmed === '}' ||
-        trimmed.startsWith('//') ||
-        trimmed.startsWith('*') ||
-        trimmed.startsWith('/*') ||
-        trimmed.startsWith('*/')
-      );
-    }
-    // Inside a function/other body: suppress everything
-    return false;
-  }
-
-  // Block-comment state carried across lines (M2 fix: multi-line /* */ tracking)
-  let blockCommentState = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    const [open, close, nextBlockComment] = countBraces(line, blockCommentState);
-    blockCommentState = nextBlockComment;
-    const net = open - close;
-
-    const currentKind = stack.length > 0 ? stack[stack.length - 1] : undefined;
-    const inFunctionBody = currentKind === 'function' || currentKind === 'other';
-
-    if (inFunctionBody) {
-      // Inside a suppressed body — track braces, exit when depth returns
-      for (let o = 0; o < open; o++) stack.push('other');
-      for (let c = 0; c < close; c++) {
-        if (stack.length > 0) stack.pop();
-      }
-      // When we've exited all suppressed levels back to a class or top-level,
-      // emit a closing brace line if we just popped out fully
-      const newKind = stack.length > 0 ? stack[stack.length - 1] : undefined;
-      if (newKind !== 'function' && newKind !== 'other') {
-        // Emit the closing brace only (the `}` that ends the function)
-        if (trimmed === '}' || trimmed === '};') {
-          result.push(line);
-        }
-      }
-      continue;
-    }
-
-    // Not in a suppressed body
-    if (!isStructural(line, trimmed, currentKind)) {
-      // Non-structural line at class/top level — track braces but skip
-      for (let o = 0; o < open; o++) stack.push('other');
-      for (let c = 0; c < close; c++) {
-        if (stack.length > 0) stack.pop();
-      }
-      continue;
-    }
-
-    // ── M1 fix: single-line body (open == close, net == 0 but open > 0) ──────
-    // e.g. `export function f(): number { return 42; }`
-    // The old code fell through to the else branch and emitted the line verbatim
-    // (body included). Detect this case and elide the body.
-    if (open > 0 && net === 0 && isFunctionLike(line)) {
-      // Replace everything between the first `{` and its matching `}` with
-      // the placeholder. The regex grabs from the first `{` to the LAST `}` on
-      // the line (greedy inner), which handles the simple single-block case.
-      const sigLine = line.replace(/\{.*\}/, BODY_ELISION_PLACEHOLDER);
-      result.push(sigLine);
-      // Net brace count is 0 — stack is unchanged; body is fully contained on
-      // this one line so no suppression entry is needed.
-      continue;
-    }
-
-    // Structural line — does it open a block?
-    if (open > 0 && net > 0) {
-      // Emit the signature with the opening body brace replaced by the placeholder
-      const sigLine = line.replace(/\{[^{]*$/, BODY_ELISION_PLACEHOLDER);
-      result.push(sigLine);
-
-      // Determine what kind of block opened
-      const blockKind: BlockKind = isClassLikeLine(line)
-        ? 'class'
-        : isFunctionLike(line)
-          ? 'function'
-          : 'other';
-
-      // Push one entry per net open (net > 0 means opened more than closed on this line)
-      // In practice a signature line opens exactly one block
-      for (let o = 0; o < open; o++) {
-        stack.push(o === 0 ? blockKind : 'other');
-      }
-      for (let c = 0; c < close; c++) {
-        if (stack.length > 0) stack.pop();
-      }
-    } else if (trimmed === '}' || trimmed === '};') {
-      // Closing brace at structural level — pop and emit
-      if (stack.length > 0) stack.pop();
-      result.push(line);
-    } else {
-      // Non-opening structural line (import, type alias, blank, comment)
-      result.push(line);
-      // Track any net braces (e.g. single-line type aliases)
-      for (let o = 0; o < open; o++) stack.push('other');
-      for (let c = 0; c < close; c++) {
-        if (stack.length > 0) stack.pop();
-      }
-    }
-  }
-
-  return result.join('\n');
-}
-
-// ─── Skeleton extraction: Python ──────────────────────────────────────────────
-
-/**
- * Extract a structural skeleton from Python source code.
- *
- * Kept lines:
- *   - import / from … import lines
- *   - class signatures (the `class` line itself, body is transparent — nested
- *     defs are emitted)
- *   - def / async def SIGNATURES (the def line itself, body suppressed)
- *   - Decorator lines (@…)
- *   - Top-level assignments (CONSTANT = …, __dunder__ = …)
- *   - Type aliases (TypeAlias, TypeVar)
- *   - Blank lines between declarations
- *
- * Elided:
- *   - Function/method bodies only (not class bodies — class bodies are
- *     "transparent" so nested defs can be emitted)
- *
- * Strategy: a suppression stack.  Each entry records the indent level of a
- * def body that is currently suppressed.  When we see a new line:
- *   - If indented more than the top-of-stack entry, it is suppressed (skip it
- *     but emit a `...` elision once).
- *   - Once we return to or below the entry's indent, pop the stack entry.
- *   - class lines are emitted but do NOT push a suppress entry (body is transparent).
- *   - def lines are emitted AND push a suppress entry for their body.
- */
-function extractPythonSkeleton(source: string): string {
-  const lines = source.split('\n');
-  const result: string[] = [];
-
-  const IMPORT_RE = /^(import |from )/;
-  const DEF_RE = /^\s*(async\s+)?def\s+\w+/;
-  const CLASS_RE = /^\s*class\s+\w+/;
-  const DECORATOR_RE = /^\s*@\w+/;
-  const TOP_ASSIGN_RE = /^[A-Z_][A-Z_0-9]*\s*[=:]/; // CONSTANT = …
-  const DUNDER_RE = /^__\w+__\s*=/;
-  const TYPE_ALIAS_RE = /^\s*(TypeVar|TypeAlias|\w+)\s*=\s*(TypeVar|TypeAlias)/;
-
-  // Stack of {indent, emittedElision} for suppressed def bodies
-  const suppressStack: Array<{ indent: number; emittedElision: boolean }> = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const trimmed = line.trim();
-
-    // Blank lines: emit only when not inside a suppressed body
-    if (trimmed === '') {
-      if (suppressStack.length === 0) {
-        result.push(line);
-      }
-      continue;
-    }
-
-    // Measure current indentation
-    const indent = line.length - line.trimStart().length;
-
-    // Pop any suppression entries that this line's indent exits
-    while (suppressStack.length > 0 && indent <= suppressStack[suppressStack.length - 1]!.indent) {
-      suppressStack.pop();
-    }
-
-    // If still inside a suppressed def body, emit elision once then skip
-    if (suppressStack.length > 0) {
-      const top = suppressStack[suppressStack.length - 1]!;
-      if (!top.emittedElision) {
-        result.push(`${' '.repeat(top.indent + 4)}...`);
-        top.emittedElision = true;
-      }
-      continue;
-    }
-
-    // Determine whether this line is structural
-    const isDef = DEF_RE.test(line);
-    const isClass = CLASS_RE.test(line);
-    const isStructural =
-      IMPORT_RE.test(trimmed) ||
-      isDef ||
-      isClass ||
-      DECORATOR_RE.test(line) ||
-      TOP_ASSIGN_RE.test(trimmed) ||
-      DUNDER_RE.test(trimmed) ||
-      TYPE_ALIAS_RE.test(trimmed);
-
-    if (isStructural) {
-      result.push(line);
-      if (isDef) {
-        // def bodies are suppressed; class bodies are transparent
-        suppressStack.push({ indent, emittedElision: false });
-      }
-    }
-    // Non-structural lines at current level are skipped
-  }
-
-  return result.join('\n');
-}
-
-// ─── Generic best-effort skeleton extraction ──────────────────────────────────
-
-/**
- * Best-effort skeleton extraction for other code file types (Go, Rust, Java,
- * C/C++, Swift, Kotlin, etc.): extract import/include lines plus lines that
- * look like function/method/class/type declarations.
- *
- * This is intentionally conservative — it will include some non-signature lines
- * rather than accidentally drop real signatures.  Bodies are NOT elided for
- * unknown languages (too risky to get wrong); instead only likely-signature
- * lines are included and everything else is dropped.
- */
-function extractGenericSkeleton(source: string): string {
-  const lines = source.split('\n');
-  const result: string[] = [];
-
-  const IMPORT_RE =
-    /^\s*(import|include|use|require|from|package|namespace|using|extern)\s/i;
-  const DECL_RE =
-    /^\s*(pub|public|private|protected|internal|extern|static|virtual|override|abstract|final|sealed|inline|func|fn|fun|def|class|struct|interface|trait|impl|type|enum|const|let|var|val|typedef|template|auto)\s/i;
-  const DECORATOR_RE = /^\s*[@#\[]/; // decorators / attributes
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (
-      trimmed === '' ||
-      IMPORT_RE.test(line) ||
-      DECL_RE.test(line) ||
-      DECORATOR_RE.test(line)
-    ) {
-      result.push(line);
-    }
-  }
-
-  return result.join('\n');
-}
-
-// ─── Skeleton dispatch ─────────────────────────────────────────────────────────
+// ─── Skeleton dispatch (delegates to the harness-owned `skeletons` registry) ──
 
 /**
  * Extract a structural skeleton from source code at `filePath`.
  *
- * Language is determined by file extension:
- *   - TypeScript / JavaScript (.ts, .tsx, .js, .jsx, …): full body elision
- *   - Python (.py, .pyi): indentation-based body elision
- *   - Data formats (.json, .yaml, …): NEVER elided — returns null (caller falls back)
- *   - Everything else (Go, Rust, Java, C/C++, no extension, etc.): returns null
- *     (caller falls back to the normal bounded read path).
+ * The harness ships NO built-in language extractors. Per-language skeleton
+ * extraction is delegated to the harness-owned `skeletons` registry
+ * (src/contract.ts), which consuming-project pi extensions populate via
+ * `skeletons.register(ext, (source) => string)` at load.
  *
- * Rationale for the unknown-language no-op:
- *   The generic extractor matched `const/var/val/let/type/…` lines which ALSO
- *   match in-body variable assignments (e.g. Go `var secret = "x"`), leaking
- *   body content. A skeleton that can leak bodies is worse than no skeleton at
- *   all.  Only languages with full body-elision support (TS/JS and Python)
- *   produce a skeleton; everything else is a safe no-op.
+ * Dispatch is purely by lowercased file extension (including the leading dot,
+ * e.g. `.ts`, `.py`). A file with no extension dispatches under the empty
+ * string `''`.
  *
  * Returns:
- *   - null   → caller must use the normal bounded read (data format, unknown
- *              language, or no/unrecognized extension)
- *   - string → the skeleton (may be empty for a trivial file)
+ *   - null   → NO extractor is registered for this extension. The caller treats
+ *              this as a safe no-op and returns the RAW file content (no
+ *              skeleton, no error).
+ *   - string → the registered extractor's skeleton output (byte-capped at
+ *              SKELETON_MAX_BYTES).
  */
 function extractSkeleton(filePath: string, source: string): string | null {
   const ext = path.extname(filePath).toLowerCase();
 
-  // Data formats must never be body-stripped
-  if (DATA_FORMAT_EXTENSIONS.has(ext)) return null;
+  const extractor = skeletons.get(ext);
+  if (!extractor) return null;
 
-  let skeleton: string;
-  if (TS_JS_EXTENSIONS.has(ext)) {
-    skeleton = extractTsJsSkeleton(source);
-  } else if (PYTHON_EXTENSIONS.has(ext)) {
-    skeleton = extractPythonSkeleton(source);
-  } else {
-    // Unknown/unsupported language (includes no-extension files like Dockerfile,
-    // Go, Rust, Java, C/C++, etc.).  The old generic extractor could leak body
-    // assignments, so we treat these as a safe no-op fallback.
-    return null;
-  }
+  const skeleton = extractor(source);
 
   // Enforce byte cap
   const bytes = Buffer.byteLength(skeleton, 'utf8');
@@ -740,21 +310,18 @@ export interface PathContextInput {
    */
   limit?: number;
   /**
-   * When true, return a language-aware structural skeleton of the file instead
-   * of a bounded line slice.  The skeleton contains:
-   *   - import/require statements
-   *   - class/interface/type/enum declarations
-   *   - function/method SIGNATURES with bodies elided (replaced by `{ ... }`)
-   *   - exported symbol names
+   * When true, return a structural skeleton of the file instead of a bounded
+   * line slice.
    *
-   * Language detection is extension-based:
-   *   - TypeScript/JavaScript: full body elision
-   *   - Python: indentation-based body elision
-   *   - Data formats (.json/.yaml/.toml/.md/…): skeleton is a NO-OP — the
-   *     file is returned via the existing bounded read path
-   *   - Other code languages / no-extension files: skeleton is a NO-OP (returns
-   *     null / skeletonFallback:true). The old generic extractor leaked in-body
-   *     variable assignments; safe no-op is preferable to a leaky skeleton.
+   * The harness ships NO built-in language extractors. Skeleton extraction is
+   * dispatched by lowercased file extension to the harness-owned `skeletons`
+   * registry (src/contract.ts), which consuming-project pi extensions populate
+   * via `skeletons.register(ext, (source) => string)` at load.
+   *   - An extractor IS registered for the extension → its skeleton output is
+   *     returned in `skeletonContent` (capped at SKELETON_MAX_BYTES).
+   *   - NO extractor is registered for the extension → safe NO-OP: the RAW file
+   *     content is returned in `skeletonContent` with `skeletonFallback:true`.
+   *     No error, no body stripping.
    *
    * Output is capped at SKELETON_MAX_BYTES.
    * Mutually exclusive with `offset`/`limit` (skeleton ignores them when set).
@@ -803,18 +370,18 @@ export interface PathContextFound {
   slice: string | null;
   nearestMatches: string[];
   /**
-   * When `skeleton:true` was requested AND the file is a recognized code type,
-   * contains the structural skeleton (signatures/imports/declarations with
-   * bodies elided). Null when skeleton mode was not requested, the file is a
-   * data format, or the file is not readable.
+   * When `skeleton:true` was requested, contains either the registered
+   * extractor's skeleton output (when an extractor is registered for the file's
+   * extension) OR the RAW file content (when none is registered — the safe
+   * no-op, also flagged via `skeletonFallback:true`). Null when skeleton mode
+   * was not requested or the file is not readable.
    */
   skeletonContent: string | null;
   /**
-   * True when `skeleton:true` was requested but no skeleton could be produced:
-   * either the file is a data format (.json/.yaml/etc.) or the language is
-   * unknown/unsupported (Go, Rust, no extension, etc.).  In both cases skeleton
-   * mode is a safe no-op — no body stripping occurs.
-   * In this case `slice` may be populated if offset+limit were also provided.
+   * True when `skeleton:true` was requested but NO extractor is registered for
+   * the file's extension. In that case `skeletonContent` holds the RAW file
+   * content (safe no-op — no body stripping occurs) and `slice` may also be
+   * populated if offset+limit were provided.
    */
   skeletonFallback: boolean;
 }
@@ -931,7 +498,9 @@ export class PathContext {
         const source = fs.readFileSync(resolved, 'utf8');
         const result = extractSkeleton(resolved, source);
         if (result === null) {
-          // Data format or unknown/unsupported language — skeleton is a no-op
+          // No extractor registered for this extension — safe no-op: return the
+          // RAW file content (no skeleton, no error).
+          skeletonContent = source;
           skeletonFallback = true;
         } else {
           skeletonContent = result;
