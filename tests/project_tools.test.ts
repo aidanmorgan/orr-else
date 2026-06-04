@@ -2360,53 +2360,29 @@ describe('structured-invocation registry integration (5fij)', () => {
     expect(argv).not.toContain('--pretty');
   });
 
-  // (b) ruff: injected flag appears AFTER the subcommand (exact index assertion).
-  // This is the assertion that catches M2 (the prepend-flags bug).
-  it('appends the injected flag AFTER the subcommand for ruff (exact augmentedArgs order)', () => {
-    const handler = resolveStructuredInvocation('ruff', ['check', '.']);
-    expect(handler).not.toBeNull();
-    const argv: string[] = handler!.augmentedArgs;
-    // Exact expected order: check . --output-format json
-    // If flags were prepended it would be: --output-format json check .  (WRONG)
-    expect(argv).toEqual(['check', '.', '--output-format', 'json']);
-    // Belt-and-suspenders index check: subcommand 'check' precedes injected flag
-    const checkIdx = argv.indexOf('check');
-    const flagIdx = argv.indexOf('--output-format');
-    expect(checkIdx).toBeGreaterThanOrEqual(0);
-    expect(flagIdx).toBeGreaterThan(checkIdx);
+  // (b) pi-experiment-0yt5.2: the harness ships NO built-in parsers, so formerly
+  // built-in tools (ruff, golangci-lint, semgrep, mypy, ...) get no registered
+  // handler — resolveStructuredInvocation returns null and args are untouched.
+  it('returns null (no injection) for formerly-built-in tools — harness is parser-free', () => {
+    expect(resolveStructuredInvocation('ruff', ['check', '.'])).toBeNull();
+    expect(resolveStructuredInvocation('golangci-lint', ['run'])).toBeNull();
+    expect(resolveStructuredInvocation('semgrep', ['--config=auto', '.'])).toBeNull();
+    expect(resolveStructuredInvocation('mypy', ['src/'])).toBeNull();
   });
 
-  // (b2) golangci-lint: injected flag appears AFTER the subcommand (exact order).
-  it('appends the injected flag AFTER the subcommand for golangci-lint (exact augmentedArgs order)', () => {
-    const handler = resolveStructuredInvocation('golangci-lint', ['run']);
-    expect(handler).not.toBeNull();
-    const argv: string[] = handler!.augmentedArgs;
-    // Exact expected order: run --out-format json
-    expect(argv).toEqual(['run', '--out-format', 'json']);
-    const runIdx = argv.indexOf('run');
-    const flagIdx = argv.indexOf('--out-format');
-    expect(runIdx).toBeGreaterThanOrEqual(0);
-    expect(flagIdx).toBeGreaterThan(runIdx);
-  });
-
-  // (c) Matched handler's parse result lands in structuredResult via the executor.
-  it('places the parse result from a matched semgrep handler into structuredResult', async () => {
-    // Emit valid semgrep JSON from a Node subprocess. The command is named via the
-    // definition's name field, but resolveStructuredInvocation looks up by the
-    // `command` field value. We use a wrapper: write a stub script named 'semgrep'
-    // into tempRoot/bin, add it to PATH so execa can find it.
+  // (c) pi-experiment-0yt5.2: with no registered parser, the executor produces NO
+  // parsed structuredResult and does not inject an output-format flag. Cerdiwen
+  // per-tool files own their own parsing and return their own minimal result.
+  it('does not inject flags nor synthesize a parsed structuredResult for a formerly-built-in tool', async () => {
     const binDir = path.join(tempRoot, 'bin');
     fs.mkdirSync(binDir, { recursive: true });
-    const semgrepPayload = JSON.stringify({
-      results: [
-        { check_id: 'test.rule', path: 'src/a.py', start: { line: 5 }, extra: { severity: 'ERROR', message: 'test finding' } }
-      ],
-      errors: [],
-      paths: { scanned: ['src/a.py', 'src/b.py'] }
-    });
-    // Write a stub script that emits the semgrep payload and exits 1 (findings found)
+    // Stub named 'semgrep' that echoes its received argv as JSON and exits 0.
     const stubScript = path.join(binDir, 'semgrep');
-    fs.writeFileSync(stubScript, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(semgrepPayload)});\nprocess.exit(1);\n`, { mode: 0o755 });
+    fs.writeFileSync(
+      stubScript,
+      `#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ argv: process.argv.slice(2) }));\nprocess.exit(0);\n`,
+      { mode: 0o755 }
+    );
 
     const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
       name: 'semgrep_stub',
@@ -2421,45 +2397,10 @@ describe('structured-invocation registry integration (5fij)', () => {
       actionId: 'adversarial-code-review'
     }, {} as any, undefined, new Map()) as any;
 
-    // (c) parse result present in structuredResult
-    expect(result.structuredResult).toBeDefined();
-    const sr = result.structuredResult as any;
-    expect(sr.status).toBe('ok');
-    expect(sr.counts?.findings).toBe(1);
-    // 0yt5.16/0yt5.17: the scanned-file count is carried under scannedFiles only;
-    // the redundant scannedTargetCount echo (which fed the removed harness
-    // zero-target-scan recognition) was removed.
-    expect(sr.counts?.scannedFiles).toBe(2);
-    expect(sr.counts?.scannedTargetCount).toBeUndefined();
-  });
-
-  // (d) A passing run is unaffected by injection — status remains PASSED.
-  it('does not flip a passing run to REJECTED when injection injects flags for a known tool', async () => {
-    // Write a stub named 'mypy' that ignores its args and exits 0 with valid mypy JSON.
-    const binDir = path.join(tempRoot, 'bin');
-    fs.mkdirSync(binDir, { recursive: true });
-    const mypyLine = JSON.stringify({ file: 'src/ok.py', line: 1, message: 'ok', code: 'none', severity: 'note' });
-    const stubScript = path.join(binDir, 'mypy');
-    fs.writeFileSync(stubScript, `#!/usr/bin/env node\nprocess.stdout.write(${JSON.stringify(mypyLine)});\nprocess.exit(0);\n`, { mode: 0o755 });
-
-    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
-      name: 'mypy_stub',
-      type: ProjectToolType.COMMAND,
-      command: 'mypy',
-      defaultArgs: ['src/'],
-      cwd: CwdMode.WORKTREE,
-      env: { PATH: `${binDir}:${process.env.PATH ?? ''}` }
-    }, {
-      beadId: 'bd-1',
-      stateId: 'Implementation',
-      actionId: 'type-check'
-    }, {} as any, undefined, new Map()) as any;
-
-    // (d) injection of --output json must not flip the passing run
     expect(result.status).toBe(ToolResultStatus.PASSED);
-    // structuredResult is populated from the mypy parse
-    expect(result.structuredResult).toBeDefined();
-    expect((result.structuredResult as any).counts?.notes).toBe(1);
+    // No --json injected (the harness registers no semgrep handler).
+    const argv = JSON.parse(fs.readFileSync(result.stdoutFile!, 'utf8')).argv as string[];
+    expect(argv).toEqual(['--config=auto', '.']);
   });
 });
 
