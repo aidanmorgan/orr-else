@@ -1643,6 +1643,13 @@ export class Supervisor {
     if (now - this.lastRetentionCleanupMs < RetentionDefaults.CLEANUP_INTERVAL_MS) return;
     this.lastRetentionCleanupMs = now;
 
+    // Source the retention/compaction policy from config so compaction can
+    // actually run when enabled (the `retention` block in harness.yaml).
+    // Without this, compactionEnabled is pinned to the
+    // RetentionDefaults.COMPACTION_ENABLED (false) default and compaction
+    // never runs regardless of config.
+    const config = await this.services.configLoader.load();
+
     const cleanup = new RetentionCleanup(
       this.services.projectRoot,
       this.clock,
@@ -1650,7 +1657,8 @@ export class Supervisor {
       // ProjectionCapableStore the rest of the Supervisor consumes).
       this.services.eventStore,
       RetentionDefaults.MAX_AGE_MS,
-      () => this.factory.getLiveTeammateBeadIds()
+      () => this.factory.getLiveTeammateBeadIds(),
+      config.retention
     );
 
     await cleanup.run().catch(error => {

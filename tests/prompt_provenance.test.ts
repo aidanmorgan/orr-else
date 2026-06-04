@@ -24,7 +24,7 @@ import {
   resolvePromptProvenance,
   detectStaleProvenanceEntries
 } from '../src/core/PiIntegration.js';
-import { PromptProvenanceKind, PromptProvenanceDefaults } from '../src/constants/index.js';
+import { PromptProvenanceKind, PromptProvenanceDefaults, EventStoreDefaults } from '../src/constants/index.js';
 import orrElseExtension from '../src/extension.js';
 import {
   BuiltInToolName,
@@ -902,6 +902,16 @@ states:
       for (const file of eventFiles) {
         fs.appendFileSync(path.join(eventDir, file), fakeInitEvent);
       }
+
+      // The fake event was written out-of-band, bypassing EventStore.record, so
+      // it is NOT reflected in the live by-bead index.  Drop the index dir so the
+      // next eventsForBead read falls back to a full primary scan and sees the
+      // tampered JSONL (which is exactly the "harness bug" this test simulates —
+      // the primary JSONL is the source of truth and was modified behind the
+      // index's back).
+      const beadIndexDir = path.join(eventDir, EventStoreDefaults.BEAD_INDEX_DIR);
+      fs.rmSync(beadIndexDir, { recursive: true, force: true });
+
       await new Promise(resolve => setTimeout(resolve, 20));
 
       const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);

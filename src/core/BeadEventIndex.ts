@@ -96,10 +96,11 @@ export class BeadEventIndex {
     indexPath: string,
     readyPath: string
   ): Promise<void> {
-    if (!existsSync(readyPath)) return;
-
-    const marker = await this.readMarker(location, beadId);
-    if (marker === undefined) return;
+    // Bootstrap the marker on first append: if it does not yet exist, start from
+    // an empty marker so the index becomes readable (eventsForBead requires the
+    // .ready marker to exist).  Previously this early-returned, leaving the index
+    // write-only and unbounded (it was never read back).
+    const marker = (await this.readMarker(location, beadId)) ?? {};
 
     const sourceBasename = path.basename(sourcePath);
     const currentSize = fs.statSync(sourcePath).size;

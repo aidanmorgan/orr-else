@@ -136,10 +136,11 @@ describe('BeadEventIndex', () => {
     }
   });
 
-  it('does not create a ready marker when append receives a primary path but no marker exists', async () => {
+  it('bootstraps a ready marker on first append when a primary path is provided', async () => {
     const primaryPath = path.join(tempDir, 'project.jsonl');
     const event = makeDomainEvent({ id: 'e1', data: { beadId: 'bd-1' } });
     fs.writeFileSync(primaryPath, `${JSON.stringify(event)}\n`);
+    const primarySize = fs.statSync(primaryPath).size;
 
     await index.append(location, 'bd-1', event, primaryPath);
 
@@ -148,7 +149,41 @@ describe('BeadEventIndex', () => {
       EventStoreDefaults.BEAD_INDEX_DIR,
       `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`
     );
-    expect(fs.existsSync(readyPath)).toBe(false);
+    // The marker MUST be created on first append (previously it was never
+    // bootstrapped, leaving the index write-only and unbounded).
+    expect(fs.existsSync(readyPath)).toBe(true);
+    const marker = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
+    expect(marker.version).toBe(1);
+    expect(marker.sources['project.jsonl']).toBe(primarySize);
+  });
+
+  it('serves appended events from the index without a pre-existing marker (write+read round-trip)', async () => {
+    const primaryPath = path.join(tempDir, 'project.jsonl');
+    const e1 = makeDomainEvent({ id: 'e1', timestamp: '2026-01-01T00:00:01.000Z', data: { beadId: 'bd-1' } });
+    const e2 = makeDomainEvent({ id: 'e2', timestamp: '2026-01-01T00:00:02.000Z', data: { beadId: 'bd-1' } });
+
+    // Simulate EventStore.record: append to primary, then to the index, advancing
+    // the marker each time to the current primary size.
+    fs.writeFileSync(primaryPath, `${JSON.stringify(e1)}\n`);
+    await index.append(location, 'bd-1', e1, primaryPath);
+    fs.appendFileSync(primaryPath, `${JSON.stringify(e2)}\n`);
+    await index.append(location, 'bd-1', e2, primaryPath);
+
+    // Read served from the index (marker exists with the source offset).
+    const result = await index.eventsForBead(location, 'bd-1', [primaryPath], isDomainEvent, beadIdFor, compareEvents);
+    expect(result).not.toBeUndefined();
+    expect(result!.map(e => e.id)).toEqual(['e1', 'e2']);
+
+    // Prove the read was served from the index: the .ready marker exists on disk
+    // and records the primary source offset (so eventsForBead no longer full-scans).
+    const readyPath = path.join(
+      tempDir,
+      EventStoreDefaults.BEAD_INDEX_DIR,
+      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`
+    );
+    expect(fs.existsSync(readyPath)).toBe(true);
+    const marker = JSON.parse(fs.readFileSync(readyPath, 'utf8'));
+    expect(marker.sources['project.jsonl']).toBe(fs.statSync(primaryPath).size);
   });
 
   it('removes index and ready marker when ready marker advancement fails', async () => {
