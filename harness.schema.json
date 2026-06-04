@@ -395,6 +395,7 @@
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
+              "serialize": { "type": "boolean", "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)." },
               "successExitCodes": {
                 "type": "array",
                 "items": { "type": "integer", "minimum": 0 },
@@ -588,6 +589,7 @@
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
+              "serialize": { "type": "boolean", "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)." },
               "successExitCodes": {
                 "type": "array",
                 "items": { "type": "integer", "minimum": 0 },

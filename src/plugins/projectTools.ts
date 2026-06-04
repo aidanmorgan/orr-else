@@ -91,7 +91,7 @@ export { shouldSerializeMcpTool, mcpToolRequestTimeoutMs } from './projectTools/
 export { structuredResultHasDecisionEvidence } from './projectTools/resultEnvelope.js';
 export { projectToolFailureLimitSuggestedOutcome } from './projectTools/preflight.js';
 export type { StructuredResult, ProjectToolSummarizer } from './projectTools/resultEnvelope.js';
-export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure } from './projectTools/commandExecutor.js';
+export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool } from './projectTools/commandExecutor.js';
 
 // ---- ProjectToolRuntimeContext ----
 

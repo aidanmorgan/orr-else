@@ -7,7 +7,7 @@ import { execa } from 'execa';
 import { open, readFile, stat } from 'fs/promises';
 import { resolveTemplateString } from '../../core/PiIntegration.js';
 import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
-import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ToolResultStatus } from '../../constants/index.js';
+import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../../constants/index.js';
 import {
   ARTIFACT_VALIDATOR_TOOL_NAME,
   AST_GREP_TOOL_NAME,
@@ -52,6 +52,8 @@ import {
 } from './pathNormalization.js';
 import { projectToolEnvironment } from './contextHelpers.js';
 import { resolveStructuredInvocation } from './structuredInvocation.js';
+import { COMMAND_TOOL_LOCK_DIR, SERIAL_MCP_LOCK_REASON, SERIAL_MCP_LOCK_SCOPE } from './constants.js';
+import { SerializedToolLockTimeoutError, withSerializedToolLock } from './serializedToolLock.js';
 
 // ---- Argument normalization ----
 
@@ -607,7 +609,85 @@ export function buildCommandResult(input: CommandResultInput): object {
 // SUCCESS, FAILURE, and TIMEOUT.  The model-facing result references those
 // files by path plus byte counts; no inline text is returned.
 
+// ---- Serialized command/tsProjectTool lock ----
+//
+// Reuses the SAME generic cross-process lock as the MCP path
+// (withSerializedToolLock / SerializedToolLockTimeoutError in serializedToolLock.ts).
+// A command tool with serialize:true acquires a per-tool lock keyed on
+// (projectRoot, tool name) before running and releases it after, so identical
+// serialized command/tsProjectTool tools never overlap across teammates, while
+// different tools (and non-serialized tools) run freely.
+
+export class SerializedCommandToolLockTimeoutError extends Error {
+  readonly lockMetadata: import('./types.js').SerializedCommandLockTimeoutMetadata;
+
+  constructor(definition: ProjectCommandToolConfig, cause: SerializedToolLockTimeoutError) {
+    super(cause.message);
+    this.name = 'SerializedCommandToolLockTimeoutError';
+    this.lockMetadata = {
+      scope: SERIAL_MCP_LOCK_SCOPE,
+      reason: SERIAL_MCP_LOCK_REASON,
+      waitedMs: cause.waitedMs,
+      tool: definition.name,
+      lockRef: cause.lockRef,
+      lockFile: cause.lockFile
+    };
+  }
+}
+
+export function shouldSerializeCommandTool(
+  definition: Pick<ProjectCommandToolConfig, 'type' | 'serialize'>
+): boolean {
+  return definition.type === ProjectToolType.COMMAND && definition.serialize === true;
+}
+
+export function serializedCommandLockTimeoutResult(
+  definition: ProjectCommandToolConfig,
+  error: SerializedCommandToolLockTimeoutError
+): Record<string, unknown> {
+  return {
+    tool: definition.name,
+    status: ToolResultStatus.REJECTED,
+    [ProjectToolResultKey.FAILURE_CATEGORY]: ProjectToolFailureCategory.BACKPRESSURE,
+    lockTimeout: true,
+    lockMetadata: error.lockMetadata,
+    message: `REJECTED: \`${definition.name}\` could not acquire the serialized project-tool lock after ${error.lockMetadata.waitedMs}ms. Another \`${definition.name}\` invocation is likely still in flight; wait for that result instead of starting parallel retries.`,
+    [ProjectToolResultKey.RECOVERY]: [
+      'Wait for the in-flight serialized project-tool result before retrying.',
+      'After the in-flight result is visible, rerun this configured project tool once with narrower arguments only if more evidence is still required.'
+    ]
+  };
+}
+
 export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
+  if (!shouldSerializeCommandTool(definition)) {
+    return await executeCommandToolUnlocked(definition, args, context);
+  }
+  const projectRoot = context.templateContext.projectRoot || process.cwd();
+  try {
+    return await withSerializedToolLock(
+      {
+        lockDir: COMMAND_TOOL_LOCK_DIR,
+        keyParts: [projectRoot, definition.name],
+        lockName: definition.name,
+        logFields: {
+          tool: definition.name,
+          lockScope: SERIAL_MCP_LOCK_SCOPE,
+          lockReason: SERIAL_MCP_LOCK_REASON
+        }
+      },
+      `Timed out acquiring serialized project-tool lock for ${definition.name}`,
+      async () => executeCommandToolUnlocked(definition, args, context)
+    );
+  } catch (error) {
+    if (error instanceof SerializedToolLockTimeoutError) {
+      return serializedCommandLockTimeoutResult(definition, new SerializedCommandToolLockTimeoutError(definition, error));
+    }
+    throw error;
+  }
+}
+
+async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
   const templateContext = context.templateContext;
   const command = resolveTemplateString(definition.command, templateContext);
   const finalArgs = (definition.defaultArgs || []).map(arg => resolveTemplateString(arg, templateContext));

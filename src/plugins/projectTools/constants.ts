@@ -231,6 +231,11 @@ export const DIAGNOSTIC_SUMMARY_LOCATION_LIMIT = 3;
 export const DIAGNOSTIC_MESSAGE_PREFIX_CHARS = 160;
 export const DIAGNOSTIC_TRUNCATION_PATTERN = /\[truncated\b/i;
 
+/** tmpdir bucket for serialized MCP project-tool locks. */
+export const MCP_TOOL_LOCK_DIR = 'orr-else-mcp-tool-locks';
+/** tmpdir bucket for serialized command/tsProjectTool project-tool locks. */
+export const COMMAND_TOOL_LOCK_DIR = 'orr-else-command-tool-locks';
+
 export const SERIAL_MCP_LOCK_STALE_MS = 10 * 60 * 1000;
 export const SERIAL_MCP_LOCK_RETRIES = 480;
 export const SERIAL_MCP_LOCK_RETRY_MIN_MS = 250;

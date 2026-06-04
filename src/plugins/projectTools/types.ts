@@ -52,6 +52,20 @@ export interface SerializedMcpLockTimeoutMetadata {
   lockFile: string;
 }
 
+/**
+ * Sanitized backpressure metadata for a serialized COMMAND/tsProjectTool lock
+ * timeout. Mirrors the MCP shape minus the `server` field (command tools have no
+ * MCP server). Carries no absolute project/worktree paths.
+ */
+export interface SerializedCommandLockTimeoutMetadata {
+  scope: 'project';
+  reason: 'shared_backend_symbol_operations';
+  waitedMs: number;
+  tool: string;
+  lockRef: string;
+  lockFile: string;
+}
+
 export interface ProjectToolOutputArchive {
   artifactRef: string;
   bytes: number;

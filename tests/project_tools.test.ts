@@ -8,7 +8,7 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool, structuredResultHasDecisionEvidence } from '../src/plugins/projectTools.js';
 import { FAILURE_REREAD_ARCHIVE_RECOVERY, HIGH_VOLUME_NARROW_RERUN_RECOVERY, HIGH_VOLUME_SAMPLE_BUDGET_BYTES, TOKEN_ESTIMATE_CHARS_PER_TOKEN } from '../src/plugins/projectTools/constants.js';
 import { summarizeResultAccounting, summarizeToolResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ResultAccounting } from '../src/plugins/projectTools/resultEnvelope.js';
@@ -516,6 +516,217 @@ describe('project tool command arguments', () => {
     });
     expect(JSON.stringify(failed?.data?.result)).not.toContain(tempRoot);
     expect(JSON.stringify(failed?.data?.result)).not.toContain(tempWorktree);
+  });
+
+  it('serializes command project-tool calls when the config sets serialize:true (covers tsProjectTool expansion)', () => {
+    expect(shouldSerializeCommandTool({ type: ProjectToolType.COMMAND, serialize: true })).toBe(true);
+    expect(shouldSerializeCommandTool({ type: ProjectToolType.COMMAND, serialize: false })).toBe(false);
+    expect(shouldSerializeCommandTool({ type: ProjectToolType.COMMAND })).toBe(false);
+    // serialize only applies to command tools here, never MCP tools.
+    expect(shouldSerializeCommandTool({ type: ProjectToolType.MCP, serialize: true } as any)).toBe(false);
+  });
+
+  // ── Concurrency: mutual exclusion for serialize:true command/ts tools (AC2/AC3) ──
+  //
+  // Each invocation appends `start <id>` and `end <id>` to a shared marker file
+  // with a fixed blocking sleep in between (Atomics.wait — a real wall-clock
+  // sleep, no busy-spin, deterministic). When two invocations of the SAME
+  // serialized tool run concurrently the cross-process lock forces them to run
+  // back-to-back, so the marker sequence must be [start X, end X, start Y, end Y]
+  // — never interleaved.
+  function mutualExclusionScript(markerFile: string): string {
+    return `
+const fs = require('fs');
+const id = process.argv[1];
+const marker = ${JSON.stringify(markerFile)};
+function blockingSleep(ms) {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+fs.appendFileSync(marker, 'start ' + id + '\\n');
+blockingSleep(150);
+fs.appendFileSync(marker, 'end ' + id + '\\n');
+process.stdout.write(JSON.stringify({ id, done: true }));
+`;
+  }
+
+  function serializedCommandTool(script: string, name = 'serial_marker'): ProjectCommandToolConfig {
+    return {
+      name,
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script, '--'],
+      argsMode: 'append',
+      allowArgs: true,
+      serialize: true
+    };
+  }
+
+  function runMarkerTool(tool: ProjectCommandToolConfig, id: string) {
+    return executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: `marker-${id}`,
+      arguments: { argv: [id] }
+    }, {} as any, undefined, new Map());
+  }
+
+  function assertNoInterleave(sequence: string[]): void {
+    // Walk pairs: every `start X` must be immediately followed by `end X`.
+    for (let i = 0; i < sequence.length; i += 2) {
+      const open = sequence[i];
+      const close = sequence[i + 1];
+      expect(open?.startsWith('start ')).toBe(true);
+      expect(close?.startsWith('end ')).toBe(true);
+      expect(close.slice('end '.length)).toBe(open.slice('start '.length));
+    }
+  }
+
+  it('serialized command tools do NOT overlap across concurrent invocations (mutual exclusion)', async () => {
+    const markerFile = path.join(tempRoot, 'serial-markers.txt');
+    fs.writeFileSync(markerFile, '');
+    const tool = serializedCommandTool(mutualExclusionScript(markerFile));
+
+    const [a, b] = await Promise.all([runMarkerTool(tool, 'A'), runMarkerTool(tool, 'B')]);
+    expect(a.status).toBe(ToolResultStatus.PASSED);
+    expect(b.status).toBe(ToolResultStatus.PASSED);
+
+    const sequence = fs.readFileSync(markerFile, 'utf8').trim().split('\n').filter(Boolean);
+    expect(sequence.length).toBe(4);
+    assertNoInterleave(sequence);
+  });
+
+  it('serialized tsProjectTool tools do NOT overlap (serialize survives tsProjectTool expansion)', async () => {
+    // Drive the tsProjectTool shorthand through the ConfigLoader so we exercise
+    // the real expansion path (tsProjectTool -> type: command, serialize preserved).
+    const scriptDir = path.join(tempRoot, '.pi', 'project-tools');
+    fs.mkdirSync(scriptDir, { recursive: true });
+    const markerFile = path.join(tempRoot, 'ts-serial-markers.txt');
+    fs.writeFileSync(markerFile, '');
+    const scriptPath = path.join(scriptDir, 'serial_ts.ts');
+    fs.writeFileSync(scriptPath, mutualExclusionScript(markerFile));
+
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+  eventStore:
+    enabled: true
+tools:
+  - name: serial_ts
+    type: tsProjectTool
+    description: "serialized ts tool"
+    serialize: true
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    configLoader.reset();
+    const config = configLoader.load();
+    const expanded = (config.tools || []).find(t => t.name === 'serial_ts') as ProjectCommandToolConfig | undefined;
+    expect(expanded).toBeDefined();
+    expect(expanded!.type).toBe(ProjectToolType.COMMAND);
+    // serialize survived the tsProjectTool -> command expansion.
+    expect(expanded!.serialize).toBe(true);
+    expect(shouldSerializeCommandTool(expanded!)).toBe(true);
+
+    const [a, b] = await Promise.all([runMarkerTool(expanded!, 'A'), runMarkerTool(expanded!, 'B')]);
+    expect(a.status).toBe(ToolResultStatus.PASSED);
+    expect(b.status).toBe(ToolResultStatus.PASSED);
+
+    const sequence = fs.readFileSync(markerFile, 'utf8').trim().split('\n').filter(Boolean);
+    expect(sequence.length).toBe(4);
+    assertNoInterleave(sequence);
+  });
+
+  it('non-serialized command tools ARE allowed to run concurrently', async () => {
+    // Rendezvous proof of genuine overlap (deterministic, not timing-based):
+    // each invocation writes its own start marker, then polls until it observes
+    // the OTHER invocation's start marker before finishing. If the two ran
+    // concurrently both observe each other and both complete; if they were
+    // (wrongly) serialized the first would block waiting for the second's start
+    // and time out. No serialize flag here, so concurrency must be allowed.
+    const markerDir = path.join(tempRoot, 'rendezvous');
+    fs.mkdirSync(markerDir, { recursive: true });
+    const script = `
+const fs = require('fs');
+const path = require('path');
+const id = process.argv[1];
+const other = id === 'A' ? 'B' : 'A';
+const dir = ${JSON.stringify(markerDir)};
+function blockingSleep(ms) {
+  const sab = new SharedArrayBuffer(4);
+  Atomics.wait(new Int32Array(sab), 0, 0, ms);
+}
+fs.writeFileSync(path.join(dir, id + '.start'), '1');
+const deadline = Date.now() + 4000;
+let sawOther = false;
+while (Date.now() < deadline) {
+  if (fs.existsSync(path.join(dir, other + '.start'))) { sawOther = true; break; }
+  blockingSleep(10);
+}
+process.stdout.write(JSON.stringify({ id, sawOther }));
+process.exit(sawOther ? 0 : 1);
+`;
+    const tool: ProjectCommandToolConfig = {
+      name: 'concurrent_marker',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script, '--'],
+      argsMode: 'append',
+      allowArgs: true
+      // no serialize — concurrency must be allowed.
+    };
+
+    const [a, b] = await Promise.all([runMarkerTool(tool, 'A'), runMarkerTool(tool, 'B')]);
+    expect(a.status).toBe(ToolResultStatus.PASSED);
+    expect(b.status).toBe(ToolResultStatus.PASSED);
+    expect(JSON.parse(fs.readFileSync(a.stdoutFile!, 'utf8')).sawOther).toBe(true);
+    expect(JSON.parse(fs.readFileSync(b.stdoutFile!, 'utf8')).sawOther).toBe(true);
+  });
+
+  it('returns structured backpressure when a serialize:true command lock acquisition times out (AC4)', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    // Reject ONLY the command project-tool lock; let the shared events-JSONL
+    // append lock (a .jsonl path) succeed so event recording is unaffected.
+    vi.spyOn(lockfile, 'lock').mockImplementation(async (target: string) => {
+      if (String(target).includes('orr-else-command-tool-locks')) {
+        throw new Error('Lock file is already being held');
+      }
+      return (async () => {}) as () => Promise<void>;
+    });
+    const tool: ProjectCommandToolConfig = {
+      name: 'serial_command',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'process.stdout.write("never runs")'],
+      serialize: true
+    };
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'serial'
+    }, {} as any, undefined, new Map());
+
+    expect(result).toMatchObject({
+      tool: 'serial_command',
+      status: ToolResultStatus.REJECTED,
+      failureCategory: ProjectToolFailureCategory.BACKPRESSURE,
+      lockTimeout: true,
+      nextAction: 'wait_for_in_flight_result'
+    });
+    expect((result as any).message).toContain('could not acquire the serialized project-tool lock');
+    expect((result as any).lockMetadata).toMatchObject({
+      scope: 'project',
+      waitedMs: 0,
+      tool: 'serial_command'
+    });
+    // No absolute project/worktree paths leak into the model-facing metadata.
+    expect(JSON.stringify((result as any).lockMetadata)).not.toContain(tempRoot);
+    expect(JSON.stringify((result as any).lockMetadata)).not.toContain(tempWorktree);
   });
 
   it('rejects configured non-zero success exit codes when stderr contains an error', async () => {

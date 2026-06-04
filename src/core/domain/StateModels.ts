@@ -128,6 +128,16 @@ export interface ProjectCommandToolConfig extends BaseProjectToolConfig {
   successExitCodes?: number[];
   acceptMaxBuffer?: boolean;
   env?: Record<string, string>;
+  /**
+   * When true, invocations of this command tool are serialized across teammates
+   * via the same generic cross-process lock that serializes MCP tools (for
+   * stateful tools that must not run concurrently — e.g. a tsProjectTool that
+   * mutates a shared backend index). Different tools never block each other; the
+   * SAME serialized tool runs to completion before another teammate's identical
+   * tool can start. tsProjectTool shorthand expands to a command tool, so this
+   * flag covers tsProjectTool tools too.
+   */
+  serialize?: boolean;
 }
 
 export interface ProjectCommandArgumentPathConfig extends ProjectToolPathArgumentConfig {

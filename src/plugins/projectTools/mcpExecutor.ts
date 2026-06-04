@@ -9,9 +9,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { mkdir, open, readFile, writeFile } from 'fs/promises';
-import lockfile from 'proper-lockfile';
+import { readFile, writeFile } from 'fs/promises';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { resolveTemplateString } from '../../core/PiIntegration.js';
 import type { ProjectMcpToolConfig } from '../../core/domain/StateModels.js';
@@ -22,17 +20,15 @@ import {
   MCP_RAW_FILE_NAME,
   MCP_SERVER_CONFIG_KEY,
   MCP_SSE_TRANSPORT,
+  MCP_TOOL_LOCK_DIR,
   SERIAL_MCP_LOCK_REASON,
-  SERIAL_MCP_LOCK_RETRIES,
-  SERIAL_MCP_LOCK_RETRY_MAX_MS,
-  SERIAL_MCP_LOCK_RETRY_MIN_MS,
   SERIAL_MCP_LOCK_SCOPE,
-  SERIAL_MCP_LOCK_STALE_MS,
   SERIAL_MCP_REQUEST_TIMEOUT_MS
 } from './constants.js';
 import type { McpConfigFile, McpServerDefinition, ProjectToolExecutionContext, SerializedMcpLockMetadata } from './types.js';
 import { projectToolEnvironment } from './contextHelpers.js';
 import { normalizeMcpPathArguments } from './pathNormalization.js';
+import { SerializedToolLockTimeoutError, withSerializedToolLock } from './serializedToolLock.js';
 
 // ---- Serialized MCP lock error ----
 
@@ -41,21 +37,19 @@ export class SerializedMcpToolLockTimeoutError extends Error {
 
   constructor(
     definition: ProjectMcpToolConfig,
-    lockPath: string,
-    waitedMs: number,
-    cause: unknown,
+    cause: SerializedToolLockTimeoutError,
     metadata: SerializedMcpLockMetadata
   ) {
-    super(`Timed out acquiring serialized MCP project-tool lock for ${definition.name} after ${waitedMs}ms: ${String(cause)}`);
+    super(cause.message);
     this.name = 'SerializedMcpToolLockTimeoutError';
     this.lockMetadata = {
       scope: metadata.scope,
       reason: metadata.reason,
-      waitedMs,
+      waitedMs: cause.waitedMs,
       tool: definition.name,
       server: definition.server,
-      lockRef: path.basename(path.dirname(lockPath)),
-      lockFile: path.basename(lockPath)
+      lockRef: cause.lockRef,
+      lockFile: cause.lockFile
     };
   }
 }
@@ -89,23 +83,6 @@ function serializedMcpLockMetadata(context: ProjectToolExecutionContext): Serial
   };
 }
 
-function serializedMcpLockPath(definition: ProjectMcpToolConfig, context: ProjectToolExecutionContext): string {
-  const metadata = serializedMcpLockMetadata(context);
-  const digest = createHash('sha256')
-    .update(`${metadata.projectRoot}\n${definition.server}\n${definition.name}`)
-    .digest('hex')
-    .slice(0, 16);
-  return path.join(tmpdir(), 'orr-else-mcp-tool-locks', digest, `${definition.name}.lock`);
-}
-
-async function ensureSerializedMcpLockFile(definition: ProjectMcpToolConfig, context: ProjectToolExecutionContext): Promise<string> {
-  const lockPath = serializedMcpLockPath(definition, context);
-  await mkdir(path.dirname(lockPath), { recursive: true });
-  const handle = await open(lockPath, 'a');
-  await handle.close();
-  return lockPath;
-}
-
 async function withSerializedMcpToolLock<T>(
   definition: ProjectMcpToolConfig,
   context: ProjectToolExecutionContext,
@@ -113,61 +90,28 @@ async function withSerializedMcpToolLock<T>(
 ): Promise<T> {
   if (!shouldSerializeMcpTool(definition)) return await fn();
 
-  const lockPath = await ensureSerializedMcpLockFile(definition, context);
-  const startedAtMs = Date.now();
-  let release: (() => Promise<void>) | undefined;
+  const metadata = serializedMcpLockMetadata(context);
   try {
-    release = await lockfile.lock(lockPath, {
-      stale: SERIAL_MCP_LOCK_STALE_MS,
-      retries: {
-        retries: SERIAL_MCP_LOCK_RETRIES,
-        factor: 1.1,
-        minTimeout: SERIAL_MCP_LOCK_RETRY_MIN_MS,
-        maxTimeout: SERIAL_MCP_LOCK_RETRY_MAX_MS
-      }
-    });
+    return await withSerializedToolLock(
+      {
+        lockDir: MCP_TOOL_LOCK_DIR,
+        keyParts: [metadata.projectRoot, definition.server, definition.name],
+        lockName: definition.name,
+        logFields: {
+          tool: definition.name,
+          server: definition.server,
+          lockScope: metadata.scope,
+          lockReason: metadata.reason
+        }
+      },
+      `Timed out acquiring serialized MCP project-tool lock for ${definition.name}`,
+      fn
+    );
   } catch (error) {
-    const waitedMs = Date.now() - startedAtMs;
-    const lockMetadata = serializedMcpLockMetadata(context);
-    Logger.warn(Component.PROJECT_TOOLS, 'Timed out acquiring serialized MCP project-tool lock', {
-      tool: definition.name,
-      server: definition.server,
-      waitedMs,
-      lockScope: lockMetadata.scope,
-      lockReason: lockMetadata.reason,
-      lockRef: path.basename(path.dirname(lockPath)),
-      lockFile: path.basename(lockPath),
-      error: String(error)
-    });
-    throw new SerializedMcpToolLockTimeoutError(definition, lockPath, waitedMs, error, lockMetadata);
-  }
-
-  const waitedMs = Date.now() - startedAtMs;
-  if (waitedMs > SERIAL_MCP_LOCK_RETRY_MAX_MS) {
-    const lockMetadata = serializedMcpLockMetadata(context);
-    Logger.warn(Component.PROJECT_TOOLS, 'Waited for serialized MCP project-tool lock', {
-      tool: definition.name,
-      server: definition.server,
-      waitedMs,
-      lockScope: lockMetadata.scope,
-      lockReason: lockMetadata.reason,
-      projectRoot: lockMetadata.projectRoot,
-      worktreePath: lockMetadata.worktreePath,
-      lockPath
-    });
-  }
-
-  try {
-    return await fn();
-  } finally {
-    await release?.().catch((error: unknown) => {
-      Logger.warn(Component.PROJECT_TOOLS, 'Unable to release serialized MCP project-tool lock', {
-        tool: definition.name,
-        server: definition.server,
-        lockPath,
-        error: String(error)
-      });
-    });
+    if (error instanceof SerializedToolLockTimeoutError) {
+      throw new SerializedMcpToolLockTimeoutError(definition, error, metadata);
+    }
+    throw error;
   }
 }
 

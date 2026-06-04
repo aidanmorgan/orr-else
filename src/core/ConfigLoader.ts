@@ -267,6 +267,7 @@ export class ConfigLoader {
         acceptMaxBuffer,
         successExitCodes,
         env,
+        serialize,
         ...rest
       } = toolRecord;
 
@@ -299,6 +300,9 @@ export class ConfigLoader {
       if (allowCwdOverride !== undefined) expanded['allowCwdOverride'] = allowCwdOverride;
       if (acceptMaxBuffer !== undefined) expanded['acceptMaxBuffer'] = acceptMaxBuffer;
       if (successExitCodes !== undefined) expanded['successExitCodes'] = successExitCodes;
+      // serialize survives the tsProjectTool → command transform so the expanded
+      // command tool acquires the generic cross-process lock (s3wp/0yt5.23).
+      if (serialize !== undefined) expanded['serialize'] = serialize;
 
       // cwd: per-tool → tsProjectToolDefaults
       const resolvedCwd = cwd ?? tsDefs?.cwd;
