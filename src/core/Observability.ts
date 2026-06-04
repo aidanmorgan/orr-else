@@ -172,7 +172,10 @@ export class Observability {
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    // Injected so the 'process.pid' span attribute is deterministic under test
+    // rather than read from the global directly (pf7v).
+    private readonly pid: number = process.pid
   ) {
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
     this.sessionStateId = this.env.env(EnvVars.SESSION_STATE_ID) || null;
@@ -309,7 +312,7 @@ export class Observability {
           [OtelAttr.ORR_ELSE_STATE_ID]: this.env.env(EnvVars.STATE_ID) || undefined,
           [OtelAttr.ORR_ELSE_ACTION_ID]: this.env.env(EnvVars.ACTION_ID) || undefined,
           [OtelAttr.ORR_ELSE_WORKER_ID]: this.env.env(EnvVars.WORKER_ID) || undefined,
-          'process.pid': process.pid,
+          'process.pid': this.pid,
           ...attributes
         })
       },
@@ -371,7 +374,7 @@ export class Observability {
           [OtelAttr.ORR_ELSE_STATE_ID]: this.env.env(EnvVars.STATE_ID) || undefined,
           [OtelAttr.ORR_ELSE_ACTION_ID]: this.env.env(EnvVars.ACTION_ID) || undefined,
           [OtelAttr.ORR_ELSE_WORKER_ID]: this.env.env(EnvVars.WORKER_ID) || undefined,
-          'process.pid': process.pid,
+          'process.pid': this.pid,
           ...attributes
         })
       },

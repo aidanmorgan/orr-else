@@ -6,6 +6,7 @@ import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
+import { systemClock, type Clock } from './Clock.js';
 import { isRecord } from './RecordUtils.js';
 import { isRestartTransition } from './EventUtils.js';
 import {
@@ -31,6 +32,7 @@ export type {
 
 import type {
   DomainEvent,
+  EventData,
   LatestEventFilterOptions,
   ProjectToolFailureLimitFilterOptions,
   ProjectionCapableStore,
@@ -58,10 +60,11 @@ export class EventStore implements ProjectionCapableStore {
     private readonly configLoader: ConfigLoader,
     private readonly eventLog: JsonlEventLog = new JsonlEventLog(),
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    private readonly clock: Clock = systemClock
   ) {
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
-    this.beadIndex = new BeadEventIndex(this.eventLog);
+    this.beadIndex = new BeadEventIndex(this.eventLog, this.clock);
     this.projection = new BeadStateProjection();
   }
 
@@ -130,7 +133,10 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   private beadIdFor(event: DomainEvent): string | undefined {
-    return event.data?.beadId || event.data?.id;
+    const data = event.data;
+    const beadId = typeof data.beadId === 'string' ? data.beadId : undefined;
+    const id = typeof data.id === 'string' ? data.id : undefined;
+    return beadId || id;
   }
 
   private compareEvents(a: DomainEvent, b: DomainEvent): number {
@@ -183,15 +189,15 @@ export class EventStore implements ProjectionCapableStore {
   // Public API – record
   // ---------------------------------------------------------------------------
 
-  public async record(event: DomainEventName | string, data: any) {
+  public async record(event: DomainEventName | string, data: unknown): Promise<void> {
     const location = await this.init();
 
     const entry: DomainEvent = {
       id: uuidv7(),
       type: event,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(this.clock.now()).toISOString(),
       sessionId: this.sessionId,
-      data
+      data: isRecord(data) ? data : {}
     };
 
     if (location) {
@@ -330,7 +336,8 @@ export class EventStore implements ProjectionCapableStore {
       if (event.type !== DomainEventName.PROJECT_TOOL_FAILED) continue;
       if (options.stateId && data.stateId !== options.stateId) continue;
       if (options.actionId && data.actionId !== options.actionId) continue;
-      const failureLimit = data.result?.failureLimit;
+      const result = isRecord(data.result) ? data.result : undefined;
+      const failureLimit = isRecord(result?.failureLimit) ? result.failureLimit : undefined;
       if (!failureLimit) continue;
       if (options.terminalOnly && failureLimit.terminal !== true) continue;
       if (!latest || this.compareEvents(latest, event) < 0) latest = event;

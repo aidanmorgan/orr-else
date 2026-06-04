@@ -608,7 +608,10 @@ export class Supervisor {
     const restartEvent = this.latestHarnessRestartRequestEvent(events, stateId);
     if (!restartEvent || !this.eventAtOrAfter(restartEvent, terminalFailureEvent)) return undefined;
 
-    const terminalData = terminalFailureEvent.data || {};
+    // Event payloads are schemaless JSON keyed by string; read this one as a
+    // loose record at the consumer boundary (the typed persistence boundary is
+    // DomainEvent.data: EventData — pf7v). Field types are validated inline below.
+    const terminalData = terminalFailureEvent.data as Record<string, any>;
     const result = terminalData.result || {};
     const failureLimit = result.failureLimit || {};
     const actionId = typeof terminalData.actionId === 'string' ? terminalData.actionId : '';
@@ -933,7 +936,8 @@ export class Supervisor {
     try {
       const events = await this.eventStore.eventsForBead(beadId);
       for (const event of [...events].reverse()) {
-        const data = event.data || {};
+        // Schemaless JSON payload; loose-record view at the consumer boundary (pf7v).
+        const data = event.data as Record<string, any>;
         if (event.type === DomainEventName.HARNESS_RESTART_REQUESTED || event.type === DomainEventName.CONTEXT_RESTART_REQUESTED) {
           return {
             restartKind: event.type === DomainEventName.HARNESS_RESTART_REQUESTED ? RestartKind.HARNESS : RestartKind.CONTEXT,

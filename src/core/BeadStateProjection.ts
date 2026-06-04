@@ -124,6 +124,21 @@ export class BeadStateProjection {
     return `${ActionCompletionKey.WORKFLOW_PREFIX}=${normalized}${ActionCompletionKey.FIELD_SEPARATOR}`;
   }
 
+  /**
+   * Reads an event's payload as a loose, string-keyed JSON record.
+   *
+   * The persistence boundary types `DomainEvent.data` as `EventData`
+   * (Record<string, unknown>) so producers/readers narrow explicitly (pf7v).
+   * This projection consumes dozens of optional, event-type-specific fields and
+   * validates each inline (`typeof`, truthiness) before use, so it reads the
+   * payload through this single documented widening rather than `as`-casting at
+   * every field — matching the `Record<string, any>` shape its own helpers
+   * (`eventAppliesToWorkflow`, `completedActionFromData`) already accept.
+   */
+  private eventData(event: DomainEvent): Record<string, any> {
+    return event.data;
+  }
+
   private eventAppliesToWorkflow(data: Record<string, any>, workflowVersion?: string): boolean {
     const prefix = this.workflowActionPrefix(workflowVersion);
     if (!prefix) return true;
@@ -189,7 +204,7 @@ export class BeadStateProjection {
     };
 
     const applyRestart = (event: DomainEvent, kind: RestartKind): void => {
-      const data = event.data || {};
+      const data = this.eventData(event);
       projection.restartRequested = true;
       projection.restartKind = kind;
       projection.restartEvent = data.transitionEvent;
@@ -203,7 +218,7 @@ export class BeadStateProjection {
     };
 
     for (const event of events) {
-      const data = event.data || {};
+      const data = this.eventData(event);
       projection.lastEventId = event.id;
       projection.lastUpdatedAt = event.timestamp;
 
@@ -404,7 +419,7 @@ export class BeadStateProjection {
     const projection: Partial<HarnessBeadMetadata> = {};
     const includeDetails = this.includeDetails(options);
     for (const event of events) {
-      const data = event.data || {};
+      const data = this.eventData(event);
       // lastActivity tracks genuine bead activity. Supervisor-internal scheduling
       // bookkeeping (e.g. BEAD_QUARANTINED) must NOT advance it: the quarantine
       // signature is derived from status+lastActivity, so bumping lastActivity on

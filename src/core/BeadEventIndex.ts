@@ -13,6 +13,8 @@ import * as path from 'path';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { Component, EventStoreDefaults } from '../constants/index.js';
+import { systemClock, type Clock } from './Clock.js';
+import { systemUniqueId, type UniqueId } from './UniqueId.js';
 import type { DomainEvent } from './EventStoreTypes.js';
 
 const existsSync = fs.existsSync;
@@ -33,7 +35,11 @@ export interface BeadIndexLocation {
 }
 
 export class BeadEventIndex {
-  constructor(private readonly eventLog: JsonlEventLog) {}
+  constructor(
+    private readonly eventLog: JsonlEventLog,
+    private readonly clock: Clock = systemClock,
+    private readonly uniqueId: UniqueId = systemUniqueId
+  ) {}
 
   // ---------------------------------------------------------------------------
   // Path helpers
@@ -104,10 +110,10 @@ export class BeadEventIndex {
     const nextMarker: BeadIndexMarker = {
       ...marker,
       version: typeof marker.version === 'number' ? marker.version : 1,
-      generatedAt: new Date().toISOString(),
+      generatedAt: new Date(this.clock.now()).toISOString(),
       sources
     };
-    const tempPath = `${readyPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    const tempPath = `${readyPath}.${this.uniqueId.token()}.tmp`;
 
     try {
       await fs.promises.writeFile(tempPath, JSON.stringify(nextMarker));

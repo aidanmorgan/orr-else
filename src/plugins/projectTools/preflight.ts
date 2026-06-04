@@ -112,10 +112,11 @@ export function routingHintSuggestedOutcome(value: unknown): string | undefined 
 }
 
 function failureLimitSuggestedOutcomeFromEvent(event: DomainEvent): string | undefined {
-  const failureLimit = event.data?.result?.failureLimit;
+  const result = isJsonRecord(event.data.result) ? event.data.result : undefined;
+  const failureLimit = result?.failureLimit;
   return isJsonRecord(failureLimit) && typeof failureLimit.suggestedOutcome === 'string'
     ? failureLimit.suggestedOutcome
-    : routingHintSuggestedOutcome(event.data?.result);
+    : routingHintSuggestedOutcome(result);
 }
 
 function isProjectToolFailureWindowBoundary(
@@ -210,12 +211,13 @@ export async function projectToolFailureLimit(
   const events = await eventStore.eventsForBead(beadId);
   const activeRunEvents = eventsForActiveProjectToolRun(events, stateId, actionId);
   const matchingFailures = activeRunEvents.filter(event => {
-    const data = event.data || {};
+    const data = event.data;
     if (event.type !== DomainEventName.PROJECT_TOOL_FAILED) return false;
     if (data.tool !== definition.name) return false;
     if (stateId && data.stateId !== stateId) return false;
     if (actionId && data.actionId !== actionId) return false;
-    if (data.failureCategory === ProjectToolFailureCategory.BACKPRESSURE || data.result?.failureCategory === ProjectToolFailureCategory.BACKPRESSURE) return false;
+    const result = isJsonRecord(data.result) ? data.result : undefined;
+    if (data.failureCategory === ProjectToolFailureCategory.BACKPRESSURE || result?.failureCategory === ProjectToolFailureCategory.BACKPRESSURE) return false;
     if (isInfrastructureProjectToolFailure(data.error) || isInfrastructureProjectToolFailure(data.result)) return false;
     return true;
   });

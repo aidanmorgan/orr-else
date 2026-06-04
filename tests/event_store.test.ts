@@ -7,6 +7,7 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
+import type { Clock } from '../src/core/Clock.js';
 
 describe('EventStore projections', () => {
   let tempRoot: string;
@@ -1321,5 +1322,62 @@ states:
     // Clean up restarted resources.
     restartedConfigLoader.reset();
     restartedEventStore.setSessionId('test-reset');
+  });
+});
+
+describe('EventStore — injected Clock determinism (pf7v)', () => {
+  let tempRoot: string;
+  let configLoader: ConfigLoader;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-clock-'));
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    fs.mkdirSync(path.join(tempRoot, '.pi/events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi/logs'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+  });
+
+  afterEach(async () => {
+    configLoader.reset();
+    Logger.close();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('stamps the event timestamp from the injected Clock, not wall-clock', async () => {
+    // A fixed epoch far from "now"; a wall-clock `new Date()` could never
+    // produce this ISO string, so the assertion fails if the stamp regresses.
+    const FIXED_EPOCH_MS = 1262304000000; // 2010-01-01T00:00:00.000Z
+    const fixedClock: Clock = {
+      now: () => FIXED_EPOCH_MS,
+      date: (timestampMs?: number) => new Date(timestampMs ?? FIXED_EPOCH_MS)
+    };
+
+    const eventStore = new EventStore(configLoader, undefined, undefined, tempRoot, fixedClock);
+    eventStore.setSessionId('clock-session');
+
+    const before = Date.now();
+    await eventStore.record(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-clock', stateId: 'Planning' });
+    const after = Date.now();
+
+    const events = await eventStore.readAll();
+    expect(events).toHaveLength(1);
+    expect(events[0].timestamp).toBe('2010-01-01T00:00:00.000Z');
+
+    // Adversarial guard: prove the stamp is the injected fixed epoch and NOT the
+    // wall-clock that elapsed during record() — i.e. `new Date()` is gone.
+    const stampedMs = Date.parse(events[0].timestamp);
+    expect(stampedMs).toBe(FIXED_EPOCH_MS);
+    expect(stampedMs).toBeLessThan(before);
+    expect(stampedMs).toBeLessThan(after);
   });
 });
