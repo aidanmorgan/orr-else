@@ -369,6 +369,31 @@ describe('PathContext', () => {
     }
   });
 
+  it('(h-excl) skeleton is mutually exclusive with offset/limit — offset is ignored when skeleton:true', () => {
+    const ext = '.xclr';
+    skeletons.register(ext, (source) => `SKELETON-OF:${source.split('\n')[0]}`);
+    try {
+      writeFile('src/excl.xclr', 'line1\nline2\nline3\nline4\n');
+      const filePath = path.join(root, 'src/excl.xclr');
+
+      // Pass BOTH skeleton and an out-of-range offset + a limit. Per the
+      // documented contract, skeleton wins and offset/limit are ignored: no
+      // slice, no offset validation, no corrected-offset hint.
+      const result = pathContext.resolve({ filePath, skeleton: true, offset: 999, limit: 2 });
+
+      expect(result.status).toBe('found');
+      if (result.status !== 'found') throw new Error('unexpected status');
+      // Skeleton is produced.
+      expect(result.skeletonContent).toBe('SKELETON-OF:line1');
+      // offset/limit are ignored — none of the slice/offset fields are computed.
+      expect(result.slice).toBeNull();
+      expect(result.requestedOffsetValid).toBeNull();
+      expect(result.correctedOffset).toBeNull();
+    } finally {
+      skeletons.register(ext, (source) => source);
+    }
+  });
+
   // ── (h) NEGATIVE: no extractor registered → RAW content, no crash ─────────
 
   it('(h3) skeleton:true with NO registered extractor returns the RAW file content (no crash)', () => {

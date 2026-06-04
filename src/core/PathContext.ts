@@ -511,12 +511,15 @@ export class PathContext {
     }
 
     // ── Validate optional offset (existing behavior) ──────────────────────────
+    // Skeleton mode is mutually exclusive with offset/limit: when `skeleton` is
+    // set, offset/limit are ignored (no slice, no offset validation) so the
+    // result honors the documented PathContextInput contract.
     const hasOffset = input.offset !== undefined && input.offset !== null;
     let requestedOffsetValid: boolean | null = null;
     let correctedOffset: number | null = null;
     let slice: string | null = null;
 
-    if (hasOffset && isReadableFile) {
+    if (hasOffset && isReadableFile && !input.skeleton) {
       const requestedOffset = input.offset!;
       requestedOffsetValid = requestedOffset >= 1 && requestedOffset <= totalLines;
 
