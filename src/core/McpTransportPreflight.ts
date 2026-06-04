@@ -9,7 +9,7 @@
  *  - SINGLE health event recorded per unique failure key; repeated spawn-loop
  *    iterations reuse the cached result rather than rediscovering the same
  *    module error per worker.
- *  - GENERIC: no cerdiwen specifics; any harness with MCP-type project tools
+ *  - GENERIC: no consuming-project specifics; any harness with MCP-type project tools
  *    benefits from the same protection.
  *  - UNAVAILABLE marking: affected tool names are exposed on the health result
  *    so callers can gate spawning without needing to re-probe.

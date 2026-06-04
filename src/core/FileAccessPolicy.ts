@@ -424,9 +424,9 @@ export class FileAccessPolicy {
   // contract message rather than a confusing generic "escapes worktree" error.
   //
   // CONTRACT (ruq0): the framework root (orr-else repo) is READ-ONLY EVIDENCE
-  // from a Cerdiwen worktree. Framework-root write-sets are EXPLICITLY REJECTED.
+  // from the consuming project worktree. Framework-root write-sets are EXPLICITLY REJECTED.
   // The correct route is to make framework/orr-else changes directly in the
-  // orr-else repository, not via a Cerdiwen worktree write-set.
+  // orr-else repository, not via the consuming project worktree write-set.
   //
   // SECURITY: this is HARDENING only — it does NOT broaden what is allowed.
   // The worktreeScopeRejection that follows still applies to all other paths
@@ -449,10 +449,10 @@ export class FileAccessPolicy {
       `PROTOCOL VIOLATION: ${toolLabel} attempted to write to \`${targetPath}\`,`,
       `which resolves inside the configured framework root (\`${context.frameworkRoot}\`)`,
       'but outside the active Bead worktree.',
-      'The framework root (orr-else repo) is read-only evidence from a Cerdiwen worktree;',
+      'The framework root (orr-else repo) is read-only evidence from the consuming project worktree;',
       'framework-root write-sets are explicitly rejected.',
       'Make framework/orr-else changes directly in the orr-else repository,',
-      'not via a Cerdiwen worktree write-set.'
+      'not via the consuming project worktree write-set.'
     ].join(' ');
   }
 

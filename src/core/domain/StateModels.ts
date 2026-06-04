@@ -387,7 +387,7 @@ export interface HarnessConfig {
      * "frameworkRoot", "artifactsDir"); values are absolute paths or paths
      * relative to projectRoot.  Template variables use `{{roots.NAME}}`.
      *
-     * Project-specific roots (e.g. Cerdiwen artifact dirs) stay here so the
+     * Project-specific roots (e.g. the consuming project's artifact dirs) stay here so the
      * harness core remains generic — no hard-coded project paths in defaults.
      */
     roots?: Record<string, string>;

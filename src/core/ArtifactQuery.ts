@@ -93,9 +93,9 @@ function allowedArtifactRoots(beadId: string): string[] {
  * selector that extracts the relevant subtree from the artifact JSON.
  *
  * A projection may have multiple candidate selectors to handle schema drift
- * across Cerdiwen artifact versions. The tool tries each candidate selector in
+ * across artifact schema versions. The tool tries each candidate selector in
  * order and returns the first that resolves to a non-undefined value. This is
- * a generic fallback mechanism — not Cerdiwen-specific leakage — so the same
+ * a generic fallback mechanism — not consuming-project-specific leakage — so the same
  * pattern can be used for any artifact type whose schema has evolved.
  */
 interface ProjectionEntry {
@@ -120,7 +120,7 @@ interface ProjectionEntry {
  * Keys are stable model-facing names; values are entries with candidate selectors.
  *
  * Fallback lists cover both the original harness schema keys and the current
- * Cerdiwen planContract keys so queries succeed regardless of which schema
+ * consuming-project planContract keys so queries succeed regardless of which schema
  * version produced the artifact.
  */
 const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionEntry> = {
@@ -138,7 +138,7 @@ const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionEntry> = {
   },
   planSteps: {
     selectors: ['planSteps', 'implementationSteps'],
-    description: 'Ordered plan steps (Cerdiwen planContract schema)'
+    description: 'Ordered plan steps (consuming-project planContract schema)'
   },
   smtEvidence: {
     selectors: ['smtEvidence'],
@@ -162,8 +162,8 @@ const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionEntry> = {
  * Registry for requirementsAnalysis named projections (req 3).
  *
  * Fallback lists cover both the original harness schema keys and the current
- * Cerdiwen requirementsAnalysis keys. For example, the projection "gapFlags"
- * also tries "completenessGaps" (the Cerdiwen key), and "unresolvedQuestions"
+ * consuming-project requirementsAnalysis keys. For example, the projection "gapFlags"
+ * also tries "completenessGaps" (the consuming-project key), and "unresolvedQuestions"
  * also tries "clarificationQuestions".
  */
 const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
@@ -177,7 +177,7 @@ const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
   },
   traceability: {
     selectors: ['traceability', 'traceabilityReferences'],
-    description: 'Traceability map (Cerdiwen requirementsAnalysis schema)'
+    description: 'Traceability map (consuming-project requirementsAnalysis schema)'
   },
   gapFlags: {
     selectors: ['gapFlags', 'completenessGaps'],
@@ -185,7 +185,7 @@ const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
   },
   completenessGaps: {
     selectors: ['completenessGaps', 'gapFlags'],
-    description: 'Completeness gaps identified in requirements (Cerdiwen requirementsAnalysis schema)'
+    description: 'Completeness gaps identified in requirements (consuming-project requirementsAnalysis schema)'
   },
   referenceCitations: {
     selectors: ['referenceCitations'],
@@ -197,7 +197,7 @@ const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionEntry> = {
   },
   clarificationQuestions: {
     selectors: ['clarificationQuestions', 'unresolvedQuestions'],
-    description: 'Clarification questions to be resolved (Cerdiwen requirementsAnalysis schema)'
+    description: 'Clarification questions to be resolved (consuming-project requirementsAnalysis schema)'
   }
 } as const;
 

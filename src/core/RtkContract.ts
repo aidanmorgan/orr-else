@@ -19,7 +19,7 @@
  *   - Built-in control-plane tools  (BuiltInToolName)
  *   - Bundled runtime plugin tools  (PluginToolName)
  *   - Native Pi tools observed by policy (NativePiToolName)
- *   - Project-configured tools (config-driven; zero in the Cerdiwen harness)
+ *   - Project-configured tools (config-driven; zero in the bare harness)
  *
  * REGRESSION GUARDRAIL
  * --------------------
@@ -75,7 +75,7 @@ export type RtkRawOutputLocation =
  *   owningFile            Source file that defines/registers the tool (repo-relative).
  *   schemaTypeName        TypeScript type/interface name for the tool's return schema, or
  *                         'untyped_record' when the return is Record<string,unknown>.
- *                         Schema types are owned by each tool (or Cerdiwen for project tools).
+ *                         Schema types are owned by each tool (or the consuming project for project tools).
  *   skillPath             Path to the SKILL.md that documents model-facing usage
  *                         (planned path prefix '.pi/skills/' when file not yet created).
  *   rawOutputLocation     Where the harness persists the complete raw output of each
@@ -113,7 +113,7 @@ export interface RtkContractEntry {
  *  - Every PluginToolName value must have exactly one entry.
  *  - Every DEFAULT_OBSERVED_PI_TOOLS (NativePiToolName) value must have an entry.
  *  - Project-configured tools (config-driven) are registered here with class
- *    'project_configured'; the Cerdiwen harness currently has zero.
+ *    'project_configured'; the bare harness currently has zero.
  *  - No entry may demand a structuredResult/resultPreview/outputArchive return
  *    shape unless the tool is a project-configured command/mcp tool that already
  *    uses those compatibility fields.
@@ -644,7 +644,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   }
 
   // =========================================================================
-  // PROJECT-CONFIGURED tools (config-driven; none in the Cerdiwen harness)
+  // PROJECT-CONFIGURED tools (config-driven; none in the bare harness)
   // When the harness.yaml `tools:` section is populated, add entries here
   // following the pattern:
   //
