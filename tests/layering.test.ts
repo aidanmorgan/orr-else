@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-type LayerName = 'core' | 'plugins' | 'composition' | 'tools' | 'shared' | 'unknown';
+type LayerName = 'core' | 'plugins' | 'composition' | 'tools' | 'shared' | 'e2e' | 'unknown';
 
 interface SourceFile {
   absolutePath: string;
@@ -50,6 +50,11 @@ const layerMap: Array<{ layer: LayerName; pattern: RegExp; intent: string }> = [
     layer: 'shared',
     pattern: /^src\/(?:constants|types)\/|^src\/contract(?:\.type-tests)?\.ts$/,
     intent: 'Shared constants, types, and the harness-owned tool/verify contract are dependency leaves for runtime layers.'
+  },
+  {
+    layer: 'e2e',
+    pattern: /^src\/e2e\//,
+    intent: 'End-to-end verification utilities (e.g. the gate-outcome analyzer) read core event/domain types and are consumed only by e2e driver scripts — a leaf, never imported by runtime layers.'
   }
 ];
 
