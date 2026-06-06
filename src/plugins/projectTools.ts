@@ -164,6 +164,7 @@ export async function executeConfiguredProjectTool(
         tool: definition.name,
         type: definition.type,
         status: ToolResultStatus.REJECTED,
+        toolInvocationId: context.templateContext.toolInvocationId,
         result: summarizeToolResult(result)
       }).catch(() => {});
       return result;
@@ -217,6 +218,7 @@ export async function executeConfiguredProjectTool(
           tool: definition.name,
           type: definition.type,
           status,
+          toolInvocationId: context.templateContext.toolInvocationId,
           failureCategory: status === ToolResultStatus.PASSED ? undefined : classifyProjectToolFailure(definition, finalResult),
           // 0yt5.27: record the single PROJECT-scoped per-invocation output path so the
           // coordinator-only gate can resolve the latest event per (bead,state,action,tool)
@@ -239,6 +241,7 @@ export async function executeConfiguredProjectTool(
         tool: definition.name,
         type: definition.type,
         status: ToolResultStatus.REJECTED,
+        toolInvocationId: context.templateContext.toolInvocationId,
         failureCategory,
         // 0yt5.27: deterministic per-invocation path (partial output may or may not
         // be present when the run threw) so the gate's latest-event read is consistent.

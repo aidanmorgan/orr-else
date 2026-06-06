@@ -129,6 +129,16 @@ describe('buildToolTokenAccounting', () => {
     expect(accounting.modelFacingBytes).toBe(Buffer.byteLength(result, 'utf8'));
     expect(accounting.estimatedTokens).toBe(Math.ceil(Buffer.byteLength(result, 'utf8') / 4));
     expect(accounting.cached).toBe(false);
+    // toolInvocationId defaults to undefined when omitted
+    expect(accounting.toolInvocationId).toBeUndefined();
+  });
+
+  it('threads toolInvocationId through the accounting record when provided', () => {
+    const invocationId = '01935c28-1234-7abc-def0-123456789abc';
+    const accounting = buildToolTokenAccounting(
+      'my_tool', 'bead-1', 'Planning', 'action-1', 'result', false, invocationId
+    );
+    expect(accounting.toolInvocationId).toBe(invocationId);
   });
 
   it('produces accounting for an object result without mutating the input', () => {

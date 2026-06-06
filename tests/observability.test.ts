@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { JsonlSpanExporter, Observability, SpanStatusValue } from '../src/core/Observability.js';
-import { EnvVars, ObservabilityDefaults, SpanName, ToolResultStatus } from '../src/constants/index.js';
+import { EnvVars, ObservabilityDefaults, OtelAttr, SpanName, ToolResultStatus } from '../src/constants/index.js';
 
 describe('Observability', () => {
   const root = path.join(os.tmpdir(), 'orr-else-observability-test');
@@ -107,6 +107,23 @@ states:
         else process.env[key] = value;
       }
     }
+  });
+
+  it('carries orr_else.tool_invocation_id on a span when passed as an attribute', async () => {
+    writeHarnessConfig();
+    configLoader.setConfigPath(configPath);
+
+    await observability.initialize();
+    const invocationId = '01935c28-feed-7abc-def0-123456789abc';
+    const span = observability.startSpan('tool:my_tool', {
+      [OtelAttr.ORR_ELSE_TOOL_INVOCATION_ID]: invocationId
+    });
+    observability.endSpan(span.spanId, 'ok');
+    await observability.forceFlush();
+
+    const lines = fs.readFileSync(observability.getJsonlFilePath(), 'utf8').trim().split('\n');
+    const record = JSON.parse(lines[0]);
+    expect(record.attributes[OtelAttr.ORR_ELSE_TOOL_INVOCATION_ID]).toBe(invocationId);
   });
 
   it('retains passing tool evidence after a later failed invocation', () => {

@@ -15,6 +15,8 @@ const TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 export interface ToolTokenAccounting {
   /** Registered tool name. */
   tool: string;
+  /** Canonical invocation identifier — the same id carried on TOOL_INVOCATION_* events. */
+  toolInvocationId: string | undefined;
   /** Bead identifier when available (undefined in non-worker mode). */
   beadId: string | undefined;
   /** State identifier when available. */
@@ -68,11 +70,12 @@ export function buildToolTokenAccounting(
   stateId: string | undefined,
   actionId: string | undefined,
   modelFacingResult: unknown,
-  cached: boolean = false
+  cached: boolean = false,
+  toolInvocationId: string | undefined = undefined
 ): ToolTokenAccounting {
   const modelFacingBytes = estimateResultBytes(modelFacingResult);
   const estimatedTokens = Math.ceil(modelFacingBytes / TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN);
-  return { tool, beadId, stateId, actionId, modelFacingBytes, estimatedTokens, cached };
+  return { tool, toolInvocationId, beadId, stateId, actionId, modelFacingBytes, estimatedTokens, cached };
 }
 
 /** Token/cost usage as reported on a Pi assistant message (`message.usage`). */

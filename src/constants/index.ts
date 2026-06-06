@@ -1414,6 +1414,7 @@ export const OtelAttr = {
   ORR_ELSE_ACTION_ID: 'orr_else.action_id',
   ORR_ELSE_WORKER_ID: 'orr_else.worker_id',
   ORR_ELSE_COST_TOTAL: 'orr_else.cost_total',
+  ORR_ELSE_TOOL_INVOCATION_ID: 'orr_else.tool_invocation_id',
   // agent.* — teammate spawn context
   AGENT_BEAD_ID: 'agent.bead_id',
   AGENT_STATE_ID: 'agent.state_id',

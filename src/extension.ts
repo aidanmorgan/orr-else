@@ -434,11 +434,12 @@ function activeSpanAttributes(beadId: string | undefined, session: ExtensionSess
   };
 }
 
-function toolSpanAttributes(toolName: string, params: unknown, beadId: string | undefined, session: ExtensionSession, externalPiTool = false): SpanAttributes {
+function toolSpanAttributes(toolName: string, params: unknown, beadId: string | undefined, session: ExtensionSession, externalPiTool = false, toolInvocationId?: string): SpanAttributes {
   return {
     'tool.name': toolName,
     'tool.params': stringifySpanAttribute(summarizeForEvent(params)),
     'tool.external_pi': externalPiTool || undefined,
+    [OtelAttr.ORR_ELSE_TOOL_INVOCATION_ID]: toolInvocationId,
     ...activeSpanAttributes(beadId, session)
   };
 }
@@ -637,9 +638,10 @@ async function persistPluginToolRawResult(
   projectRoot: string,
   payload: unknown,
   status: ToolResultBase['status'],
-  failureCategory?: ToolResultBase['failureCategory']
+  failureCategory?: ToolResultBase['failureCategory'],
+  toolInvocationId?: string
 ): Promise<ToolResultBase> {
-  const invocationId = uuidv7();
+  const invocationId = toolInvocationId ?? uuidv7();
   let serialized: string;
   try {
     serialized = JSON.stringify(payload);
@@ -670,11 +672,11 @@ async function persistPluginToolRawResult(
     await fs.promises.writeFile(rawFile, serialized);
     const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
     Logger.debug(Component.PROJECT_TOOLS, 'Persisted plugin tool raw result', {
-      tool: toolName, rawFile, rawBytes, rawChecksum
+      tool: toolName, toolInvocationId: invocationId, rawFile, rawBytes, rawChecksum
     });
   } catch (error) {
     Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist plugin tool raw result', {
-      tool: toolName, error: String(error)
+      tool: toolName, toolInvocationId: invocationId, error: String(error)
     });
   }
 
@@ -713,6 +715,9 @@ function wrapPluginTool(
       const breakerEnabled = isWorkerMode();
       const key = breakerKey(beadId, tool.name);
       const cacheKey = toolCacheKey(tool.name, params);
+      // dl9r: generate ONE canonical toolInvocationId at invocation start and
+      // thread it through all events, token accounting, raw-output logs, and OTel.
+      const toolInvocationId = uuidv7();
 
       // Serve cacheable tools from the in-session memo when present. Any call
       // to a non-cacheable tool below will clear the memo before executing,
@@ -725,6 +730,7 @@ function wrapPluginTool(
           await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
             beadId,
             tool: tool.name,
+            toolInvocationId,
             result: summarizeForEvent(hit.result),
             toolResult: hit.toolResult,
             cached: true,
@@ -735,7 +741,7 @@ function wrapPluginTool(
             tool.name, beadId,
             process.env[EnvVars.STATE_ID] || session.activeRun?.stateId,
             process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id,
-            hit.result, true
+            hit.result, true, toolInvocationId
           )).catch(() => {});
           return toolResult(hit.result);
         }
@@ -757,6 +763,7 @@ function wrapPluginTool(
           await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
             beadId,
             tool: tool.name,
+            toolInvocationId,
             result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' }
           }).catch(() => {});
           if (ctx.hasUI) ctx.ui.notify(message, 'error');
@@ -767,6 +774,7 @@ function wrapPluginTool(
       await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
         beadId,
         tool: tool.name,
+        toolInvocationId,
         params: summarizeForEvent(params)
       });
 
@@ -780,6 +788,7 @@ function wrapPluginTool(
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
+          toolInvocationId,
           result: {
             status: ToolResultStatus.REJECTED,
             isError: true,
@@ -792,7 +801,7 @@ function wrapPluginTool(
 
       const tracedExecute = runtimeObservability.tracedAsync(
         `tool:${tool.name}`,
-        toolSpanAttributes(tool.name, params, beadId, session),
+        toolSpanAttributes(tool.name, params, beadId, session, false, toolInvocationId),
         async (p: any, c: ExtensionContext) => {
           if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
           const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c)));
@@ -817,7 +826,7 @@ function wrapPluginTool(
           const toolResultHandle = await persistPluginToolRawResult(
             services.toolCallPathFactory,
             tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
-            ToolResultStatus.PASSED
+            ToolResultStatus.PASSED, undefined, toolInvocationId
           );
           if (failed) {
             if (breakerEnabled) {
@@ -826,6 +835,7 @@ function wrapPluginTool(
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
               beadId,
               tool: tool.name,
+              toolInvocationId,
               result: summarizeForEvent(result),
               toolResult: toolResultHandle
             });
@@ -842,6 +852,7 @@ function wrapPluginTool(
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
               tool: tool.name,
+              toolInvocationId,
               result: summarizeForEvent(result),
               toolResult: toolResultHandle
             });
@@ -863,7 +874,7 @@ function wrapPluginTool(
         // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
         // Does NOT mutate `result`; accounting is harness-side only.
         void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
-          tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false
+          tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false, toolInvocationId
         )).catch(() => {});
         return toolResult(result);
       } catch (error) {
@@ -882,11 +893,13 @@ function wrapPluginTool(
             tool: tool.name
           },
           ToolResultStatus.REJECTED,
-          'INFRA'
+          'INFRA',
+          toolInvocationId
         );
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
+          toolInvocationId,
           error: String(error),
           toolResult: errorHandle
         }).catch(() => {});
