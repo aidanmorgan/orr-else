@@ -7,6 +7,7 @@ import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefau
 import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
+import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import {
@@ -325,20 +326,62 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * Returns the absolute path to the packaged harness.schema.json.
+   * Protected so test subclasses can override it to inject a custom install path.
+   */
+  protected resolveInstallSchemaPath(): string {
+    return getPackagedSchemaPath();
+  }
+
   private validate(config: unknown): asserts config is HarnessConfig {
     const ajv = new Ajv({ allErrors: true, useDefaults: true });
     addFormats(ajv);
 
+    const installSchemaPath = this.resolveInstallSchemaPath();
     const projectSchemaPath = resolveProjectFrom(this.projectRoot, 'harness.schema.json');
-    const installSchemaPath = resolveInstall('harness.schema.json');
     const schemaPath = fs.existsSync(installSchemaPath) ? installSchemaPath : projectSchemaPath;
     if (!fs.existsSync(schemaPath)) {
-      Logger.warn(Component.CONFIG, 'Schema file not found, skipping validation', { path: schemaPath });
-      return;
+      throw new Error(
+        `Harness schema not found — startup aborted. ` +
+        `Attempted paths:\n` +
+        `  install: ${installSchemaPath}\n` +
+        `  project: ${projectSchemaPath}\n` +
+        `The packaged schema ships with the orr-else package. ` +
+        `Call getPackagedSchemaPath() (from SchemaRegistry) to locate it, ` +
+        `or ensure the package is installed correctly.`
+      );
     }
 
-    const schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
-    const validate = ajv.compile(schema);
+    let schema: Record<string, unknown>;
+    try {
+      schema = JSON.parse(fs.readFileSync(schemaPath, 'utf8'));
+    } catch (err) {
+      throw new Error(
+        `Harness schema at "${schemaPath}" could not be parsed — startup aborted. ` +
+        `Attempted paths:\n` +
+        `  install: ${installSchemaPath}\n` +
+        `  project: ${projectSchemaPath}\n` +
+        `Ensure the file is valid JSON. Call getPackagedSchemaPath() (from SchemaRegistry) ` +
+        `to locate the authoritative packaged schema. Parse error: ${String(err)}`
+      );
+    }
+
+    let validate: ReturnType<typeof ajv.compile>;
+    try {
+      validate = ajv.compile(schema);
+    } catch (err) {
+      throw new Error(
+        `Harness schema at "${schemaPath}" could not be compiled by AJV — startup aborted. ` +
+        `Attempted paths:\n` +
+        `  install: ${installSchemaPath}\n` +
+        `  project: ${projectSchemaPath}\n` +
+        `Ensure the file is a valid JSON Schema draft-07 document. ` +
+        `Call getPackagedSchemaPath() (from SchemaRegistry) to locate the authoritative schema. ` +
+        `Compile error: ${String(err)}`
+      );
+    }
+
     const valid = validate(config);
 
     if (!valid) {

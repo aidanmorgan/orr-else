@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ConfigLoader, resolveProviderName } from '../src/core/ConfigLoader.js';
+import { getPackagedSchemaPath } from '../src/core/SchemaRegistry.js';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -1271,5 +1272,158 @@ tools:
     command: echo
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bhxt: fail startup closed when harness schema/registry missing or uncompilable
+//
+// The ConfigLoader.validate() method resolves the install schema path via a
+// protected resolveInstallSchemaPath() hook, which subclasses can override for
+// test isolation. Tests use ConfigLoaderWithCustomInstallSchema to inject a
+// non-existent or corrupt schema path without touching real package files.
+// ---------------------------------------------------------------------------
+
+/** Test double: override install-schema resolution so we can inject any path. */
+class ConfigLoaderWithCustomInstallSchema extends ConfigLoader {
+  constructor(
+    private readonly installSchemaOverride: string,
+    projectRoot: string
+  ) {
+    super(undefined, projectRoot);
+  }
+
+  protected override resolveInstallSchemaPath(): string {
+    return this.installSchemaOverride;
+  }
+}
+
+describe('bhxt: ConfigLoader.validate() fails closed — missing / corrupt schema', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-bhxt-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  const minimalYaml = `
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`;
+
+  // AC1/AC3: both install schema and project schema absent → fatal throw (no warn-and-skip)
+  it('AC1/AC3: throws (not warn-and-skip) when both install schema and project schema are absent', () => {
+    const configPath = writeConfig(minimalYaml);
+    // Neither the fake install path nor the project schema path exists.
+    const loader = new ConfigLoaderWithCustomInstallSchema(
+      path.join(tempRoot, 'nonexistent-install', 'harness.schema.json'),
+      tempRoot
+    );
+    let thrown: Error | undefined;
+    try {
+      loader.load(configPath);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown, 'expected load() to throw when both schema paths are absent').toBeDefined();
+    // AC2: error must include the attempted paths
+    expect(thrown!.message).toMatch(/harness\.schema\.json/);
+    expect(thrown!.message).toMatch(/getPackagedSchemaPath/);
+  });
+
+  // AC3: install schema absent, project schema exists but contains invalid JSON → throws
+  it('AC3: throws when schema file exists but contains invalid JSON', () => {
+    // Write a corrupt schema at the project root.
+    fs.writeFileSync(path.join(tempRoot, 'harness.schema.json'), 'INVALID_JSON{{{');
+    const configPath = writeConfig(minimalYaml);
+    // Install schema path points to non-existent location → falls back to project schema.
+    const loader = new ConfigLoaderWithCustomInstallSchema(
+      path.join(tempRoot, 'nonexistent-install', 'harness.schema.json'),
+      tempRoot
+    );
+    let thrown: Error | undefined;
+    try {
+      loader.load(configPath);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown, 'expected load() to throw on invalid JSON schema').toBeDefined();
+    expect(thrown!.message).toMatch(/harness\.schema\.json/);
+  });
+
+  // AC3: install schema absent, project schema is valid JSON but AJV compile fails → throws
+  it('AC3: throws when schema file contains valid JSON that AJV cannot compile', () => {
+    // Write a JSON file that is syntactically valid but not a valid JSON Schema.
+    fs.writeFileSync(
+      path.join(tempRoot, 'harness.schema.json'),
+      JSON.stringify({ type: 'completely_unknown_invalid_type_xyz' })
+    );
+    const configPath = writeConfig(minimalYaml);
+    const loader = new ConfigLoaderWithCustomInstallSchema(
+      path.join(tempRoot, 'nonexistent-install', 'harness.schema.json'),
+      tempRoot
+    );
+    let thrown: Error | undefined;
+    try {
+      loader.load(configPath);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown, 'expected load() to throw on AJV compile failure').toBeDefined();
+    // The error should reference the schema path or compilation failure.
+    expect(thrown!.message).toMatch(/harness\.schema\.json/);
+  });
+
+  // AC2: error message includes the install path and project path when both are absent
+  it('AC2: error message includes both attempted schema paths', () => {
+    const configPath = writeConfig(minimalYaml);
+    const fakeInstallPath = path.join(tempRoot, 'fake-install', 'harness.schema.json');
+    const loader = new ConfigLoaderWithCustomInstallSchema(fakeInstallPath, tempRoot);
+    let thrown: Error | undefined;
+    try {
+      loader.load(configPath);
+    } catch (e) {
+      thrown = e as Error;
+    }
+    expect(thrown).toBeDefined();
+    // The fake install path must appear in the error message.
+    expect(thrown!.message).toContain(fakeInstallPath);
+    // The project schema path must also appear.
+    expect(thrown!.message).toContain(path.join(tempRoot, 'harness.schema.json'));
+    // getPackagedSchemaPath must be mentioned so users know how to find the correct path.
+    expect(thrown!.message).toMatch(/getPackagedSchemaPath/);
+  });
+
+  // AC1 (normal): packaged install schema is present → loads without throwing (no regression)
+  it('AC1 (normal): real packaged install schema → load() succeeds, no regression', () => {
+    const configPath = writeConfig(minimalYaml);
+    // Use the real ConfigLoader (no override) — the packaged harness.schema.json must be found.
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+  });
+
+  // AC1 (normal): install schema absent but valid project schema present → succeeds
+  it('AC1 (normal): valid project-level harness.schema.json is accepted when install schema absent', () => {
+    // Copy the real packaged schema into the project root.
+    const pkgSchema = getPackagedSchemaPath();
+    fs.copyFileSync(pkgSchema, path.join(tempRoot, 'harness.schema.json'));
+    const configPath = writeConfig(minimalYaml);
+    const loader = new ConfigLoaderWithCustomInstallSchema(
+      path.join(tempRoot, 'nonexistent-install', 'harness.schema.json'),
+      tempRoot
+    );
+    // Project schema is valid → must not throw.
+    expect(() => loader.load(configPath)).not.toThrow();
   });
 });
