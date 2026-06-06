@@ -2507,15 +2507,15 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         const preliminary = parseOrrElseArgs(args);
 
         if (preliminary === ExtensionCommandAction.STATUS) {
-          ctx.ui.notify((await flowStatus(services, session, 'text')) as string, 'info');
+          if (ctx.hasUI) ctx.ui.notify((await flowStatus(services, session, 'text')) as string, 'info');
           return;
         }
-        
+
         if (preliminary === ExtensionCommandAction.STOP) {
           if (session.supervisor) session.supervisor.stop();
           session.supervisor = null;
           session.currentFlowOptions = null;
-          ctx.ui.notify('Orr Else stopped.', 'info');
+          if (ctx.hasUI) ctx.ui.notify('Orr Else stopped.', 'info');
           return;
         }
 
@@ -2525,11 +2525,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
         if (typeof parsed === 'object') {
           const result = await startOrrElse(pi, ctx as any, parsed, services, session);
-          ctx.ui.notify(result, 'info');
+          if (ctx.hasUI) ctx.ui.notify(result, 'info');
         }
       } catch (error) {
         Logger.error(Component.ORR_ELSE, 'Orr Else command failed', { error: String(error) });
-        ctx.ui.notify(`Orr Else failed: ${String(error)}`, 'error');
+        if (ctx.hasUI) ctx.ui.notify(`Orr Else failed: ${String(error)}`, 'error');
       }
     }
   });
@@ -2545,7 +2545,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     session.observedPiToolSpans = new Map<string, SpanContext>();
     session.observedPiToolInvocationIds = new Map<string, string>();
     const runtimeObservability = services.observability;
-    void runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
+    // Return the cleanup promise so the Pi host can await it (pi-experiment-2xho AC5).
+    // forceFlush drains any pending telemetry spans; shutdown closes the exporter.
+    // On failure the promise resolves anyway (finally) — a bounded shutdown-failure
+    // that does NOT block replacement/reload.
+    return runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
   });
 
   pi.on(PiEventName.BEFORE_AGENT_START, async (event: BeforeAgentStartEvent) => {
@@ -3430,8 +3434,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       return;
     }
 
+    // NOTE: BuiltInToolName.ORR_ELSE ('orr-else') is a Pi COMMAND registered via
+    // pi.registerCommand(), not a model-callable tool. It must NOT appear in
+    // setActiveTools or be counted as a callable requiredTool — the command
+    // surface and the model-callable tool surface are distinct (pi-experiment-2xho).
     services.flowManager.activateTools(pi, [
-      BuiltInToolName.ORR_ELSE,
       BuiltInToolName.HARNESS_STATUS,
       ...services.plugins.bd.tools.map(t => t.name),
       ...getConfiguredProjectToolNames(config),

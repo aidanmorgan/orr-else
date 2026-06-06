@@ -3497,3 +3497,159 @@ describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (rea
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// pi-experiment-2xho: command surface vs model-callable tool surface separation
+// ---------------------------------------------------------------------------
+
+describe('pi-experiment-2xho — command surface vs model-callable tool surface', () => {
+  // AC3: /orr-else appears in command inventory and is ABSENT from active
+  // model-callable tools, getAllTools tool surfaces, requiredTool callability,
+  // and prompt tool snippets.
+  it('AC3: /orr-else is registered as a command but absent from active model-callable tools', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    // /orr-else must appear in commands
+    expect(harness.commands['orr-else']).toBeDefined();
+    expect(harness.commands['orr-else'].description).toContain('--config');
+
+    // /orr-else must NOT appear in registered tools
+    const toolNames = harness.tools.map((t: any) => t.name);
+    expect(toolNames).not.toContain('orr-else');
+    expect(toolNames).not.toContain(BuiltInToolName.ORR_ELSE);
+  });
+
+  it('AC3: /orr-else is absent from setActiveTools (active model-callable tool surface)', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    // The active tools set by setActiveTools must not include the command name
+    const activeTools = harness.pi.getActiveTools();
+    expect(activeTools).not.toContain('orr-else');
+    expect(activeTools).not.toContain(BuiltInToolName.ORR_ELSE);
+  });
+
+  it('AC3: /orr-else is absent from active tools even after SESSION_START in coordinator mode', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: true, ui: { notify: () => {}, setStatus: () => {}, setWorkingMessage: () => {} }, cwd: process.cwd(), shutdown: () => {} } as any);
+
+    const activeTools = harness.pi.getActiveTools();
+    expect(activeTools).not.toContain('orr-else');
+    // harness_status IS a model-callable tool and should remain
+    expect(activeTools).toContain(BuiltInToolName.HARNESS_STATUS);
+  });
+
+  // AC4: command handlers with hasUI:false must not throw
+  it('AC4: /orr-else command status handler is safe with hasUI:false (headless/JSON/RPC)', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const headlessCommandCtx = {
+      hasUI: false,
+      ui: undefined,
+      cwd: process.cwd(),
+      shutdown: () => {}
+    } as any;
+
+    // Should not throw even though ctx.ui is undefined
+    await expect(
+      harness.commands['orr-else'].handler('status', headlessCommandCtx)
+    ).resolves.not.toThrow();
+  });
+
+  it('AC4: /orr-else command stop handler is safe with hasUI:false (headless/JSON/RPC)', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const headlessCommandCtx = {
+      hasUI: false,
+      ui: undefined,
+      cwd: process.cwd(),
+      shutdown: () => {}
+    } as any;
+
+    // Should not throw even though ctx.ui is undefined
+    await expect(
+      harness.commands['orr-else'].handler('stop', headlessCommandCtx)
+    ).resolves.not.toThrow();
+  });
+
+  it('AC4: /orr-else command start handler is safe with hasUI:false (headless/JSON/RPC)', async () => {
+    // A minimal harness.yaml so the config loader finds a valid config
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-2xho-headless-')));
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    const previousCwd = process.cwd();
+    let harness2xho: ReturnType<typeof fakePi> | undefined;
+    try {
+      process.chdir(tempRoot);
+      harness2xho = fakePi();
+      await orrElseExtension(harness2xho.pi);
+      await harness2xho.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+      const headlessCommandCtx = {
+        hasUI: false,
+        ui: undefined,
+        cwd: tempRoot,
+        shutdown: () => {}
+      } as any;
+
+      // Should not throw even when hasUI:false and ui is undefined
+      // (start path will fail tmux / supervisor start, but must not crash on ctx.ui.notify)
+      await expect(
+        harness2xho.commands['orr-else'].handler('', headlessCommandCtx)
+      ).resolves.not.toThrow();
+    } finally {
+      await harness2xho?.callbacks?.[PiEventName.SESSION_SHUTDOWN]?.();
+      process.chdir(previousCwd);
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  // AC4: /orr-else command error path must not crash on ctx.ui when hasUI:false
+  it('AC4: /orr-else command error path is safe with hasUI:false', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const headlessCommandCtx = {
+      hasUI: false,
+      ui: undefined,
+      cwd: process.cwd(),
+      shutdown: () => {}
+    } as any;
+
+    // Pass a bad --config path to trigger an error in the command handler
+    await expect(
+      harness.commands['orr-else'].handler('--config /no/such/file/harness.yaml', headlessCommandCtx)
+    ).resolves.not.toThrow();
+  });
+
+  // AC5: SESSION_SHUTDOWN awaits cleanup (returns a Promise, not void/undefined)
+  it('AC5: SESSION_SHUTDOWN handler returns a thenable (awaits cleanup)', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const result = harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+    // Must be a Promise (thenable) so the Pi host can await cleanup
+    expect(result).toBeTruthy();
+    expect(typeof result?.then).toBe('function');
+    await result;
+  });
+});
+

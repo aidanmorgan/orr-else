@@ -174,6 +174,7 @@ describe('flowStatusText coordinator formatting', () => {
 
     const notifyMessages: string[] = [];
     const uiCtx = {
+      hasUI: true,
       ui: { notify: (msg: string) => notifyMessages.push(msg) }
     } as any;
 
@@ -545,6 +546,7 @@ describe('/orr-else stop handler', () => {
 
     const notifyMessages: string[] = [];
     const uiCtx = {
+      hasUI: true,
       ui: { notify: (msg: string) => notifyMessages.push(msg) }
     } as any;
 
@@ -661,6 +663,7 @@ describe('Plugin lifecycle: no action until session_start or /orr-else', () => {
     // confirming the status returns "inactive"):
     const notifyMessages: string[] = [];
     const uiCtx = {
+      hasUI: true,
       ui: { notify: (msg: string) => notifyMessages.push(msg) }
     } as any;
 
@@ -678,6 +681,7 @@ describe('Plugin lifecycle: no action until session_start or /orr-else', () => {
 
     const notifyMessages: string[] = [];
     const uiCtx = {
+      hasUI: true,
       ui: { notify: (msg: string) => notifyMessages.push(msg) }
     } as any;
 
