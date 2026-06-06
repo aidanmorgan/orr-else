@@ -8,6 +8,7 @@ import type { ApiAddress, BeadId } from '../types/index.js';
 
 import { ConfigLoader } from '../core/ConfigLoader.js';
 import { Logger } from '../core/Logger.js';
+import { validateHandoffPayload, HandoffSchemaId } from '../core/HandoffSchemas.js';
 import { Observability } from '../core/Observability.js';
 import { redactPaneText } from '../core/PaneTextRedactor.js';
 import { scanPaneTranscript, hasScanFindings, formatScanSummary, type PaneTranscriptScanResult } from '../core/PaneTranscriptScanner.js';
@@ -769,6 +770,31 @@ export class TeammateFactory {
         runDir,
         spawnIdentityDigestId: spawnDigestId
       });
+
+      // pi-experiment-3b5e: fail-closed dispatch-side validation for worker command.
+      // The workerCommand schema enforces beadId/stateId are present and well-formed
+      // before the spawn record is written and the tmux pane is launched.
+      // Fail closed — the spawn is blocked entirely, not heuristic.
+      const commandValidation = validateHandoffPayload(
+        HandoffSchemaId.WORKER_COMMAND,
+        { beadId, stateId, workerId },
+        { beadId, stateId }
+      );
+      if (!commandValidation.valid) {
+        const { diagnostic } = commandValidation;
+        Logger.error(Component.FACTORY, 'Dispatch-side workerCommand schema validation FAILED — blocking spawn', {
+          beadId,
+          stateId,
+          workerId,
+          schemaId: diagnostic.schemaId,
+          failurePath: diagnostic.failurePath
+        });
+        return {
+          success: false,
+          error: `Handoff schema violation [${diagnostic.schemaId}] for beadId=${beadId} stateId=${stateId}: ${diagnostic.failurePath.join('; ')}`
+        };
+      }
+
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWN_STARTED, {
         beadId,
         stateId,

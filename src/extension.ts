@@ -53,6 +53,7 @@ import {
   findAppliedTeammateSignal,
   isStatusMutatingTeammateEvent
 } from './core/TeammateEvents.js';
+import { validateHandoffPayload, HandoffSchemaId } from './core/HandoffSchemas.js';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from './core/ProviderRequestCap.js';
 import { buildTurnUsageRecord, buildToolTokenAccounting } from './core/TokenUsage.js';
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
@@ -1921,6 +1922,30 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       evidence: event.evidence,
       handover: event.handover
     };
+
+    // pi-experiment-3b5e: fail-closed dispatch-side validation for terminal/state transitions.
+    // The terminalTransition schema guards STATE_TRANSITION_APPLIED records before they
+    // are written to the event log. A malformed payload is a deterministic BLOCKED signal —
+    // the record is NOT written and the coordinator throws rather than advancing state silently.
+    const terminalValidation = validateHandoffPayload(
+      HandoffSchemaId.TERMINAL_TRANSITION,
+      transitionEventData,
+      { beadId, stateId: event.stateId, actionId: event.actionId }
+    );
+    if (!terminalValidation.valid) {
+      const { diagnostic } = terminalValidation;
+      Logger.error(Component.ORR_ELSE, 'Dispatch-side terminalTransition schema validation FAILED — blocking record', {
+        beadId,
+        stateId: event.stateId,
+        actionId: event.actionId,
+        schemaId: diagnostic.schemaId,
+        failurePath: diagnostic.failurePath
+      });
+      throw new Error(
+        `Handoff schema violation [${diagnostic.schemaId}] for beadId=${beadId} stateId=${event.stateId} actionId=${event.actionId ?? ''}: ${diagnostic.failurePath.join('; ')}`
+      );
+    }
+
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, transitionEventData);
 
     if (isTerminalState(nextState, config) && isAdvanceOutcome(event.transitionEvent, config)) {
@@ -3253,6 +3278,28 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           handover: summary,
           usedTools: runtimeObservability.getCalledTools()
         });
+
+        // pi-experiment-3b5e: fail-closed dispatch-side validation for worker completion.
+        // The workerCompletion schema enforces beadId/stateId/outcome are present and
+        // well-formed before the signal is sent. Fail closed — blocked, not heuristic.
+        const completionValidation = validateHandoffPayload(
+          HandoffSchemaId.WORKER_COMPLETION,
+          { beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id, workerId: event.workerId, outcome },
+          { beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id }
+        );
+        if (!completionValidation.valid) {
+          const { diagnostic } = completionValidation;
+          Logger.error(Component.ORR_ELSE, 'Dispatch-side workerCompletion schema validation FAILED — blocking signal', {
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            actionId: activeRun.action.id,
+            schemaId: diagnostic.schemaId,
+            failurePath: diagnostic.failurePath
+          });
+          throw new Error(
+            `Handoff schema violation [${diagnostic.schemaId}] for beadId=${activeRun.beadId} stateId=${activeRun.stateId} actionId=${activeRun.action.id}: ${diagnostic.failurePath.join('; ')}`
+          );
+        }
 
         await postWorkerSignal(services, event);
         
