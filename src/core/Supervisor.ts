@@ -17,6 +17,7 @@ import type { WorktreeProvisioningMode } from './domain/StateModels.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 import { projectToolFailureLimitSuggestedOutcome } from './ProjectToolFailureLimit.js';
+import { deriveRestartId } from './RestartCorrelation.js';
 import {
   routeFailure,
   compactDescriptor,
@@ -1915,6 +1916,7 @@ export class Supervisor {
           }
         } else {
           // BOUNDED_RETRY: restart the bead (existing behavior).
+          const finalBlockedRestartKey = `supervisor-final-blocked-${beadId}-${stateId}-${now}`;
           await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
             beadId,
             stateId,
@@ -1922,7 +1924,8 @@ export class Supervisor {
             transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
             summary,
             evidence,
-            handover: summary
+            handover: summary,
+            restartId: deriveRestartId(finalBlockedRestartKey)
           }).catch(() => {});
         }
 
@@ -2001,6 +2004,7 @@ export class Supervisor {
         }
       } else {
         // BOUNDED_RETRY: restart the bead (existing behavior).
+        const noProgressRestartKey = `supervisor-no-progress-${beadId}-${stateId}-${now}`;
         await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
           beadId,
           stateId,
@@ -2008,7 +2012,8 @@ export class Supervisor {
           transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
           summary,
           evidence,
-          handover: summary
+          handover: summary,
+          restartId: deriveRestartId(noProgressRestartKey)
         }).catch(() => {});
       }
 

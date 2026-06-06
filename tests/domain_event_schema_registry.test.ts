@@ -135,11 +135,12 @@ describe('AC1 – registry covers replay-critical and startup-critical events', 
   });
 
   it('restart lifecycle events have schemas: CONTEXT_RESTART_REQUESTED, HARNESS_RESTART_REQUESTED', () => {
+    // pi-experiment-q8tl: restartId and targetState are now required fields.
     expect(DOMAIN_EVENT_SCHEMAS[DomainEventName.CONTEXT_RESTART_REQUESTED]).toEqual(
-      expect.arrayContaining(['beadId', 'stateId', 'transitionEvent'])
+      expect.arrayContaining(['beadId', 'stateId', 'transitionEvent', 'restartId', 'targetState'])
     );
     expect(DOMAIN_EVENT_SCHEMAS[DomainEventName.HARNESS_RESTART_REQUESTED]).toEqual(
-      expect.arrayContaining(['beadId', 'stateId', 'transitionEvent'])
+      expect.arrayContaining(['beadId', 'stateId', 'transitionEvent', 'restartId', 'targetState'])
     );
   });
 
@@ -288,15 +289,40 @@ describe('AC2 – extended registry validates production writes for new event ca
     ).rejects.toThrow(/CONTEXT_RESTART_REQUESTED.*missing required field.*transitionEvent/i);
   });
 
-  it('accepts CONTEXT_RESTART_REQUESTED with minimal required fields', async () => {
+  it('accepts CONTEXT_RESTART_REQUESTED with all required fields (q8tl: restartId + targetState required)', async () => {
+    await expect(
+      store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        transitionEvent: 'CONTEXT_RESTART',
+        targetState: 'Planning',
+        restartId: 'restart-test-1'
+      })
+    ).resolves.toBeUndefined();
+  });
+
+  it('rejects CONTEXT_RESTART_REQUESTED missing restartId (q8tl: required field)', async () => {
     await expect(
       store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-1',
         stateId: 'Planning',
         transitionEvent: 'CONTEXT_RESTART',
         targetState: 'Planning'
+        // missing: restartId — must be rejected
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/CONTEXT_RESTART_REQUESTED.*missing required field.*restartId/i);
+  });
+
+  it('rejects CONTEXT_RESTART_REQUESTED missing targetState (q8tl: required field)', async () => {
+    await expect(
+      store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'restart-test-2'
+        // missing: targetState — must be rejected
+      })
+    ).rejects.toThrow(/CONTEXT_RESTART_REQUESTED.*missing required field.*targetState/i);
   });
 
   // Tool invocation
@@ -562,16 +588,19 @@ describe('AC5 – backward compatibility: grandfathered partial-shape writes are
     ).resolves.toBeUndefined();
   });
 
-  it('CONTEXT_RESTART_REQUESTED without restartId is accepted (pre-nyug writes)', async () => {
-    // project_tools.test.ts:1027 writes without restartId (added in pi-experiment-nyug).
+  it('CONTEXT_RESTART_REQUESTED without restartId is REJECTED (q8tl: restartId now required, no pre-nyug compat)', async () => {
+    // pi-experiment-q8tl: restartId is now required on all production writes.
+    // The pre-nyug grandfathered path is removed — old records without restartId
+    // must be rejected at the write boundary to enforce the correlation contract.
     await expect(
       store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-1',
         stateId: 'Planning',
         transitionEvent: 'CONTEXT_RESTART',
         targetState: 'Planning'
+        // No restartId — must be rejected
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/CONTEXT_RESTART_REQUESTED.*missing required field.*restartId/i);
   });
 
   it('STATE_TRANSITION_APPLIED without workerId is accepted (workerId is optional)', async () => {

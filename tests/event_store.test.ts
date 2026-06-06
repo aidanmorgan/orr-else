@@ -697,9 +697,11 @@ settings:
         data: {
           beadId: 'bd-1',
           stateId: 'Implementation',
+          targetState: 'Implementation',
           transitionEvent: 'CONTEXT_RESTART',
           actionKey: 'workflow=fixture-workflow-v1/state=Implementation/action=surgical-execution',
-          handover: noisyContextOverflow
+          handover: noisyContextOverflow,
+          restartId: 'restart-e2-lifecycle'
         }
       }
     ];
@@ -744,7 +746,8 @@ settings:
           actionKey: 'workflow=fixture-workflow-v1/state=Planning/action=formulate-plan',
           handover: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           summary: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
-          evidence: 'Agent lifecycle failure during turn_end: WebSocket closed 1000'
+          evidence: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
+          restartId: 'restart-e2-transient'
         }
       }
     ];
@@ -796,7 +799,8 @@ settings:
           stateId: 'Implementation',
           targetState: 'Implementation',
           transitionEvent: 'CONTEXT_RESTART',
-          actionId: 'surgical-execution'
+          actionId: 'surgical-execution',
+          restartId: 'restart-e3-wt24'
         }
       }
     ];
@@ -831,7 +835,8 @@ settings:
           beadId: 'bd-1',
           stateId: 'Planning',
           targetState: 'Planning',
-          transitionEvent: 'HARNESS_RESTART'
+          transitionEvent: 'HARNESS_RESTART',
+          restartId: 'restart-e1-clear'
         }
       },
       {

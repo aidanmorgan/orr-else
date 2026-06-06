@@ -1033,7 +1033,8 @@ process.exit(sawOther ? 0 : 1);
     await eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
       ...context,
       targetState: context.stateId,
-      transitionEvent: EventName.CONTEXT_RESTART
+      transitionEvent: EventName.CONTEXT_RESTART,
+      restartId: 'restart-test-fixture'
     });
     await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
     const restartedRetry = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());

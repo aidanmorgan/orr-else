@@ -1,5 +1,5 @@
 /**
- * Restart lifecycle correlation utilities — pi-experiment-nyug.
+ * Restart lifecycle correlation utilities — pi-experiment-nyug / pi-experiment-q8tl.
  *
  * Provides helpers for generating and extracting restart correlation IDs so
  * that operators can reconstruct the lifecycle chain:
@@ -12,8 +12,11 @@
  *  - restartId is derived deterministically from the signal's idempotencyKey
  *    so duplicate signals (same idempotencyKey) produce the same restartId.
  *  - No new env vars — the worker reads correlation from the event store.
- *  - Backward compatible: all fields are optional so old events without them
- *    never cause projection errors.
+ *  - Explicit-only: restartId and targetState are required on every production
+ *    restart event (pi-experiment-q8tl). Malformed records missing restartId
+ *    are rejected with a descriptive error rather than silently returning undefined.
+ *    There is NO fallback from targetState to stateId — cross-state restarts
+ *    require explicit targetState.
  */
 
 import { createHash } from 'node:crypto';
@@ -27,8 +30,11 @@ import type { DomainEvent } from './EventStoreTypes.js';
 export interface RestartCorrelation {
   /** Stable ID derived from the restart signal's idempotencyKey. */
   restartId: string;
-  /** The sessionStateId of the worker that issued the restart signal. */
-  previousRunId: string;
+  /**
+   * The sessionStateId of the worker that issued the restart signal.
+   * Optional: supervisor-triggered restarts have no prior worker session ID.
+   */
+  previousRunId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,11 +101,15 @@ export function computeRestartAttempt(
  * Once a run is initialized the restart is "consumed" and subsequent calls
  * return undefined.
  *
- * Old events that lack the new fields (restartId / previousRunId) return
- * undefined rather than a partial correlation.
+ * Matching is performed ONLY on the explicit targetState field — there is no
+ * fallback to stateId. A restart event lacking targetState or restartId is
+ * malformed and throws a descriptive error (pi-experiment-q8tl).
  *
  * This is the WORKER-SIDE reader: called during STATE_RUN_INITIALIZED recording
  * to carry restartId + previousRunId forward.
+ *
+ * @throws {Error} when a matching restart event is missing restartId or
+ *   targetState — the caller must not silently proceed without a valid correlation.
  */
 export function extractRestartCorrelation(
   events: DomainEvent[],
@@ -120,30 +130,33 @@ export function extractRestartCorrelation(
       return undefined;
     }
 
-    // Match restart events by their TARGET state (the state the new run will
-    // execute in).  Fall back to the SOURCE stateId for legacy events that
-    // pre-date the targetState field — this preserves backward compatibility
-    // when source == target (the default config).
-    const restartMatchesState =
-      typeof data.targetState === 'string'
-        ? data.targetState === stateId
-        : data.stateId === stateId;
-
     if (
       (event.type === DomainEventName.CONTEXT_RESTART_REQUESTED ||
         event.type === DomainEventName.HARNESS_RESTART_REQUESTED) &&
-      data.beadId === beadId &&
-      restartMatchesState
+      data.beadId === beadId
     ) {
-      const restartId = typeof data.restartId === 'string' ? data.restartId : undefined;
+      // Match ONLY by explicit targetState — no stateId fallback (pi-experiment-q8tl).
+      if (typeof data.targetState !== 'string') {
+        throw new Error(
+          `Malformed restart event ${event.id} (${event.type}): missing required field targetState. ` +
+          `beadId=${String(data.beadId)} stateId=${String(data.stateId)}`
+        );
+      }
+
+      if (data.targetState !== stateId) continue;
+
+      // restartId is required on all production restart events (pi-experiment-q8tl).
+      if (typeof data.restartId !== 'string') {
+        throw new Error(
+          `Malformed restart event ${event.id} (${event.type}): missing required field restartId. ` +
+          `beadId=${String(data.beadId)} targetState=${data.targetState}`
+        );
+      }
+
       const previousRunId =
         typeof data.previousRunId === 'string' ? data.previousRunId : undefined;
 
-      // Old events may lack the new fields — return undefined rather than a
-      // partial correlation that operators cannot fully trust.
-      if (!restartId || !previousRunId) return undefined;
-
-      return { restartId, previousRunId };
+      return { restartId: data.restartId, previousRunId };
     }
   }
 

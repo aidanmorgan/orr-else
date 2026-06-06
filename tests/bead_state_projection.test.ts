@@ -111,7 +111,8 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
         stateId: 'Implementation',
         targetState: 'Implementation',
         transitionEvent: EventName.CONTEXT_RESTART,
-        actionId: 'surgical-execution'
+        actionId: 'surgical-execution',
+        restartId: 'restart-ctx-1'
       })
     ];
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
@@ -128,7 +129,8 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
         beadId: 'bd-1',
         stateId: 'Planning',
         targetState: 'Planning',
-        transitionEvent: EventName.HARNESS_RESTART
+        transitionEvent: EventName.HARNESS_RESTART,
+        restartId: 'restart-hrn-1'
       })
     ];
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
@@ -138,7 +140,7 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
 
   it('clears restart fields when STATE_TRANSITION_APPLIED follows a restart', () => {
     const events = [
-      makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, { beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART }, { timestamp: '2026-01-01T00:00:01.000Z' }),
+      makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, { beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART, restartId: 'restart-hrn-clear' }, { timestamp: '2026-01-01T00:00:01.000Z' }),
       makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, { beadId: 'bd-1', fromState: 'Planning', nextState: 'Planning', transitionEvent: EventName.HARNESS_RESTART }, { timestamp: '2026-01-01T00:00:02.000Z' })
     ];
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
@@ -191,8 +193,10 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
       makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-1',
         stateId: 'Planning',
+        targetState: 'Planning',
         transitionEvent: 'HARNESS_RESTART',
-        handover: noisy
+        handover: noisy,
+        restartId: 'restart-transient-1'
       })
     ];
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
@@ -242,7 +246,7 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
         beadId: 'bd-1', fromState: 'Planning', nextState: 'Implementation', transitionEvent: 'SUCCESS', actionId: 'plan'
       }, { timestamp: '2026-01-01T00:00:02.000Z' }),
       makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
-        beadId: 'bd-1', stateId: 'Implementation', targetState: 'Implementation', transitionEvent: EventName.CONTEXT_RESTART, actionId: 'execute'
+        beadId: 'bd-1', stateId: 'Implementation', targetState: 'Implementation', transitionEvent: EventName.CONTEXT_RESTART, actionId: 'execute', restartId: 'restart-ctx-2'
       }, { timestamp: '2026-01-01T00:00:03.000Z' })
     ];
     const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true });
@@ -256,7 +260,7 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
   it('clears restart fields when STATE_TRANSITION_APPLIED follows a restart', () => {
     const events = [
       makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, {
-        beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART
+        beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART, restartId: 'restart-hrn-bead-clear'
       }, { timestamp: '2026-01-01T00:00:01.000Z' }),
       makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
         beadId: 'bd-1', fromState: 'Planning', nextState: 'Planning', transitionEvent: EventName.HARNESS_RESTART
@@ -397,7 +401,7 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
     // NOT clear the restart fields — the bead stays in restart-pending state.
     const events = [
       makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, {
-        beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART
+        beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART, restartId: 'restart-hrn-2'
       }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
       makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
         beadId: 'bd-1',
@@ -496,7 +500,8 @@ describe('BeadStateProjection — replay idempotency and out-of-order determinis
           stateId: 'Implementation',
           targetState: 'Implementation',
           transitionEvent: EventName.CONTEXT_RESTART,
-          actionId: 'surgical-execution'
+          actionId: 'surgical-execution',
+          restartId: 'restart-idem-1'
         },
         { id: 'e5', timestamp: '2026-01-01T00:00:05.000Z', sessionId: 's2' }
       )

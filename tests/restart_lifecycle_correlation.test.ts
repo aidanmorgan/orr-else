@@ -1,13 +1,14 @@
 /**
- * Restart lifecycle correlation — pi-experiment-nyug
+ * Restart lifecycle correlation — pi-experiment-nyug / pi-experiment-q8tl
  *
  * Acceptance criteria:
  *   AC1: A restart replay can reconstruct request -> new run initialized ->
  *        terminal outcome using IDs ONLY (not timestamp adjacency).
  *   AC2: Duplicate restart signals share the same restartId.
  *   AC3: Tests cover BOTH context restart and harness restart.
- *   AC4: Existing event projections remain backward compatible with older events
- *        that lack the new fields (no crash / no required-field assumption).
+ *   AC4 (q8tl INVERTED): Malformed/old restart records are REJECTED — they
+ *        cannot restart, restore, or satisfy progress. There is no backward
+ *        compat fallback for events missing restartId or targetState.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -201,31 +202,30 @@ describe('AC1: restart lifecycle can be reconstructed using IDs only', () => {
     expect(correlation!.previousRunId).toBe('session-planning');
   });
 
-  it('extractRestartCorrelation resolves legacy event (no targetState) by stateId when source==target', () => {
-    // Backward-compat: old restart events have no targetState field.  The matcher
-    // must fall back to stateId matching so default-config (source==target) still works.
+  it('extractRestartCorrelation throws for a restart event missing targetState (no stateId fallback)', () => {
+    // pi-experiment-q8tl: there is no stateId fallback. A restart event without
+    // explicit targetState is malformed and must be rejected with a descriptive error.
     const events: DomainEvent[] = [
       makeEvent(
         DomainEventName.CONTEXT_RESTART_REQUESTED,
         {
           beadId: 'bd-1',
-          stateId: 'Implementation',     // source == target; no targetState field
+          stateId: 'Implementation',     // source state, but no targetState field
           transitionEvent: EventName.CONTEXT_RESTART,
-          restartId: 'restart-legacy',
+          restartId: 'restart-no-target',
           previousRunId: 'session-old',
           reason: EventName.CONTEXT_RESTART,
           attempt: 1,
-          // NOTE: no targetState — simulates a pre-nyug event
+          // NOTE: no targetState — malformed event; this MUST throw, not fall back
         },
-        { id: 'e-legacy', timestamp: '2026-01-01T00:00:01.000Z', sessionId: 'session-old' }
+        { id: 'e-no-target', timestamp: '2026-01-01T00:00:01.000Z', sessionId: 'session-old' }
       ),
     ];
 
-    const correlation = extractRestartCorrelation(events, 'bd-1', 'Implementation');
-
-    expect(correlation).not.toBeUndefined();
-    expect(correlation!.restartId).toBe('restart-legacy');
-    expect(correlation!.previousRunId).toBe('session-old');
+    // Must throw with a descriptive message; must NOT silently fall back to stateId.
+    expect(() => extractRestartCorrelation(events, 'bd-1', 'Implementation')).toThrow(
+      /missing required field targetState/
+    );
   });
 
   it('extractRestartCorrelation returns undefined when a STATE_RUN_INITIALIZED follows the restart (run already started)', () => {
@@ -357,55 +357,83 @@ describe('AC3: context and harness restart both carry correlation fields', () =>
 });
 
 // ---------------------------------------------------------------------------
-// AC4: Backward compatibility — old events without new fields must not crash
+// AC4 (q8tl INVERTED): Malformed restart records are rejected — no fallbacks
 // ---------------------------------------------------------------------------
+// pi-experiment-q8tl: These tests prove that old/malformed restart records
+// CANNOT restart, restore, or satisfy progress. Backward compat tests from
+// pi-experiment-nyug are inverted: the negative assertions now drive real
+// production projection and correlation paths. If a fallback were reintroduced,
+// these tests would fail.
 
-describe('AC4: projections are backward compatible with old events lacking correlation fields', () => {
+describe('AC4: malformed/old restart records are rejected by projection and correlation', () => {
   const projection = new BeadStateProjection();
 
-  it('projectBeadStateChartFromEvents handles CONTEXT_RESTART_REQUESTED without restartId', () => {
+  it('projectBeadStateChartFromEvents rejects CONTEXT_RESTART_REQUESTED without restartId (records corruptionDiagnostics)', () => {
     const events: DomainEvent[] = [
       makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-1',
         stateId: 'Implementation',
         targetState: 'Implementation',
         transitionEvent: EventName.CONTEXT_RESTART,
-        // No restartId, previousRunId, reason, attempt — old event format
+        // No restartId — malformed; must be fail-closed
       }),
     ];
 
-    // Must not throw; restartRequested should still be set correctly
-    expect(() => projection.projectBeadStateChartFromEvents('bd-1', events)).not.toThrow();
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
-    expect(result.restartRequested).toBe(true);
-    expect(result.restartKind).toBe(RestartKind.CONTEXT);
-    // restartId/previousRunId/attempt are optional — undefined is fine for old events
+    // The event must NOT set restartRequested — it is rejected, not applied.
+    expect(result.restartRequested).not.toBe(true);
+    expect(result.restartKind).toBeUndefined();
+    // corruptionDiagnostics must record the rejection with the missing field.
+    expect(result.corruptionDiagnostics).toBeDefined();
+    expect(result.corruptionDiagnostics!.length).toBeGreaterThan(0);
+    expect(result.corruptionDiagnostics![0].missingFields).toContain('restartId');
   });
 
-  it('projectBeadStateChartFromEvents handles HARNESS_RESTART_REQUESTED without restartId', () => {
+  it('projectBeadStateChartFromEvents rejects HARNESS_RESTART_REQUESTED without restartId (records corruptionDiagnostics)', () => {
     const events: DomainEvent[] = [
       makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, {
         beadId: 'bd-1',
         stateId: 'Planning',
         targetState: 'Planning',
         transitionEvent: EventName.HARNESS_RESTART,
-        // No new fields
+        // No restartId — malformed
       }),
     ];
 
-    expect(() => projection.projectBeadStateChartFromEvents('bd-1', events)).not.toThrow();
     const result = projection.projectBeadStateChartFromEvents('bd-1', events);
-    expect(result.restartRequested).toBe(true);
-    expect(result.restartKind).toBe(RestartKind.HARNESS);
+    expect(result.restartRequested).not.toBe(true);
+    expect(result.restartKind).toBeUndefined();
+    expect(result.corruptionDiagnostics).toBeDefined();
+    expect(result.corruptionDiagnostics![0].missingFields).toContain('restartId');
   });
 
-  it('projectBeadStateChartFromEvents handles STATE_RUN_INITIALIZED without restartId', () => {
+  it('projectBeadStateChartFromEvents rejects restart event without targetState (records corruptionDiagnostics)', () => {
+    const events: DomainEvent[] = [
+      makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
+        beadId: 'bd-1',
+        stateId: 'Implementation',
+        // No targetState — malformed
+        transitionEvent: EventName.CONTEXT_RESTART,
+        restartId: 'restart-abc',
+      }),
+    ];
+
+    const result = projection.projectBeadStateChartFromEvents('bd-1', events);
+    expect(result.restartRequested).not.toBe(true);
+    expect(result.corruptionDiagnostics).toBeDefined();
+    expect(result.corruptionDiagnostics![0].missingFields).toContain('targetState');
+  });
+
+  it('projectBeadStateChartFromEvents still handles STATE_RUN_INITIALIZED without restartId (runId is optional)', () => {
+    // STATE_RUN_INITIALIZED.restartId is still optional — supervisor-triggered
+    // restarts produce a run-init without previousRunId. This test proves the
+    // guard only affects restart REQUEST events, not run-init events.
     const events: DomainEvent[] = [
       makeEvent(DomainEventName.STATE_RUN_INITIALIZED, {
         beadId: 'bd-1',
         stateId: 'Implementation',
         actionId: 'act',
-        // No restartId, previousRunId, runId — old event format
+        // No restartId, previousRunId, runId — still valid
       }),
     ];
 
@@ -414,21 +442,68 @@ describe('AC4: projections are backward compatible with old events lacking corre
     expect(result.currentState).toBe('Implementation');
   });
 
-  it('extractRestartCorrelation tolerates old restart events without restartId field', () => {
+  it('extractRestartCorrelation throws for restart event missing restartId', () => {
     const events: DomainEvent[] = [
       makeEvent(
         DomainEventName.CONTEXT_RESTART_REQUESTED,
         {
           beadId: 'bd-1',
           stateId: 'Implementation',
+          targetState: 'Implementation',
           transitionEvent: EventName.CONTEXT_RESTART,
-          // No restartId — old format
+          // No restartId — malformed; must throw, not return undefined
         },
         { id: 'old-restart', timestamp: '2026-01-01T00:00:01.000Z', sessionId: 'session-old' }
       ),
     ];
 
-    // Should not throw; returns undefined or a partial result without restartId
-    expect(() => extractRestartCorrelation(events, 'bd-1', 'Implementation')).not.toThrow();
+    // Must throw with a diagnostic message, not silently return undefined.
+    expect(() => extractRestartCorrelation(events, 'bd-1', 'Implementation')).toThrow(
+      /missing required field restartId/
+    );
+  });
+
+  it('extractRestartCorrelation throws for restart event missing targetState', () => {
+    const events: DomainEvent[] = [
+      makeEvent(
+        DomainEventName.HARNESS_RESTART_REQUESTED,
+        {
+          beadId: 'bd-1',
+          stateId: 'Implementation',
+          // No targetState — malformed
+          transitionEvent: EventName.HARNESS_RESTART,
+          restartId: 'restart-abc',
+        },
+        { id: 'no-target', timestamp: '2026-01-01T00:00:01.000Z', sessionId: 'session-old' }
+      ),
+    ];
+
+    expect(() => extractRestartCorrelation(events, 'bd-1', 'Implementation')).toThrow(
+      /missing required field targetState/
+    );
+  });
+
+  it('malformed restart event in projection leaves currentState unmodified (cannot satisfy progress)', () => {
+    // A malformed restart record cannot advance the bead's currentState.
+    // Without currentState being set by the restart, progress gating cannot
+    // be satisfied by the malformed event.
+    const events: DomainEvent[] = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        lease: { owner: 'worker-1' },
+      }),
+      makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        // Missing targetState AND restartId — malformed
+        transitionEvent: EventName.CONTEXT_RESTART,
+      }),
+    ];
+
+    const result = projection.projectBeadStateChartFromEvents('bd-1', events);
+    // currentState must NOT have been advanced to 'Implementation' by the malformed event
+    expect(result.currentState).toBe('Planning');
+    expect(result.restartRequested).not.toBe(true);
   });
 });

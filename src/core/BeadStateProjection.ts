@@ -206,12 +206,31 @@ export class BeadStateProjection {
 
     const applyRestart = (event: DomainEvent, kind: RestartKind): void => {
       const data = this.eventData(event);
+      // pi-experiment-q8tl: fail-closed guard — restart events MUST carry
+      // restartId and targetState. A record missing these is malformed; reject
+      // it entirely rather than partially applying state changes (which could
+      // corrupt currentState or satisfy progress checks with stale data).
+      const missingRestartFields: string[] = [];
+      if (!data.restartId) missingRestartFields.push('restartId');
+      if (!data.targetState) missingRestartFields.push('targetState');
+      if (!data.transitionEvent) missingRestartFields.push('transitionEvent');
+      if (missingRestartFields.length > 0) {
+        if (!projection.corruptionDiagnostics) projection.corruptionDiagnostics = [];
+        projection.corruptionDiagnostics.push({
+          eventId: event.id,
+          eventType: event.type,
+          timestamp: event.timestamp,
+          missingFields: missingRestartFields,
+          reason: `${event.type} rejected: missing required fields [${missingRestartFields.join(', ')}]; event cannot set restart state`
+        });
+        return; // fail closed — do not apply any partial restart state change
+      }
       projection.restartRequested = true;
       projection.restartKind = kind;
       projection.restartEvent = data.transitionEvent;
       projection.restartFromState = data.stateId;
-      projection.restartTargetState = data.targetState || data.stateId;
-      if (data.targetState) projection.currentState = data.targetState;
+      projection.restartTargetState = data.targetState;
+      projection.currentState = data.targetState;
       if (includeDetails) completeAction(this.completedActionFromData(data, workflowVersion));
       if (includeDetails && this.eventAppliesToWorkflow(data, workflowVersion) && typeof data.handover === 'string' && data.stateId) {
         projection.handovers[data.stateId] = this.compactHandover(data.handover);

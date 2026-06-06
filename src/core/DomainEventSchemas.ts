@@ -28,9 +28,9 @@
  *     (project_tools.test.ts:975); schema requires only beadId + tool.
  *   - STATE_TRANSITION_APPLIED: workerId is optional; schema requires
  *     beadId + fromState + nextState + transitionEvent.
- *   - CONTEXT/HARNESS_RESTART_REQUESTED: restartId added in pi-experiment-nyug;
- *     older test fixture writes (project_tools.test.ts:1027) omit it; schema
- *     requires only beadId + stateId + transitionEvent.
+ *   - CONTEXT/HARNESS_RESTART_REQUESTED: restartId and targetState required
+ *     (pi-experiment-q8tl); all production writers now populate them. actionId
+ *     and previousRunId remain optional (supervisor-triggered restarts omit them).
  *   - SIGNAL_ACKNOWLEDGED/INTENT_RECORDED: some test writes omit idempotencyKey
  *     (project_tools.test.ts:1117, synthetic_read_filter.test.ts:222);
  *     schema requires only beadId + type.
@@ -161,17 +161,24 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
 
   // ── Restart lifecycle ─────────────────────────────────────────────────────
   [DomainEventName.CONTEXT_RESTART_REQUESTED]: {
-    version: 1,
+    version: 2,
     replayImpact: 'CRITICAL',
-    // restartId/previousRunId: added pi-experiment-nyug; absent in older writes.
-    // targetState: default = stateId; absent in pre-nyug events.
-    // handover: present on some restart signals, absent on others.
-    optionalFields: ['restartId', 'previousRunId', 'targetState', 'handover', 'actionId']
+    // restartId: required (pi-experiment-q8tl) — all writers now populate it.
+    // targetState: required — all writers now populate it explicitly.
+    // previousRunId: optional — only worker-sourced restarts carry the prior
+    //   session ID; supervisor-triggered restarts have no prior worker session.
+    // actionId: optional — supervisor-triggered restarts have no actionId.
+    // handover: present on most signals; absent on supervisor-triggered ones.
+    optionalFields: ['previousRunId', 'handover', 'actionId']
   },
   [DomainEventName.HARNESS_RESTART_REQUESTED]: {
-    version: 1,
+    version: 2,
     replayImpact: 'CRITICAL',
-    optionalFields: ['restartId', 'previousRunId', 'targetState', 'handover', 'actionId']
+    // restartId: required (pi-experiment-q8tl) — all writers now populate it.
+    // targetState: required — all writers now populate it explicitly.
+    // previousRunId: optional — supervisor-triggered restarts have no prior session.
+    // actionId: optional — supervisor-triggered restarts have no actionId.
+    optionalFields: ['previousRunId', 'handover', 'actionId']
   },
 
   // ── Teammate / worktree ────────────────────────────────────────────────────
@@ -395,10 +402,13 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   [DomainEventName.ACTION_COMPLETED]: ['beadId', 'stateId', 'actionId'],
 
   // ── Restart lifecycle ─────────────────────────────────────────────────────
-  // restartId (added pi-experiment-nyug) is absent in older test fixtures
-  // (project_tools.test.ts:1027). Require only the invariant minimal set.
-  [DomainEventName.CONTEXT_RESTART_REQUESTED]: ['beadId', 'stateId', 'transitionEvent'],
-  [DomainEventName.HARNESS_RESTART_REQUESTED]: ['beadId', 'stateId', 'transitionEvent'],
+  // pi-experiment-q8tl: restartId and targetState are now required.
+  //   All production writers (extension.ts, Supervisor.ts) always populate them.
+  //   previousRunId is optional — supervisor-triggered restarts have no prior
+  //   worker session ID. actionId is optional — supervisor-triggered restarts
+  //   have no actionId.
+  [DomainEventName.CONTEXT_RESTART_REQUESTED]: ['beadId', 'stateId', 'transitionEvent', 'restartId', 'targetState'],
+  [DomainEventName.HARNESS_RESTART_REQUESTED]: ['beadId', 'stateId', 'transitionEvent', 'restartId', 'targetState'],
 
   // ── Teammate / worktree ────────────────────────────────────────────────────
   [DomainEventName.TEAMMATE_SPAWNED]: ['beadId', 'stateId', 'workerId'],

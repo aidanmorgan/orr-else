@@ -173,10 +173,13 @@ describe('AC2 (kutb) – identity field coverage in metadata', () => {
     expect(meta.optionalFields).toContain('previousRunId');
   });
 
-  it('CONTEXT/HARNESS_RESTART_REQUESTED: restartId is optionalFields (absent pre-nyug)', () => {
+  it('CONTEXT/HARNESS_RESTART_REQUESTED: restartId is a required field (q8tl), previousRunId is optionalFields', () => {
+    // pi-experiment-q8tl: restartId and targetState are now required (moved from optionalFields).
+    // previousRunId stays optional: supervisor-triggered restarts have no prior session ID.
     for (const evt of [DomainEventName.CONTEXT_RESTART_REQUESTED, DomainEventName.HARNESS_RESTART_REQUESTED]) {
       const meta = getDomainEventMeta(evt)!;
-      expect(meta.optionalFields).toContain('restartId');
+      expect(meta.optionalFields).not.toContain('restartId');
+      expect(meta.optionalFields).not.toContain('targetState');
       expect(meta.optionalFields).toContain('previousRunId');
     }
   });
@@ -398,10 +401,11 @@ describe('AC3 (kutb) – replay reconstruction from validated events', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC4 (kutb): Legacy-compat — old events missing optional fields don't crash
+// AC4 (kutb / q8tl INVERTED): Malformed restart records are rejected at write
+// and projection boundaries — no pre-nyug compat fallback for restartId.
 // ---------------------------------------------------------------------------
 
-describe('AC4 (kutb) – legacy event compat: missing optional fields are tolerated', () => {
+describe('AC4 (kutb) – malformed restart records are rejected (q8tl: no pre-nyug compat)', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -416,44 +420,52 @@ describe('AC4 (kutb) – legacy event compat: missing optional fields are tolera
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('pre-nyug CONTEXT_RESTART_REQUESTED without restartId is accepted (optional field)', async () => {
+  it('pre-nyug CONTEXT_RESTART_REQUESTED without restartId is REJECTED (q8tl: now required)', async () => {
+    // pi-experiment-q8tl: restartId is now required. Old pre-nyug writes are
+    // rejected at the event store write boundary, not silently accepted.
     await expect(
       store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-legacy-1',
         stateId: 'Planning',
-        transitionEvent: 'CONTEXT_RESTART'
-        // restartId absent: pre-nyug write — must be accepted
+        transitionEvent: 'CONTEXT_RESTART',
+        targetState: 'Planning'
+        // restartId absent — must be REJECTED
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/CONTEXT_RESTART_REQUESTED.*missing required field.*restartId/i);
   });
 
-  it('pre-nyug HARNESS_RESTART_REQUESTED without restartId is accepted', async () => {
+  it('pre-nyug HARNESS_RESTART_REQUESTED without restartId is REJECTED (q8tl: now required)', async () => {
     await expect(
       store.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
         beadId: 'bd-legacy-2',
         stateId: 'Planning',
-        transitionEvent: 'HARNESS_RESTART'
+        transitionEvent: 'HARNESS_RESTART',
+        targetState: 'Planning'
+        // restartId absent — must be REJECTED
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/HARNESS_RESTART_REQUESTED.*missing required field.*restartId/i);
   });
 
-  it('BeadStateProjection handles legacy CONTEXT_RESTART_REQUESTED without restartId gracefully', () => {
+  it('BeadStateProjection rejects legacy CONTEXT_RESTART_REQUESTED without restartId (records corruptionDiagnostics)', () => {
     const projection = new BeadStateProjection();
     const events: DomainEvent[] = [
       makeEvent(DomainEventName.CONTEXT_RESTART_REQUESTED, {
         beadId: 'bd-legacy-3',
         stateId: 'Planning',
+        targetState: 'Planning',
         transitionEvent: EventName.CONTEXT_RESTART
-        // No restartId, previousRunId — old pre-nyug shape
+        // No restartId — malformed; must be fail-closed
       })
     ];
-    // Projection must not throw; restart fields reconstructed from what IS present.
+    // Projection must not throw; the event is rejected, not applied.
     expect(() =>
       projection.projectBeadStateChartFromEvents('bd-legacy-3', events)
     ).not.toThrow();
     const result = projection.projectBeadStateChartFromEvents('bd-legacy-3', events);
-    expect(result.restartRequested).toBe(true);
-    expect(result.restartKind).toBe(RestartKind.CONTEXT);
+    // restartRequested must NOT be set — the event was rejected
+    expect(result.restartRequested).not.toBe(true);
+    expect(result.corruptionDiagnostics).toBeDefined();
+    expect(result.corruptionDiagnostics![0].missingFields).toContain('restartId');
   });
 
   it('STATE_RUN_INITIALIZED without runId/restartId is accepted (no-restart run path)', async () => {

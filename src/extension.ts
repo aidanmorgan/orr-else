@@ -1459,7 +1459,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   // STATE_RUN_INITIALIZED has followed it yet), carry restartId + previousRunId
   // forward so operators can chain: restart event → this run → terminal outcome.
   // The current worker's sessionStateId serves as the new run's identity (runId).
-  let restartCorrelation: { restartId: string; previousRunId: string } | undefined;
+  let restartCorrelation: { restartId: string; previousRunId?: string } | undefined;
   try {
     const beadEventsForCorrelation = await services.eventStore.eventsForBead(beadId);
     restartCorrelation = extractRestartCorrelation(beadEventsForCorrelation, beadId, stateId);
