@@ -5,9 +5,16 @@ import * as path from 'path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
+import { BeadEventIndex } from '../src/core/BeadEventIndex.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
+
+// Helper to compute the collision-resistant index filename for a bead ID.
+const beadIndex = new BeadEventIndex(new JsonlEventLog());
+function indexFileNameFor(beadId: string): string {
+  return beadIndex.indexFileName(beadId);
+}
 
 describe('EventStore projections', () => {
   let tempRoot: string;
@@ -56,7 +63,7 @@ states:
       tempRoot,
       '.pi/events',
       EventStoreDefaults.BEAD_INDEX_DIR,
-      `bd-new${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+      indexFileNameFor('bd-new')
     );
 
     expect(fs.existsSync(indexPath)).toBe(true);
@@ -85,7 +92,7 @@ states:
       tempRoot,
       '.pi/events',
       EventStoreDefaults.BEAD_INDEX_DIR,
-      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+      indexFileNameFor('bd-1')
     );
     const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
     const eventFileName = path.basename(eventsPath);
@@ -233,7 +240,7 @@ settings:
       tempRoot,
       '.pi/events',
       EventStoreDefaults.BEAD_INDEX_DIR,
-      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+      indexFileNameFor('bd-1')
     );
     fs.mkdirSync(path.dirname(indexPath), { recursive: true });
     fs.writeFileSync(indexPath, `${JSON.stringify({
@@ -306,7 +313,7 @@ settings:
       tempRoot,
       '.pi/events',
       EventStoreDefaults.BEAD_INDEX_DIR,
-      `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`
+      indexFileNameFor('bd-1')
     );
     fs.mkdirSync(path.dirname(indexPath), { recursive: true });
     fs.writeFileSync(indexPath, `${JSON.stringify({
@@ -1026,7 +1033,7 @@ states:
       data: { beadId: 'bd-target', stateId: 'Planning' }
     };
 
-    const indexPath = path.join(indexDir, `bd-target${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    const indexPath = path.join(indexDir, indexFileNameFor('bd-target'));
     fs.writeFileSync(indexPath, `${JSON.stringify(targetEvent)}\n`);
 
     // Ready marker: sources records the full primary file size → no tail to read.

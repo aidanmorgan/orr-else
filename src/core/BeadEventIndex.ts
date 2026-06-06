@@ -10,6 +10,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { createHash } from 'node:crypto';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { Component, EventStoreDefaults } from '../constants/index.js';
@@ -45,7 +46,28 @@ export class BeadEventIndex {
   // Path helpers
   // ---------------------------------------------------------------------------
 
-  private safeIndexFileName(beadId: string): string {
+  /** Returns the collision-resistant filename for a bead's index JSONL.
+   *
+   * Format: `<sanitizedPrefix>-<8hexChars><INDEX_FILE_EXTENSION>`
+   * The short SHA-256 hash of the raw bead ID disambiguates two bead IDs that
+   * sanitize to the same prefix (e.g. `a/b` and `a:b` → both sanitize to `a-b`
+   * but get different hashes appended).
+   *
+   * Note: 8 hex digits = 32-bit hash space — collision-RESISTANT for same-prefix
+   * bead IDs, not collision-proof. Probability of a conflict is negligible in
+   * practice but non-zero under adversarial or extremely large bead-ID spaces.
+   */
+  indexFileName(beadId: string): string {
+    const sanitized = beadId
+      .replace(EventStoreDefaults.UNSAFE_INDEX_PATH_SEGMENT_PATTERN, '-')
+      .replace(/^-+|-+$/g, '');
+    const prefix = sanitized || 'bead';
+    const hash = createHash('sha256').update(beadId).digest('hex').slice(0, 8);
+    return `${prefix}-${hash}${EventStoreDefaults.INDEX_FILE_EXTENSION}`;
+  }
+
+  /** Legacy filename (no hash) used before bead c5kd. Kept for compat reads. */
+  private legacyIndexFileName(beadId: string): string {
     const sanitized = beadId
       .replace(EventStoreDefaults.UNSAFE_INDEX_PATH_SEGMENT_PATTERN, '-')
       .replace(/^-+|-+$/g, '');
@@ -57,7 +79,11 @@ export class BeadEventIndex {
   }
 
   private indexPath(location: BeadIndexLocation, beadId: string): string {
-    return path.join(this.indexDir(location), this.safeIndexFileName(beadId));
+    return path.join(this.indexDir(location), this.indexFileName(beadId));
+  }
+
+  private legacyIndexPath(location: BeadIndexLocation, beadId: string): string {
+    return path.join(this.indexDir(location), this.legacyIndexFileName(beadId));
   }
 
   private indexReadyPath(location: BeadIndexLocation, beadId: string): string {
@@ -100,14 +126,30 @@ export class BeadEventIndex {
     // an empty marker so the index becomes readable (eventsForBead requires the
     // .ready marker to exist).  Previously this early-returned, leaving the index
     // write-only and unbounded (it was never read back).
-    const marker = (await this.readMarker(location, beadId)) ?? {};
+    const existingMarker = await this.readMarker(location, beadId);
+    // Safe bootstrap: when no hashed marker exists (fresh index, post-compaction
+    // invalidation, or legacy->hashed migration), record all source offsets as 0.
+    // This forces the top-up loop in eventsForBead to scan from the start of every
+    // primary file, so no pre-existing events are skipped.  The hashed index holds
+    // the newly appended event; the top-up re-reads everything else from offset 0
+    // and de-duplication collapses any overlap — no events are ever lost.
+    const marker: BeadIndexMarker = existingMarker ?? {};
+    const isFirstHashedMarker = existingMarker === undefined;
 
     const sourceBasename = path.basename(sourcePath);
     const currentSize = fs.statSync(sourcePath).size;
-    const sources = {
-      ...(marker.sources ?? {}),
-      [sourceBasename]: Math.max(marker.sources?.[sourceBasename] ?? 0, currentSize)
-    };
+    // On the first bootstrap record offset 0 for the current source (and leave
+    // all other sources absent, which eventsForBead treats as 0).  This ensures
+    // the top-up loop always starts from the beginning of every primary file on
+    // first read, so no pre-existing events are skipped.  On subsequent calls
+    // advance the current source to its new size; other sources keep their
+    // previously recorded offsets.
+    const sources = isFirstHashedMarker
+      ? { [sourceBasename]: 0 }
+      : {
+          ...(marker.sources ?? {}),
+          [sourceBasename]: Math.max(marker.sources?.[sourceBasename] ?? 0, currentSize)
+        };
     const nextMarker: BeadIndexMarker = {
       ...marker,
       version: typeof marker.version === 'number' ? marker.version : 1,
@@ -249,7 +291,21 @@ export class BeadEventIndex {
   ): Promise<DomainEvent[] | undefined> {
     const iPath = this.indexPath(location, beadId);
     const marker = await this.readMarker(location, beadId);
-    if (!existsSync(iPath) || marker === undefined) return undefined;
+
+    // Legacy compat: if the hashed index is absent but a legacy (no-hash) index
+    // exists, return undefined so the caller rebuilds from the primary log.
+    // This is safe because the next append() will create the hashed index and
+    // the legacy file will be left in place (benign orphan).
+    if (!existsSync(iPath) || marker === undefined) {
+      const legacyPath = this.legacyIndexPath(location, beadId);
+      if (existsSync(legacyPath)) {
+        Logger.debug(Component.CORE, 'Legacy bead index found without hashed counterpart; falling back to primary scan', {
+          beadId,
+          legacyPath
+        });
+      }
+      return undefined;
+    }
 
     const events: DomainEvent[] = [];
 
