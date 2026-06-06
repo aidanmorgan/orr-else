@@ -32,6 +32,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: TestPhase
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -62,6 +64,8 @@ settings:
   startState: TestPhase
   harnessRestartPrompt: "temp_harness_restart.md"
   contextRestartPrompt: "temp_context_restart.md"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -103,6 +107,8 @@ settings:
   maxConcurrentSlots: 5
   handoverTemplate: "test"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -125,6 +131,8 @@ settings:
   maxConcurrentSlots: 2
   handoverTemplate: "first"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -134,6 +142,8 @@ settings:
   maxConcurrentSlots: 4
   handoverTemplate: "second"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -157,6 +167,8 @@ settings:
   maxConcurrentSlots: 2
   handoverTemplate: "test"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 tools:
@@ -179,6 +191,8 @@ settings:
   maxConcurrentSlots: 2
   handoverTemplate: "test"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 tools:
@@ -202,6 +216,8 @@ settings:
   maxConcurrentSlots: 2
   handoverTemplate: "test"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 tools:
@@ -238,6 +254,8 @@ settings:
   maxConcurrentSlots: 3
   handoverTemplate: "configured"
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -262,6 +280,8 @@ settings:
   modelProviders:
     claude: { provider: "anthropic", model: "claude-default", thinking: "high" }
     openai: { provider: "openai", model: "gpt-default", thinking: "medium" }
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -297,6 +317,8 @@ settings:
   defaultModel: "claude-opus-4-5"
   modelProviders:
     claude: { provider: "claude", model: "claude-opus-4-5", thinking: "high" }
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -330,6 +352,8 @@ settings:
   defaultModel: "gpt-5.5"
   modelProviders:
     codex: { provider: "codex", model: "gpt-5.5", thinking: "xhigh" }
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -368,6 +392,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [completed]
   advanceOutcomes: [SUCCESS]
@@ -400,6 +426,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [completed]
   advanceOutcomes: [SUCCESS]
@@ -433,6 +461,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [completed]
   advanceOutcomes: [SUCCESS]
@@ -462,6 +492,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Planning
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [completed]
   advanceOutcomes: [SUCCESS]
@@ -551,6 +583,8 @@ describe('qkjm removed output-cap knobs hard-reject at config validation', () =>
     const harnessYaml = `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -600,6 +634,8 @@ settings:
     timeoutMs: 30000
     env:
       BASE_VAR: "from-defaults"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -629,6 +665,8 @@ settings:
   toolDefaults:
     argsMode: replace
     timeoutMs: 10000
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -662,6 +700,8 @@ settings:
       env:
         BASE: "profile"
         EXTRA: "profile-extra"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -691,6 +731,8 @@ settings:
   toolDefaults:
     argsMode: append
     timeoutMs: 30000
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -712,6 +754,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -746,6 +790,8 @@ settings:
       timeoutMs: 30000
     profileB:
       timeoutMs: 60000
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -774,6 +820,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -793,6 +841,8 @@ settings:
     failureLimit:
       maxFailuresPerState: 3
       terminal: false
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -814,6 +864,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -855,6 +907,8 @@ describe('s3wp.10 tsProjectTool shorthand expansion', () => {
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -881,6 +935,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -902,6 +958,8 @@ settings:
   startState: Planning
   tsProjectToolDefaults:
     scriptDir: src/scripts
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -920,6 +978,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -939,6 +999,8 @@ settings:
   startState: Planning
   tsProjectToolDefaults:
     argsMode: replace
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -955,6 +1017,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -978,6 +1042,8 @@ settings:
     nodeEnv:
       env:
         NODE_ENV: "test"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -997,6 +1063,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1019,6 +1087,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1040,6 +1110,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1070,6 +1142,8 @@ settings:
     nodeTs:
       env:
         NODE_ENV: "test"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1114,6 +1188,8 @@ settings:
     requirePlanToBead: true
     requireBeadToPlan: true
     evidenceStore: eventStore
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1130,6 +1206,8 @@ settings:
   startState: Planning
   traceability:
     requirePlanToBead: true
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1149,6 +1227,8 @@ settings:
     requireBeadToPlan: true
     evidenceStore: eventStore
     ownedBy: plan_contract
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1167,6 +1247,8 @@ tools:
     const configPath = writeConfig(`
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1181,6 +1263,8 @@ settings:
   startState: Planning
   traceability:
     requireBeadToPlan: true
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1204,6 +1288,8 @@ settings:
   traceability:
     requirePlanToBead: true
     ownedBy: nonexistent_typo
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1234,6 +1320,8 @@ settings:
     requireBeadToPlan: true
     evidenceStore: eventStore
     ownedBy: plan_contract
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1276,6 +1364,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -1301,6 +1391,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -1332,6 +1424,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -1358,6 +1452,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -1418,6 +1514,8 @@ describe('bhxt: ConfigLoader.validate() fails closed — missing / corrupt schem
   const minimalYaml = `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states: {}
@@ -1525,5 +1623,101 @@ states: {}
     );
     // Project schema is valid → must not throw.
     expect(() => loader.load(configPath)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pi-experiment-145m: missing settings.worktreePolicy.default is startup-fatal
+// ---------------------------------------------------------------------------
+describe('pi-experiment-145m: settings.worktreePolicy.default must be explicit', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-145m-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  // AC1/AC5: absent worktreePolicy entirely → startup-fatal
+  it('AC1/AC5: throws when settings.worktreePolicy is entirely absent', () => {
+    const configPath = writeConfig(
+      'settings:\n  startState: Planning\nscheduler:\n  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }\nstates: {}\n'
+    );
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
+      /settings\.worktreePolicy\.default/
+    );
+  });
+
+  // AC1/AC5: worktreePolicy block present but default field missing → startup-fatal
+  it('AC1/AC5: throws when settings.worktreePolicy is present but default is absent', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy: {}
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
+      /settings\.worktreePolicy\.default/
+    );
+  });
+
+  // AC5: diagnostic message includes a replacement example
+  it('AC5: error message names the missing field and provides a replacement example', () => {
+    const configPath = writeConfig(
+      'settings:\n  startState: Planning\nscheduler:\n  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }\nstates: {}\n'
+    );
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/settings\.worktreePolicy\.default/);
+    // Replacement example must name both valid values
+    expect(caught!.message).toMatch(/always/);
+    expect(caught!.message).toMatch(/never/);
+  });
+
+  // Positive: explicit default: always loads without error
+  it('loads successfully when settings.worktreePolicy.default = "always"', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    expect(config.settings.worktreePolicy?.default).toBe('always');
+  });
+
+  // Positive: explicit default: never loads without error
+  it('loads successfully when settings.worktreePolicy.default = "never"', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: never
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    expect(config.settings.worktreePolicy?.default).toBe('never');
   });
 });

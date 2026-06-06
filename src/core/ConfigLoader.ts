@@ -532,10 +532,37 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-145m: Reject configs that do not declare settings.worktreePolicy.default.
+   *
+   * The harness no longer defaults a missing policy to 'always'. Every harness
+   * config must declare its intent explicitly so the provisioning behaviour is
+   * visible in the config file rather than implied by the absence of a field.
+   *
+   * Replacement example included in the diagnostic so the author can fix the
+   * issue without reading documentation.
+   */
+  private validateWorktreePolicy(config: HarnessConfig): void {
+    const policy = config.settings?.worktreePolicy;
+    if (!policy || policy.default === undefined) {
+      throw new Error(
+        'settings.worktreePolicy.default is required but was not declared. ' +
+        'The harness no longer defaults a missing worktree policy to "always". ' +
+        'Declare the intended default explicitly, for example:\n' +
+        '  settings:\n' +
+        '    worktreePolicy:\n' +
+        '      default: always   # or: never\n' +
+        'Use "always" to provision an isolated git worktree for every state (original behavior). ' +
+        'Use "never" to run all states at the project root unless a state declares provisionWorktree: true.'
+      );
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
     this.validateDeprecatedRequiredTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);
+    this.validateWorktreePolicy(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;

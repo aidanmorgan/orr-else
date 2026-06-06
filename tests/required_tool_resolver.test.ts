@@ -31,6 +31,8 @@ settings:
   transactionalState:
     enabled: true
     requireWriteSet: true
+  worktreePolicy:
+    default: always
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }

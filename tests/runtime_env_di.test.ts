@@ -38,6 +38,8 @@ settings:
   observability:
     dir: .pi/otel
     fileName: session-{{sessionId}}.jsonl
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -269,6 +271,8 @@ settings:
   handoverTemplate: "h"
   startState: Done
   defaultModel: "model"
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -333,6 +337,8 @@ settings:
     baseDir: .pi/artifacts
     templates:
       plan: .pi/artifacts/{{beadId}}/plan.json
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:

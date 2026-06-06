@@ -11,6 +11,8 @@ settings:
   processReapIntervalMs: 60000
   defaultProvider: claude
   startState: Planning
+  worktreePolicy:
+    default: always
   modelProviders:
     claude:
       provider: claude

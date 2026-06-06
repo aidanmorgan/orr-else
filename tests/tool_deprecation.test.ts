@@ -470,6 +470,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -497,6 +499,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -525,6 +529,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -553,6 +559,8 @@ settings:
   startState: Implement
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }

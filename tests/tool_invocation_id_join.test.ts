@@ -37,6 +37,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -208,6 +210,8 @@ describe('toolInvocationId join — plugin tool (AC1 + AC3)', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: probe_join_tool
     type: command
@@ -320,6 +324,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: distinct_id_tool
     type: command

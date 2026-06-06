@@ -11,6 +11,8 @@ settings:
   handoverTemplate: "Global {{history}}"
   defaultModel: "m1"
   startState: State1
+  worktreePolicy:
+    default: always
 scheduler:
   weights:
     waitTime: 1.0

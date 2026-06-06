@@ -22,6 +22,8 @@ settings:
   defaultProvider: codex
   defaultModel: gpt-5.5
   startState: Planning
+  worktreePolicy:
+    default: always
   modelProviders:
     claude:
       provider: claude

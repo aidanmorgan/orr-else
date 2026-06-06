@@ -31,6 +31,8 @@ describe('EventStore projections', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -864,6 +866,8 @@ settings:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [ADVANCE]
@@ -1000,6 +1004,8 @@ describe('EventStore — memory-bound index scan (BEAD B)', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1155,6 +1161,8 @@ describe('EventStore — restart-replay integration (BEAD F)', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1362,6 +1370,8 @@ describe('EventStore — injected Clock determinism (pf7v)', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

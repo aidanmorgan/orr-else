@@ -652,6 +652,8 @@ settings:
       required: true
       state: AdversarialPostReview
       store: eventStore
+  worktreePolicy:
+    default: always
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }
@@ -736,6 +738,8 @@ settings:
       required: true
       state: AdversarialPostReview
       store: eventStore
+  worktreePolicy:
+    default: always
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }
@@ -819,6 +823,8 @@ settings:
       required: true
       state: AdversarialPostReview
       store: eventStore
+  worktreePolicy:
+    default: always
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }

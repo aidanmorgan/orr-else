@@ -93,6 +93,8 @@ function minimalHarnessYaml(extra = ''): string {
   return `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -156,6 +158,8 @@ describe('resolvePromptProvenance', () => {
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -334,6 +338,8 @@ describe('STATE_RUN_INITIALIZED provenance recording', () => {
 settings:
   startState: Planning
   workflowVersion: "3.1"
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -520,6 +526,8 @@ describe('completion gate — provenance dimension', () => {
     const twoStateYaml = `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -630,6 +638,8 @@ states:
     fs.writeFileSync(harnessYamlPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -724,6 +734,8 @@ states:
     const initialYaml = `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1163,6 +1175,8 @@ describe('resolvePromptProvenance — configured source failures (r3yq)', () => 
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1214,6 +1228,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1262,6 +1278,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1306,6 +1324,8 @@ states:
 settings:
   startState: Planning
   projectObjective: "GOAL.md"
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1350,6 +1370,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1400,6 +1422,8 @@ states:
 settings:
   startState: Planning
   projectObjective: "${objective.replace(/"/g, '\\"')}"
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1450,6 +1474,8 @@ states:
         fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1492,6 +1518,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1549,6 +1577,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1599,6 +1629,8 @@ states:
       fs.writeFileSync(configPath, `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1865,6 +1897,8 @@ describe('completion gate — configured source failures BLOCK SUCCESS (r3yq AC2
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1962,6 +1996,8 @@ states:
 settings:
   startState: Planning
   projectObjective: "Implement the auth/login flow using TypeScript/JavaScript best practices"
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -2057,6 +2093,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

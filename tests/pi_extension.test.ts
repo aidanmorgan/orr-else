@@ -186,6 +186,8 @@ settings:
     baseDir: .pi/artifacts
     templates:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -430,6 +432,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -563,6 +567,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -653,6 +659,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: action_gate
     type: command
@@ -748,6 +756,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: evidence_gate
     type: command
@@ -840,6 +850,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: evidence_gate
     type: command
@@ -951,6 +963,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: LessonCapture
+  worktreePolicy:
+    default: always
 tools:
   - name: artifact_validator
     type: command
@@ -1063,6 +1077,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: artifact_validator
     type: command
@@ -1158,6 +1174,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: run_quality_checks
     type: command
@@ -1220,6 +1238,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1582,6 +1602,8 @@ describe('pre_signal_audit', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: required_verifier
     type: command
@@ -1683,6 +1705,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: terminal_verifier
     type: command
@@ -1785,6 +1809,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: passing_gate
     type: command
@@ -1900,6 +1926,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: passing_verifier
     type: command
@@ -2039,6 +2067,8 @@ settings:
     baseDir: .pi/artifacts
     templates:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+  worktreePolicy:
+    default: always
 states:
   Implementation:
     identity: { role: "Implementer", expertise: "Coding", constraints: [] }
@@ -2149,6 +2179,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: mandatory_checker
     type: command
@@ -2308,6 +2340,8 @@ describe('pre_signal_audit — s3wp.32: MCP bridge unavailability (3rd required 
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -2405,6 +2439,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -2499,6 +2535,8 @@ describe('signal_completion gate — zero-target scan recognition removed (0yt5.
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: AdversarialPreReview
+  worktreePolicy:
+    default: always
 tools:
   - name: zero_target_verifier
     type: command
@@ -2591,6 +2629,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: AdversarialPreReview
+  worktreePolicy:
+    default: always
 tools:
   - name: real_target_verifier
     type: command
@@ -2689,6 +2729,8 @@ describe('signal_completion gate — handoverRequired enforcement (s3wp.3)', () 
     const handoverLine = handoverRequired ? '        handoverRequired: true' : '';
     return `settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -3059,6 +3101,8 @@ describe('pi-experiment-q64l — cacheable tool invoked twice records toolResult
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: cacheable_probe
     type: command
@@ -3183,6 +3227,8 @@ describe('AC3 fail-closed: runParentSequenceActionsBeforeActive via BEFORE_AGENT
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: generator_tool
     type: command
@@ -3260,6 +3306,8 @@ states:
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 tools:
   - name: plain_tool
     type: command
@@ -3342,6 +3390,8 @@ describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (rea
     fs.writeFileSync(path.join(tempRoot, "harness.yaml"), [
       "settings:",
       "  startState: Implementing",
+      "  worktreePolicy:",
+      "    default: always",
       "tools:",
       "  - name: identity_probe",
       "    type: command",
@@ -3424,6 +3474,8 @@ describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (rea
     fs.writeFileSync(path.join(tempRoot, "harness.yaml"), [
       "settings:",
       "  startState: Implementing",
+      "  worktreePolicy:",
+      "    default: always",
       "tools:",
       "  - name: id_cache_probe",
       "    type: command",
@@ -3586,6 +3638,8 @@ describe('pi-experiment-2xho — command surface vs model-callable tool surface'
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

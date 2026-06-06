@@ -91,6 +91,8 @@ function minimalHarnessYaml(): string {
   return `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

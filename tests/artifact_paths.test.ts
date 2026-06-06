@@ -32,6 +32,8 @@ settings:
     templates:
       existingArtifact: .pi/artifacts/{{beadId}}/existing.json
       missingArtifact: .pi/artifacts/{{beadId}}/missing.json
+  worktreePolicy:
+    default: always
 scheduler:
   weights:
     waitTime: 1

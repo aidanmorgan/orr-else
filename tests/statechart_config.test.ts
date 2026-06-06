@@ -276,6 +276,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [ADVANCE]
@@ -303,6 +305,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [ADVANCE]
@@ -339,6 +343,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -714,6 +720,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [ADVANCE]
@@ -750,6 +758,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [SUCCESS]
@@ -777,6 +787,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -798,6 +810,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [ADVANCE]
@@ -833,6 +847,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
 scheduler:
@@ -872,6 +888,8 @@ settings:
   handoverTemplate: "test"
   defaultModel: "m1"
   startState: Alpha
+  worktreePolicy:
+    default: always
 statechart:
   terminalStates: [done]
   advanceOutcomes: [SUCCESS]

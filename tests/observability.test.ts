@@ -22,6 +22,8 @@ settings:
   observability:
     dir: .pi/otel
     fileName: session-{{sessionId}}.jsonl
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:

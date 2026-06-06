@@ -86,6 +86,8 @@ settings:
   startState: Implementing
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implementing:
     identity: { role: "Eng", expertise: "x", constraints: [] }
@@ -332,6 +334,8 @@ settings:
   startState: Implementing
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Implementing:
     identity: { role: "Eng", expertise: "x", constraints: [] }

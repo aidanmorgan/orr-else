@@ -19,6 +19,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: false
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

@@ -1,14 +1,15 @@
 /**
- * Tests for the state worktree allocation policy (pi-experiment-s3wp.5).
+ * Tests for the state worktree allocation policy (pi-experiment-s3wp.5 / pi-experiment-145m).
  *
  * Encodes the invariants:
- *   1. Default (no policy configured): every state receives a worktree ('always').
- *   2. settings.worktreePolicy.default = 'never': no state receives a worktree
+ *   1. Missing settings.worktreePolicy.default → startup-fatal (ConfigLoader rejects at load).
+ *   2. settings.worktreePolicy.default = 'always': every state receives a worktree.
+ *   3. settings.worktreePolicy.default = 'never': no state receives a worktree
  *      unless it has an explicit provisionWorktree: true override.
- *   3. Per-state provisionWorktree overrides the policy default:
+ *   4. Per-state provisionWorktree overrides the policy default:
  *        provisionWorktree: true  → worktree provisioned even when policy is 'never'
  *        provisionWorktree: false → no worktree even when policy is 'always'
- *   4. resolveWorktreeProvisioning is a pure function accessible on the
+ *   5. resolveWorktreeProvisioning is a pure function accessible on the
  *      Supervisor instance — tests exercise it directly and through scanAndSpawn.
  */
 
@@ -110,12 +111,6 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
     vi.clearAllMocks();
   });
 
-  it('returns true (always) when no policy and no per-state override (backward compat)', () => {
-    const { supervisor } = buildSupervisor({ settings: {}, states: {} });
-    const result = (supervisor as any).resolveWorktreeProvisioning('Planning', { settings: {}, states: {} });
-    expect(result).toBe(true);
-  });
-
   it('returns true when policy.default = "always" and no per-state override', () => {
     const config = {
       settings: { worktreePolicy: { default: 'always' } },
@@ -152,13 +147,12 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
     expect((supervisor as any).resolveWorktreeProvisioning('Planning', config)).toBe(false);
   });
 
-  it('returns true for unknown state when policy.default is absent (always fallback)', () => {
+  it('returns true for unknown state when policy.default = "always"', () => {
     const config = {
-      settings: {},
+      settings: { worktreePolicy: { default: 'always' } },
       states: { Planning: {} }
     };
     const { supervisor } = buildSupervisor(config);
-    // 'UnknownState' has no entry in states — should fall back to 'always'
     expect((supervisor as any).resolveWorktreeProvisioning('UnknownState', config)).toBe(true);
   });
 
@@ -179,23 +173,6 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
 describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-  });
-
-  it('provisions a worktree when no policy is configured (default preserves current behavior)', async () => {
-    orchestratorMock.selectAssignments.mockResolvedValue([
-      { id: 'bead-1', stateId: 'Planning', score: 1, status: 'ready' }
-    ]);
-
-    const { supervisor, createWorktree, spawnTeammateInTmux, records } = buildSupervisor({
-      settings: {}
-    });
-
-    await (supervisor as any).scanAndSpawn();
-
-    expect(createWorktree).toHaveBeenCalledTimes(1);
-    expect(createWorktree).toHaveBeenCalledWith('bead-1', expect.anything());
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-1', 'Planning', '/tmp/worktree', expect.anything());
-    expect(records.some(r => r.event === DomainEventName.WORKTREE_PROVISIONED)).toBe(true);
   });
 
   it('provisions a worktree when policy.default = "always"', async () => {
@@ -291,7 +268,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
 
     const { supervisor, spawnTeammateInTmux, release } = buildSupervisor(
       {
-        settings: {},
+        settings: { worktreePolicy: { default: 'always' } },
         states: { Implementation: { provisionWorktree: true } }
       },
       { createWorktree: failingCreateWorktree }

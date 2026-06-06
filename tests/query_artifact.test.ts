@@ -81,6 +81,8 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/planContract.json
       requirementsAnalysis: .pi/artifacts/{{beadId}}/requirementsAnalysis.json
       missingArtifact: .pi/artifacts/{{beadId}}/missing.json
+  worktreePolicy:
+    default: always
 scheduler:
   weights:
     waitTime: 1

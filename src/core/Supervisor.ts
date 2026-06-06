@@ -862,10 +862,9 @@ export class Supervisor {
    * Resolution order (highest to lowest precedence):
    *   1. Per-state `provisionWorktree` (explicit boolean on the SDLCState)
    *   2. `settings.worktreePolicy.default` ('always' | 'never')
-   *   3. Hard default: 'always' — every state gets a worktree (backward compat)
    *
-   * This encodes the invariant described in AGENTS.md and the bead acceptance
-   * criteria without altering existing behavior for configs that omit the field.
+   * ConfigLoader rejects configs that omit settings.worktreePolicy.default,
+   * so by the time this method is called the policy is always explicitly set.
    */
   private resolveWorktreeProvisioning(stateId: string, config: HarnessConfig): boolean {
     const stateConfig = config.states?.[stateId];
@@ -873,7 +872,7 @@ export class Supervisor {
     if (stateConfig?.provisionWorktree !== undefined) {
       return stateConfig.provisionWorktree;
     }
-    // 2. Policy-level default.
+    // 2. Policy-level default (always declared explicitly — ConfigLoader enforces this).
     const policyDefault: WorktreeProvisioningMode = config.settings?.worktreePolicy?.default ?? 'always';
     return policyDefault !== 'never';
   }

@@ -41,6 +41,8 @@ settings:
     templates:
       planContract: .pi/artifacts/{{beadId}}/planContract.json
       requirementsAnalysis: .pi/artifacts/{{beadId}}/requirementsAnalysis.json
+  worktreePolicy:
+    default: always
 scheduler:
   weights:
     waitTime: 1

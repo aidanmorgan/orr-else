@@ -124,6 +124,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 tools:
   - name: prerequisite_tool
     type: command
@@ -240,6 +242,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 tools:
   - name: flaky_verifier
     type: command
@@ -335,6 +339,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -450,6 +456,8 @@ settings:
   startState: Planning
   eventStore:
     enabled: true
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

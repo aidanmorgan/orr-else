@@ -37,6 +37,8 @@ settings:
     baseDir: .pi/artifacts
     templates:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+  worktreePolicy:
+    default: always
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }
@@ -132,6 +134,8 @@ settings:
     baseDir: .pi/artifacts
     templates:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
+  worktreePolicy:
+    default: always
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }

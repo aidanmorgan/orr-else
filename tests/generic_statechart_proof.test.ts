@@ -163,6 +163,8 @@ settings:
   stateContextRotThreshold: 8
   harnessContextRotThreshold: 4
 
+  worktreePolicy:
+    default: always
 statechart:
   initialState: Intake
   terminalStates: [archived]

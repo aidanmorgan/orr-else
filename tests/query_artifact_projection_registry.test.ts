@@ -57,6 +57,8 @@ settings:
     templates:
       ${REG_TYPE}: .pi/artifacts/{{beadId}}/${REG_TYPE}.json
       ${ADV_TYPE}: .pi/artifacts/{{beadId}}/${ADV_TYPE}.json
+  worktreePolicy:
+    default: always
 scheduler:
   weights:
     waitTime: 1

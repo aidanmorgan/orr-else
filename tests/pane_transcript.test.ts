@@ -570,6 +570,8 @@ settings:
     enabled: false
   observability:
     enabled: false
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -688,6 +690,8 @@ settings:
     enabled: false
   observability:
     enabled: false
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:
@@ -742,6 +746,8 @@ settings:
     enabled: false
   observability:
     enabled: false
+  worktreePolicy:
+    default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 states:

@@ -1517,6 +1517,8 @@ describe('RetentionCleanup — MUST-FIX 2: by-bead index invalidated after compa
     fs.writeFileSync(path.join(tmpRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -2044,6 +2046,8 @@ describe('RetentionCleanup — c5bv: evidence-bearing tool-result events survive
     fs.writeFileSync(path.join(tmpRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -2225,6 +2229,8 @@ describe('RetentionCleanup — c5bv review fix: PROJECT_TOOL_SUCCEEDED flat outp
     fs.writeFileSync(path.join(tmpRoot, 'harness.yaml'), `
 settings:
   startState: Planning
+  worktreePolicy:
+    default: always
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

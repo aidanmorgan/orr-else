@@ -351,15 +351,16 @@ export type WorktreeProvisioningMode = 'always' | 'never';
  * Top-level worktree allocation policy.
  * Lives under settings.worktreePolicy in harness.yaml.
  *
- * When absent, defaults to { default: 'always' }, which preserves the
- * behavior that existed before this field was introduced: every state
- * receives an isolated git worktree regardless of its type.
+ * settings.worktreePolicy.default is REQUIRED — ConfigLoader rejects configs
+ * that omit it. Declare 'always' to preserve the original behavior (every
+ * state receives an isolated git worktree) or 'never' to run all states at
+ * the project root unless overridden per-state.
  */
 export interface WorktreePolicyConfig {
   /**
    * Default provisioning mode applied to all states that do not declare
-   * an explicit `provisionWorktree` field.
-   * Defaults to 'always'.
+   * an explicit `provisionWorktree` field. REQUIRED — ConfigLoader fails
+   * startup if this field is absent.
    */
   default?: WorktreeProvisioningMode;
 }
@@ -393,7 +394,8 @@ export interface SDLCState {
    * When false, the teammate runs at the project root (no worktree created).
    *
    * When absent, the harness falls back to settings.worktreePolicy.default
-   * ('always' if the policy is also absent), preserving backward compatibility.
+   * (which is now required to be explicit — ConfigLoader rejects configs
+   * that omit it).
    *
    * Example: set to false for Planning/Review states that must not modify
    * code; set to true (or omit) for Implementation states.
@@ -492,12 +494,13 @@ export interface HarnessConfig {
      */
     tsProjectToolDefaults?: TsProjectToolDefaults;
     /**
-     * Harness-wide worktree allocation policy.
+     * Harness-wide worktree allocation policy. REQUIRED — ConfigLoader
+     * rejects startup when this block (or its `default` field) is absent.
      *
      * Controls which states receive an isolated git worktree before the
-     * teammate is spawned.  When absent, the harness behaves as if
-     * `{ default: 'always' }` were specified — every state receives a
-     * worktree — preserving pre-existing behavior exactly.
+     * teammate is spawned. Declare `default: always` to provision a worktree
+     * for every state (original behavior) or `default: never` to run all
+     * states at the project root.
      *
      * Per-state `provisionWorktree` overrides this policy for individual
      * states regardless of the policy default.

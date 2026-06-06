@@ -130,6 +130,8 @@ async function closeServer(server: Server | undefined): Promise<void> {
 const FAKE_TWO_STATE_YAML = `
 settings:
   startState: StateA
+  worktreePolicy:
+    default: always
 states:
   StateA:
     identity:
