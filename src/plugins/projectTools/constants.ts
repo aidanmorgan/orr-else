@@ -24,7 +24,6 @@ export const ProjectToolResultKey = {
   FAILURE_CATEGORY: 'failureCategory',
   REMEDIATION: 'remediation',
   OUTPUT_ACCESS: 'outputAccess',
-  OUTPUT_ARCHIVE: 'outputArchive',
   // Tool-owned compact text summary of the result (replaces the forbidden generic 'resultPreview').
   // This is tool-owned deterministic compaction of raw output into a bounded text field.
   COMPACT_SUMMARY: 'compactSummary',
@@ -214,7 +213,6 @@ export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   ProjectToolResultKey.STDOUT,
   ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,
-  ProjectToolResultKey.OUTPUT_ARCHIVE,
   ProjectToolResultKey.FRAMEWORK_TOOL_CALLS,
   'result' // s3wp.26: raw MCP callTool payload — always hidden; see mcp-raw.json
 ]);

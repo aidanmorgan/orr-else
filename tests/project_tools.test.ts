@@ -14,6 +14,8 @@ import { summarizeToolResult, persistAndBoundResult } from '../src/plugins/proje
 import type { ProjectToolExecutionContext } from '../src/plugins/projectTools/types.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
 import { frameworkRootFromConfig } from '../src/plugins/projectTools/contextHelpers.js';
+import { runVerifierGate, VerifierGateBlockKind, type VerifierGateEventStore } from '../src/core/VerifierGate.js';
+import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 const EnvProbeField = {
   CWD: 'cwd',
@@ -1866,8 +1868,9 @@ process.exit(sawOther ? 0 : 1);
     const prepared = events.find(event => event.type === DomainEventName.PROJECT_TOOL_OUTPUT_DIR_PREPARED);
     expect(JSON.stringify(started?.data)).not.toContain('outputFile');
     expect(prepared).toBeUndefined();
-    // Event start data still includes outputArchive.artifactRef (event-side, not model-facing)
-    expect((started?.data as any).outputArchive.artifactRef).toMatch(/^project-tool-output:/);
+    // 55lu: outputArchive envelope removed from event data; toolInvocationId is the canonical id
+    expect((started?.data as any).outputArchive).toBeUndefined();
+    expect(typeof (started?.data as any).toolInvocationId).toBe('string');
     // s3wp.25: stdout is in stdoutFile, not inline on the model-facing result
     const stdoutContent = fs.readFileSync(result.stdoutFile!, 'utf8');
     const payload = JSON.parse(stdoutContent);
@@ -2722,5 +2725,104 @@ describe('executeConfiguredProjectTool — _internalOutputFile internal channel 
     expect(JSON.stringify(modelFacingResult)).not.toContain('_internalOutputFile');
     // The result still carries model-facing fields.
     expect(modelFacingResult.status).toBe(ToolResultStatus.PASSED);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pi-experiment-55lu: NEGATIVE — outputArchive-only payload cannot satisfy gate
+//
+// Proves that an event whose data carries only the old outputArchive envelope
+// (and no canonical status/outputFile fields) is REJECTED by the real
+// runVerifierGate production path with TOOL_STATUS_UNRECOGNIZED.  This test
+// WOULD FAIL if the outputArchive carve-out were reintroduced: a carve-out that
+// synthesised a PASSED status from outputArchive.artifactRef would cause the
+// gate to pass, making this assertion wrong.
+// ---------------------------------------------------------------------------
+describe('pi-experiment-55lu: outputArchive-only payload is rejected by the gate (negative)', () => {
+  // A minimal VerifierGateEventStore that returns a single pre-built event.
+  class SingleEventStore implements VerifierGateEventStore {
+    constructor(private readonly event: DomainEvent) {}
+    async latestToolResultEvent(): Promise<DomainEvent | undefined> {
+      return this.event;
+    }
+  }
+
+  it('outputArchive-only event data cannot satisfy the verifier gate — TOOL_STATUS_UNRECOGNIZED blocks', async () => {
+    // Inject a realistic-looking PROJECT_TOOL_SUCCEEDED event that carries ONLY
+    // the old outputArchive envelope.  There is no `status` or `outputFile` field —
+    // exactly what a pre-55lu carve-out produced.
+    const outputArchiveOnlyEvent: DomainEvent = {
+      id: 'legacy-evt-1',
+      type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
+      timestamp: new Date().toISOString(),
+      sessionId: 'test-55lu',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        actionId: 'analyze',
+        tool: 'my_tool',
+        type: 'command',
+        cwd: '/some/cwd',
+        toolInvocationId: 'inv-legacy',
+        // ← the OLD outputArchive envelope only; no canonical status or outputFile
+        outputArchive: { artifactRef: 'project-tool-output:inv-legacy' }
+      }
+    };
+
+    const store = new SingleEventStore(outputArchiveOnlyEvent);
+    const result = await runVerifierGate(
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'analyze', writeSet: [], artifacts: {} },
+      ['my_tool'],
+      store
+    );
+
+    // The gate MUST block — status is unrecognized (no `status` field on the event).
+    expect(result.pass).toBe(false);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].tool).toBe('my_tool');
+    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
+  });
+
+  it('outputArchive-only event data is also absent from toolOutputs — verify() sees no artifact path', async () => {
+    // Arrange: same outputArchive-only event.  Register a verify() that records
+    // what toolOutputs it received, so we can prove the canonical path is absent.
+    let capturedToolOutputs: Record<string, string> | undefined;
+    // We re-import verifier inline to keep this test self-contained.
+    const { verifier: testVerifier, VerifyVerdict } = await import('../src/contract.js');
+    testVerifier.register('path_probe_tool', (ctx) => {
+      capturedToolOutputs = { ...ctx.toolOutputs };
+      return { verdict: VerifyVerdict.PASS, reasons: [] };
+    });
+
+    const pathProbeEvent: DomainEvent = {
+      id: 'legacy-evt-2',
+      type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
+      timestamp: new Date().toISOString(),
+      sessionId: 'test-55lu',
+      data: {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        actionId: 'probe',
+        tool: 'path_probe_tool',
+        // No canonical status field — outputArchive only
+        outputArchive: { artifactRef: 'project-tool-output:inv-probe' }
+      }
+    };
+
+    const store = new SingleEventStore(pathProbeEvent);
+    const result = await runVerifierGate(
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'probe', writeSet: [], artifacts: {} },
+      ['path_probe_tool'],
+      store
+    );
+
+    // Gate blocks because status is unrecognized; verify() was never called.
+    expect(result.pass).toBe(false);
+    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
+    // verify() was never invoked — capturedToolOutputs is still undefined.
+    expect(capturedToolOutputs).toBeUndefined();
+
+    // Clean up: overwrite with inert stub so this registration can't leak.
+    testVerifier.register('path_probe_tool', () => ({ verdict: VerifyVerdict.NOT_APPLICABLE, reasons: [] }));
   });
 });

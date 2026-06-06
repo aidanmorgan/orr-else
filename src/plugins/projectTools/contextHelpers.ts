@@ -337,11 +337,6 @@ export function projectToolBackpressureResult(
   };
 }
 
-export function outputArtifactRef(context: ProjectToolExecutionContext): string {
-  const invocationId = context.templateContext.toolInvocationId || path.basename(context.outputFile, '.json');
-  return `project-tool-output:${invocationId}`;
-}
-
 export function projectToolRunEventData(
   definition: ProjectToolConfig,
   context: ProjectToolExecutionContext,
@@ -356,9 +351,6 @@ export function projectToolRunEventData(
     tool: definition.name,
     type: definition.type,
     cwd: context.cwd,
-    toolInvocationId: context.templateContext.toolInvocationId,
-    outputArchive: {
-      artifactRef: outputArtifactRef(context)
-    }
+    toolInvocationId: context.templateContext.toolInvocationId
   };
 }

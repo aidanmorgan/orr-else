@@ -4,9 +4,8 @@
  * DESIGN INTENT
  * -------------
  * Each tool owns its minimal return schema and interpretation rules.  There is
- * intentionally NO shared public return envelope — structuredResult/resultPreview/
- * outputArchive are project-tool compatibility fields that remain where they are
- * already used; they are NOT required by any other tool class.
+ * intentionally NO shared public return envelope — structuredResult/resultPreview
+ * are project-tool fields; they are NOT required by any other tool class.
  *
  * The harness manages raw-output persistence (PI_TOOL_CALL_DIR), path injection,
  * timeouts, and telemetry.  It MUST NOT impose generic byte caps, output-limit
@@ -114,9 +113,9 @@ export interface RtkContractEntry {
  *  - Every DEFAULT_OBSERVED_PI_TOOLS (NativePiToolName) value must have an entry.
  *  - Project-configured tools (config-driven) are registered here with class
  *    'project_configured'; the bare harness currently has zero.
- *  - No entry may demand a structuredResult/resultPreview/outputArchive return
+ *  - No entry may demand a structuredResult/resultPreview return
  *    shape unless the tool is a project-configured command/mcp tool that already
- *    uses those compatibility fields.
+ *    uses those fields.
  *  - No entry uses a byteBudget or any other generic byte-cap field — see
  *    docs/raw-output-contract.md for the full forbidden list.
  */
@@ -637,9 +636,8 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   //   mutating: false  // set true for write/mutation commands
   // }
   //
-  // NOTE: project-configured tools MAY use the compatibility envelope fields
-  // (structuredResult/resultPreview/outputArchive) — those are not required
-  // of other tool classes.
+  // NOTE: project-configured tools MAY use structuredResult/resultPreview — those
+  // are not required of other tool classes.  outputArchive has been removed (55lu).
   // =========================================================================
 
 ] as const;
