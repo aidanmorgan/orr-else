@@ -285,7 +285,13 @@ export async function preflightProjectTool(
   const reservation = reserveProjectToolCall(backpressure, definition, context);
 
   if (reservation.existing) {
-    const result = attachFailureCategory(definition, projectToolBackpressureResult(definition, context, reservation.existing));
+    const rawBpResult = projectToolBackpressureResult(definition, context, reservation.existing);
+    // Capsule results already carry failureCategory and must stay prose-free (<=80 est. tokens).
+    // Skip attachFailureCategory for them — it would append verbose remediation prose that
+    // defeats the capsule's on-wire budget (AC2) and reintroduces text the capsule replaces (AC3).
+    const result = ('capsule' in rawBpResult)
+      ? rawBpResult
+      : attachFailureCategory(definition, rawBpResult);
     await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,

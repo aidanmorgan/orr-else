@@ -40,6 +40,11 @@ import type {
 export interface InFlightProjectToolCall {
   token: string;
   startedAtMs: number;
+  /** Number of times a concurrent call for the same (bead/state/action/tool) has been rejected
+   * while this entry is still in-flight.  Starts at 0 on first reservation; incremented on each
+   * subsequent rejection so projectToolBackpressureResult can emit a compact capsule instead of
+   * repeating the verbose text after the first collision. */
+  collisionCount: number;
 }
 
 /** Process-scoped in-flight backpressure map for project-tool calls.

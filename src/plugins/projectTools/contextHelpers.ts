@@ -20,6 +20,7 @@ import {
 } from './constants.js';
 import type { ProjectToolExecutionContext } from './types.js';
 import { ProjectToolFailureCategory } from './failureCategory.js';
+import { shouldEmitCapsule, buildBackpressureCapsule } from './BackpressureCapsule.js';
 
 function isInsidePath(root: string, candidate: string): boolean {
   const relativePath = path.relative(root, candidate);
@@ -268,6 +269,8 @@ export function reserveProjectToolCall(backpressure: ProjectToolBackpressure, de
   if (existing) {
     const staleMs = projectToolBackpressureStaleMs(definition);
     if (now - existing.startedAtMs <= staleMs) {
+      // Increment the collision count so the caller can gate on capsule vs verbose text.
+      existing.collisionCount += 1;
       return { key, existing };
     }
     Logger.warn(Component.PROJECT_TOOLS, 'Discarding stale in-flight project-tool backpressure entry', {
@@ -282,7 +285,8 @@ export function reserveProjectToolCall(backpressure: ProjectToolBackpressure, de
 
   backpressure.set(key, {
     token: context.templateContext.toolInvocationId || uuidv7(),
-    startedAtMs: now
+    startedAtMs: now,
+    collisionCount: 0
   });
   return { key };
 }
@@ -299,6 +303,20 @@ export function projectToolBackpressureResult(
   existing: InFlightProjectToolCall
 ): Record<string, unknown> {
   const ageMs = Math.max(0, Date.now() - existing.startedAtMs);
+
+  // On repeated collisions (2nd+), emit a compact coordination capsule INSTEAD of
+  // repeating the verbose text.  The first collision (collisionCount === 1) still
+  // gets the full explanation so the agent sees it once.
+  if (shouldEmitCapsule(existing.collisionCount)) {
+    return buildBackpressureCapsule(
+      definition.name,
+      context.templateContext.beadId || '',
+      context.templateContext.stateId || '',
+      context.templateContext.actionId || '',
+      ageMs
+    ) as Record<string, unknown>;
+  }
+
   return {
     tool: definition.name,
     status: ToolResultStatus.REJECTED,
