@@ -139,9 +139,13 @@ export class Supervisor {
   private lastRetentionCleanupMs = 0;
   private schedulingPausedUntilMs = 0;
   private schedulingPausedReason = '';
-  // Throttle "scheduling paused" warns: only emit when pauseUntil changes,
-  // otherwise the supervisor poll spams the log every POLL_INTERVAL_MS.
-  private lastLoggedPausedUntilMs = 0;
+  // Track the pauseUntil value at which the SCHEDULING_PAUSED domain event was
+  // last emitted so we fire it exactly once per distinct pause window (not on
+  // every poll).
+  private lastSchedulingPausedEventMs = 0;
+  // Throttle the low-frequency pause heartbeat: at most once per
+  // PAUSE_HEARTBEAT_INTERVAL_MS while pause is active.
+  private lastPauseHeartbeatMs = 0;
   // Throttle "underfilled or stale" slot warns: only emit when the digest
   // (expected/working counts + stale bead set) changes.
   private lastLoggedSlotHealthDigest = '';
@@ -321,14 +325,28 @@ export class Supervisor {
     if (pauseUntilMs <= this.schedulingPausedUntilMs) return;
     this.schedulingPausedUntilMs = pauseUntilMs;
     this.schedulingPausedReason = reason;
+    // Persist the legacy HARNESS_CAPACITY_LIMIT_REACHED event (used by
+    // restoreCapacityPauseFromStore on coordinator restart) and the new
+    // SCHEDULING_PAUSED event (fired exactly once per distinct pause window).
+    const pauseUntilIso = this.clock.date(pauseUntilMs).toISOString();
     void this.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
-      pauseUntil: this.clock.date(pauseUntilMs).toISOString(),
+      pauseUntil: pauseUntilIso,
       reason
     }).catch(() => {});
-    Logger.warn(Component.SUPERVISOR, 'Scheduling paused after harness capacity limit', {
-      pauseUntil: this.clock.date(pauseUntilMs).toISOString(),
-      reason
-    });
+    // Fire SCHEDULING_PAUSED exactly once per distinct pauseUntil value so
+    // operators see a single clean enter-event rather than per-poll noise.
+    if (pauseUntilMs !== this.lastSchedulingPausedEventMs) {
+      this.lastSchedulingPausedEventMs = pauseUntilMs;
+      this.lastPauseHeartbeatMs = this.clock.now();
+      void this.eventStore.record(DomainEventName.SCHEDULING_PAUSED, {
+        pauseUntil: pauseUntilIso,
+        reason
+      }).catch(() => {});
+      Logger.warn(Component.SUPERVISOR, 'Scheduling paused; entering quiet capacity-pause mode', {
+        pauseUntil: pauseUntilIso,
+        reason
+      });
+    }
   }
 
   private async restoreCapacityPauseFromStore(): Promise<void> {
@@ -525,9 +543,16 @@ export class Supervisor {
     if (this.ctx.hasUI) {
       this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Paused until ${pauseUntil}`);
     }
-    if (this.schedulingPausedUntilMs === this.lastLoggedPausedUntilMs) return;
-    this.lastLoggedPausedUntilMs = this.schedulingPausedUntilMs;
-    Logger.warn(Component.SUPERVISOR, 'Skipping spawn while scheduling is paused', {
+    // Emit a low-frequency heartbeat at most once per PAUSE_HEARTBEAT_INTERVAL_MS
+    // so operators can confirm the pause is still active without flooding the log.
+    const now = this.clock.now();
+    if (now - this.lastPauseHeartbeatMs < SupervisorDefaults.PAUSE_HEARTBEAT_INTERVAL_MS) return;
+    this.lastPauseHeartbeatMs = now;
+    void this.eventStore.record(DomainEventName.SCHEDULING_PAUSE_HEARTBEAT, {
+      pauseUntil,
+      reason: this.schedulingPausedReason
+    }).catch(() => {});
+    Logger.warn(Component.SUPERVISOR, 'Scheduling still paused (capacity-pause heartbeat)', {
       pauseUntil,
       reason: this.schedulingPausedReason
     });
@@ -1474,7 +1499,12 @@ export class Supervisor {
     const digest = `${expectedCount}/${workingCount}/${activeCount}|${missingTrackedBeadIds.join(',')}|${staleBeadIds.join(',')}|${heartbeatOnlyStaleBeadIds.join(',')}|${trackedOnlyBeadIds.join(',')}|${paneOnlyBeadIds.join(',')}`;
     if (digest !== this.lastLoggedSlotHealthDigest) {
       this.lastLoggedSlotHealthDigest = digest;
-      if (activeCount < expectedCount || staleBeadIds.length > 0 || heartbeatOnlyStaleBeadIds.length > 0) {
+      // While scheduling is intentionally paused, underfill is expected and
+      // not actionable — suppress the warn to avoid log spam.
+      const isUnderfilled = activeCount < expectedCount || staleBeadIds.length > 0 || heartbeatOnlyStaleBeadIds.length > 0;
+      if (isUnderfilled && this.isSchedulingPaused()) {
+        // Silently absorb the digest change; no operator-facing log.
+      } else if (isUnderfilled) {
         Logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
       } else {
         Logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
@@ -1546,6 +1576,10 @@ export class Supervisor {
     };
 
     await this.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
+    // Suppress the operator-facing underfilled warning while scheduling is
+    // intentionally paused — underfill is expected and not actionable until
+    // pause expiry, so the log entry would only add noise.
+    if (this.isSchedulingPaused()) return;
     Logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
   }
 

@@ -282,7 +282,22 @@ export enum DomainEventName {
    * fire together and provide deterministic evidence that the model attempted
    * to use an obsolete tool. Diagnostic + audit; NOT replay-critical.
    */
-  TOOL_DEPRECATED_REJECTED = 'TOOL_DEPRECATED_REJECTED'
+  TOOL_DEPRECATED_REJECTED = 'TOOL_DEPRECATED_REJECTED',
+  /**
+   * Emitted exactly ONCE when the supervisor enters a capacity-pause mode
+   * (scheduling suspended until pauseUntil).  Carries: { reason, pauseUntil }.
+   * Subsequent polls within the same pause window emit no additional events —
+   * the coordinator instead emits a low-frequency SCHEDULING_PAUSE_HEARTBEAT
+   * at most once per PAUSE_HEARTBEAT_INTERVAL_MS to confirm the pause is still
+   * active.  A new SCHEDULING_PAUSED event fires if pauseUntil is extended.
+   */
+  SCHEDULING_PAUSED = 'SCHEDULING_PAUSED',
+  /**
+   * Emitted at most once per PAUSE_HEARTBEAT_INTERVAL_MS while scheduling
+   * remains paused. Carries: { reason, pauseUntil }.  Bounds operator-visible
+   * log volume during long capacity pauses.
+   */
+  SCHEDULING_PAUSE_HEARTBEAT = 'SCHEDULING_PAUSE_HEARTBEAT'
 }
 
 export enum BeadsCliCommand {
@@ -1247,7 +1262,13 @@ export const SupervisorDefaults = {
    * Configurable via `settings.heartbeatOnlyGapOrphanTtlMs`.
    * Default: 3 × SLOT_HEALTH_EVENT_INTERVAL_MS = 90 s.
    */
-  HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS: 3 * 30 * TimeMs.SECOND
+  HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS: 3 * 30 * TimeMs.SECOND,
+  /**
+   * While scheduling is paused, the supervisor emits a SCHEDULING_PAUSE_HEARTBEAT
+   * event and logs at most once per this interval.  30 minutes matches typical
+   * capacity-limit pause durations and keeps operator logs tractable.
+   */
+  PAUSE_HEARTBEAT_INTERVAL_MS: 30 * TimeMs.MINUTE
 } as const;
 
 export const RetentionDefaults = {

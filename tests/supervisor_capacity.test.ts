@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { BeadStatus, DomainEventName, EventName, TimeMs } from '../src/constants/index.js';
+import { Logger } from '../src/core/Logger.js';
+import { BeadStatus, DomainEventName, EventName, SupervisorDefaults, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 
@@ -967,5 +968,277 @@ describe('Supervisor capacity pause handling', () => {
     expect((supervisor as any).startedBeadAtMs.has('bead-leak')).toBe(false);
     // Error must be classified as INVALID_BRANCH_REF
     expect((supervisor as any).quarantine.get('bead-leak')?.reason).toBe('INVALID_BRANCH_REF');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Quiet capacity-pause mode (xg4v)
+// ---------------------------------------------------------------------------
+
+describe('Supervisor quiet capacity-pause mode', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  function makeMutableClock(startMs: number) {
+    let nowMs = startMs;
+    return {
+      now: () => nowMs,
+      date: (timestampMs?: number) => new Date(timestampMs === undefined ? nowMs : timestampMs),
+      advance: (deltaMs: number) => { nowMs += deltaMs; }
+    };
+  }
+
+  function makePauseSupervisor(clock: ReturnType<typeof makeMutableClock>) {
+    const records: Array<{ event: string; data: unknown }> = [];
+    orchestratorMock.selectAssignments.mockResolvedValue([]);
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        getAvailableSlots: vi.fn(async () => 2),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: false, error: 'should not be called' }))
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        flowManager: {},
+        scheduler: {},
+        eventStore: fakeProjectionStore({
+          record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+        }),
+        beadsPort: fakeBeadsPort(),
+        worktreePort: fakeWorktreePort()
+      } as any,
+      { maxSlots: 2, clock }
+    );
+    return { supervisor, records };
+  }
+
+  // AC1: A usage-limit pause records exactly ONE SCHEDULING_PAUSED event with
+  // reason + pauseUntil on the first call to pauseSchedulingUntil().
+  it('AC1: records exactly ONE SCHEDULING_PAUSED event with reason+pauseUntil on pause enter', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const { supervisor, records } = makePauseSupervisor(clock);
+
+    const pauseUntilMs = clock.now() + TimeMs.HOUR;
+    supervisor.pauseSchedulingUntil(pauseUntilMs, 'usage_limit_reached');
+
+    const pausedEvents = records.filter(r => r.event === DomainEventName.SCHEDULING_PAUSED);
+    expect(pausedEvents).toHaveLength(1);
+    expect(pausedEvents[0].data).toMatchObject({
+      reason: 'usage_limit_reached',
+      pauseUntil: clock.date(pauseUntilMs).toISOString()
+    });
+
+    // Calling again with the same value must NOT fire a second event
+    supervisor.pauseSchedulingUntil(pauseUntilMs, 'usage_limit_reached');
+    expect(records.filter(r => r.event === DomainEventName.SCHEDULING_PAUSED)).toHaveLength(1);
+  });
+
+  // AC2: No repeated spawn attempts occur before pauseUntil.
+  it('AC2: no spawn attempts occur while pause is active', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const { supervisor } = makePauseSupervisor(clock);
+    const spawnSpy = (supervisor as any).factory.spawnTeammateInTmux;
+
+    supervisor.pauseSchedulingUntil(clock.now() + TimeMs.HOUR, 'usage_limit_reached');
+
+    // Run scanAndSpawn multiple times — none should attempt to spawn
+    for (let i = 0; i < 5; i++) {
+      await (supervisor as any).scanAndSpawn();
+    }
+    expect(orchestratorMock.selectAssignments).not.toHaveBeenCalled();
+    expect(spawnSpy).not.toHaveBeenCalled();
+  });
+
+  // AC3: Operator logs include no more than ONE paused heartbeat per 30 minutes.
+  it('AC3: heartbeat event fires at most once per PAUSE_HEARTBEAT_INTERVAL_MS', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const { supervisor, records } = makePauseSupervisor(clock);
+
+    supervisor.pauseSchedulingUntil(clock.now() + 2 * TimeMs.HOUR, 'usage_limit_reached');
+
+    // First call: lastPauseHeartbeatMs was set to now() in pauseSchedulingUntil,
+    // so reportPausedScheduling should NOT emit another heartbeat yet.
+    await (supervisor as any).scanAndSpawn();
+    await (supervisor as any).scanAndSpawn();
+
+    // Advance by less than the interval
+    clock.advance(SupervisorDefaults.PAUSE_HEARTBEAT_INTERVAL_MS - TimeMs.SECOND);
+    await (supervisor as any).scanAndSpawn();
+    await (supervisor as any).scanAndSpawn();
+
+    // Still at most 0 heartbeats fired (initial enter was the only event so far)
+    const heartbeats0 = records.filter(r => r.event === DomainEventName.SCHEDULING_PAUSE_HEARTBEAT);
+    expect(heartbeats0.length).toBe(0);
+
+    // Advance past the interval
+    clock.advance(TimeMs.SECOND * 2);
+    await (supervisor as any).scanAndSpawn();
+
+    const heartbeats1 = records.filter(r => r.event === DomainEventName.SCHEDULING_PAUSE_HEARTBEAT);
+    expect(heartbeats1).toHaveLength(1);
+    expect(heartbeats1[0].data).toMatchObject({ reason: 'usage_limit_reached' });
+
+    // Another batch of calls within the interval must NOT add more heartbeats
+    for (let i = 0; i < 5; i++) {
+      clock.advance(TimeMs.SECOND);
+      await (supervisor as any).scanAndSpawn();
+    }
+    expect(records.filter(r => r.event === DomainEventName.SCHEDULING_PAUSE_HEARTBEAT)).toHaveLength(1);
+  });
+
+  // AC4a: The 'Teammate capacity underfilled' Logger.warn is suppressed while the
+  // capacity-pause is active (Supervisor.ts recordCapacityUnderfill guard ~line 1582)
+  // and fires exactly once after the pause expires.
+  it('AC4a: Logger.warn "Teammate capacity underfilled" is suppressed while paused and fires after expiry', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const records: Array<{ event: string; data: unknown }> = [];
+    orchestratorMock.selectAssignments.mockResolvedValue([]);
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()), // no live beads → underfilled
+        getAvailableSlots: vi.fn(async () => 2),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: false, error: 'no' }))
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        flowManager: {},
+        scheduler: {},
+        eventStore: fakeProjectionStore({
+          record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+        }),
+        beadsPort: fakeBeadsPort(),
+        worktreePort: fakeWorktreePort()
+      } as any,
+      { maxSlots: 2, clock }
+    );
+
+    const pauseDurationMs = TimeMs.MINUTE;
+    supervisor.pauseSchedulingUntil(clock.now() + pauseDurationMs, 'usage_limit_reached');
+
+    const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    try {
+      // WHILE PAUSED: recordSlotHealth triggers recordCapacityUnderfill.
+      // The guard at Supervisor.ts:1582 must suppress the Logger.warn call.
+      await (supervisor as any).recordSlotHealth('test_paused');
+
+      // Durable event IS still recorded (audit trail must be intact)
+      expect(records.filter(r => r.event === DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED).length).toBeGreaterThanOrEqual(1);
+
+      // Logger.warn must NOT have been called with the underfilled message
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.any(String),
+        'Teammate capacity underfilled',
+        expect.anything()
+      );
+
+      // AFTER PAUSE EXPIRES: advance clock past pause + slot-health throttle,
+      // reset digests so the event + warn fire fresh.
+      clock.advance(pauseDurationMs + TimeMs.SECOND + SupervisorDefaults.SLOT_HEALTH_EVENT_INTERVAL_MS);
+      expect((supervisor as any).isSchedulingPaused()).toBe(false);
+
+      // Reset digests so recordCapacityUnderfill sees a new digest and emits again
+      (supervisor as any).lastCapacityUnderfillDigest = '';
+      (supervisor as any).lastLoggedSlotHealthDigest = '';
+
+      warn.mockClear();
+      await (supervisor as any).recordSlotHealth('test_resumed');
+
+      // Now the guard is cleared — Logger.warn MUST be called with the underfilled message
+      expect(warn).toHaveBeenCalledWith(
+        expect.any(String),
+        'Teammate capacity underfilled',
+        expect.anything()
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // AC4b: The 'Teammate slot health check found underfilled or stale work' Logger.warn
+  // is suppressed while the capacity-pause is active (Supervisor.ts ~lines 1505-1506).
+  it('AC4b: Logger.warn "slot health underfilled" is suppressed while paused; durable event still recorded', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const records: Array<{ event: string; data: unknown }> = [];
+    orchestratorMock.selectAssignments.mockResolvedValue([]);
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()), // no live beads → underfilled
+        getAvailableSlots: vi.fn(async () => 2),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: false, error: 'no' }))
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        flowManager: {},
+        scheduler: {},
+        eventStore: fakeProjectionStore({
+          record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); })
+        }),
+        beadsPort: fakeBeadsPort(),
+        worktreePort: fakeWorktreePort()
+      } as any,
+      { maxSlots: 2, clock }
+    );
+
+    supervisor.pauseSchedulingUntil(clock.now() + TimeMs.HOUR, 'usage_limit_reached');
+
+    const warn = vi.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    try {
+      // WHILE PAUSED: the slot-health underfilled branch (Supervisor.ts:1505-1506)
+      // must absorb the digest change silently — no Logger.warn emitted.
+      await (supervisor as any).recordSlotHealth('test_slot_health_paused');
+
+      // Durable TEAMMATE_CAPACITY_UNDERFILLED event IS still recorded
+      expect(records.filter(r => r.event === DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED).length).toBeGreaterThanOrEqual(1);
+
+      // Logger.warn must NOT have been called with the slot-health underfilled message
+      expect(warn).not.toHaveBeenCalledWith(
+        expect.any(String),
+        'Teammate slot health check found underfilled or stale work',
+        expect.anything()
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // AC5: Normal scheduling resumes automatically after pause expiry.
+  it('AC5: scheduling resumes automatically after pause expiry', async () => {
+    const clock = makeMutableClock(NOW_MS);
+    const { supervisor } = makePauseSupervisor(clock);
+
+    const pauseUntilMs = clock.now() + TimeMs.MINUTE;
+    supervisor.pauseSchedulingUntil(pauseUntilMs, 'usage_limit_reached');
+
+    // While paused: selectAssignments must not be called
+    await (supervisor as any).scanAndSpawn();
+    expect(orchestratorMock.selectAssignments).not.toHaveBeenCalled();
+
+    // Advance past the pause window
+    clock.advance(TimeMs.MINUTE + TimeMs.SECOND);
+
+    // Now pause is expired — isSchedulingPaused() should return false
+    expect((supervisor as any).isSchedulingPaused()).toBe(false);
+
+    // scanAndSpawn should now proceed to selectAssignments
+    await (supervisor as any).scanAndSpawn();
+    expect(orchestratorMock.selectAssignments).toHaveBeenCalledTimes(1);
   });
 });
