@@ -7,8 +7,9 @@ import { Observability } from '../src/core/Observability.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import { EnvVars, BuiltInToolName } from '../src/constants/index.js';
+import { EnvVars, BuiltInToolName, DomainEventName } from '../src/constants/index.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
+import type { SignalAck } from '../src/core/SignalingServer.js';
 
 vi.mock('../src/core/HarnessApiClient.js', () => ({
   postHarnessSignal: vi.fn().mockResolvedValue({ ok: true })
@@ -353,6 +354,241 @@ states:
         expect(body.error).toContain('Invalid event type');
         expect(events).toHaveLength(0);
       } finally {
+        server.stop();
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Held-ack timeout (pi-experiment-f5h6)
+  //
+  // A handler that calls ack.hold() but never calls ack.send() must not hang
+  // the HTTP request indefinitely. The server must time out the deferred
+  // response, record TEAMMATE_SIGNAL_FAILED with held-timeout metadata, and
+  // return a retryable failure response to the caller.
+  // ---------------------------------------------------------------------------
+
+  describe('held-ack timeout (f5h6)', () => {
+    // AC1 + AC2: a handler that holds and then hangs (never calls send) returns
+    // within the configured timeout and records TEAMMATE_SIGNAL_FAILED with
+    // held=true metadata.
+    it('AC1+AC2: hold-and-never-send returns within timeout and records TEAMMATE_SIGNAL_FAILED with held metadata', async () => {
+      const recordedEvents: Array<{ name: string; payload: unknown }> = [];
+      const originalRecord = eventStore.record.bind(eventStore);
+      vi.spyOn(eventStore, 'record').mockImplementation(async (name, payload) => {
+        recordedEvents.push({ name, payload });
+        return originalRecord(name, payload);
+      });
+
+      const heldAckTimeoutMs = 150;
+      const server = new SignalingServer(
+        async (_event, ack: SignalAck) => {
+          // Call hold() then await something that never resolves — simulates a
+          // hung gated handler that acquired the deferred response but stalled.
+          ack.hold();
+          await new Promise<void>(() => {}); // intentionally never resolves
+        },
+        observability,
+        eventStore,
+        { port: 39900 + (process.pid % 1000), heldAckTimeoutMs }
+      );
+      const port = await server.start();
+
+      try {
+        const before = Date.now();
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(eventBody())
+        });
+        const elapsed = Date.now() - before;
+
+        // AC1: request must resolve within a bounded time (timeout + generous buffer)
+        expect(elapsed).toBeLessThan(heldAckTimeoutMs + 1000);
+
+        // AC2: response must be a retryable failure verdict
+        const body = await response.json() as Record<string, unknown>;
+        expect(body.ok).toBe(false);
+
+        // AC2: TEAMMATE_SIGNAL_FAILED must be recorded with held-timeout metadata
+        await waitFor(() => {
+          const failed = recordedEvents.find(e => e.name === DomainEventName.TEAMMATE_SIGNAL_FAILED);
+          expect(failed).toBeDefined();
+          const p = failed!.payload as Record<string, unknown>;
+          expect(p.held).toBe(true);
+          expect(p.timeoutMs).toBe(heldAckTimeoutMs);
+          expect(p.beadId).toBe('pi-experiment-proof');
+          expect(p.stateId).toBe('Planning');
+          expect(p.workerId).toBe('worker-1');
+          expect(p.type).toBe('STATE_TRANSITIONED');
+          expect(typeof p.idempotencyKey).toBe('string');
+        });
+      } finally {
+        server.stop();
+        vi.restoreAllMocks();
+      }
+    });
+
+    // AC3: a held handler that DOES call send() still returns the verifier verdict.
+    it('AC3: held handler that calls send() returns the verifier verdict normally', async () => {
+      const server = new SignalingServer(
+        async (_event, ack: SignalAck) => {
+          ack.hold();
+          // Simulate async gate work then resolve with a verdict
+          await new Promise(resolve => setTimeout(resolve, 20));
+          ack.send({ pass: true, failures: [], rejectMessage: '' });
+        },
+        observability,
+        eventStore,
+        { port: 39910 + (process.pid % 1000), heldAckTimeoutMs: 500 }
+      );
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(eventBody())
+        });
+        const body = await response.json() as Record<string, unknown>;
+        // Must carry the gate verdict (pass: true)
+        expect(body.ok).toBe(true);
+        expect((body.gate as Record<string, unknown>).pass).toBe(true);
+      } finally {
+        server.stop();
+      }
+    });
+
+    // Timer-cleanup guard: the held-ack timeout handle must be cleared via
+    // clearTimeout() on BOTH the success path (send() wins the race) and the
+    // timeout path (timer fires first). Without the fix, the timer outlives the
+    // race and pins the Node event loop for 25 s on every held-success signal.
+    //
+    // Strategy: spy on BOTH globalThis.setTimeout and globalThis.clearTimeout.
+    // Identify the held-ack timer by filtering setTimeout calls for the one whose
+    // delay === heldAckTimeoutMs, capture its return value (the timer handle), and
+    // assert clearTimeout was called WITH THAT EXACT HANDLE. This is immune to
+    // Node internals calling clearTimeout for their own socket/HTTP timers.
+    it('timer-cleanup: clearTimeout is called after held success (timer must not outlive the race)', async () => {
+      const heldAckTimeoutMs = 500;
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const server = new SignalingServer(
+        async (_event, ack: SignalAck) => {
+          ack.hold();
+          await new Promise(resolve => setTimeout(resolve, 10));
+          ack.send({ pass: true, failures: [], rejectMessage: '' });
+        },
+        observability,
+        eventStore,
+        { port: 39930 + (process.pid % 1000), heldAckTimeoutMs }
+      );
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(eventBody())
+        });
+        expect(response.ok).toBe(true);
+
+        // Find the held-ack timer: the setTimeout call whose delay === heldAckTimeoutMs.
+        const heldAckCall = setTimeoutSpy.mock.results.find(
+          (_r, i) => setTimeoutSpy.mock.calls[i]?.[1] === heldAckTimeoutMs
+        );
+        expect(heldAckCall).toBeDefined(); // sanity: the timer must have been set
+        const heldTimerHandle = heldAckCall!.value;
+
+        // clearTimeout must have been called with the exact held-ack handle.
+        // Node's own HTTP/socket internals never receive this handle, so this
+        // assertion fails precisely when clearTimeout(heldTimer) is removed.
+        expect(clearTimeoutSpy.mock.calls.flat()).toContain(heldTimerHandle);
+      } finally {
+        server.stop();
+        setTimeoutSpy.mockRestore();
+        clearTimeoutSpy.mockRestore();
+      }
+    });
+
+    it('timer-cleanup: clearTimeout is called after held timeout (timer handle must be cleared even on the timeout path)', async () => {
+      const heldAckTimeoutMs = 80;
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+      const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const server = new SignalingServer(
+        async (_event, ack: SignalAck) => {
+          ack.hold();
+          await new Promise<void>(() => {}); // never resolves
+        },
+        observability,
+        eventStore,
+        { port: 39940 + (process.pid % 1000), heldAckTimeoutMs }
+      );
+      const port = await server.start();
+
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(eventBody())
+        });
+        const body = await response.json() as Record<string, unknown>;
+        expect(body.ok).toBe(false);
+
+        // Find the held-ack timer: the setTimeout call whose delay === heldAckTimeoutMs.
+        const heldAckCall = setTimeoutSpy.mock.results.find(
+          (_r, i) => setTimeoutSpy.mock.calls[i]?.[1] === heldAckTimeoutMs
+        );
+        expect(heldAckCall).toBeDefined(); // sanity: the timer must have been set
+        const heldTimerHandle = heldAckCall!.value;
+
+        // Even though the timer fired (timedOut path), clearTimeout must still be
+        // called in the finally block with the exact handle — ensuring it's released.
+        // Node's own internals never receive this handle, so this fails precisely
+        // when clearTimeout(heldTimer) is removed from the finally block.
+        expect(clearTimeoutSpy.mock.calls.flat()).toContain(heldTimerHandle);
+      } finally {
+        server.stop();
+        setTimeoutSpy.mockRestore();
+        clearTimeoutSpy.mockRestore();
+      }
+    });
+
+    // AC4: non-held signals respond immediately (fire-and-forget) — unaffected.
+    it('AC4: non-held signals respond immediately without waiting for the handler', async () => {
+      let markHandlerEntered: () => void = () => {};
+      let releaseHandler: () => void = () => {};
+      const handlerEntered = new Promise<void>(resolve => { markHandlerEntered = resolve; });
+
+      const server = new SignalingServer(
+        async () => {
+          markHandlerEntered();
+          // Block for much longer than any timeout — must not affect response time.
+          await new Promise<void>(resolve => { releaseHandler = resolve; });
+        },
+        observability,
+        eventStore,
+        { port: 39920 + (process.pid % 1000), heldAckTimeoutMs: 100 }
+      );
+      const port = await server.start();
+
+      try {
+        const responsePromise = fetch(`http://127.0.0.1:${port}/signals`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(eventBody())
+        });
+        await handlerEntered;
+        const first = await Promise.race([
+          responsePromise.then(r => r.ok ? 'response' : `status:${r.status}`),
+          new Promise(resolve => setTimeout(() => resolve('timeout'), 500))
+        ]);
+        // Fire-and-forget: response must arrive before the handler finishes.
+        expect(first).toBe('response');
+      } finally {
+        releaseHandler();
         server.stop();
       }
     });

@@ -1191,6 +1191,11 @@ export const WorkerDefaults = {
   // worker. Stuck-detection still uses the in-memory snapshot.
   HEARTBEAT_RECORD_INTERVAL_MS: 30 * TimeMs.SECOND,
   SIGNAL_REQUEST_TIMEOUT_MS: 30 * TimeMs.SECOND,
+  // Maximum time the server waits for a held-ack gated handler to call send().
+  // Prevents indefinite HTTP request hangs when a gated handler hangs or never
+  // resolves. Must be less than SIGNAL_REQUEST_TIMEOUT_MS so the worker sees a
+  // clear error rather than a network timeout.
+  HELD_ACK_TIMEOUT_MS: 25 * TimeMs.SECOND,
   SIGNAL_REQUEST_ATTEMPTS: 3,
   SIGNAL_REQUEST_RETRY_DELAY_MS: 250,
   SHUTDOWN_AFTER_SIGNAL_MS: TimeMs.SECOND,

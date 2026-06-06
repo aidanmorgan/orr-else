@@ -59,6 +59,13 @@ export interface SignalingServerOptions {
    * names in addition to the built-in TeammateEventType enum values.
    */
   allowedCustomEvents?: readonly string[];
+  /**
+   * Maximum milliseconds to wait for a held-ack gated handler to call send().
+   * Defaults to WorkerDefaults.HELD_ACK_TIMEOUT_MS (25 s).
+   * When the deadline elapses the server records TEAMMATE_SIGNAL_FAILED with
+   * held: true metadata and responds with a retryable failure verdict.
+   */
+  heldAckTimeoutMs?: number;
 }
 
 function asyncRoute(route: AsyncRoute) {
@@ -94,6 +101,7 @@ export class SignalingServer {
   private readonly signalChains = new Map<string, Promise<void>>();
   private readonly port: number;
   private readonly allowedCustomEvents: ReadonlySet<string>;
+  private readonly heldAckTimeoutMs: number;
   /** Actual bound port, populated after start() resolves. */
   private boundPort?: number;
 
@@ -104,10 +112,11 @@ export class SignalingServer {
     portOrOptions: number | RuntimeEnvironment | SignalingServerOptions = {}
   ) {
     this.port = resolvePort(portOrOptions);
-    const customEvents = typeof portOrOptions === 'object' && !isRuntimeEnvironment(portOrOptions)
-      ? (portOrOptions as SignalingServerOptions).allowedCustomEvents
+    const options = typeof portOrOptions === 'object' && !isRuntimeEnvironment(portOrOptions)
+      ? (portOrOptions as SignalingServerOptions)
       : undefined;
-    this.allowedCustomEvents = new Set(customEvents ?? []);
+    this.allowedCustomEvents = new Set(options?.allowedCustomEvents ?? []);
+    this.heldAckTimeoutMs = options?.heldAckTimeoutMs ?? WorkerDefaults.HELD_ACK_TIMEOUT_MS;
   }
 
   public async start(): Promise<number> {
@@ -173,6 +182,7 @@ export class SignalingServer {
         // before deciding whether to respond now or await the verdict.
         let held = false;
         let responseSent = false;
+        let heldTimedOut = false;
         let resolveSend: () => void = () => {};
         const sendDeferred = new Promise<void>(resolve => { resolveSend = resolve; });
         let verdict: SignalGateVerdict | undefined;
@@ -216,19 +226,23 @@ export class SignalingServer {
             error: String(error),
             stack: (error as Error).stack
           });
-          try {
-            await this.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
-              type: event.type,
-              beadId: event.beadId,
-              workerId: event.workerId,
-              stateId: event.stateId,
-              error: String(error)
-            });
-          } catch (recordError) {
-            Logger.error(Component.SIGNALING, 'Failed to record asynchronous teammate signal failure', {
-              error: String(recordError),
-              stack: (recordError as Error).stack
-            });
+          // If the held-ack timeout already fired and recorded TEAMMATE_SIGNAL_FAILED,
+          // skip recording a second event for the same signal (double-record guard).
+          if (!heldTimedOut) {
+            try {
+              await this.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+                type: event.type,
+                beadId: event.beadId,
+                workerId: event.workerId,
+                stateId: event.stateId,
+                error: String(error)
+              });
+            } catch (recordError) {
+              Logger.error(Component.SIGNALING, 'Failed to record asynchronous teammate signal failure', {
+                error: String(recordError),
+                stack: (recordError as Error).stack
+              });
+            }
           }
           // Release any held response so a failing held handler never hangs the
           // caller — it falls back to the {ok:true} acknowledgement.
@@ -246,7 +260,60 @@ export class SignalingServer {
         // signal.
         await new Promise<void>(resolve => setImmediate(resolve));
         if (held) {
-          await sendDeferred;
+          // Race the deferred send against the bounded held-ack timeout so a
+          // hung gated handler never holds the HTTP connection indefinitely.
+          // Mirror the VerifierGate.ts idiom: capture the handle and clear it
+          // in a finally so the timer never outlives the race on either path.
+          const timeoutMs = this.heldAckTimeoutMs;
+          let heldTimer: ReturnType<typeof setTimeout> | undefined;
+          const timeoutRace = new Promise<void>(resolve => {
+            heldTimer = setTimeout(() => {
+              heldTimedOut = true;
+              resolve();
+            }, timeoutMs);
+          });
+          try {
+            await Promise.race([sendDeferred, timeoutRace]);
+          } finally {
+            if (heldTimer) clearTimeout(heldTimer);
+          }
+
+          if (heldTimedOut) {
+            // heldTimedOut=true signals the bead-chain catch block to skip
+            // recording a second TEAMMATE_SIGNAL_FAILED (double-record guard).
+            // The gated handler hung — record a failure event with held-timeout
+            // metadata so operators can diagnose which handler stalled, then
+            // return a retryable failure so the worker can act on it.
+            Logger.error(Component.SIGNALING, 'Held-ack timeout: gated handler did not call send() within deadline', {
+              type: event.type,
+              beadId: event.beadId,
+              workerId: event.workerId,
+              stateId: event.stateId,
+              timeoutMs
+            });
+            try {
+              await this.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+                held: true,
+                timeoutMs,
+                type: event.type,
+                beadId: event.beadId,
+                workerId: event.workerId,
+                stateId: event.stateId,
+                idempotencyKey: event.idempotencyKey
+              });
+            } catch (recordError) {
+              Logger.error(Component.SIGNALING, 'Failed to record held-ack timeout failure', {
+                error: String(recordError),
+                stack: (recordError as Error).stack
+              });
+            }
+            if (!responseSent) {
+              responseSent = true;
+              res.status(HttpStatus.OK).json({ ok: false, timedOut: true });
+            }
+            return;
+          }
+
           if (!responseSent) {
             responseSent = true;
             if (verdict && !verdict.pass) {
