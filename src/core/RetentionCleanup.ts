@@ -571,7 +571,7 @@ async function compactJsonlFile(
         const trimmed = line.trim();
         if (!trimmed) return; // skip blank lines
 
-        let event: { type?: string; timestamp?: string; data?: { beadId?: string } };
+        let event: { type?: string; timestamp?: string; data?: { beadId?: string; outputFile?: string; toolResult?: { outputFile?: string } } };
         try {
           event = JSON.parse(trimmed);
         } catch {
@@ -586,6 +586,45 @@ async function compactJsonlFile(
 
         // SAFETY 1: never drop replay-critical events.
         if (eventType && REPLAY_CRITICAL_EVENT_TYPES.has(eventType)) {
+          writeStream.write(`${trimmed}\n`);
+          eventsKept++;
+          return;
+        }
+
+        // SAFETY 1.5: never drop evidence-bearing tool-result events.
+        //
+        // Two recorded shapes are reconciled here (see EventStore.toolResultEventMatches):
+        //
+        // NESTED (wrapped plugin tools): TOOL_INVOCATION_SUCCEEDED / TOOL_INVOCATION_FAILED
+        //   carry toolResult.outputFile at data.toolResult.outputFile.
+        //
+        // FLAT (command / MCP tools): PROJECT_TOOL_SUCCEEDED / PROJECT_TOOL_FAILED
+        //   carry outputFile at the TOP LEVEL of data (data.outputFile), recorded in
+        //   src/plugins/projectTools.ts as `outputFile: context.outputFile`.
+        //
+        // Both shapes are consumed by EventStore.latestToolResultEvent() as proof that a
+        // required tool ran for the current bead/state/action. They must survive compaction
+        // even when the bead is no longer live, so the verifier gate can still reconstruct
+        // required-tool status from the event log.
+        //
+        // Events WITHOUT an outputFile (e.g. TOOL_INVOCATION_STARTED, or SUCCEEDED/FAILED
+        // without an outputFile) are NOT evidence and remain compactable as pure telemetry.
+        if (
+          (eventType === DomainEventName.TOOL_INVOCATION_SUCCEEDED ||
+           eventType === DomainEventName.TOOL_INVOCATION_FAILED) &&
+          typeof event.data?.toolResult?.outputFile === 'string' &&
+          event.data.toolResult.outputFile.length > 0
+        ) {
+          writeStream.write(`${trimmed}\n`);
+          eventsKept++;
+          return;
+        }
+
+        if (
+          eventType === DomainEventName.PROJECT_TOOL_SUCCEEDED &&
+          typeof event.data?.outputFile === 'string' &&
+          event.data.outputFile.length > 0
+        ) {
           writeStream.write(`${trimmed}\n`);
           eventsKept++;
           return;

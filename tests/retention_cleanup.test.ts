@@ -1883,3 +1883,415 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
     expect(fs.existsSync(arch.actionDir)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// c5bv: evidence-bearing tool-result events survive compaction
+//
+// TOOL_INVOCATION_SUCCEEDED / TOOL_INVOCATION_FAILED events that carry a
+// toolResult.outputFile are consumed by latestToolResultEvent() as proof that a
+// required tool ran. They must survive compaction even for non-live beads.
+// Events WITHOUT toolResult.outputFile remain compactable (pure telemetry).
+// ---------------------------------------------------------------------------
+
+describe('RetentionCleanup — c5bv: evidence-bearing tool-result events survive compaction', () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpRoot();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  // AC1: evidence-bearing TOOL_INVOCATION_SUCCEEDED survives compaction
+  it('AC1: TOOL_INVOCATION_SUCCEEDED with toolResult.outputFile survives compaction for a non-live bead', async () => {
+    const beadId = 'bd-c5bv-ac1-succeeded';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+
+    const outputFile = `.pi/tool-output/${beadId}/Planning/formulate-plan/bash/inv-1/output/result.json`;
+
+    const events: DomainEvent[] = [
+      // Evidence-bearing TOOL_INVOCATION_SUCCEEDED — must survive.
+      makeEvent(DomainEventName.TOOL_INVOCATION_SUCCEEDED, beadId, oldMs, {
+        tool: 'bash',
+        toolResult: {
+          status: 'PASSED',
+          outputFile,
+          outputFileBytes: 128
+        }
+      }),
+      // Non-evidence telemetry (no toolResult.outputFile) — must be dropped.
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 1000, {}),
+    ];
+
+    const eventsFile = path.join(tmpRoot, '.pi', 'events', 'project.jsonl');
+    writeEventsJsonl(eventsFile, events);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS, // very short — both events are old
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(), // bead is NOT live
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // Only the heartbeat should be dropped; the evidence event must survive.
+    expect(result.eventsCompacted).toBe(1);
+    const remaining = readEventsJsonl(eventsFile);
+    expect(remaining.some(e => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED)).toBe(true);
+    expect(remaining.some(e => e.type === DomainEventName.HEARTBEAT_RECORDED)).toBe(false);
+  });
+
+  // AC1 variant: evidence-bearing TOOL_INVOCATION_FAILED survives compaction
+  it('AC1: TOOL_INVOCATION_FAILED with toolResult.outputFile survives compaction for a non-live bead', async () => {
+    const beadId = 'bd-c5bv-ac1-failed';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+
+    const outputFile = `.pi/tool-output/${beadId}/Planning/formulate-plan/semgrep/inv-1/output/result.json`;
+
+    const events: DomainEvent[] = [
+      makeEvent(DomainEventName.TOOL_INVOCATION_FAILED, beadId, oldMs, {
+        tool: 'semgrep',
+        toolResult: {
+          status: 'FAILED',
+          outputFile,
+          outputFileBytes: 64
+        }
+      }),
+      makeEvent(DomainEventName.TOKEN_USAGE_RECORDED, beadId, oldMs + 500, {}),
+    ];
+
+    const eventsFile = path.join(tmpRoot, '.pi', 'events', 'project.jsonl');
+    writeEventsJsonl(eventsFile, events);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS,
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(),
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    expect(result.eventsCompacted).toBe(1);
+    const remaining = readEventsJsonl(eventsFile);
+    expect(remaining.some(e => e.type === DomainEventName.TOOL_INVOCATION_FAILED)).toBe(true);
+    expect(remaining.some(e => e.type === DomainEventName.TOKEN_USAGE_RECORDED)).toBe(false);
+  });
+
+  // AC3: TOOL_INVOCATION events WITHOUT toolResult.outputFile remain compactable
+  it('AC3: TOOL_INVOCATION_SUCCEEDED WITHOUT toolResult.outputFile is compacted (pure telemetry)', async () => {
+    const beadId = 'bd-c5bv-ac3-no-outputfile';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+
+    const events: DomainEvent[] = [
+      // No toolResult.outputFile — not evidence, must be compacted.
+      makeEvent(DomainEventName.TOOL_INVOCATION_SUCCEEDED, beadId, oldMs, {
+        tool: 'bash',
+        toolResult: { status: 'PASSED' } // outputFile intentionally absent
+      }),
+      // Also no toolResult at all.
+      makeEvent(DomainEventName.TOOL_INVOCATION_STARTED, beadId, oldMs + 200, { tool: 'bash' }),
+      // Non-evidence telemetry.
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 400, {}),
+    ];
+
+    const eventsFile = path.join(tmpRoot, '.pi', 'events', 'project.jsonl');
+    writeEventsJsonl(eventsFile, events);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS,
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(),
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // All three events (no outputFile → compactable) must be dropped.
+    expect(result.eventsCompacted).toBe(3);
+    const remaining = readEventsJsonl(eventsFile);
+    expect(remaining).toHaveLength(0);
+  });
+
+  // AC2 + AC4: latestToolResultEvent still resolves after compaction
+  it('AC2+AC4: latestToolResultEvent resolves the evidence event after compaction of non-evidence telemetry', async () => {
+    const beadId = 'bd-c5bv-ac2';
+    const eventsDir = path.join(tmpRoot, '.pi', 'events');
+    const primaryBasename = path.basename(tmpRoot).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^-+|-+$/g, '') || 'project';
+    const primaryPath = path.join(eventsDir, `${primaryBasename}.jsonl`);
+
+    fs.writeFileSync(path.join(tmpRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+    const stateId = 'Planning';
+    const actionId = 'formulate-plan';
+    const tool = 'bash';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+    const outputFile = `.pi/tool-output/${beadId}/${stateId}/${actionId}/${tool}/inv-1/output/result.json`;
+
+    const rawEvents: DomainEvent[] = [
+      // Replay-critical lifecycle events.
+      makeEvent(DomainEventName.BEAD_CLAIMED, beadId, oldMs, {
+        stateId,
+        owner: 'worker-1',
+        lease: { owner: 'worker-1', expiresAt: new Date(oldMs + ONE_HOUR_MS).toISOString() }
+      }),
+      makeEvent(DomainEventName.STATE_RUN_INITIALIZED, beadId, oldMs + 1000, { stateId, actionId }),
+      // Evidence-bearing TOOL_INVOCATION event — must survive compaction.
+      makeEvent(DomainEventName.TOOL_INVOCATION_SUCCEEDED, beadId, oldMs + 2000, {
+        tool,
+        toolResult: { status: 'PASSED', outputFile, outputFileBytes: 128 }
+      }),
+      // Old non-evidence telemetry — must be compacted away.
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 3000, {}),
+      makeEvent(DomainEventName.TOKEN_USAGE_RECORDED, beadId, oldMs + 4000, {}),
+    ];
+
+    writeEventsJsonl(primaryPath, rawEvents);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS, // everything is old
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(), // bead is not live
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // Heartbeat + token_usage were compacted; evidence event + lifecycle events survived.
+    expect(result.eventsCompacted).toBe(2);
+
+    // Instantiate a fresh EventStore and verify latestToolResultEvent resolves.
+    const configLoader = new ConfigLoader(undefined, tmpRoot);
+    const freshEventStore = new EventStore(configLoader, undefined, undefined, tmpRoot);
+    freshEventStore.setSessionId('fresh-c5bv');
+
+    const toolResultEvent = await freshEventStore.latestToolResultEvent(beadId, stateId, actionId, tool);
+    expect(toolResultEvent).toBeDefined();
+    expect(toolResultEvent?.type).toBe(DomainEventName.TOOL_INVOCATION_SUCCEEDED);
+    const trd = toolResultEvent?.data as Record<string, unknown>;
+    expect((trd?.toolResult as Record<string, unknown>)?.outputFile).toBe(outputFile);
+
+    configLoader.reset();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// c5bv review fix: PROJECT_TOOL_SUCCEEDED with flat top-level outputFile must
+// also survive compaction (the FLAT shape left open by the original SAFETY 1.5
+// guard which only covered the NESTED TOOL_INVOCATION_* shape).
+// ---------------------------------------------------------------------------
+
+describe('RetentionCleanup — c5bv review fix: PROJECT_TOOL_SUCCEEDED flat outputFile survives compaction', () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpRoot();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    Logger.close();
+  });
+
+  // AC1-flat: evidence-bearing PROJECT_TOOL_SUCCEEDED (top-level outputFile) survives compaction
+  it('PROJECT_TOOL_SUCCEEDED with top-level data.outputFile survives compaction for a non-live bead', async () => {
+    const beadId = 'bd-c5bv-flat-ac1';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+
+    const outputFile = `.pi/tool-output/${beadId}/Planning/formulate-plan/bash/inv-1/output/result.json`;
+
+    const events: DomainEvent[] = [
+      // Evidence-bearing PROJECT_TOOL_SUCCEEDED with FLAT top-level outputFile — must survive.
+      makeEvent(DomainEventName.PROJECT_TOOL_SUCCEEDED, beadId, oldMs, {
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        tool: 'bash',
+        status: 'PASSED',
+        outputFile,  // top-level data.outputFile (FLAT shape)
+      }),
+      // Non-evidence telemetry — must be dropped.
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 1000, {}),
+    ];
+
+    const eventsFile = path.join(tmpRoot, '.pi', 'events', 'project.jsonl');
+    writeEventsJsonl(eventsFile, events);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS, // very short — both events are old
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(), // bead is NOT live
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // Only the heartbeat should be dropped; the PROJECT_TOOL_SUCCEEDED evidence must survive.
+    expect(result.eventsCompacted).toBe(1);
+    const remaining = readEventsJsonl(eventsFile);
+    expect(remaining.some(e => e.type === DomainEventName.PROJECT_TOOL_SUCCEEDED)).toBe(true);
+    expect(remaining.some(e => e.type === DomainEventName.HEARTBEAT_RECORDED)).toBe(false);
+  });
+
+  // AC2-flat: PROJECT_TOOL_SUCCEEDED WITHOUT outputFile is compactable (pure telemetry)
+  it('PROJECT_TOOL_SUCCEEDED WITHOUT top-level outputFile is compacted (pure telemetry)', async () => {
+    const beadId = 'bd-c5bv-flat-ac2-no-outputfile';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+
+    const events: DomainEvent[] = [
+      // No outputFile — not evidence, must be compacted.
+      makeEvent(DomainEventName.PROJECT_TOOL_SUCCEEDED, beadId, oldMs, {
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        tool: 'bash',
+        status: 'PASSED',
+        // outputFile intentionally absent
+      }),
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 500, {}),
+    ];
+
+    const eventsFile = path.join(tmpRoot, '.pi', 'events', 'project.jsonl');
+    writeEventsJsonl(eventsFile, events);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS,
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(),
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // Both events (no outputFile → compactable) must be dropped.
+    expect(result.eventsCompacted).toBe(2);
+    const remaining = readEventsJsonl(eventsFile);
+    expect(remaining).toHaveLength(0);
+  });
+
+  // AC3-flat: latestToolResultEvent resolves a PROJECT_TOOL_SUCCEEDED after compaction (end-to-end)
+  it('latestToolResultEvent resolves PROJECT_TOOL_SUCCEEDED (flat shape) after compaction via replay from shrunk primary log', async () => {
+    const beadId = 'bd-c5bv-flat-ac3';
+    const eventsDir = path.join(tmpRoot, '.pi', 'events');
+    const primaryBasename = path.basename(tmpRoot).replace(/[^A-Za-z0-9._-]/g, '-').replace(/^-+|-+$/g, '') || 'project';
+    const primaryPath = path.join(eventsDir, `${primaryBasename}.jsonl`);
+
+    fs.writeFileSync(path.join(tmpRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+    const stateId = 'Planning';
+    const actionId = 'formulate-plan';
+    const tool = 'bash';
+    const oldMs = NOW_MS - SEVEN_DAYS_MS - ONE_HOUR_MS;
+    const outputFile = `.pi/tool-output/${beadId}/${stateId}/${actionId}/${tool}/inv-1/output/result.json`;
+
+    const rawEvents: DomainEvent[] = [
+      // Replay-critical lifecycle events.
+      makeEvent(DomainEventName.BEAD_CLAIMED, beadId, oldMs, {
+        stateId,
+        owner: 'worker-1',
+        lease: { owner: 'worker-1', expiresAt: new Date(oldMs + ONE_HOUR_MS).toISOString() }
+      }),
+      makeEvent(DomainEventName.STATE_RUN_INITIALIZED, beadId, oldMs + 1000, { stateId, actionId }),
+      // Evidence-bearing PROJECT_TOOL_SUCCEEDED (FLAT shape, top-level outputFile) — must survive compaction.
+      makeEvent(DomainEventName.PROJECT_TOOL_SUCCEEDED, beadId, oldMs + 2000, {
+        stateId,
+        actionId,
+        tool,
+        status: 'PASSED',
+        outputFile,  // top-level data.outputFile
+      }),
+      // Old non-evidence telemetry — must be compacted away.
+      makeEvent(DomainEventName.HEARTBEAT_RECORDED, beadId, oldMs + 3000, {}),
+      makeEvent(DomainEventName.TOKEN_USAGE_RECORDED, beadId, oldMs + 4000, {}),
+    ];
+
+    writeEventsJsonl(primaryPath, rawEvents);
+
+    const retentionConfig: RetentionConfig = {
+      compactionEnabled: true,
+      compactionWindowMs: ONE_HOUR_MS, // everything is old
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(NOW_MS),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(), // bead is not live
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // Heartbeat + token_usage were compacted; PROJECT_TOOL_SUCCEEDED + lifecycle events survived.
+    expect(result.eventsCompacted).toBe(2);
+
+    // Re-instantiate a fresh EventStore — true replay from the shrunk primary log.
+    const configLoader = new ConfigLoader(undefined, tmpRoot);
+    const freshEventStore = new EventStore(configLoader, undefined, undefined, tmpRoot);
+    freshEventStore.setSessionId('fresh-c5bv-flat');
+
+    const toolResultEvent = await freshEventStore.latestToolResultEvent(beadId, stateId, actionId, tool);
+    expect(toolResultEvent).toBeDefined();
+    expect(toolResultEvent?.type).toBe(DomainEventName.PROJECT_TOOL_SUCCEEDED);
+    const trd = toolResultEvent?.data as Record<string, unknown>;
+    // Flat shape: outputFile is at the top level of data, not nested under toolResult.
+    expect(trd?.outputFile).toBe(outputFile);
+
+    configLoader.reset();
+  });
+});
