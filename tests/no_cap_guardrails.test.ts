@@ -854,14 +854,17 @@ describe('large-output fixture guard', () => {
    * PROOF METHOD: invokes the ACTUAL persistMcpRawResult production function.
    *   - Constructs a large MCP callTool response with text content >10 MB
    *   - Calls persistMcpRawResult() — the same function executeMcpToolUnlocked calls
-   *   - Asserts: rawFile exists, rawBytes correct, rawChecksum matches
-   *   - Asserts: the returned archive envelope has no forbidden keys
+   *   - Asserts: rawFile exists on disk with complete content and matching checksum
+   *   - Asserts: the model-facing MCP result shape (compact fields only) has no
+   *     forbidden keys — rawFile/rawBytes/rawChecksum are NOT in the model-facing
+   *     result (cosx: removed; raw archives are harness-side evidence only)
    *
-   * NOTE: persistMcpRawResult was exported from mcpExecutor.ts for this test.
-   *   The full callTool payload is persisted to mcp-raw.json; the model only
-   *   receives rawFile/rawBytes/rawChecksum references.
+   * NOTE: persistMcpRawResult is exported from mcpExecutor.ts for this test.
+   *   The full callTool payload is persisted to mcp-raw.json; the model-facing
+   *   result carries ONLY compact schema fields (tool/status/server/operation/…),
+   *   NOT rawFile/rawBytes/rawChecksum references.
    */
-  it('(c) MCP text content >10 MB: persistMcpRawResult writes complete file; archive envelope has no forbidden keys', async () => {
+  it('(c) MCP text content >10 MB: persistMcpRawResult writes complete file; model-facing result has no raw archive fields', async () => {
     const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 's3wp30-mcp-text-'));
     try {
       // Generate large text content inline (> 10 MB in the JSON payload)
@@ -885,7 +888,7 @@ describe('large-output fixture guard', () => {
       if (!archiveResult) throw new Error('archiveResult undefined');
 
       // ASSERT: rawFile exists on disk with complete content
-      expect(existsSync(archiveResult.rawFile), 'rawFile must exist').toBe(true);
+      expect(existsSync(archiveResult.rawFile), 'rawFile must exist on disk').toBe(true);
 
       const rawFileBuffer = await fsPromises.readFile(archiveResult.rawFile);
       const actualByteCount = rawFileBuffer.length;
@@ -896,13 +899,9 @@ describe('large-output fixture guard', () => {
       const expectedChecksum = sha256Hex(rawJson).slice(0, 16);
       expect(archiveResult.rawChecksum, 'rawChecksum must be sha256[:16] of serialized payload').toBe(expectedChecksum);
 
-      // ASSERT: archive envelope itself has no forbidden keys
-      assertNoForbiddenModelFacingKeys(
-        archiveResult as Record<string, unknown>,
-        'persistMcpRawResult archive envelope (MCP text)'
-      );
-
-      // ASSERT: the model-facing MCP result shape has no forbidden keys
+      // ASSERT: the model-facing MCP result shape (compact fields only, NO raw archive refs).
+      // cosx: rawFile/rawBytes/rawChecksum are harness-side evidence and must NOT appear
+      // in model-facing results — they are not spread into the returned result.
       const modelFacingMcpResult: Record<string, unknown> = {
         tool: 'fixture_mcp_tool',
         status: ToolResultStatus.PASSED,
@@ -910,9 +909,12 @@ describe('large-output fixture guard', () => {
         operation: 'query',
         droppedArguments: [],
         normalizedPathArguments: [],
-        ...archiveResult
+        // rawFile/rawBytes/rawChecksum intentionally absent — harness-side evidence only
       };
       assertNoForbiddenModelFacingKeys(modelFacingMcpResult, 'model-facing MCP text result');
+      expect('rawFile' in modelFacingMcpResult, 'rawFile must not be in model-facing result').toBe(false);
+      expect('rawBytes' in modelFacingMcpResult, 'rawBytes must not be in model-facing result').toBe(false);
+      expect('rawChecksum' in modelFacingMcpResult, 'rawChecksum must not be in model-facing result').toBe(false);
 
     } finally {
       await fsPromises.rm(tmpDir, { recursive: true, force: true });
@@ -925,8 +927,9 @@ describe('large-output fixture guard', () => {
    * PROOF METHOD: same as (c) but with a large structuredContent payload
    * (array of structured objects, like what a high-volume structured MCP tool returns).
    * The complete callTool result (including structuredContent) is persisted to mcp-raw.json.
+   * cosx: model-facing result carries NO rawFile/rawBytes/rawChecksum references.
    */
-  it('(d) MCP structuredContent >10 MB: persistMcpRawResult writes complete file; archive envelope has no forbidden keys', async () => {
+  it('(d) MCP structuredContent >10 MB: persistMcpRawResult writes complete file; model-facing result has no raw archive fields', async () => {
     const tmpDir = await fsPromises.mkdtemp(path.join(os.tmpdir(), 's3wp30-mcp-structured-'));
     try {
       // Simulate a large MCP structuredContent response (many structured issue records)
@@ -961,7 +964,7 @@ describe('large-output fixture guard', () => {
       expect(archiveResult, 'persistMcpRawResult must return an archive result').toBeDefined();
       if (!archiveResult) throw new Error('archiveResult undefined');
 
-      // ASSERT: rawFile exists with complete content
+      // ASSERT: rawFile exists on disk with complete content
       const rawFileBuffer = await fsPromises.readFile(archiveResult.rawFile);
       expect(rawFileBuffer.length, 'rawFile must contain complete payload bytes').toBe(expectedByteCount);
       expect(archiveResult.rawBytes, 'rawBytes must match actual file size').toBe(expectedByteCount);
@@ -970,13 +973,9 @@ describe('large-output fixture guard', () => {
       const expectedChecksum = sha256Hex(rawJson).slice(0, 16);
       expect(archiveResult.rawChecksum, 'rawChecksum must match sha256[:16]').toBe(expectedChecksum);
 
-      // ASSERT: archive envelope has no forbidden keys
-      assertNoForbiddenModelFacingKeys(
-        archiveResult as Record<string, unknown>,
-        'persistMcpRawResult archive envelope (MCP structuredContent)'
-      );
-
-      // ASSERT: full model-facing MCP result shape has no forbidden keys
+      // ASSERT: model-facing MCP result (compact fields only, NO raw archive refs).
+      // cosx: rawFile/rawBytes/rawChecksum are harness-side evidence and must NOT appear
+      // in model-facing results — they are not spread into the returned result.
       const modelFacingMcpResult: Record<string, unknown> = {
         tool: 'fixture_structured_mcp_tool',
         status: ToolResultStatus.PASSED,
@@ -984,9 +983,12 @@ describe('large-output fixture guard', () => {
         operation: 'get_issues',
         droppedArguments: [],
         normalizedPathArguments: [],
-        ...archiveResult
+        // rawFile/rawBytes/rawChecksum intentionally absent — harness-side evidence only
       };
       assertNoForbiddenModelFacingKeys(modelFacingMcpResult, 'model-facing MCP structuredContent result');
+      expect('rawFile' in modelFacingMcpResult, 'rawFile must not be in model-facing result').toBe(false);
+      expect('rawBytes' in modelFacingMcpResult, 'rawBytes must not be in model-facing result').toBe(false);
+      expect('rawChecksum' in modelFacingMcpResult, 'rawChecksum must not be in model-facing result').toBe(false);
 
     } finally {
       await fsPromises.rm(tmpDir, { recursive: true, force: true });

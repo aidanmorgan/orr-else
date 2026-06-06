@@ -214,7 +214,13 @@ export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,
   ProjectToolResultKey.FRAMEWORK_TOOL_CALLS,
-  'result' // s3wp.26: raw MCP callTool payload — always hidden; see mcp-raw.json
+  'result', // s3wp.26: raw MCP callTool payload — always hidden; see mcp-raw.json
+  // cosx: raw transport archive references — harness-side evidence only, never model-facing.
+  // The raw file lives at context.outputDir/mcp-raw.json and is accessible via the
+  // canonical event/evidence path; the model must not see the archive file reference.
+  'rawFile',
+  'rawBytes',
+  'rawChecksum',
 ]);
 
 // 0yt5.16/0yt5.17: the model raw-suppressed key set, the scan-target / semgrep-path

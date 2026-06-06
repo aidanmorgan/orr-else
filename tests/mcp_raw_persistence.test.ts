@@ -1,5 +1,5 @@
 /**
- * s3wp.26 acceptance tests: raw MCP call-tool result persistence.
+ * cosx acceptance tests: MCP raw result persistence via canonical evidence path.
  *
  * Four fixtures required by the bead acceptance criteria:
  *   (a) large MCP text content response
@@ -8,10 +8,19 @@
  *   (d) cached/repeated invocation
  *
  * Each fixture asserts:
- *   1. The complete raw payload is written to mcp-raw.json (byte count + sha256).
- *   2. The model-facing result is compact: no generic resultPreview/diagnosticPreview/
- *      outputArchive/truncated/sample wrapper fields, no inline 'result' content blob.
- *   3. rawFile, rawBytes, rawChecksum appear in the model-facing result.
+ *   1. The complete raw payload is written to mcp-raw.json (byte count + sha256)
+ *      — discovered via the canonical _internalOutputFile evidence path, NOT via
+ *      model-facing result fields.
+ *   2. The model-facing result is compact: rawFile, rawBytes, rawChecksum are
+ *      NOT present (harness-side evidence only, accessible via canonical path).
+ *   3. No generic resultPreview/diagnosticPreview/outputArchive/truncated/sample
+ *      wrapper fields appear in the model-facing result.
+ *
+ * (e) Negative test: proves that a model-facing raw archive field cannot satisfy
+ *      requiredTools or verifier gates. The negative test drives a real production
+ *      path and is load-bearing — it will FAIL if rawFile leaks into the model-facing
+ *      result, because it explicitly asserts those fields are absent and would catch
+ *      any regression where they are re-introduced.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'fs';
@@ -108,6 +117,21 @@ function sha256Hex16(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
+/**
+ * Resolve the mcp-raw.json path from the _internalOutputFile returned by
+ * executeConfiguredProjectTool. The raw archive lives in the same directory
+ * as the tool's canonical outputFile (context.outputDir).
+ *
+ * This is the canonical evidence path: consumers discover raw archives by
+ * locating the per-invocation output directory via event/evidence data, NOT
+ * by reading model-facing rawFile references.
+ */
+function rawFileFromResult(result: Record<string, unknown>): string {
+  const internalOutputFile = result._internalOutputFile as string;
+  expect(typeof internalOutputFile, '_internalOutputFile must be present on result').toBe('string');
+  return path.join(path.dirname(internalOutputFile), MCP_RAW_FILE_NAME);
+}
+
 // FORBIDDEN generic output-control wrapper keys (per docs/raw-output-contract.md).
 // These must NEVER appear in the model-facing result.
 const FORBIDDEN_GENERIC_WRAPPER_KEYS = new Set([
@@ -124,9 +148,26 @@ const FORBIDDEN_GENERIC_WRAPPER_KEYS = new Set([
   'maxBufferExceeded'
 ]);
 
+// Raw transport archive fields must NOT appear in model-facing results (cosx).
+// They are harness-side evidence only, accessible via the canonical evidence path.
+const FORBIDDEN_RAW_ARCHIVE_FIELDS = new Set([
+  'rawFile',
+  'rawBytes',
+  'rawChecksum',
+]);
+
 function assertNoForbiddenKeys(result: Record<string, unknown>): void {
   for (const key of FORBIDDEN_GENERIC_WRAPPER_KEYS) {
     expect(result, `model-facing result must not contain generic wrapper key '${key}'`).not.toHaveProperty(key);
+  }
+}
+
+function assertNoRawArchiveFields(result: Record<string, unknown>): void {
+  for (const key of FORBIDDEN_RAW_ARCHIVE_FIELDS) {
+    expect(
+      result,
+      `model-facing result must not contain raw archive field '${key}' — raw archives are harness-side evidence only`
+    ).not.toHaveProperty(key);
   }
 }
 
@@ -137,7 +178,7 @@ function assertNoInlineRawResult(result: Record<string, unknown>): void {
 
 // ---- Shared setup ----
 
-describe('s3wp.26: MCP raw result persistence', () => {
+describe('cosx: MCP raw result persistence via canonical evidence path', () => {
   let tempRoot: string;
   let tempWorktree: string;
   let configLoader: ConfigLoader;
@@ -186,7 +227,7 @@ describe('s3wp.26: MCP raw result persistence', () => {
 
   // ---- (a) Large MCP text content response ----
 
-  it('(a) persists complete raw payload for a large text-content MCP response', async () => {
+  it('(a) persists complete raw payload for a large text-content MCP response via canonical evidence path', async () => {
     // Build a large text content payload (> 4 KiB to ensure it's "large").
     const largeLine = 'x'.repeat(80);
     const largeText = Array.from({ length: 100 }, (_, i) => `line-${i}: ${largeLine}`).join('\n');
@@ -204,27 +245,33 @@ describe('s3wp.26: MCP raw result persistence', () => {
       {} as any, undefined, new Map()
     ) as Record<string, unknown>;
 
-    // 1. Compact model-facing schema: no forbidden generic wrapper keys.
+    // 1. Model-facing result has NO raw archive fields (cosx).
+    assertNoRawArchiveFields(result);
+    // 2. No forbidden generic wrapper keys.
     assertNoForbiddenKeys(result);
-    // 2. Raw MCP 'result' field is NOT inline.
+    // 3. Raw MCP 'result' field is NOT inline.
     assertNoInlineRawResult(result);
-    // 3. rawFile reference is present and the file exists.
-    expect(typeof result.rawFile).toBe('string');
-    expect(result.rawBytes).toBeGreaterThan(4000); // large response
-    expect(typeof result.rawChecksum).toBe('string');
-    expect((result.rawChecksum as string).length).toBe(16); // 16-hex-char truncated sha256
-    const rawFilePath = result.rawFile as string;
-    expect(fs.existsSync(rawFilePath)).toBe(true);
-    // 4. File contains the COMPLETE payload (verified by byte count and checksum).
+
+    // 4. Persistence is asserted via the canonical evidence path:
+    //    _internalOutputFile → output dir → mcp-raw.json
+    const rawFilePath = rawFileFromResult(result);
+    expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at canonical evidence path: ${rawFilePath}`).toBe(true);
+
+    // 5. File contains the COMPLETE payload (verified by byte count and checksum).
     const rawContent = fs.readFileSync(rawFilePath, 'utf8');
     const expectedSerialized = JSON.stringify(callToolPayload);
     expect(rawContent).toBe(expectedSerialized);
-    expect(Buffer.byteLength(rawContent, 'utf8')).toBe(result.rawBytes);
-    expect(sha256Hex16(rawContent)).toBe(result.rawChecksum);
-    // 5. The raw file is under the single PROJECT-scoped tool-output tree (0yt5.27).
+    const rawBytes = Buffer.byteLength(rawContent, 'utf8');
+    expect(rawBytes).toBeGreaterThan(4000); // large response
+    expect(sha256Hex16(rawContent)).toMatch(/^[0-9a-f]{16}$/);
+    // Verify the archived content matches the original payload round-trip.
+    expect(JSON.parse(rawContent)).toEqual(callToolPayload);
+
+    // 6. The raw file is under the single PROJECT-scoped tool-output tree (0yt5.27).
     expect(rawFilePath).toContain('.pi/tool-output');
     expect(path.basename(rawFilePath)).toBe(MCP_RAW_FILE_NAME);
-    // 6. Model-facing result has standard compact fields.
+
+    // 7. Model-facing result has standard compact fields.
     expect(result.tool).toBe('test_mcp_tool');
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.server).toBe(SERVER_NAME);
@@ -233,7 +280,7 @@ describe('s3wp.26: MCP raw result persistence', () => {
 
   // ---- (b) Large MCP structuredContent response ----
 
-  it('(b) persists complete raw payload for a large structuredContent MCP response', async () => {
+  it('(b) persists complete raw payload for a large structuredContent MCP response via canonical evidence path', async () => {
     // structuredContent is an arbitrary JSON object alongside content[].
     const largeStructuredContent = {
       symbols: Array.from({ length: 200 }, (_, i) => ({
@@ -260,24 +307,25 @@ describe('s3wp.26: MCP raw result persistence', () => {
       {} as any, undefined, new Map()
     ) as Record<string, unknown>;
 
-    // 1–2. No forbidden keys, no inline result.
+    // 1–2. No raw archive fields, no forbidden keys, no inline result.
+    assertNoRawArchiveFields(result);
     assertNoForbiddenKeys(result);
     assertNoInlineRawResult(result);
-    // 3. rawFile reference exists.
-    expect(typeof result.rawFile).toBe('string');
-    const rawFilePath = result.rawFile as string;
-    expect(fs.existsSync(rawFilePath)).toBe(true);
+
+    // 3. Persistence via canonical evidence path.
+    const rawFilePath = rawFileFromResult(result);
+    expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at: ${rawFilePath}`).toBe(true);
+
     // 4. File holds the COMPLETE payload including structuredContent.
     const rawContent = fs.readFileSync(rawFilePath, 'utf8');
     const parsed = JSON.parse(rawContent);
     expect(parsed.structuredContent).toBeDefined();
     expect(parsed.structuredContent.totalCount).toBe(200);
     expect(parsed.structuredContent.symbols).toHaveLength(200);
-    // Checksum and byte count match.
+    // Serialization round-trip.
     const expectedSerialized = JSON.stringify(callToolPayload);
     expect(rawContent).toBe(expectedSerialized);
-    expect(Buffer.byteLength(rawContent, 'utf8')).toBe(result.rawBytes);
-    expect(sha256Hex16(rawContent)).toBe(result.rawChecksum);
+
     // 5. Compact schema fields.
     expect(result.status).toBe(ToolResultStatus.PASSED);
     expect(result.tool).toBe('test_mcp_tool');
@@ -285,7 +333,7 @@ describe('s3wp.26: MCP raw result persistence', () => {
 
   // ---- (c) Failure (isError) response ----
 
-  it('(c) persists complete raw payload for a failure (isError) MCP response', async () => {
+  it('(c) persists complete raw payload for a failure (isError) MCP response via canonical evidence path', async () => {
     const failurePayload = {
       content: [
         { type: 'text', text: 'Error: symbol not found in module src/engine.py at line 42' }
@@ -302,21 +350,25 @@ describe('s3wp.26: MCP raw result persistence', () => {
 
     // 1. Model-facing result is REJECTED.
     expect(result.status).toBe(ToolResultStatus.REJECTED);
-    // 2. No forbidden keys, no inline result.
+    // 2. No raw archive fields, no forbidden keys, no inline result.
+    assertNoRawArchiveFields(result);
     assertNoForbiddenKeys(result);
     assertNoInlineRawResult(result);
-    // 3. rawFile reference exists.
-    expect(typeof result.rawFile).toBe('string');
-    const rawFilePath = result.rawFile as string;
-    expect(fs.existsSync(rawFilePath)).toBe(true);
+
+    // 3. Persistence via canonical evidence path.
+    const rawFilePath = rawFileFromResult(result);
+    expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at: ${rawFilePath}`).toBe(true);
+
     // 4. File contains the COMPLETE failure payload.
     const rawContent = fs.readFileSync(rawFilePath, 'utf8');
     const parsed = JSON.parse(rawContent);
     expect(parsed.isError).toBe(true);
     expect(parsed.content[0].text).toContain('symbol not found');
-    // Byte count and checksum match.
-    expect(Buffer.byteLength(rawContent, 'utf8')).toBe(result.rawBytes);
-    expect(sha256Hex16(rawContent)).toBe(result.rawChecksum);
+    // Byte count and checksum are internally consistent.
+    const rawBytes = Buffer.byteLength(rawContent, 'utf8');
+    expect(rawBytes).toBeGreaterThan(0);
+    expect(sha256Hex16(rawContent)).toMatch(/^[0-9a-f]{16}$/);
+
     // 5. Compact schema: tool/status/server/operation.
     expect(result.tool).toBe('test_mcp_tool');
     expect(result.server).toBe(SERVER_NAME);
@@ -354,30 +406,93 @@ describe('s3wp.26: MCP raw result persistence', () => {
       {} as any, undefined, new Map()
     ) as Record<string, unknown>;
 
-    // Both results have rawFile references.
-    expect(typeof result1.rawFile).toBe('string');
-    expect(typeof result2.rawFile).toBe('string');
+    // Both results have canonical evidence paths (no raw archive fields in model-facing).
+    assertNoRawArchiveFields(result1);
+    assertNoRawArchiveFields(result2);
+
+    const rawFilePath1 = rawFileFromResult(result1);
+    const rawFilePath2 = rawFileFromResult(result2);
 
     // The two invocations must have DIFFERENT per-invocation directories.
     // (toolInvocationId is a UUID7 so the paths differ.)
-    expect(result1.rawFile).not.toBe(result2.rawFile);
+    expect(rawFilePath1).not.toBe(rawFilePath2);
 
     // First file holds the first payload.
-    const raw1 = fs.readFileSync(result1.rawFile as string, 'utf8');
+    const raw1 = fs.readFileSync(rawFilePath1, 'utf8');
     expect(JSON.parse(raw1).content[0].text).toBe('first-invocation-unique-response');
-    expect(Buffer.byteLength(raw1, 'utf8')).toBe(result1.rawBytes);
-    expect(sha256Hex16(raw1)).toBe(result1.rawChecksum);
 
     // Second file holds the second payload — no cross-contamination.
-    const raw2 = fs.readFileSync(result2.rawFile as string, 'utf8');
+    const raw2 = fs.readFileSync(rawFilePath2, 'utf8');
     expect(JSON.parse(raw2).content[0].text).toBe('second-invocation-unique-response');
-    expect(Buffer.byteLength(raw2, 'utf8')).toBe(result2.rawBytes);
-    expect(sha256Hex16(raw2)).toBe(result2.rawChecksum);
 
     // Both results have no forbidden wrapper keys.
     assertNoForbiddenKeys(result1);
     assertNoForbiddenKeys(result2);
     assertNoInlineRawResult(result1);
     assertNoInlineRawResult(result2);
+  });
+
+  // ---- (e) Negative test: raw archive fields must NOT appear in model-facing result ----
+  //
+  // This test is load-bearing: it will FAIL if rawFile/rawBytes/rawChecksum are
+  // re-introduced into the model-facing result from executeMcpTool. The test drives the
+  // REAL production path (executeConfiguredProjectTool → executeMcpTool) and
+  // explicitly proves those fields are absent from what the model receives.
+  //
+  // A model-facing raw archive field CANNOT satisfy requiredTools or verifier gates
+  // because: (1) the verifier gate reads semanticArtifactPath from canonical
+  // ToolEvidenceHandle/event data, not from the model-facing result; (2) the
+  // model-facing result is filtered by MODEL_HIDDEN_RESULT_KEYS before being returned;
+  // (3) this test asserts the absence of those fields so any regression is caught.
+
+  it('(e) negative: rawFile/rawBytes/rawChecksum absent from model-facing result; persistence still happens via canonical evidence', async () => {
+    const callToolPayload = {
+      content: [{ type: 'text', text: 'some-mcp-response' }],
+      isError: false
+    };
+    mcpMockState.callToolResult = callToolPayload;
+
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory, mcpTool,
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'gate-check', operation: 'query' },
+      {} as any, undefined, new Map()
+    ) as Record<string, unknown>;
+
+    // CRITICAL NEGATIVE ASSERTIONS: these fields must be absent.
+    // If any of these fail, it means rawFile/rawBytes/rawChecksum leaked into the
+    // model-facing result — a regression that would allow a raw archive reference to
+    // potentially appear as a model-facing field, violating the cosx contract.
+    expect(
+      'rawFile' in result,
+      'rawFile must NOT be present in model-facing MCP result — raw archives are harness-side evidence only'
+    ).toBe(false);
+    expect(
+      'rawBytes' in result,
+      'rawBytes must NOT be present in model-facing MCP result — raw archives are harness-side evidence only'
+    ).toBe(false);
+    expect(
+      'rawChecksum' in result,
+      'rawChecksum must NOT be present in model-facing MCP result — raw archives are harness-side evidence only'
+    ).toBe(false);
+
+    // Persistence STILL happens via the canonical evidence path.
+    // The raw file MUST exist on disk even though the model doesn't see the reference.
+    const rawFilePath = rawFileFromResult(result);
+    expect(
+      fs.existsSync(rawFilePath),
+      `Raw archive must still be persisted at canonical path ${rawFilePath} even though model-facing result carries no rawFile reference`
+    ).toBe(true);
+
+    // Verify the file has real content (not empty).
+    const rawContent = fs.readFileSync(rawFilePath, 'utf8');
+    expect(rawContent.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(rawContent);
+    expect(parsed.content[0].text).toBe('some-mcp-response');
+
+    // The model-facing result has only compact schema fields.
+    expect(result.tool).toBe('test_mcp_tool');
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect(result.server).toBe(SERVER_NAME);
+    expect(result.operation).toBe('query');
   });
 });

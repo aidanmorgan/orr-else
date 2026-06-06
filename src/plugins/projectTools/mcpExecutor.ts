@@ -282,15 +282,17 @@ function unavailable(name: string, message: string) {
   };
 }
 
-// ---- Raw MCP result persistence (s3wp.26) ----
+// ---- Raw MCP result persistence (s3wp.26 / cosx) ----
 
 /**
  * Persist the complete raw client.callTool result (or error envelope) to
  * context.outputDir/mcp-raw.json BEFORE the compact model-facing result is
- * built.  This is the generic archival the raw-output contract mandates.
+ * built.  This is harness-side evidence only.
  *
- * Returns { rawFile, rawBytes, rawChecksum } for inclusion in the model-facing
- * result so the model can reference the archive if needed.
+ * Returns { rawFile, rawBytes, rawChecksum } for internal/evidence use.
+ * These fields are NOT spread into the model-facing result (cosx: removed from
+ * model-facing results; raw archives are harness-side evidence only, accessible
+ * via the canonical event/evidence path).
  *
  * Errors here are swallowed (logged only) so a persistence failure never
  * prevents the model from receiving its result.
@@ -386,11 +388,12 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         arguments: normalizedArguments.arguments
       }, undefined, mcpToolRequestOptions(definition));
 
-      // s3wp.26: persist the COMPLETE raw client.callTool payload to mcp-raw.json
-      // BEFORE building the compact model-facing result.  The model never receives
-      // the full callTool payload; it receives only the compact schema fields plus
-      // rawFile/rawBytes/rawChecksum references.
-      const rawArchive = await persistMcpRawResult(context.outputDir, callToolResult);
+      // cosx: persist the COMPLETE raw client.callTool payload to mcp-raw.json as
+      // harness-side evidence BEFORE building the compact model-facing result.
+      // The model-facing result does NOT include rawFile/rawBytes/rawChecksum;
+      // those are harness-internal evidence fields accessible via the canonical
+      // event/evidence path (context.outputDir/mcp-raw.json).
+      await persistMcpRawResult(context.outputDir, callToolResult);
 
       if ((callToolResult as { isError?: boolean }).isError) {
         return {
@@ -400,7 +403,6 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
           operation,
           droppedArguments,
           normalizedPathArguments: normalizedArguments.normalizedPathArguments,
-          ...rawArchive
         };
       }
 
@@ -411,7 +413,6 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         operation,
         droppedArguments,
         normalizedPathArguments: normalizedArguments.normalizedPathArguments,
-        ...rawArchive
       };
     } finally {
       await client.close().catch((error: unknown) => {
@@ -424,8 +425,10 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
   } catch (error) {
     const message = String(error);
     if (definition.optional) return unavailable(definition.name, message);
-    // s3wp.26: persist a raw error envelope on transport/connection failures so
-    // the complete error metadata is archived even when client.callTool never ran.
+    // cosx: persist a raw error envelope on transport/connection failures so
+    // the complete error metadata is archived as harness-side evidence even when
+    // client.callTool never ran. The model-facing result does NOT include
+    // rawFile/rawBytes/rawChecksum; evidence is accessible via the canonical path.
     const errorEnvelope = {
       tool: definition.name,
       server: definition.server,
@@ -434,14 +437,13 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
       errorType: error instanceof Error ? error.constructor.name : typeof error,
       errorStack: error instanceof Error ? error.stack : undefined
     };
-    const rawArchive = await persistMcpRawResult(context.outputDir, errorEnvelope).catch(() => undefined);
+    await persistMcpRawResult(context.outputDir, errorEnvelope).catch(() => undefined);
     return {
       tool: definition.name,
       status: ToolResultStatus.REJECTED,
       server: definition.server,
       operation,
       message,
-      ...rawArchive
     };
   }
 }
