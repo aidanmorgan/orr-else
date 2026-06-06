@@ -404,6 +404,23 @@
                 "uniqueItems": true
               },
               "optional": { "type": "boolean" },
+              "deprecated": {
+                "type": "boolean",
+                "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
+              },
+              "hidden": {
+                "type": "boolean",
+                "description": "When true, this tool is omitted from model-facing guidance."
+              },
+              "replacedBy": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Replacement tool names for a deprecated tool."
+              },
+              "deprecationReason": {
+                "type": "string",
+                "description": "Human-readable explanation of why this tool is deprecated."
+              },
               "validationRules": {
                 "type": "array",
                 "items": {
@@ -497,6 +514,23 @@
                 ]
               },
               "optional": { "type": "boolean" },
+              "deprecated": {
+                "type": "boolean",
+                "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
+              },
+              "hidden": {
+                "type": "boolean",
+                "description": "When true, this tool is omitted from model-facing guidance."
+              },
+              "replacedBy": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Replacement tool names for a deprecated tool."
+              },
+              "deprecationReason": {
+                "type": "string",
+                "description": "Human-readable explanation of why this tool is deprecated."
+              },
               "validationRules": {
                 "type": "array",
                 "items": {
@@ -540,6 +574,23 @@
               },
               "type": { "const": "extension" },
               "optional": { "type": "boolean" },
+              "deprecated": {
+                "type": "boolean",
+                "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
+              },
+              "hidden": {
+                "type": "boolean",
+                "description": "When true, this tool is omitted from model-facing guidance."
+              },
+              "replacedBy": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Replacement tool names for a deprecated tool."
+              },
+              "deprecationReason": {
+                "type": "string",
+                "description": "Human-readable explanation of why this tool is deprecated."
+              },
               "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
               "validationRules": {
                 "type": "array",
@@ -601,6 +652,23 @@
                 "uniqueItems": true
               },
               "optional": { "type": "boolean" },
+              "deprecated": {
+                "type": "boolean",
+                "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
+              },
+              "hidden": {
+                "type": "boolean",
+                "description": "When true, this tool is omitted from model-facing guidance."
+              },
+              "replacedBy": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Replacement tool names for a deprecated tool."
+              },
+              "deprecationReason": {
+                "type": "string",
+                "description": "Human-readable explanation of why this tool is deprecated."
+              },
               "failureLimit": {
                 "type": "object",
                 "additionalProperties": false,
@@ -754,6 +822,10 @@
                     "expectsVerify": {
                       "type": "boolean",
                       "description": "When true, the coordinator artifact-presence gate fails fast at startup if no verify() callback is registered for this tool. Presence-only tools omit this flag."
+                    },
+                    "allowDeprecated": {
+                      "type": "boolean",
+                      "description": "When true, config validation does not fail even if the referenced tool is deprecated+hidden. The invocation-time REJECTED guard still fires."
                     },
                     "when": {
                       "type": "object",

@@ -272,7 +272,15 @@ export enum DomainEventName {
    * that the heartbeating worker is orphaned and the harness is taking action
    * (suppressing + releasing the stale entry) to prevent indefinite noise.
    */
-  HEARTBEAT_ONLY_GAP_ORPHANED = 'HEARTBEAT_ONLY_GAP_ORPHANED'
+  HEARTBEAT_ONLY_GAP_ORPHANED = 'HEARTBEAT_ONLY_GAP_ORPHANED',
+  /**
+   * Emitted when a deprecated project tool is invoked by the model. Carries:
+   * { tool, beadId?, stateId?, actionId?, replacedBy?, reason? }.
+   * Always accompanies the REJECTED result returned to the model — the two
+   * fire together and provide deterministic evidence that the model attempted
+   * to use an obsolete tool. Diagnostic + audit; NOT replay-critical.
+   */
+  TOOL_DEPRECATED_REJECTED = 'TOOL_DEPRECATED_REJECTED'
 }
 
 export enum BeadsCliCommand {

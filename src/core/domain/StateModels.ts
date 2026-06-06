@@ -64,6 +64,32 @@ export interface BaseProjectToolConfig {
     message?: string;
     terminal?: boolean;
   };
+  /**
+   * When true, this tool is considered obsolete/replaced. The harness:
+   *   - Omits it from model-facing guidance (unless hidden is explicitly false).
+   *   - Returns a structured REJECTED result when invoked, naming replacedBy tools.
+   *   - Emits a TOOL_DEPRECATED_REJECTED event with tool/replacedBy/reason.
+   * Config validation FAILS if a requiredTool/action sequence references a
+   * deprecated+hidden tool without an explicit allowDeprecated override.
+   */
+  deprecated?: boolean;
+  /**
+   * When true, this tool is completely omitted from model-facing guidance.
+   * Hidden tools can still be invoked programmatically.
+   * Combined with deprecated:true, config validation rejects requiredTool references
+   * to this tool unless the reference carries allowDeprecated:true.
+   */
+  hidden?: boolean;
+  /**
+   * Canonical replacement tool names for a deprecated tool.
+   * Named in the REJECTED result message and TOOL_DEPRECATED_REJECTED event.
+   */
+  replacedBy?: string[];
+  /**
+   * Human-readable explanation of why this tool is deprecated.
+   * Surfaced in the REJECTED result message and TOOL_DEPRECATED_REJECTED event.
+   */
+  deprecationReason?: string;
 }
 
 /**
@@ -202,6 +228,12 @@ export interface ConditionalRequiredTool {
    * — for them the gate enforces tool-result presence only.
    */
   expectsVerify?: boolean;
+  /**
+   * When true, config validation does NOT fail even if the referenced tool is
+   * deprecated+hidden. Use this to explicitly opt-in to a deprecated tool during
+   * a migration window — the invocation-time REJECTED guard still fires.
+   */
+  allowDeprecated?: boolean;
 }
 
 export type RequiredTool = string | ConditionalRequiredTool;

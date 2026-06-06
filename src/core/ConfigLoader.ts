@@ -366,7 +366,53 @@ export class ConfigLoader {
    *     reference implicit terminals like 'done', 'completed', 'failed').
    *   - No vocabulary warnings are emitted.
    */
+  private validateDeprecatedRequiredTools(config: HarnessConfig): void {
+    // Build a set of tool names that are both deprecated AND hidden.
+    // Only the combination of deprecated+hidden triggers the hard validation failure:
+    // - deprecated-only: tool still appears in guidance (just prints a REJECTED on invocation).
+    // - hidden-only: tool is invisible to the model but can still be used programmatically.
+    // - deprecated+hidden: tool is gone from guidance AND will reject on invocation;
+    //   a requiredTools reference here is almost certainly a stale config bug.
+    const deprecatedHiddenTools = new Set<string>();
+    for (const tool of config.tools || []) {
+      const t = tool as { deprecated?: boolean; hidden?: boolean };
+      if (t.deprecated && t.hidden) {
+        deprecatedHiddenTools.add(tool.name);
+      }
+    }
+    if (deprecatedHiddenTools.size === 0) return;
+
+    const checkRequiredTools = (requiredTools: import('./domain/StateModels.js').RequiredTool[] | undefined, location: string): void => {
+      for (const rt of requiredTools || []) {
+        if (typeof rt === 'string') {
+          if (deprecatedHiddenTools.has(rt)) {
+            throw new Error(
+              `${location} references requiredTool "${rt}" which is deprecated and hidden. ` +
+              `Either remove the reference, use a replacement tool, or add allowDeprecated:true to the object form to explicitly opt in.`
+            );
+          }
+        } else {
+          if (deprecatedHiddenTools.has(rt.name) && !rt.allowDeprecated) {
+            throw new Error(
+              `${location} references requiredTool "${rt.name}" which is deprecated and hidden. ` +
+              `Either remove the reference, use a replacement tool, or set allowDeprecated:true on the entry to explicitly opt in.`
+            );
+          }
+        }
+      }
+    };
+
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      checkRequiredTools(state.requiredTools, `State "${stateId}"`);
+      for (const action of state.actions || []) {
+        checkRequiredTools(action.requiredTools, `State "${stateId}" action "${action.id}"`);
+      }
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
+    this.validateDeprecatedRequiredTools(config);
+
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;
     const hasStatechartBlock = !!sc;

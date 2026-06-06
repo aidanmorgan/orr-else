@@ -21,7 +21,7 @@ import { EventStore } from '../core/EventStore.js';
 import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../constants/index.js';
-import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig } from '../core/domain/StateModels.js';
+import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, RequiredTool } from '../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../core/RuntimeServices.js';
 
 // ---- Sub-module imports ----
@@ -109,6 +109,30 @@ export async function executeConfiguredProjectTool(
   backpressure: ProjectToolBackpressure,
   injectedRoot: string = process.cwd()
 ): Promise<unknown> {
+  // Deprecation guard: intercept before any execution when tool is marked deprecated.
+  const defAny = definition as { deprecated?: boolean; replacedBy?: string[]; deprecationReason?: string };
+  if (defAny.deprecated) {
+    const beadIdForEvent = beadIdFromArgs(args, env);
+    const stateIdForEvent = typeof args.stateId === 'string' ? args.stateId : undefined;
+    const actionIdForEvent = typeof args.actionId === 'string' ? args.actionId : undefined;
+    const replacements = defAny.replacedBy;
+    const reason = defAny.deprecationReason;
+    const replacementHint = replacements?.length
+      ? ` Use ${replacements.map(r => `\`${r}\``).join(' or ')} instead.`
+      : '';
+    const reasonHint = reason ? ` Reason: ${reason}` : '';
+    const message = `REJECTED: \`${definition.name}\` is deprecated and cannot be invoked.${replacementHint}${reasonHint}`;
+    await eventStore.record(DomainEventName.TOOL_DEPRECATED_REJECTED, {
+      tool: definition.name,
+      ...(beadIdForEvent !== undefined ? { beadId: beadIdForEvent } : {}),
+      ...(stateIdForEvent !== undefined ? { stateId: stateIdForEvent } : {}),
+      ...(actionIdForEvent !== undefined ? { actionId: actionIdForEvent } : {}),
+      ...(replacements !== undefined ? { replacedBy: replacements } : {}),
+      ...(reason !== undefined ? { reason } : {})
+    }).catch(() => {});
+    return { status: ToolResultStatus.REJECTED, message };
+  }
+
   const beadId = beadIdFromArgs(args, env);
   const context = executionContext(pathFactory, definition, args, env, injectedRoot, process.env);
   const stateId = context.templateContext.stateId;
@@ -297,8 +321,33 @@ function usageNotesSummary(tool: ProjectToolConfig): string {
   return tool.usageNotes?.length ? ` Usage notes: ${tool.usageNotes.join(' ')}` : '';
 }
 
-export function describeConfiguredProjectTools(config: HarnessConfig): string {
-  const tools = config.tools || [];
+/**
+ * Returns the set of tool names that are explicitly allowed despite being deprecated/hidden,
+ * based on the current state's and action's requiredTools entries that carry allowDeprecated:true.
+ * Reuses the same string-form / object-form parsing as validateDeprecatedRequiredTools.
+ */
+export function allowedDeprecatedToolNames(
+  stateRequiredTools: RequiredTool[] | undefined,
+  actionRequiredTools: RequiredTool[] | undefined
+): Set<string> {
+  const allowed = new Set<string>();
+  for (const rt of [...(stateRequiredTools || []), ...(actionRequiredTools || [])]) {
+    if (typeof rt !== 'string' && rt.allowDeprecated) {
+      allowed.add(rt.name);
+    }
+  }
+  return allowed;
+}
+
+export function describeConfiguredProjectTools(
+  config: HarnessConfig,
+  allowedDeprecated: Set<string> = new Set()
+): string {
+  const tools = (config.tools || []).filter(tool => {
+    const t = tool as { hidden?: boolean; deprecated?: boolean };
+    if (!t.hidden && !t.deprecated) return true;
+    return allowedDeprecated.has(tool.name);
+  });
   if (tools.length === 0) return '';
 
   const descriptions = tools.map(tool => {
