@@ -63,7 +63,7 @@
   "properties": {
     "settings": {
       "type": "object",
-      "required": ["maxConcurrentSlots", "handoverTemplate", "defaultModel", "startState"],
+      "description": "All settings fields have ConfigLoader defaults; none are strictly required in the YAML file. Omitted fields are filled from harness defaults before validation.",
       "properties": {
         "maxConcurrentSlots": { "type": "integer", "minimum": 1 },
         "handoverTemplate": { "type": "string" },

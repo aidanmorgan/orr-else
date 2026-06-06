@@ -53,9 +53,36 @@
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
 import type { ValidateFunction } from 'ajv';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const Ajv = AjvModule.default ?? AjvModule;
 const addFormats = addFormatsModule.default ?? addFormatsModule;
+
+// ---------------------------------------------------------------------------
+// Packaged schema path (published for consuming projects — AC iery)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the absolute path to the authoritative harness.schema.json that ships
+ * with the orr-else package.
+ *
+ * Consuming projects (e.g. cerdiwen) can reference this path directly by
+ * calling getPackagedSchemaPath() from the installed orr-else package.
+ * Use the returned path as the $schema reference in editor tooling or
+ * as the source for copying/validating a local schema file.
+ *
+ * The schema at this path is the AUTHORITATIVE source. Any locally-copied
+ * harness.schema.json in a consumer repo must be generated from this path
+ * (or version-pinned) and is drift-detected by the harness regression suite.
+ */
+export function getPackagedSchemaPath(): string {
+  // Resolve relative to this file: src/core/SchemaRegistry.ts → ../../harness.schema.json
+  // When compiled to dist/core/SchemaRegistry.js → ../../harness.schema.json (same two levels)
+  const thisFile = fileURLToPath(import.meta.url);
+  return path.resolve(path.dirname(thisFile), '..', '..', 'harness.schema.json');
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -644,6 +671,112 @@ schemaRegistry.register(commandToolSchema);
 schemaRegistry.register(requiredToolSchema);
 
 // ---------------------------------------------------------------------------
+// harness.config.harnessYaml — authoritative full harness YAML schema (iery)
+//
+// Loaded from the packaged harness.schema.json at registry-init time so that
+// the registry entry's jsonSchema always matches the file on disk.
+// Consuming projects reference this via getPackagedSchemaPath() or the
+// 'harness.config.harnessYaml' registry id.
+// ---------------------------------------------------------------------------
+
+(function registerHarnessYamlSchema(): void {
+  const schemaPath = getPackagedSchemaPath();
+  let jsonSchema: Record<string, unknown>;
+  try {
+    const raw = fs.readFileSync(schemaPath, 'utf8');
+    jsonSchema = JSON.parse(raw) as Record<string, unknown>;
+  } catch (err) {
+    throw new SchemaRegistryError(
+      `Failed to load packaged harness.schema.json from "${schemaPath}": ${String(err)}. ` +
+      `Ensure the file is present in the package root.`
+    );
+  }
+
+  const harnessYamlSchema: SchemaRegistryEntry = {
+    id: 'harness.config.harnessYaml',
+    version: '1.0.0',
+    owner: 'harness.schema.json',
+    replayPolicy: 'NONE',
+    compatibilityPolicy: 'ADDITIVE_ONLY',
+    jsonSchema,
+    positiveFixtures: [
+      {
+        label: 'minimal valid harness config',
+        value: {
+          settings: {
+            maxConcurrentSlots: 1,
+            handoverTemplate: 'test',
+            defaultModel: 'gpt-4',
+            startState: 'impl',
+          },
+          scheduler: { weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 } },
+          states: {
+            impl: {
+              identity: { role: 'R', expertise: 'E', constraints: [] },
+              actions: [{ id: 'a1', type: 'prompt', prompt: 'Go!' }],
+              transitions: { SUCCESS: 'done' },
+            },
+          },
+        },
+      },
+      {
+        label: 'harness with tsProjectTool (serialize + wrapperTimeoutMs + failureLimit)',
+        value: {
+          settings: {
+            maxConcurrentSlots: 2,
+            handoverTemplate: 'test',
+            defaultModel: 'gpt-4',
+            startState: 'impl',
+            pi: {
+              mcp: { allowToolCalls: false, blockedToolPatterns: ['^ruff$'] },
+              workerExtensions: ['.pi/extensions/cerdiwen.ts'],
+            },
+            roots: { myRoot: '/some/path' },
+          },
+          scheduler: { weights: { waitTime: 1, executionTime: 1, progress: 2, penalty: 1, priority: 1 } },
+          tools: [{
+            name: 'my_tool',
+            type: 'tsProjectTool',
+            serialize: true,
+            wrapperTimeoutMs: 600000,
+            failureLimit: { maxFailuresPerState: 5, suggestedOutcome: 'BLOCKED', terminal: true },
+            argumentPathScope: { root: 'worktree', virtualRoots: ['/workspace'], flags: ['--file'] },
+          }],
+          states: {
+            impl: {
+              identity: { role: 'R', expertise: 'E', constraints: [] },
+              requiredTools: ['my_tool', { name: 'plan_contract', expectsVerify: true }],
+              actions: [{ id: 'a1', type: 'prompt', prompt: 'Go!' }],
+              transitions: { SUCCESS: 'done' },
+            },
+          },
+        },
+      },
+    ],
+    negativeFixtures: [
+      {
+        label: 'missing required top-level states key',
+        value: {
+          settings: { startState: 'impl' },
+          scheduler: { weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 } },
+          // states is absent — required at root level
+        },
+      },
+      {
+        label: 'settings is not an object',
+        value: {
+          settings: 'invalid',
+          scheduler: { weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 } },
+          states: {},
+        },
+      },
+    ],
+  };
+
+  schemaRegistry.register(harnessYamlSchema);
+})();
+
+// ---------------------------------------------------------------------------
 // Convenience re-exports for the seeded schema ids
 // ---------------------------------------------------------------------------
 
@@ -651,7 +784,9 @@ schemaRegistry.register(requiredToolSchema);
 export const SchemaId = {
   SCHEDULER_WEIGHTS: 'harness.config.schedulerWeights',
   COMMAND_TOOL:      'harness.tool.commandTool',
-  REQUIRED_TOOL:     'harness.tool.requiredTool'
+  REQUIRED_TOOL:     'harness.tool.requiredTool',
+  /** Authoritative full harness YAML schema (published from harness.schema.json). */
+  HARNESS_YAML:      'harness.config.harnessYaml',
 } as const;
 
 export type SchemaId = typeof SchemaId[keyof typeof SchemaId];
@@ -686,5 +821,6 @@ export type SchemaId = typeof SchemaId[keyof typeof SchemaId];
 export const REQUIRED_BOUNDARY_IDS: ReadonlySet<string> = new Set<string>([
   SchemaId.SCHEDULER_WEIGHTS,
   SchemaId.COMMAND_TOOL,
-  SchemaId.REQUIRED_TOOL
+  SchemaId.REQUIRED_TOOL,
+  SchemaId.HARNESS_YAML,
 ]);
