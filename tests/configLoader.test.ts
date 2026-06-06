@@ -378,7 +378,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: completed
       FAILURE: Alpha
@@ -409,7 +411,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: completed
       FAILURE: Alpha
@@ -439,7 +443,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: totally_unknown_state
       FAILURE: Alpha
@@ -466,21 +472,27 @@ states:
   Planning:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: Implementation
       FAILURE: Planning
   Implementation:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: AdversarialPostReview
       FAILURE: Implementation
   AdversarialPostReview:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
       SUCCESS: completed
       FAILURE: Implementation

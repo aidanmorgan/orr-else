@@ -464,7 +464,9 @@ export class ConfigLoader {
     // startState / statechart.initialState existence check.
     // Only enforced when there are defined states (avoids false positives in
     // test configs with empty states maps that only care about other features).
-    const startState = config.settings.startState || sc?.initialState;
+    const settingsStartState = config.settings.startState;
+    const scInitialState = sc?.initialState;
+    const startState = settingsStartState || scInitialState;
     if (startState && stateIds.size > 0 && !stateIds.has(startState) && !terminalStates.has(startState)) {
       throw new Error(
         `Configured startState "${startState}" does not exist in states. ` +
@@ -472,16 +474,63 @@ export class ConfigLoader {
       );
     }
 
+    // ── AC1 (1elr.2): startState / statechart.initialState must agree ─────────
+    // If both are present they must name the same state.  Disagreement means
+    // FlowManager.initialState (reads settings.startState) and any loader that
+    // reads sc.initialState would pick different starting states — runtime split.
+    if (
+      settingsStartState && scInitialState &&
+      settingsStartState !== scInitialState
+    ) {
+      throw new Error(
+        `settings.startState "${settingsStartState}" and statechart.initialState "${scInitialState}" disagree. ` +
+        `They must name the same state so the runtime resolves a single canonical start state. ` +
+        `Either remove statechart.initialState (settings.startState is authoritative) or set them to the same value.`
+      );
+    }
+
     if (!hasStatechartBlock) {
-      // Legacy mode: skip transition-target and vocabulary validation for
-      // backward compatibility with configs that predate the statechart block.
+      // Legacy mode: skip strict lint rules for backward compatibility with
+      // configs that predate the statechart block.
       return;
+    }
+
+    // ── AC4 (1elr.2): duplicate outcomes across sets (case-insensitive) ───────
+    // Outcomes must be declared exactly once.  A duplicate means the same
+    // outcome key is in two lists (e.g. both advanceOutcomes and failedOutcomes)
+    // — the classification would be non-deterministic depending on evaluation
+    // order.
+    if (
+      sc.advanceOutcomes !== undefined ||
+      sc.failedOutcomes !== undefined ||
+      sc.blockedOutcomes !== undefined ||
+      sc.customOutcomes !== undefined
+    ) {
+      const seenUpper = new Map<string, string>(); // normalized → first list name
+      const checkList = (outcomes: string[] | undefined, listName: string): void => {
+        for (const o of outcomes ?? []) {
+          const upper = o.toUpperCase();
+          const existing = seenUpper.get(upper);
+          if (existing) {
+            throw new Error(
+              `Duplicate outcome "${o}" (case-insensitive) appears in both "${existing}" and "${listName}". ` +
+              `Each outcome must be declared exactly once across advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes. ` +
+              `Remove the duplicate from one of the lists.`
+            );
+          }
+          seenUpper.set(upper, listName);
+        }
+      };
+      checkList(sc.advanceOutcomes, 'advanceOutcomes');
+      checkList(sc.failedOutcomes, 'failedOutcomes');
+      checkList(sc.blockedOutcomes, 'blockedOutcomes');
+      checkList(sc.customOutcomes, 'customOutcomes');
     }
 
     // Strict vocabulary validation only when the author explicitly declared at
     // least one outcome list.  A statechart block with ONLY terminalStates /
     // initialState is NOT strict: forcing default {SUCCESS,FAILURE,BLOCKED} on
-    // such configs silently breaks legacy callers (AC4 violation).
+    // such configs silently breaks legacy callers.
     const hasExplicitVocab =
       sc.advanceOutcomes !== undefined ||
       sc.failedOutcomes !== undefined ||
@@ -501,6 +550,74 @@ export class ConfigLoader {
         ].map(o => o.toUpperCase()))
       : null;
 
+    // ── AC2 (1elr.2): every runnable state has ≥1 action; action ids unique ──
+    // A state with no actions is inert — worker startup throws because there is
+    // nothing to execute.  Duplicate action ids cause non-deterministic action
+    // tracking and event correlation.
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      // Skip terminal states that are declared in the statechart but are not
+      // real runnable states (they have no actions by design).
+      if (terminalStates.has(stateId)) continue;
+
+      const actions = state.actions ?? [];
+      if (actions.length === 0) {
+        throw new Error(
+          `State "${stateId}" has no actions. ` +
+          `Every runnable state must declare at least one action for worker execution. ` +
+          `Add an action (e.g. type: prompt) to the state, or move it to terminalStates if it should be a terminal.`
+        );
+      }
+      const actionIds = new Set<string>();
+      for (const action of actions) {
+        if (!action.id) continue;
+        const lowerId = action.id.toLowerCase();
+        if (actionIds.has(lowerId)) {
+          throw new Error(
+            `State "${stateId}" has duplicate action id "${action.id}". ` +
+            `Action ids must be unique within a state (case-insensitive comparison). ` +
+            `Rename one of the duplicate actions to a distinct id.`
+          );
+        }
+        actionIds.add(lowerId);
+      }
+    }
+
+    // ── AC6 (1elr.2): validationGates selectors must reference valid states ──
+    // and each gate must use exactly one selector mode (states / beforeStates /
+    // afterStates).  Mixed modes are ambiguous; unknown state references are
+    // almost certainly a typo or a stale reference after a rename.
+    for (const gate of config.validationGates ?? []) {
+      const hasStates      = Array.isArray(gate.states)       && gate.states.length > 0;
+      const hasBeforeStates = Array.isArray(gate.beforeStates) && gate.beforeStates.length > 0;
+      const hasAfterStates  = Array.isArray(gate.afterStates)  && gate.afterStates.length > 0;
+      const selectorCount  = (hasStates ? 1 : 0) + (hasBeforeStates ? 1 : 0) + (hasAfterStates ? 1 : 0);
+
+      if (selectorCount > 1) {
+        throw new Error(
+          `validationGate "${gate.id}" uses multiple selector modes (states/beforeStates/afterStates). ` +
+          `Each gate must use exactly one selector mode. ` +
+          `Remove the extra selector(s) to disambiguate the gate scope.`
+        );
+      }
+
+      const allSelectorStates = [
+        ...(hasStates       ? gate.states!       : []),
+        ...(hasBeforeStates ? gate.beforeStates!  : []),
+        ...(hasAfterStates  ? gate.afterStates!   : [])
+      ];
+      for (const selectorStateId of allSelectorStates) {
+        if (!stateIds.has(selectorStateId)) {
+          throw new Error(
+            `validationGate "${gate.id}" references unknown state "${selectorStateId}". ` +
+            `Gate selector states must be defined in the statechart. ` +
+            `Known states: ${[...stateIds].join(', ')}. ` +
+            `Remove or correct the state reference.`
+          );
+        }
+      }
+    }
+
+    // ── Transition target + vocabulary validation ─────────────────────────────
     for (const [stateId, state] of Object.entries(config.states || {})) {
       const allTransitions: Record<string, string> = {
         ...(state.transitions || {}),

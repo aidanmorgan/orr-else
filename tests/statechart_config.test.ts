@@ -287,7 +287,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "Nonexistent", REWORK: "Alpha" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -312,12 +314,16 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "Bravo", REWORK: "Alpha", HALT: "done" }
   Bravo:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -719,12 +725,16 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "Bravo", REWORK: "Alpha", UNDECLARED_OUTCOME: "done" }
   Bravo:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -751,7 +761,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done", SECURITY_FAILUER: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -797,12 +809,16 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "Bravo", REWORK: "Alpha", HALT: "done" }
   Bravo:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -825,7 +841,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done", SOME_CUSTOM_TRANSITION: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -865,7 +883,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done", UNDECLARED_OUTCOME: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
@@ -986,5 +1006,74 @@ describe('AC2 gate-level: evaluateGateReadiness rejects undeclared outcome in st
     expect(gate.transitionValid).toBe(true);
     // No outcome-vocabulary blocking evidence
     expect(gate.blockingEvidence.some(e => e.includes('Undeclared'))).toBe(false);
+  });
+});
+
+// ── AC7 runtime: missing/falsy outcomes fail closed in strict mode ────────────
+//
+// Proves the RUNTIME path (outcomeCategory → teammateEventTypeForOutcome) now
+// fails closed on missing/falsy outcomes in strict mode (explicit vocabulary).
+// The old dead-code gap: classifyOutcome returned FAILED but the runtime still
+// called outcomeCategory() which returned 'advance' for falsy inputs.
+
+describe('AC7 runtime: missing/falsy outcomes cannot advance in strict mode', () => {
+  const strictCfg = makeGenericConfig(); // advanceOutcomes:[ADVANCE], failedOutcomes:[REWORK], blockedOutcomes:[HALT]
+  const legacyCfg = makeDefaultConfig(); // no statechart block — legacy/permissive
+
+  // ── outcomeCategory (the function the runtime path actually calls) ──────────
+
+  it('outcomeCategory(undefined, strictCfg) → "failed" (fail-closed, not "advance")', () => {
+    expect(outcomeCategory(undefined as any, strictCfg)).toBe('failed');
+  });
+
+  it('outcomeCategory(null, strictCfg) → "failed" (fail-closed, not "advance")', () => {
+    expect(outcomeCategory(null as any, strictCfg)).toBe('failed');
+  });
+
+  it('outcomeCategory("", strictCfg) → "failed" (fail-closed, not "advance")', () => {
+    expect(outcomeCategory('' as any, strictCfg)).toBe('failed');
+  });
+
+  it('outcomeCategory(undefined, legacyCfg) → "advance" (legacy backward-compat preserved)', () => {
+    expect(outcomeCategory(undefined as any, legacyCfg)).toBe('advance');
+  });
+
+  it('outcomeCategory("", legacyCfg) → "advance" (legacy backward-compat preserved)', () => {
+    expect(outcomeCategory('' as any, legacyCfg)).toBe('advance');
+  });
+
+  // ── teammateEventTypeForOutcome (the runtime coordinator transition path) ───
+
+  it('teammateEventTypeForOutcome(undefined, strictCfg) → STATE_FAILED (cannot advance)', () => {
+    expect(teammateEventTypeForOutcome(undefined as any, strictCfg)).toBe(TeammateEventType.STATE_FAILED);
+  });
+
+  it('teammateEventTypeForOutcome("", strictCfg) → STATE_FAILED (cannot advance)', () => {
+    expect(teammateEventTypeForOutcome('' as any, strictCfg)).toBe(TeammateEventType.STATE_FAILED);
+  });
+
+  it('teammateEventTypeForOutcome(undefined, legacyCfg) → STATE_TRANSITIONED (legacy preserved)', () => {
+    expect(teammateEventTypeForOutcome(undefined as any, legacyCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  });
+
+  it('teammateEventTypeForOutcome("", legacyCfg) → STATE_TRANSITIONED (legacy preserved)', () => {
+    expect(teammateEventTypeForOutcome('' as any, legacyCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  });
+
+  // ── declared outcomes still classify correctly (no over-fail-closing) ────────
+
+  it('declared advance outcome still classifies as advance in strict mode', () => {
+    expect(outcomeCategory('ADVANCE', strictCfg)).toBe('advance');
+    expect(teammateEventTypeForOutcome('ADVANCE', strictCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  });
+
+  it('declared failed outcome still classifies as failed in strict mode', () => {
+    expect(outcomeCategory('REWORK', strictCfg)).toBe('failed');
+    expect(teammateEventTypeForOutcome('REWORK', strictCfg)).toBe(TeammateEventType.STATE_FAILED);
+  });
+
+  it('declared blocked outcome still classifies as blocked in strict mode', () => {
+    expect(outcomeCategory('HALT', strictCfg)).toBe('blocked');
+    expect(teammateEventTypeForOutcome('HALT', strictCfg)).toBe(TeammateEventType.STATE_BLOCKED);
   });
 });

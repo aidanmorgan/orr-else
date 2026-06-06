@@ -13,6 +13,64 @@ const DEFAULT_ADVANCE_OUTCOMES: readonly string[] = [EventName.SUCCESS];
 const DEFAULT_FAILED_OUTCOMES: readonly string[] = [EventName.FAILURE];
 const DEFAULT_BLOCKED_OUTCOMES: readonly string[] = [EventName.BLOCKED];
 
+// ── Typed fail-closed outcome model (1elr.2) ─────────────────────────────────
+
+/**
+ * Typed enum for the four mutually-exclusive outcome categories.
+ *
+ * Replaces raw string literals in call sites that previously compared against
+ * 'advance' | 'failed' | 'blocked' | 'custom'.  The enum values are kept
+ * identical to the string literals so existing call sites using the string form
+ * are compatible without changes.
+ */
+export enum OutcomeCategory {
+  /** Outcome is in the configured advance-outcomes set → forward progress. */
+  ADVANCE = 'advance',
+  /** Outcome is in the configured failed-outcomes set, or is undeclared in strict mode. */
+  FAILED = 'failed',
+  /** Outcome is in the configured blocked-outcomes set. */
+  BLOCKED = 'blocked',
+  /** Outcome is in the configured custom-outcomes set. */
+  CUSTOM = 'custom',
+}
+
+/**
+ * Branded string type for an outcome name.
+ *
+ * Outcome names are always strings at runtime; the brand exists to help
+ * call sites signal intent and enables future refinement without API churn.
+ */
+export type OutcomeName = string & { readonly __outcomeName: unique symbol };
+
+/**
+ * Typed, fail-closed outcome classification.
+ *
+ * Returns a typed `OutcomeCategory` enum value by delegating to
+ * `outcomeCategory()`.  Because `outcomeCategory()` is now the single source
+ * of truth — including its fail-closed behaviour for missing/falsy outcomes in
+ * strict mode — this function simply maps its string result to the enum.
+ *
+ *  - In strict mode (explicit vocabulary declared): undeclared and
+ *    missing/falsy outcomes classify as FAILED, never ADVANCE.
+ *  - In legacy mode (no explicit vocabulary): missing/falsy outcomes
+ *    fall through to ADVANCE (backward-compatible with the old behaviour
+ *    where `teammateEventTypeForOutcome(undefined)` → STATE_TRANSITIONED).
+ *
+ * Prefer this function over `outcomeCategory()` in new code that needs the
+ * typed enum.
+ */
+export function classifyOutcome(
+  outcome: string | null | undefined,
+  config: HarnessConfig
+): OutcomeCategory {
+  switch (outcomeCategory(outcome, config)) {
+    case 'advance': return OutcomeCategory.ADVANCE;
+    case 'failed':  return OutcomeCategory.FAILED;
+    case 'blocked': return OutcomeCategory.BLOCKED;
+    case 'custom':  return OutcomeCategory.CUSTOM;
+  }
+}
+
 /**
  * Returns true iff `stateId` is a configured terminal state.
  *
@@ -31,25 +89,29 @@ export function isTerminalState(stateId: string, config: HarnessConfig): boolean
  *  - 'failed'   — outcome is in failedOutcomes  (default ['FAILURE'])
  *  - 'blocked'  — outcome is in blockedOutcomes (default ['BLOCKED'])
  *  - 'custom'   — outcome is in customOutcomes
- *  - 'failed'   — fallback in strict mode (undeclared outcome must NOT advance)
+ *  - 'failed'   — fallback in strict mode (undeclared or missing outcome must NOT advance)
  *  - 'advance'  — fallback in legacy mode (no explicit vocab; preserves old behaviour)
  *
  * With no explicit outcome vocabulary the defaults reproduce the old hard-coded
  * literals.
  *
- * A falsy / non-string outcome returns 'advance' (the safe default for
- * teammateEventTypeForOutcome → STATE_TRANSITIONED), which is why
- * isAdvanceOutcome has its own falsy guard returning false to preserve the
- * old `outcome === EventName.SUCCESS` semantics (false for missing outcome).
+ * Missing/falsy outcomes in strict mode (explicit vocabulary declared) are
+ * classified as 'failed', not 'advance' — the fail-closed behaviour that
+ * prevents a missing outcome from advancing progress.  In legacy mode (no
+ * explicit vocabulary) falsy outcomes still return 'advance' for backward
+ * compatibility.
  *
- * In strict mode (explicit vocabulary declared) an undeclared outcome is
- * classified as 'failed', not 'advance', so it can never count as progress.
+ * isAdvanceOutcome retains its own falsy guard returning false regardless of
+ * mode, preserving the old `outcome === EventName.SUCCESS` semantics.
  */
 export function outcomeCategory(
   outcome: string | null | undefined,
   config: HarnessConfig
 ): 'advance' | 'failed' | 'blocked' | 'custom' {
-  if (!outcome || typeof outcome !== 'string') return 'advance';
+  if (!outcome || typeof outcome !== 'string') {
+    const strictMode = declaredOutcomeVocabulary(config) !== null;
+    return strictMode ? 'failed' : 'advance';
+  }
 
   const sc = config.statechart;
   const advance = sc?.advanceOutcomes ?? DEFAULT_ADVANCE_OUTCOMES;

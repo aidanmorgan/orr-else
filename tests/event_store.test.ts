@@ -875,7 +875,9 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
 `);
     configLoader.reset();
