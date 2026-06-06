@@ -116,6 +116,7 @@ import {
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
+import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
@@ -516,24 +517,6 @@ function spanCompletionForToolResult(result: unknown): SpanCompletion {
     status: SpanStatusValue.ERROR,
     message: stringifySpanAttribute(summarizeForEvent(result))
   };
-}
-
-function validateNativePiExtensionProjectTools(pi: ExtensionAPI, config: HarnessConfig): void {
-  const nativeProjectTools = getNativePiExtensionProjectToolNames(config);
-  if (nativeProjectTools.length === 0) return;
-
-  const api = pi as { getAllTools?: () => Array<{ name: string }> };
-  if (typeof api.getAllTools !== 'function') return;
-
-  const availableToolNames = new Set(api.getAllTools().map(tool => tool.name));
-  const missing = nativeProjectTools.filter(toolName => !availableToolNames.has(toolName));
-  if (missing.length > 0) {
-    throw new Error(
-      `Configured native Pi extension project tools are missing: ${missing.join(', ')}. ` +
-      `Register them with pi.registerTool() from .pi/extensions/*.ts, .pi/extensions/*/index.ts, ` +
-      `~/.pi/agent/extensions, or an installed Pi package before Orr Else starts.`
-    );
-  }
 }
 
 /**
@@ -2879,7 +2862,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         actionId: session.activeRun.action.id
       }
       : undefined, undefined, services.projectToolBackpressure, services.projectRoot);
-    validateNativePiExtensionProjectTools(pi, config);
+    validateNativePiExtensionProjectToolInventory(pi, config);
 
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.TICK_ITEM,

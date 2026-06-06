@@ -206,6 +206,16 @@ export interface ProjectToolPathArgumentConfig {
 
 export interface ProjectExtensionToolConfig extends BaseProjectToolConfig {
   type: ProjectToolType.EXTENSION;
+  /**
+   * When true, this tool is declared for observation only — the harness records
+   * its calls but does not enforce that it appears in the Pi host inventory with
+   * callable/provenance attributes. observeOnly tools cannot satisfy requiredTools
+   * (config load is rejected if any observeOnly tool appears in any state or action
+   * requiredTools — see validateObserveOnlyInRequiredTools in ConfigLoader). This
+   * lets configs declare Pi-native tools that the harness watches without requiring
+   * a full host-inventory contract at startup.
+   */
+  observeOnly?: boolean;
 }
 
 export type ProjectToolConfig = (ProjectCommandToolConfig | ProjectMcpToolConfig | ProjectExtensionToolConfig) & {

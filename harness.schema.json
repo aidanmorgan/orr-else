@@ -593,6 +593,10 @@
                 "description": "Human-readable explanation of why this tool is deprecated."
               },
               "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
+              "observeOnly": {
+                "type": "boolean",
+                "description": "When true, this extension tool is declared for observation only. The harness records its calls but does not enforce Pi host inventory presence, callable status, or provenance at startup. observeOnly tools cannot satisfy requiredTools."
+              },
               "validationRules": {
                 "type": "array",
                 "items": {

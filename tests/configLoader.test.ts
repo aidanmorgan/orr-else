@@ -1148,3 +1148,128 @@ tools:
     expect(config.tools?.some(t => t.name === 'plan_contract')).toBe(true);
   });
 });
+
+// ── 1elr.8: observeOnly tools cannot satisfy requiredTools (config-load rejection) ──
+
+describe('1elr.8: observeOnly tools in requiredTools are rejected at config load', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-1elr8-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  // (a) observeOnly tool in state requiredTools is REJECTED
+  it('throws when an observeOnly extension tool appears in a state requiredTools', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Implement
+  eventStore:
+    enabled: true
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    requiredTools:
+      - watch_tool
+    actions: []
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: watch_tool
+    type: extension
+    observeOnly: true
+`);
+    const loader = new ConfigLoader(undefined, tempRoot);
+    expect(() => loader.load(configPath)).toThrow(/watch_tool/);
+    expect(() => loader.load(configPath)).toThrow(/observeOnly/);
+  });
+
+  // (a) observeOnly tool in action requiredTools is REJECTED
+  it('throws when an observeOnly extension tool appears in an action requiredTools', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Implement
+  eventStore:
+    enabled: true
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: validate
+        type: tool
+        tool: real_tool
+        requiredTools:
+          - name: watch_tool
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: watch_tool
+    type: extension
+    observeOnly: true
+  - name: real_tool
+    type: command
+    command: echo
+`);
+    const loader = new ConfigLoader(undefined, tempRoot);
+    expect(() => loader.load(configPath)).toThrow(/watch_tool/);
+    expect(() => loader.load(configPath)).toThrow(/observeOnly/);
+  });
+
+  // (b) observeOnly tool NOT in requiredTools loads fine
+  it('does NOT throw when an observeOnly tool is declared but not in any requiredTools', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Implement
+  eventStore:
+    enabled: true
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    requiredTools:
+      - real_tool
+    actions: []
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: watch_tool
+    type: extension
+    observeOnly: true
+  - name: real_tool
+    type: command
+    command: echo
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+  });
+
+  // (c) normal (non-observeOnly) tool in requiredTools still loads fine
+  it('does NOT throw when a normal (non-observeOnly) tool appears in requiredTools', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Implement
+  eventStore:
+    enabled: true
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    requiredTools:
+      - real_tool
+    actions: []
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: real_tool
+    type: command
+    command: echo
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+  });
+});

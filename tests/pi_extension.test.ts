@@ -446,6 +446,7 @@ tools:
     defaultArgs: ["-e", "console.log(JSON.stringify({ tool: 'ast_grep', status: 'PASSED' }))"]
   - name: native_symbol_index
     type: extension
+    observeOnly: true
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

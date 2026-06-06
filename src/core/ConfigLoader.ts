@@ -411,6 +411,50 @@ export class ConfigLoader {
   }
 
   /**
+   * 1elr.8: Reject observeOnly tools appearing in requiredTools.
+   *
+   * observeOnly extension tools are declared for observation only — the harness
+   * records their calls but never enforces host-inventory requirements for them.
+   * Because they make no guarantee of being callable or present in the Pi host
+   * inventory, they CANNOT satisfy a requiredTools gate. Listing an observeOnly
+   * tool in any state or action requiredTools is a config bug that is caught at
+   * config-load time, not at runtime.
+   *
+   * Mirrors the validateDeprecatedRequiredTools cross-reference pattern.
+   */
+  private validateObserveOnlyInRequiredTools(config: HarnessConfig): void {
+    const observeOnlyTools = new Set<string>();
+    for (const tool of config.tools || []) {
+      const t = tool as { observeOnly?: boolean };
+      if (t.observeOnly) {
+        observeOnlyTools.add(tool.name);
+      }
+    }
+    if (observeOnlyTools.size === 0) return;
+
+    const checkRequiredTools = (requiredTools: import('./domain/StateModels.js').RequiredTool[] | undefined, location: string): void => {
+      for (const rt of requiredTools || []) {
+        const name = typeof rt === 'string' ? rt : rt.name;
+        if (observeOnlyTools.has(name)) {
+          throw new Error(
+            `${location} references requiredTool "${name}" which is declared observeOnly. ` +
+            `observeOnly tools cannot satisfy requiredTools — they are recorded for observation only ` +
+            `and make no guarantee of being callable. ` +
+            `Either declare "${name}" without observeOnly:true, or remove it from requiredTools.`
+          );
+        }
+      }
+    };
+
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      checkRequiredTools(state.requiredTools, `State "${stateId}"`);
+      for (const action of state.actions || []) {
+        checkRequiredTools(action.requiredTools, `State "${stateId}" action "${action.id}"`);
+      }
+    }
+  }
+
+  /**
    * r0oh: Reject inert traceability settings.
    *
    * settings.traceability is meaningful only when a concrete, DECLARED owner is
@@ -447,6 +491,7 @@ export class ConfigLoader {
 
   private validateSemantics(config: HarnessConfig): void {
     this.validateDeprecatedRequiredTools(config);
+    this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
