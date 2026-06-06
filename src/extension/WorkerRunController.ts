@@ -22,7 +22,8 @@ import {
   BuiltInToolName,
   Component,
   HandoverRequiredDefaults,
-  PromptProvenanceDefaults
+  PromptProvenanceDefaults,
+  ReviewArtifactKind
 } from '../constants/index.js';
 import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PiIntegration.js';
 import { projectToolFailureLimitSuggestedOutcome } from '../plugins/projectTools.js';
@@ -261,6 +262,16 @@ export interface GateReadiness {
   /** Provenance dimension: false when provenance is missing or stale. */
   provenanceValid: boolean;
   provenanceReason?: string;
+  /**
+   * True when the reviewArtifacts.shipPostReview gate is satisfied.
+   *
+   * When required=true and the active state matches the configured state,
+   * this is true only when a SHIP_POST_REVIEW event with
+   * artifactKind=ReviewArtifactKind.SHIP_POST_REVIEW exists for the current
+   * bead + stateId in the projection.  When not configured or required=false,
+   * this is always true.
+   */
+  reviewArtifactSatisfied: boolean;
   blockingEvidence: string[];
 }
 
@@ -567,6 +578,77 @@ export async function evaluateGateReadiness(
     }
   }
 
+  // ── 5a. advance-outcome-only: required ship/post-review artifact ───────────
+  // When settings.reviewArtifacts.shipPostReview.required is true and the
+  // active state matches the configured state (or no state is configured,
+  // making it apply to any state), a SHIP_POST_REVIEW event with
+  // artifactKind=ReviewArtifactKind.SHIP_POST_REVIEW must exist in the
+  // bead's projection before SUCCESS is accepted.
+  //
+  // Current-run scoping: the state AdversarialPostReview loops (FAILURE →
+  // Implementation → AdversarialPostReview). Without run-scoping, a stale
+  // SHIP_POST_REVIEW from a prior attempt would wrongly satisfy the gate on
+  // the second pass. We scope by finding the latest STATE_RUN_INITIALIZED
+  // event for activeRun.stateId (same pattern as the provenance gate in §7)
+  // and only accepting artifacts recorded at or after that timestamp.
+  //
+  // Verdict/outcome consistency: an artifact whose `outcome` field is present
+  // and is NOT an advance outcome records a rejecting review — it must not
+  // satisfy the gate even within the current run.
+  //
+  // Performance: eventsForBead is O(n) in bead event count, shared with §7.
+  // See §7 comment for why this is acceptable.
+  let reviewArtifactSatisfied = true;
+  // Hoist beadEvents here so §5a and §7 share a single eventsForBead call.
+  let beadEventsForGates: Awaited<ReturnType<typeof services.eventStore.eventsForBead>> | undefined;
+
+  if (isAdvanceOutcome(outcome, config)) {
+    beadEventsForGates = await services.eventStore.eventsForBead(activeRun.beadId);
+
+    const shipPostReviewConfig = config.settings.reviewArtifacts?.shipPostReview;
+    const reviewRequired = shipPostReviewConfig?.required === true;
+    const configuredState = shipPostReviewConfig?.state;
+    // Gate applies only when required=true and the active state matches
+    // (or no state restriction is set).
+    const gateApplies = reviewRequired &&
+      (!configuredState || configuredState === activeRun.stateId);
+
+    if (gateApplies) {
+      // Find the latest STATE_RUN_INITIALIZED event for the current state to
+      // determine the start-of-current-run boundary.
+      const latestInitEvent = [...beadEventsForGates]
+        .reverse()
+        .find(e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === activeRun.stateId);
+      const currentRunStartTimestamp = latestInitEvent?.timestamp;
+
+      const stateChart = await services.eventStore.projectBeadStateChart(activeRun.beadId);
+      const hasMatchingArtifact = stateChart.reviewArtifacts.some(a => {
+        // Must be the right kind.
+        if (a.artifactKind !== ReviewArtifactKind.SHIP_POST_REVIEW) return false;
+        // Must match the configured stateId when one is specified.
+        if (configuredState && a.stateId !== activeRun.stateId) return false;
+        // Must belong to the CURRENT run: recorded at or after the latest
+        // STATE_RUN_INITIALIZED for this state. If no init event was found
+        // (should not happen in normal operation), we reject — we cannot
+        // confirm the artifact is from the current attempt.
+        if (!currentRunStartTimestamp || a.timestamp < currentRunStartTimestamp) return false;
+        // Must carry an advance-consistent outcome: if `outcome` is present and
+        // is NOT an advance outcome, the review is rejecting — do not satisfy.
+        if (typeof a.outcome === 'string' && !isAdvanceOutcome(a.outcome, config)) return false;
+        return true;
+      });
+      if (!hasMatchingArtifact) {
+        reviewArtifactSatisfied = false;
+        const stateQualifier = configuredState ? ` for state \`${configuredState}\`` : '';
+        blockingEvidence.push(
+          `Required ship/post-review artifact (SHIP_POST_REVIEW, artifactKind=\`${ReviewArtifactKind.SHIP_POST_REVIEW}\`)` +
+          `${stateQualifier} has not been recorded for the current run with an advance-consistent outcome. ` +
+          `Call \`${BuiltInToolName.SUBMIT_REVIEW_ARTIFACT}\` before signaling SUCCESS.`
+        );
+      }
+    }
+  }
+
   // ── 6. Checkpoint ─────────────────────────────────────────────────────────
   const checkpointAccepted = activeRun.checkpointAccepted;
   if (!checkpointAccepted) {
@@ -625,7 +707,10 @@ export async function evaluateGateReadiness(
   let provenanceReason: string | undefined;
 
   if (isAdvanceOutcome(outcome, config)) {
-    const beadEvents = await services.eventStore.eventsForBead(activeRun.beadId);
+    // beadEventsForGates was fetched in §5a above; reuse it to avoid a second
+    // eventsForBead round-trip.  It is always defined here because §5a sets it
+    // whenever isAdvanceOutcome is true.
+    const beadEvents = beadEventsForGates!;
     const initEvent = [...beadEvents]
       .reverse()
       .find(e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === activeRun.stateId);
@@ -689,6 +774,7 @@ export async function evaluateGateReadiness(
     transactionalReason,
     provenanceValid,
     provenanceReason,
+    reviewArtifactSatisfied,
     blockingEvidence
   };
 }

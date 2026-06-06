@@ -2962,6 +2962,16 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             const handoverEvidence = gateReadiness.blockingEvidence.find(e => e.includes('handoverRequired'));
             return `REJECTED: ${handoverEvidence ?? 'Action declares \`handoverRequired: true\` but no substantive checkpoint summary was recorded. Call \`${BuiltInToolName.SUBMIT_CHECKPOINT}\` with a detailed summary before signaling completion.'}`;
           }
+
+          // ── Gate 5a: required ship/post-review artifact (enforcing) ──────────
+          // evaluateGateReadiness computed reviewArtifactSatisfied and populated
+          // blockingEvidence. Reuse that result — do NOT re-query the event store.
+          if (!gateReadiness.reviewArtifactSatisfied) {
+            const artifactEvidence = gateReadiness.blockingEvidence.find(e =>
+              e.includes('SHIP_POST_REVIEW') || e.includes('ship/post-review artifact')
+            );
+            return `REJECTED: ${artifactEvidence ?? `Required ship/post-review artifact has not been recorded. Call \`${BuiltInToolName.SUBMIT_REVIEW_ARTIFACT}\` before signaling SUCCESS.`}`;
+          }
         }
 
         if (!activeRun.checkpointAccepted) {
