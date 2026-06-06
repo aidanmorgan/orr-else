@@ -1359,7 +1359,7 @@ describe('large-output fixture guard', () => {
 // ---------------------------------------------------------------------------
 
 describe('tool count summary', () => {
-  it('reports orr-else tool inventory count (built_in=16, plugin=21, native_pi=8, total=45)', () => {
+  it('reports orr-else tool inventory count (built_in=14, plugin=21, native_pi=8, total=43)', () => {
     const builtInCount = Object.values(BuiltInToolName).length;
     const pluginCount = Object.values(PluginToolName).length;
     const nativeCount = DEFAULT_OBSERVED_PI_TOOLS.length;
@@ -1370,8 +1370,9 @@ describe('tool count summary', () => {
     );
     // run_quality_checks was removed from orr-else by gzy0 (see bead s3wp.30).
     // tick_item was retired by i0d5; tick_items handles one-or-more items.
-    // Current counts: built_in=15, plugin=21, native_pi=8
-    expect(builtInCount, 'BuiltInToolName count must be 15').toBe(15);
+    // get_compatibility_context was removed by buvj.
+    // Current counts: built_in=14, plugin=21, native_pi=8
+    expect(builtInCount, 'BuiltInToolName count must be 14').toBe(14);
     expect(pluginCount, 'PluginToolName count must be 21').toBe(21);
     expect(nativeCount, 'DEFAULT_OBSERVED_PI_TOOLS count must be 8').toBe(8);
     expect(total, 'RTK_INVENTORY total must equal sum of all three sources').toBe(builtInCount + pluginCount + nativeCount);

@@ -1619,11 +1619,10 @@ states:
     }
   });
 
-  it('AC4: compatibility paths from optional discovery remain optional — absent compat mode succeeds', () => {
-    // Compatibility paths come from InstructionLoader.compatibilityContext() which already
-    // uses existsSync-based discovery — these are OPTIONAL.  When no compat mode is set,
-    // no compat entries are added but provenance resolution succeeds without failure.
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-compat-optional-'));
+  it('AC4 (buvj): compatibility prompt entries are never emitted — compat surface fully removed', () => {
+    // buvj: The compatibility prompt step is removed entirely from resolvePromptProvenance.
+    // No COMPATIBILITY_PROMPT entries should ever appear regardless of config contents.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'buvj-no-compat-'));
     try {
       const configPath = path.join(tempDir, 'harness.yaml');
       fs.writeFileSync(configPath, `
@@ -1651,13 +1650,15 @@ states:
         }
       };
 
-      // No compat mode configured — resolution must succeed (no failure) with
-      // no compat entries.  Optional discovery does NOT set resolutionFailed or configuredSourceFailed.
+      // Resolution must succeed with zero compat entries — compat step removed entirely.
       const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
       expect(result.resolutionFailed).toBeUndefined();
       expect(result.configuredSourceFailed).toBeUndefined();
-      const compatEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.COMPATIBILITY_PROMPT);
-      expect(compatEntries.length).toBe(0);
+      // Assert no entry has a kind that references compatibility — real load-bearing check:
+      // if a compatibilityPrompt entry were emitted its kind would include 'compat'.
+      expect(result.entries.some(e => String(e.kind).toLowerCase().includes('compat'))).toBe(false);
+      // Also assert at least one entry was emitted (proves the function ran, not short-circuited).
+      expect(result.entries.length).toBeGreaterThan(0);
     } finally {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }

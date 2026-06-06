@@ -1356,8 +1356,8 @@ states:
     // Before the fix, the six registration-guard booleans were module-level and
     // never reset, so SESSION_START on the second pi would call the guard
     // branches (e.g. `if (!artifactPathsToolRegistered)`) and find them already
-    // true — meaning the artifact-paths tool, compatibility-context tool, and
-    // other guarded tools would NOT be registered on harness2.pi.
+    // true — meaning the artifact-paths tool and other guarded tools would NOT
+    // be registered on harness2.pi.
     const harness2 = fakePi();
     await orrElseExtension(harness2.pi);
     await harness2.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
@@ -1365,10 +1365,12 @@ states:
 
     // Both invocations must register the same guarded tools on their respective pi
     expect(toolsAfterFirst).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
-    expect(toolsAfterFirst).toContain(BuiltInToolName.GET_COMPATIBILITY_CONTEXT);
+    // buvj: get_compatibility_context removed from core — assert the literal string is absent
+    expect(toolsAfterFirst).not.toContain('get_compatibility_context');
 
     expect(toolsAfterSecond).toContain(BuiltInToolName.GET_ARTIFACT_PATHS);
-    expect(toolsAfterSecond).toContain(BuiltInToolName.GET_COMPATIBILITY_CONTEXT);
+    // buvj: get_compatibility_context removed from core — assert the literal string is absent
+    expect(toolsAfterSecond).not.toContain('get_compatibility_context');
 
     // The two invocations must have independent tool arrays (not sharing state)
     expect(harness1.tools).not.toBe(harness2.tools);

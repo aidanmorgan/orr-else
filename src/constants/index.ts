@@ -724,7 +724,6 @@ export enum BuiltInToolName {
   REQUEST_HARNESS_RESTART = 'request_harness_restart',
   GET_ARTIFACT_PATHS = 'get_artifact_paths',
   QUERY_ARTIFACT = 'query_artifact',
-  GET_COMPATIBILITY_CONTEXT = 'get_compatibility_context',
   READ_PATH_CONTEXT = 'read_path_context',
   HARNESS_STATUS = 'harness_status',
   PRE_SIGNAL_AUDIT = 'pre_signal_audit'
@@ -1098,11 +1097,6 @@ export const StateChartToolDefaults = {
   DETAIL_REVIEW_ARTIFACTS: 3,
   TEXT_PREVIEW_CHARS: 180,
   DETAIL_TEXT_PREVIEW_CHARS: 100
-} as const;
-
-export const CompatibilityContextDefaults = {
-  DOC_FILE_LIMIT: 40,
-  AGENT_FILE_LIMIT: 40
 } as const;
 
 export const NativeReadPolicyDefaults = {
@@ -1494,7 +1488,6 @@ export const Defaults = {
 export enum PromptProvenanceKind {
   GOAL_PROMPT = 'goalPrompt',
   STATE_PROMPT = 'statePrompt',
-  COMPATIBILITY_PROMPT = 'compatibilityPrompt',
   SKILL_PROMPT = 'skillPrompt',
   HARNESS_CONFIG = 'harnessConfig'
 }

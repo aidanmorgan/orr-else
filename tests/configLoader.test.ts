@@ -1721,3 +1721,82 @@ states: {}
     expect(config.settings.worktreePolicy?.default).toBe('never');
   });
 });
+
+// ---------------------------------------------------------------------------
+// buvj: compatibility fields are rejected at startup (deterministic error)
+// ---------------------------------------------------------------------------
+
+describe('ConfigLoader — compatibility fields rejected at startup (buvj)', () => {
+  let tempRoot: string;
+  let configLoader: ConfigLoader;
+
+  function writeConfig(content: string): string {
+    const configPath = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(configPath, content);
+    return configPath;
+  }
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.cwd(), 'temp-buvj-compat-'));
+    configLoader = new ConfigLoader(undefined, tempRoot);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('rejects a config containing settings.compatibilityMode with a deterministic error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+  compatibilityMode: claude
+states: {}
+`);
+    expect(() => configLoader.load(configPath)).toThrow(/compatibilityMode.*removed|compatibility.*removed|no longer supported|removed.*buvj/i);
+  });
+
+  it('rejects a config containing settings.compatibility with a deterministic error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+  compatibility:
+    modes:
+      claude:
+        masterRules: [CLAUDE.md]
+states: {}
+`);
+    expect(() => configLoader.load(configPath)).toThrow(/compatibility.*removed|compatibilityMode.*removed|no longer supported|removed.*buvj/i);
+  });
+
+  it('rejects a config containing both compatibilityMode and compatibility with a deterministic error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+  compatibilityMode: claude
+  compatibility:
+    modes:
+      claude:
+        masterRules: [CLAUDE.md]
+        hookDirs: [.claude/hooks]
+states: {}
+`);
+    expect(() => configLoader.load(configPath)).toThrow(/compatibilityMode.*removed|compatibility.*removed|no longer supported|removed.*buvj/i);
+  });
+
+  it('accepts a normal config without any compatibility fields', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+states: {}
+`);
+    expect(() => configLoader.load(configPath)).not.toThrow();
+  });
+});

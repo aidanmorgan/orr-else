@@ -249,17 +249,6 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   },
 
   {
-    toolName: BuiltInToolName.GET_COMPATIBILITY_CONTEXT,
-    toolClass: 'built_in',
-    owningFile: 'src/extension.ts',
-    schemaTypeName: 'untyped_record',
-    skillPath: '.pi/skills/tool-routing/SKILL.md',
-    rawOutputLocation: 'tool_calls_dir',
-    deterministicCompaction: true,
-    mutating: false
-  },
-
-  {
     toolName: BuiltInToolName.READ_PATH_CONTEXT,
     toolClass: 'built_in',
     owningFile: 'src/extension.ts',

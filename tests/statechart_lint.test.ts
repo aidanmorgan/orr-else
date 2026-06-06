@@ -23,6 +23,7 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import {
   OutcomeCategory,
@@ -825,22 +826,36 @@ states:
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CERDIWEN GOLDEN TEST: cerdiwen's harness.yaml must still lint-pass
+// CERDIWEN GOLDEN TEST: cerdiwen's harness.yaml — loads cleanly after buvj
+//
+// buvj removed settings.compatibilityMode and settings.compatibility from the
+// Orr Else core.  The corresponding cerdiwen change removed those fields from
+// bankwest/cerdiwen/harness.yaml so cerdiwen now loads without errors.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('CERDIWEN GOLDEN: ../bankwest/cerdiwen/harness.yaml must lint-pass', () => {
-  it('cerdiwen harness.yaml loads without throwing (all lint rules pass)', () => {
-    const cerdiwenRoot = path.join(
-      path.dirname(path.dirname(process.cwd())),
-      'bankwest', 'cerdiwen'
-    );
-    const cerdiwenPath = path.join(cerdiwenRoot, 'harness.yaml');
-    if (!fs.existsSync(cerdiwenPath)) {
-      // Skip when cerdiwen is not present (e.g. in CI without the sibling repo)
-      return;
+describe('CERDIWEN GOLDEN: ../bankwest/cerdiwen/harness.yaml — loads cleanly after buvj', () => {
+  it('cerdiwen harness.yaml loads without errors (compat fields removed from cerdiwen)', () => {
+    // Derive the dev root robustly: climb from tests/ → repo root → dev root.
+    // Works for both main checkout (/dev/pi-experiment) and worktrees (/dev/pi-experiment-wt/buvj).
+    const testsDir = path.dirname(fileURLToPath(import.meta.url));
+    const repoRoot = path.resolve(testsDir, '..');
+    // devRoot is the directory that contains bankwest/ as a sibling.
+    // Walk up from repoRoot until we find a directory with a 'bankwest' sibling.
+    let devRoot = repoRoot;
+    while (devRoot !== path.parse(devRoot).root) {
+      if (fs.existsSync(path.join(devRoot, 'bankwest'))) break;
+      devRoot = path.resolve(devRoot, '..');
     }
+    const cerdiwenRoot = path.join(devRoot, 'bankwest', 'cerdiwen');
+    const cerdiwenPath = path.join(cerdiwenRoot, 'harness.yaml');
+    // Fail loudly if cerdiwen is absent — a missing consumer is a visible failure, not a skip.
+    expect(
+      fs.existsSync(cerdiwenPath),
+      `cerdiwen harness.yaml not found at ${cerdiwenPath} — consumer must be present`
+    ).toBe(true);
     // Must pass projectRoot so file-backed fields (checklists) resolve correctly
     const loader = new ConfigLoader(undefined, cerdiwenRoot);
+    // cerdiwen compat fields removed — must load cleanly (no throw)
     expect(() => loader.load(cerdiwenPath)).not.toThrow();
   });
 });

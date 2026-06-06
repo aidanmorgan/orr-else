@@ -1,7 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["settings", "scheduler", "states"],
+  "required": [
+    "settings",
+    "scheduler",
+    "states"
+  ],
   "additionalProperties": false,
   "definitions": {
     "toolProfileShape": {
@@ -11,18 +15,43 @@
       "properties": {
         "env": {
           "type": "object",
-          "additionalProperties": { "type": "string" }
+          "additionalProperties": {
+            "type": "string"
+          }
         },
-        "cwd": { "type": "string" },
-        "allowCwdOverride": { "type": "boolean" },
-        "timeoutMs": { "type": "integer", "minimum": 1 },
-        "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-        "argsMode": { "type": "string", "enum": ["replace", "append"] },
-        "allowArgs": { "type": "boolean" },
-        "acceptMaxBuffer": { "type": "boolean" },
+        "cwd": {
+          "type": "string"
+        },
+        "allowCwdOverride": {
+          "type": "boolean"
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "wrapperTimeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "argsMode": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "append"
+          ]
+        },
+        "allowArgs": {
+          "type": "boolean"
+        },
+        "acceptMaxBuffer": {
+          "type": "boolean"
+        },
         "successExitCodes": {
           "type": "array",
-          "items": { "type": "integer", "minimum": 0 },
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -30,31 +59,64 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "root": { "type": "string" },
-            "rootKind": { "type": "string" },
-            "workspaceRoot": { "type": "string" },
-            "virtualRoots": { "type": "array", "items": { "type": "string" } },
-            "mustStayInsideRoot": { "type": "boolean" },
-            "positionals": { "type": "boolean" },
-            "flags": { "type": "array", "items": { "type": "string" } }
+            "root": {
+              "type": "string"
+            },
+            "rootKind": {
+              "type": "string"
+            },
+            "workspaceRoot": {
+              "type": "string"
+            },
+            "virtualRoots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "mustStayInsideRoot": {
+              "type": "boolean"
+            },
+            "positionals": {
+              "type": "boolean"
+            },
+            "flags": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           }
         },
         "failureLimit": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "maxFailuresPerState": { "type": "integer", "minimum": 1 },
-            "suggestedOutcome": { "type": "string" },
+            "maxFailuresPerState": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "suggestedOutcome": {
+              "type": "string"
+            },
             "suggestedOutcomeByState": {
               "type": "object",
-              "additionalProperties": { "type": "string" }
+              "additionalProperties": {
+                "type": "string"
+              }
             },
             "suggestedOutcomeByAction": {
               "type": "object",
-              "additionalProperties": { "type": "string" }
+              "additionalProperties": {
+                "type": "string"
+              }
             },
-            "message": { "type": "string" },
-            "terminal": { "type": "boolean" }
+            "message": {
+              "type": "string"
+            },
+            "terminal": {
+              "type": "boolean"
+            }
           }
         }
       }
@@ -65,62 +127,105 @@
       "type": "object",
       "description": "All settings fields have ConfigLoader defaults; none are strictly required in the YAML file. Omitted fields are filled from harness defaults before validation.",
       "properties": {
-        "maxConcurrentSlots": { "type": "integer", "minimum": 1 },
-        "handoverTemplate": { "type": "string" },
-        "agentTurnTimeoutMs": { "type": "integer" },
-        "processReapIntervalMs": { "type": "integer" },
-        "teamLeadSystemPrompt": { "type": "string" },
-        "projectObjective": { "type": "string" },
-        "startState": { "type": "string" },
-        "workflowVersion": { "type": "string" },
-        "harnessRestartEvent": { "type": "string" },
-        "harnessRestartPrompt": { "type": "string" },
-        "contextRestartEvent": { "type": "string" },
-        "contextRestartPrompt": { "type": "string" },
-        "compatibilityMode": { "type": "string" },
-        "compatibility": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "modes": {
-              "type": "object",
-              "additionalProperties": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                  "masterRules": { "type": "array", "items": { "type": "string" } },
-                  "ruleDirs": { "type": "array", "items": { "type": "string" } },
-                  "hookDirs": { "type": "array", "items": { "type": "string" } },
-                  "docsDirs": { "type": "array", "items": { "type": "string" } },
-                  "agentDirs": { "type": "array", "items": { "type": "string" } }
-                }
-              }
-            }
-          }
+        "maxConcurrentSlots": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "handoverTemplate": {
+          "type": "string"
+        },
+        "agentTurnTimeoutMs": {
+          "type": "integer"
+        },
+        "processReapIntervalMs": {
+          "type": "integer"
+        },
+        "teamLeadSystemPrompt": {
+          "type": "string"
+        },
+        "projectObjective": {
+          "type": "string"
+        },
+        "startState": {
+          "type": "string"
+        },
+        "workflowVersion": {
+          "type": "string"
+        },
+        "harnessRestartEvent": {
+          "type": "string"
+        },
+        "harnessRestartPrompt": {
+          "type": "string"
+        },
+        "contextRestartEvent": {
+          "type": "string"
+        },
+        "contextRestartPrompt": {
+          "type": "string"
         },
         "pi": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "tools": { "type": "array", "items": { "type": "string" } },
-            "observedTools": { "type": "array", "items": { "type": "string" } },
-            "skillPaths": { "type": "array", "items": { "type": "string" } },
-            "workerArgs": { "type": "array", "items": { "type": "string" } },
-            "workerExtensions": { "type": "array", "items": { "type": "string" } },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "observedTools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "skillPaths": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "workerArgs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "workerExtensions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "mcp": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "allowToolCalls": { "type": "boolean" },
-                "blockedToolPatterns": { "type": "array", "items": { "type": "string" } }
+                "allowToolCalls": {
+                  "type": "boolean"
+                },
+                "blockedToolPatterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             },
             "shell": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "disallowProjectToolFallback": { "type": "boolean" },
-                "blockedCommandPatterns": { "type": "array", "items": { "type": "string" } }
+                "disallowProjectToolFallback": {
+                  "type": "boolean"
+                },
+                "blockedCommandPatterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
               }
             }
           }
@@ -129,28 +234,51 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "dir": { "type": "string" },
-            "name": { "type": "string" },
-            "fileName": { "type": "string" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "dir": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "fileName": {
+              "type": "string"
+            }
           }
         },
         "contextRestartRequirements": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "rereadFiles": { "type": "array", "items": { "type": "string" } },
-            "requireEvidence": { "type": "boolean" }
+            "rereadFiles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "requireEvidence": {
+              "type": "boolean"
+            }
           }
         },
         "traceability": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "requirePlanToBead": { "type": "boolean" },
-            "requireBeadToPlan": { "type": "boolean" },
-            "evidenceStore": { "type": "string" },
-            "ownedBy": { "type": "string" }
+            "requirePlanToBead": {
+              "type": "boolean"
+            },
+            "requireBeadToPlan": {
+              "type": "boolean"
+            },
+            "evidenceStore": {
+              "type": "string"
+            },
+            "ownedBy": {
+              "type": "string"
+            }
           }
         },
         "reviewArtifacts": {
@@ -161,10 +289,18 @@
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "state": { "type": "string" },
-                "store": { "type": "string" },
-                "eventType": { "type": "string" },
-                "required": { "type": "boolean" }
+                "state": {
+                  "type": "string"
+                },
+                "store": {
+                  "type": "string"
+                },
+                "eventType": {
+                  "type": "string"
+                },
+                "required": {
+                  "type": "boolean"
+                }
               }
             }
           }
@@ -173,40 +309,80 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "requireReadSet": { "type": "boolean" },
-            "requireWriteSet": { "type": "boolean" },
+            "enabled": {
+              "type": "boolean"
+            },
+            "requireReadSet": {
+              "type": "boolean"
+            },
+            "requireWriteSet": {
+              "type": "boolean"
+            },
             "autoRestoreUnapprovedPaths": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
-            "requireAssumptions": { "type": "boolean" },
-            "requireVersionDependencies": { "type": "boolean" },
-            "requireVerifierObligations": { "type": "boolean" },
-            "requireConflictPolicy": { "type": "boolean" },
-            "evidenceStore": { "type": "string" }
+            "requireAssumptions": {
+              "type": "boolean"
+            },
+            "requireVersionDependencies": {
+              "type": "boolean"
+            },
+            "requireVerifierObligations": {
+              "type": "boolean"
+            },
+            "requireConflictPolicy": {
+              "type": "boolean"
+            },
+            "evidenceStore": {
+              "type": "string"
+            }
           }
         },
         "artifacts": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "baseDir": { "type": "string" },
+            "baseDir": {
+              "type": "string"
+            },
             "templates": {
               "type": "object",
               "description": "Artifact-type registry. Each entry is a path template (string shorthand) or a rich declaration object. Object form lets an extension declare a harness-generated, writable system artifact.",
               "additionalProperties": {
                 "oneOf": [
-                  { "type": "string" },
+                  {
+                    "type": "string"
+                  },
                   {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["path"],
+                    "required": [
+                      "path"
+                    ],
                     "properties": {
-                      "path": { "type": "string", "description": "Path template (supports {{beadId}}, {{stateId}}, {{baseDir}}, {{projectRoot}}, {{worktreePath}})." },
-                      "scope": { "type": "string", "enum": ["project", "worktree"], "description": "Root the template resolves against when relative. Defaults to project." },
-                      "writable": { "type": "boolean", "description": "Permit the teammate to write this artifact's exact resolved path outside the plan write set." },
-                      "ensureDir": { "type": "boolean", "description": "Harness ensures the artifact's parent directory exists (mkdir -p)." }
+                      "path": {
+                        "type": "string",
+                        "description": "Path template (supports {{beadId}}, {{stateId}}, {{baseDir}}, {{projectRoot}}, {{worktreePath}})."
+                      },
+                      "scope": {
+                        "type": "string",
+                        "enum": [
+                          "project",
+                          "worktree"
+                        ],
+                        "description": "Root the template resolves against when relative. Defaults to project."
+                      },
+                      "writable": {
+                        "type": "boolean",
+                        "description": "Permit the teammate to write this artifact's exact resolved path outside the plan write set."
+                      },
+                      "ensureDir": {
+                        "type": "boolean",
+                        "description": "Harness ensures the artifact's parent directory exists (mkdir -p)."
+                      }
                     }
                   }
                 ]
@@ -216,8 +392,10 @@
         },
         "roots": {
           "type": "object",
-          "description": "Named path roots resolved at runtime and injected as {{roots.NAME}} template variables into tool env, prompt variables, and path normalization virtualRoots. Values are absolute paths or paths relative to projectRoot. Keys are generic identifiers — project-specific names stay in project config, not harness defaults.",
-          "additionalProperties": { "type": "string" }
+          "description": "Named path roots resolved at runtime and injected as {{roots.NAME}} template variables into tool env, prompt variables, and path normalization virtualRoots. Values are absolute paths or paths relative to projectRoot. Keys are generic identifiers \u2014 project-specific names stay in project config, not harness defaults.",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "toolDefaults": {
           "$ref": "#/definitions/toolProfileShape",
@@ -226,7 +404,9 @@
         "toolProfiles": {
           "type": "object",
           "description": "Named reusable partial command-tool configuration blocks. A command tool may reference one profile by name via its 'profile' field; the profile's fields are applied after toolDefaults and before per-tool fields.",
-          "additionalProperties": { "$ref": "#/definitions/toolProfileShape" }
+          "additionalProperties": {
+            "$ref": "#/definitions/toolProfileShape"
+          }
         },
         "tsProjectToolDefaults": {
           "type": "object",
@@ -237,11 +417,29 @@
               "type": "string",
               "description": "Base directory for default TS project-tool scripts. Relative to projectRoot. Defaults to .pi/project-tools."
             },
-            "argsMode": { "type": "string", "enum": ["replace", "append"], "description": "Default argsMode for tsProjectTool tools. Defaults to append." },
-            "allowArgs": { "type": "boolean", "description": "Default allowArgs for tsProjectTool tools. Defaults to true." },
-            "cwd": { "type": "string" },
-            "timeoutMs": { "type": "integer", "minimum": 1 },
-            "wrapperTimeoutMs": { "type": "integer", "minimum": 1 }
+            "argsMode": {
+              "type": "string",
+              "enum": [
+                "replace",
+                "append"
+              ],
+              "description": "Default argsMode for tsProjectTool tools. Defaults to append."
+            },
+            "allowArgs": {
+              "type": "boolean",
+              "description": "Default allowArgs for tsProjectTool tools. Defaults to true."
+            },
+            "cwd": {
+              "type": "string"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "wrapperTimeoutMs": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         "worktreePolicy": {
@@ -251,49 +449,108 @@
           "properties": {
             "default": {
               "type": "string",
-              "enum": ["always", "never"],
+              "enum": [
+                "always",
+                "never"
+              ],
               "description": "Default provisioning mode for all states without an explicit provisionWorktree override. 'always' provisions a worktree for every state (default); 'never' runs all states at the project root unless overridden per-state."
             }
           }
         },
-        "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
-        "defaultModel": { "type": "string" },
-        "defaultProvider": { "type": "string" },
+        "defaultActionContextMode": {
+          "type": "string",
+          "enum": [
+            "same",
+            "oneShot",
+            "subagent"
+          ]
+        },
+        "defaultModel": {
+          "type": "string"
+        },
+        "defaultProvider": {
+          "type": "string"
+        },
         "modelProviders": {
           "type": "object",
           "additionalProperties": {
             "type": "object",
-            "required": ["provider", "model"],
+            "required": [
+              "provider",
+              "model"
+            ],
             "additionalProperties": false,
             "properties": {
-              "provider": { "type": "string" },
-              "model": { "type": "string" },
-              "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] }
+              "provider": {
+                "type": "string"
+              },
+              "model": {
+                "type": "string"
+              },
+              "thinking": {
+                "type": "string",
+                "enum": [
+                  "off",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh"
+                ]
+              }
             }
           }
         },
-        "cycleCap": { "type": "integer", "minimum": 1, "description": "Maximum consecutive self-loop cycles before a blocked bead is escalated to the Team Lead." },
-        "stateContextRotThreshold": { "type": "integer", "minimum": 1 },
-        "harnessContextRotThreshold": { "type": "integer", "minimum": 1 },
+        "cycleCap": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum consecutive self-loop cycles before a blocked bead is escalated to the Team Lead."
+        },
+        "stateContextRotThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "harnessContextRotThreshold": {
+          "type": "integer",
+          "minimum": 1
+        },
         "observability": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "enabled": { "type": "boolean" },
-            "dir": { "type": "string" },
-            "fileName": { "type": "string" },
-            "retentionDays": { "type": "integer", "minimum": 1 },
+            "enabled": {
+              "type": "boolean"
+            },
+            "dir": {
+              "type": "string"
+            },
+            "fileName": {
+              "type": "string"
+            },
+            "retentionDays": {
+              "type": "integer",
+              "minimum": 1
+            },
             "collector": {
               "type": "object",
-              "required": ["endpoint"],
+              "required": [
+                "endpoint"
+              ],
               "additionalProperties": false,
               "properties": {
-                "endpoint": { "type": "string" },
+                "endpoint": {
+                  "type": "string"
+                },
                 "headers": {
                   "type": "object",
-                  "additionalProperties": { "type": "string" }
+                  "additionalProperties": {
+                    "type": "string"
+                  }
                 },
-                "timeoutMs": { "type": "integer", "minimum": 1 }
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 1
+                }
               }
             }
           }
@@ -302,16 +559,31 @@
     },
     "scheduler": {
       "type": "object",
-      "required": ["weights"],
+      "required": [
+        "weights"
+      ],
       "properties": {
         "weights": {
           "type": "object",
-          "required": ["waitTime", "executionTime", "progress", "penalty"],
+          "required": [
+            "waitTime",
+            "executionTime",
+            "progress",
+            "penalty"
+          ],
           "properties": {
-            "waitTime": { "type": "number" },
-            "executionTime": { "type": "number" },
-            "progress": { "type": "number" },
-            "penalty": { "type": "number" }
+            "waitTime": {
+              "type": "number"
+            },
+            "executionTime": {
+              "type": "number"
+            },
+            "progress": {
+              "type": "number"
+            },
+            "penalty": {
+              "type": "number"
+            }
           }
         }
       }
@@ -348,63 +620,154 @@
         "oneOf": [
           {
             "type": "object",
-            "required": ["name", "type", "command"],
+            "required": [
+              "name",
+              "type",
+              "command"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
-              "description": { "type": "string" },
-              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_]+$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "usageNotes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "failureLimit": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
-                  "suggestedOutcome": { "type": "string" },
+                  "maxFailuresPerState": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "suggestedOutcome": {
+                    "type": "string"
+                  },
                   "suggestedOutcomeByState": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "suggestedOutcomeByAction": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
-                  "message": { "type": "string" },
-                  "terminal": { "type": "boolean" }
+                  "message": {
+                    "type": "string"
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
                 }
               },
-              "type": { "const": "command" },
-              "profile": { "type": "string", "description": "Name of a settings.toolProfiles entry whose fields are applied as defaults for this tool (after toolDefaults, before per-tool fields)." },
-              "command": { "type": "string" },
-              "defaultArgs": { "type": "array", "items": { "type": "string" } },
-              "argsMode": { "type": "string", "enum": ["replace", "append"] },
-              "allowArgs": { "type": "boolean" },
+              "type": {
+                "const": "command"
+              },
+              "profile": {
+                "type": "string",
+                "description": "Name of a settings.toolProfiles entry whose fields are applied as defaults for this tool (after toolDefaults, before per-tool fields)."
+              },
+              "command": {
+                "type": "string"
+              },
+              "defaultArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "argsMode": {
+                "type": "string",
+                "enum": [
+                  "replace",
+                  "append"
+                ]
+              },
+              "allowArgs": {
+                "type": "boolean"
+              },
               "argumentPathScope": {
                 "type": "object",
                 "additionalProperties": false,
-	                "properties": {
-	                  "root": { "type": "string" },
-	                  "rootKind": { "type": "string", "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root." },
-	                  "workspaceRoot": { "type": "string" },
-	                  "virtualRoots": { "type": "array", "items": { "type": "string" } },
-	                  "mustStayInsideRoot": { "type": "boolean" },
-	                  "positionals": { "type": "boolean" },
-                  "flags": { "type": "array", "items": { "type": "string" } }
+                "properties": {
+                  "root": {
+                    "type": "string"
+                  },
+                  "rootKind": {
+                    "type": "string",
+                    "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root."
+                  },
+                  "workspaceRoot": {
+                    "type": "string"
+                  },
+                  "virtualRoots": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mustStayInsideRoot": {
+                    "type": "boolean"
+                  },
+                  "positionals": {
+                    "type": "boolean"
+                  },
+                  "flags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               },
-              "cwd": { "type": "string" },
-              "allowCwdOverride": { "type": "boolean" },
-              "timeoutMs": { "type": "integer", "minimum": 1 },
-              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-              "acceptMaxBuffer": { "type": "boolean" },
-              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
-              "serialize": { "type": "boolean", "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)." },
+              "cwd": {
+                "type": "string"
+              },
+              "allowCwdOverride": {
+                "type": "boolean"
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "wrapperTimeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "acceptMaxBuffer": {
+                "type": "boolean"
+              },
+              "cacheable": {
+                "type": "boolean",
+                "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries."
+              },
+              "serialize": {
+                "type": "boolean",
+                "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)."
+              },
               "successExitCodes": {
                 "type": "array",
-                "items": { "type": "integer", "minimum": 0 },
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                },
                 "minItems": 1,
                 "uniqueItems": true
               },
-              "optional": { "type": "boolean" },
+              "optional": {
+                "type": "boolean"
+              },
               "deprecated": {
                 "type": "boolean",
                 "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
@@ -415,7 +778,9 @@
               },
               "replacedBy": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Replacement tool names for a deprecated tool."
               },
               "deprecationReason": {
@@ -426,54 +791,115 @@
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["tool", "condition"],
+                  "required": [
+                    "tool",
+                    "condition"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "tool": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
-                    "message": { "type": "string" }
+                    "tool": {
+                      "type": "string"
+                    },
+                    "condition": {
+                      "type": "string",
+                      "enum": [
+                        "called",
+                        "passed",
+                        "succeeded"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
                   }
                 }
               },
               "env": {
                 "type": "object",
-                "additionalProperties": { "type": "string" }
+                "additionalProperties": {
+                  "type": "string"
+                }
               }
             }
           },
           {
             "type": "object",
-            "required": ["name", "type", "server"],
+            "required": [
+              "name",
+              "type",
+              "server"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
-              "description": { "type": "string" },
-              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_]+$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "usageNotes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "failureLimit": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
-                  "suggestedOutcome": { "type": "string" },
+                  "maxFailuresPerState": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "suggestedOutcome": {
+                    "type": "string"
+                  },
                   "suggestedOutcomeByState": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "suggestedOutcomeByAction": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
-                  "message": { "type": "string" },
-                  "terminal": { "type": "boolean" }
+                  "message": {
+                    "type": "string"
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
                 }
               },
-              "type": { "const": "mcp" },
-              "server": { "type": "string" },
-              "configPath": { "type": "string" },
-              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
-              "serialize": { "type": "boolean", "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)." },
-              "timeoutMs": { "type": "integer", "minimum": 1 },
-              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
+              "type": {
+                "const": "mcp"
+              },
+              "server": {
+                "type": "string"
+              },
+              "configPath": {
+                "type": "string"
+              },
+              "cacheable": {
+                "type": "boolean",
+                "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries."
+              },
+              "serialize": {
+                "type": "boolean",
+                "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)."
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "wrapperTimeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
               "argumentDefaults": {
                 "type": "object",
                 "additionalProperties": {
@@ -485,7 +911,9 @@
                 "type": "object",
                 "additionalProperties": {
                   "type": "array",
-                  "items": { "type": "string" }
+                  "items": {
+                    "type": "string"
+                  }
                 }
               },
               "pathArguments": {
@@ -495,26 +923,49 @@
                   "additionalProperties": {
                     "type": "object",
                     "additionalProperties": false,
-	                    "properties": {
-	                      "root": { "type": "string" },
-	                      "rootKind": { "type": "string", "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root." },
-	                      "workspaceRoot": { "type": "string" },
-	                      "virtualRoots": { "type": "array", "items": { "type": "string" } },
-	                      "mustStayInsideRoot": { "type": "boolean" }
-	                    }
+                    "properties": {
+                      "root": {
+                        "type": "string"
+                      },
+                      "rootKind": {
+                        "type": "string",
+                        "description": "Built-in values: worktree, project, framework, workspace. Any key from settings.roots is also valid and resolves to the configured named root."
+                      },
+                      "workspaceRoot": {
+                        "type": "string"
+                      },
+                      "virtualRoots": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "mustStayInsideRoot": {
+                        "type": "boolean"
+                      }
+                    }
                   }
                 }
               },
               "operations": {
                 "oneOf": [
-                  { "type": "array", "items": { "type": "string" } },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
                   {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   }
                 ]
               },
-              "optional": { "type": "boolean" },
+              "optional": {
+                "type": "boolean"
+              },
               "deprecated": {
                 "type": "boolean",
                 "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
@@ -525,7 +976,9 @@
               },
               "replacedBy": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Replacement tool names for a deprecated tool."
               },
               "deprecationReason": {
@@ -536,12 +989,26 @@
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["tool", "condition"],
+                  "required": [
+                    "tool",
+                    "condition"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "tool": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
-                    "message": { "type": "string" }
+                    "tool": {
+                      "type": "string"
+                    },
+                    "condition": {
+                      "type": "string",
+                      "enum": [
+                        "called",
+                        "passed",
+                        "succeeded"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -549,32 +1016,62 @@
           },
           {
             "type": "object",
-            "required": ["name", "type"],
+            "required": [
+              "name",
+              "type"
+            ],
             "additionalProperties": false,
             "properties": {
-              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
-              "description": { "type": "string" },
-              "usageNotes": { "type": "array", "items": { "type": "string" } },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_]+$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "usageNotes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "failureLimit": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
-                  "suggestedOutcome": { "type": "string" },
+                  "maxFailuresPerState": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "suggestedOutcome": {
+                    "type": "string"
+                  },
                   "suggestedOutcomeByState": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "suggestedOutcomeByAction": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
-                  "message": { "type": "string" },
-                  "terminal": { "type": "boolean" }
+                  "message": {
+                    "type": "string"
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
                 }
               },
-              "type": { "const": "extension" },
-              "optional": { "type": "boolean" },
+              "type": {
+                "const": "extension"
+              },
+              "optional": {
+                "type": "boolean"
+              },
               "deprecated": {
                 "type": "boolean",
                 "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
@@ -585,14 +1082,19 @@
               },
               "replacedBy": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Replacement tool names for a deprecated tool."
               },
               "deprecationReason": {
                 "type": "string",
                 "description": "Human-readable explanation of why this tool is deprecated."
               },
-              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
+              "cacheable": {
+                "type": "boolean",
+                "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries."
+              },
               "observeOnly": {
                 "type": "boolean",
                 "description": "When true, this extension tool is declared for observation only. The harness records its calls but does not enforce Pi host inventory presence, callable status, or provenance at startup. observeOnly tools cannot satisfy requiredTools."
@@ -601,12 +1103,26 @@
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["tool", "condition"],
+                  "required": [
+                    "tool",
+                    "condition"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "tool": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
-                    "message": { "type": "string" }
+                    "tool": {
+                      "type": "string"
+                    },
+                    "condition": {
+                      "type": "string",
+                      "enum": [
+                        "called",
+                        "passed",
+                        "succeeded"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -614,49 +1130,124 @@
           },
           {
             "type": "object",
-            "required": ["name", "type"],
+            "required": [
+              "name",
+              "type"
+            ],
             "additionalProperties": false,
             "description": "TypeScript project-tool shorthand. Expands to type: command with command: node, --experimental-strip-types, and the resolved script path before schema validation. argsMode defaults to append and allowArgs defaults to true unless explicitly overridden.",
             "properties": {
-              "name": { "type": "string", "pattern": "^[A-Za-z0-9_]+$" },
-              "description": { "type": "string" },
-              "usageNotes": { "type": "array", "items": { "type": "string" } },
-              "type": { "const": "tsProjectTool" },
+              "name": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_]+$"
+              },
+              "description": {
+                "type": "string"
+              },
+              "usageNotes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "const": "tsProjectTool"
+              },
               "scriptPath": {
                 "type": "string",
                 "description": "Path to the TypeScript script. Absolute or relative to projectRoot. Defaults to <settings.tsProjectToolDefaults.scriptDir>/<toolName>.ts (or .pi/project-tools/<toolName>.ts if not configured). Supports {{projectRoot}} template variable."
               },
-              "profile": { "type": "string", "description": "Name of a settings.toolProfiles entry applied after tsProjectTool defaults and before per-tool fields." },
-              "defaultArgs": { "type": "array", "items": { "type": "string" }, "description": "Additional args appended after the script path. The node + --experimental-strip-types + scriptPath prefix is always prepended." },
-              "argsMode": { "type": "string", "enum": ["replace", "append"] },
-              "allowArgs": { "type": "boolean" },
+              "profile": {
+                "type": "string",
+                "description": "Name of a settings.toolProfiles entry applied after tsProjectTool defaults and before per-tool fields."
+              },
+              "defaultArgs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Additional args appended after the script path. The node + --experimental-strip-types + scriptPath prefix is always prepended."
+              },
+              "argsMode": {
+                "type": "string",
+                "enum": [
+                  "replace",
+                  "append"
+                ]
+              },
+              "allowArgs": {
+                "type": "boolean"
+              },
               "argumentPathScope": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "root": { "type": "string" },
-                  "rootKind": { "type": "string" },
-                  "workspaceRoot": { "type": "string" },
-                  "virtualRoots": { "type": "array", "items": { "type": "string" } },
-                  "mustStayInsideRoot": { "type": "boolean" },
-                  "positionals": { "type": "boolean" },
-                  "flags": { "type": "array", "items": { "type": "string" } }
+                  "root": {
+                    "type": "string"
+                  },
+                  "rootKind": {
+                    "type": "string"
+                  },
+                  "workspaceRoot": {
+                    "type": "string"
+                  },
+                  "virtualRoots": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mustStayInsideRoot": {
+                    "type": "boolean"
+                  },
+                  "positionals": {
+                    "type": "boolean"
+                  },
+                  "flags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               },
-              "cwd": { "type": "string" },
-              "allowCwdOverride": { "type": "boolean" },
-              "timeoutMs": { "type": "integer", "minimum": 1 },
-              "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
-              "acceptMaxBuffer": { "type": "boolean" },
-              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
-              "serialize": { "type": "boolean", "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)." },
+              "cwd": {
+                "type": "string"
+              },
+              "allowCwdOverride": {
+                "type": "boolean"
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "wrapperTimeoutMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "acceptMaxBuffer": {
+                "type": "boolean"
+              },
+              "cacheable": {
+                "type": "boolean",
+                "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries."
+              },
+              "serialize": {
+                "type": "boolean",
+                "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)."
+              },
               "successExitCodes": {
                 "type": "array",
-                "items": { "type": "integer", "minimum": 0 },
+                "items": {
+                  "type": "integer",
+                  "minimum": 0
+                },
                 "minItems": 1,
                 "uniqueItems": true
               },
-              "optional": { "type": "boolean" },
+              "optional": {
+                "type": "boolean"
+              },
               "deprecated": {
                 "type": "boolean",
                 "description": "When true, the harness omits this tool from model-facing guidance and returns REJECTED when invoked."
@@ -667,7 +1258,9 @@
               },
               "replacedBy": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Replacement tool names for a deprecated tool."
               },
               "deprecationReason": {
@@ -678,36 +1271,65 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "maxFailuresPerState": { "type": "integer", "minimum": 1 },
-                  "suggestedOutcome": { "type": "string" },
+                  "maxFailuresPerState": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "suggestedOutcome": {
+                    "type": "string"
+                  },
                   "suggestedOutcomeByState": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "suggestedOutcomeByAction": {
                     "type": "object",
-                    "additionalProperties": { "type": "string" }
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
-                  "message": { "type": "string" },
-                  "terminal": { "type": "boolean" }
+                  "message": {
+                    "type": "string"
+                  },
+                  "terminal": {
+                    "type": "boolean"
+                  }
                 }
               },
               "validationRules": {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["tool", "condition"],
+                  "required": [
+                    "tool",
+                    "condition"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "tool": { "type": "string" },
-                    "condition": { "type": "string", "enum": ["called", "passed", "succeeded"] },
-                    "message": { "type": "string" }
+                    "tool": {
+                      "type": "string"
+                    },
+                    "condition": {
+                      "type": "string",
+                      "enum": [
+                        "called",
+                        "passed",
+                        "succeeded"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
                   }
                 }
               },
               "env": {
                 "type": "object",
-                "additionalProperties": { "type": "string" }
+                "additionalProperties": {
+                  "type": "string"
+                }
               }
             }
           }
@@ -716,7 +1338,9 @@
     },
     "statechart": {
       "type": "object",
-      "required": ["terminalStates"],
+      "required": [
+        "terminalStates"
+      ],
       "additionalProperties": false,
       "description": "Statechart vocabulary configuration. All fields except terminalStates have defaults that reproduce the original SUCCESS/FAILURE/BLOCKED/completed literals.",
       "properties": {
@@ -726,33 +1350,45 @@
         },
         "terminalStates": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "minItems": 1,
           "description": "State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent."
         },
         "advanceOutcomes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Outcome strings that trigger forward state advancement. Defaults to ['SUCCESS']."
         },
         "failedOutcomes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Outcome strings that map to STATE_FAILED. Defaults to ['FAILURE']."
         },
         "blockedOutcomes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Outcome strings that map to STATE_BLOCKED. Defaults to ['BLOCKED']."
         },
         "customOutcomes": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Additional custom outcome strings beyond the named sets."
         },
         "customEvents": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "description": "Placeholder: custom event names whose behaviour is filled by a parallel bead."
         }
       }
@@ -761,29 +1397,71 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id"],
+        "required": [
+          "id"
+        ],
         "additionalProperties": false,
         "properties": {
-          "id": { "type": "string" },
-          "description": { "type": "string" },
-          "states": { "type": "array", "items": { "type": "string" } },
-          "beforeStates": { "type": "array", "items": { "type": "string" } },
-          "afterStates": { "type": "array", "items": { "type": "string" } },
-          "required": { "type": "boolean" },
+          "id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "beforeStates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "afterStates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "required": {
+            "type": "boolean"
+          },
           "checklist": {
             "oneOf": [
-              { "type": "string" },
+              {
+                "type": "string"
+              },
               {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["text"],
+                  "required": [
+                    "text"
+                  ],
                   "properties": {
-                    "text": { "type": "string" },
-                    "mandatory": { "type": "boolean" },
-                    "type": { "type": "string", "enum": ["manual", "tool", "script"] },
-                    "tool": { "type": "string" },
-                    "script": { "type": "string" }
+                    "text": {
+                      "type": "string"
+                    },
+                    "mandatory": {
+                      "type": "boolean"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "manual",
+                        "tool",
+                        "script"
+                      ]
+                    },
+                    "tool": {
+                      "type": "string"
+                    },
+                    "script": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -796,34 +1474,73 @@
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["identity", "actions", "transitions"],
+        "required": [
+          "identity",
+          "actions",
+          "transitions"
+        ],
         "additionalProperties": false,
         "properties": {
           "identity": {
             "type": "object",
-            "required": ["role", "expertise", "constraints"],
+            "required": [
+              "role",
+              "expertise",
+              "constraints"
+            ],
             "properties": {
-              "role": { "type": "string" },
-              "expertise": { "type": "string" },
-              "constraints": { "type": "array", "items": { "type": "string" } }
+              "role": {
+                "type": "string"
+              },
+              "expertise": {
+                "type": "string"
+              },
+              "constraints": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
             }
           },
-          "baseInstructions": { "type": "string" },
-          "harnessRestartPrompt": { "type": "string" },
-          "contextRestartPrompt": { "type": "string" },
-          "ruleCategories": { "type": "array", "items": { "type": "string" } },
-          "skills": { "type": "array", "items": { "type": "string" } },
+          "baseInstructions": {
+            "type": "string"
+          },
+          "harnessRestartPrompt": {
+            "type": "string"
+          },
+          "contextRestartPrompt": {
+            "type": "string"
+          },
+          "ruleCategories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "requiredTools": {
             "type": "array",
             "items": {
               "oneOf": [
-                { "type": "string" },
+                {
+                  "type": "string"
+                },
                 {
                   "type": "object",
-                  "required": ["name"],
+                  "required": [
+                    "name"
+                  ],
                   "additionalProperties": false,
                   "properties": {
-                    "name": { "type": "string" },
+                    "name": {
+                      "type": "string"
+                    },
                     "expectsVerify": {
                       "type": "boolean",
                       "description": "When true, the coordinator artifact-presence gate fails fast at startup if no verify() callback is registered for this tool. Presence-only tools omit this flag."
@@ -836,8 +1553,18 @@
                       "type": "object",
                       "additionalProperties": false,
                       "properties": {
-                        "writeSetIncludesAny": { "type": "array", "items": { "type": "string" } },
-                        "writeSetIncludesAll": { "type": "array", "items": { "type": "string" } }
+                        "writeSetIncludesAny": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "writeSetIncludesAll": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
                       }
                     }
                   }
@@ -845,33 +1572,85 @@
               ]
             }
           },
-          "defaultActionContextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
-          "maxContextTokens": { "type": "integer", "minimum": 1 },
-          "handoverRequired": { "type": "boolean" },
-          "llmProvider": { "type": "string" },
-          "model": { "type": "string" },
-          "thinking": { "type": "string", "enum": ["off", "minimal", "low", "medium", "high", "xhigh"] },
-          "contextRotThreshold": { "type": "integer", "minimum": 1 },
+          "defaultActionContextMode": {
+            "type": "string",
+            "enum": [
+              "same",
+              "oneShot",
+              "subagent"
+            ]
+          },
+          "maxContextTokens": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "handoverRequired": {
+            "type": "boolean"
+          },
+          "llmProvider": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "thinking": {
+            "type": "string",
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          },
+          "contextRotThreshold": {
+            "type": "integer",
+            "minimum": 1
+          },
           "provisionWorktree": {
             "type": "boolean",
             "description": "Whether to provision an isolated git worktree for this state. When true, the Supervisor creates a per-bead worktree before spawning the teammate. When false, the teammate runs at the project root. When absent, falls back to settings.worktreePolicy.default ('always' if not set)."
           },
-          "handoverTemplate": { "type": "string" },
-          "qualityCheckCommand": { "type": "string" },
+          "handoverTemplate": {
+            "type": "string"
+          },
+          "qualityCheckCommand": {
+            "type": "string"
+          },
           "checklist": {
             "oneOf": [
-              { "type": "string" },
+              {
+                "type": "string"
+              },
               {
                 "type": "array",
                 "items": {
                   "type": "object",
-                  "required": ["text"],
+                  "required": [
+                    "text"
+                  ],
                   "properties": {
-                    "text": { "type": "string" },
-                    "mandatory": { "type": "boolean" },
-                    "type": { "type": "string", "enum": ["manual", "tool", "script"] },
-                    "tool": { "type": "string" },
-                    "script": { "type": "string" }
+                    "text": {
+                      "type": "string"
+                    },
+                    "mandatory": {
+                      "type": "boolean"
+                    },
+                    "type": {
+                      "type": "string",
+                      "enum": [
+                        "manual",
+                        "tool",
+                        "script"
+                      ]
+                    },
+                    "tool": {
+                      "type": "string"
+                    },
+                    "script": {
+                      "type": "string"
+                    }
                   }
                 }
               }
@@ -879,41 +1658,100 @@
           },
           "on": {
             "type": "object",
-            "additionalProperties": { "type": "string" }
+            "additionalProperties": {
+              "type": "string"
+            }
           },
           "actions": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["id", "type"],
+              "required": [
+                "id",
+                "type"
+              ],
               "properties": {
-                "id": { "type": "string" },
-                "type": { "type": "string", "enum": ["prompt", "checklist", "tool", "script"] },
-                "context": { "type": "string", "enum": ["parent", "fresh"], "default": "parent" },
-                "prompt": { "type": "string" },
-                "tool": { "type": "string" },
+                "id": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "prompt",
+                    "checklist",
+                    "tool",
+                    "script"
+                  ]
+                },
+                "context": {
+                  "type": "string",
+                  "enum": [
+                    "parent",
+                    "fresh"
+                  ],
+                  "default": "parent"
+                },
+                "prompt": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                },
                 "arguments": {
                   "type": "object",
                   "additionalProperties": true
                 },
-                "command": { "type": "string" },
-                "contextMode": { "type": "string", "enum": ["same", "oneShot", "subagent"] },
-                "maxContextTokens": { "type": "integer", "minimum": 1 },
-                "handoverRequired": { "type": "boolean" },
+                "command": {
+                  "type": "string"
+                },
+                "contextMode": {
+                  "type": "string",
+                  "enum": [
+                    "same",
+                    "oneShot",
+                    "subagent"
+                  ]
+                },
+                "maxContextTokens": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "handoverRequired": {
+                  "type": "boolean"
+                },
                 "checklist": {
                   "oneOf": [
-                    { "type": "string" },
+                    {
+                      "type": "string"
+                    },
                     {
                       "type": "array",
                       "items": {
                         "type": "object",
-                        "required": ["text"],
+                        "required": [
+                          "text"
+                        ],
                         "properties": {
-                          "text": { "type": "string" },
-                          "mandatory": { "type": "boolean" },
-                          "type": { "type": "string", "enum": ["manual", "tool", "script"] },
-                          "tool": { "type": "string" },
-                          "script": { "type": "string" }
+                          "text": {
+                            "type": "string"
+                          },
+                          "mandatory": {
+                            "type": "boolean"
+                          },
+                          "type": {
+                            "type": "string",
+                            "enum": [
+                              "manual",
+                              "tool",
+                              "script"
+                            ]
+                          },
+                          "tool": {
+                            "type": "string"
+                          },
+                          "script": {
+                            "type": "string"
+                          }
                         }
                       }
                     }
@@ -924,9 +1762,10 @@
           },
           "transitions": {
             "type": "object",
-            "properties": {
-            },
-            "additionalProperties": { "type": "string" }
+            "properties": {},
+            "additionalProperties": {
+              "type": "string"
+            }
           }
         }
       }

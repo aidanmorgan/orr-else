@@ -558,7 +558,32 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-buvj: Reject configs that declare compatibility fields.
+   *
+   * settings.compatibilityMode and settings.compatibility were removed in buvj.
+   * These fields are no longer part of the harness contract; a config that
+   * still declares them is stale and must be updated.  The error includes the
+   * exact field names and migration guidance so the author can fix without
+   * reading documentation.
+   */
+  private validateNoCompatibilityFields(config: HarnessConfig): void {
+    const settings = config.settings as Record<string, unknown>;
+    const hasMode = 'compatibilityMode' in settings;
+    const hasCompat = 'compatibility' in settings;
+    if (hasMode || hasCompat) {
+      const fields = [hasMode && 'settings.compatibilityMode', hasCompat && 'settings.compatibility']
+        .filter(Boolean).join(' and ');
+      throw new Error(
+        `${fields} ${hasMode && hasCompat ? 'have been' : 'has been'} removed (pi-experiment-buvj). ` +
+        `The compatibility-context surface is no longer part of the Orr Else core harness. ` +
+        `Remove the ${fields} ${hasMode && hasCompat ? 'fields' : 'field'} from your harness.yaml to start.`
+      );
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
+    this.validateNoCompatibilityFields(config);
     this.validateDeprecatedRequiredTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);

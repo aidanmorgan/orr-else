@@ -310,7 +310,6 @@ interface ExtensionSession {
   // ── registration guards (reset each invocation so a second call re-registers) ──
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
-  compatibilityContextToolRegistered: boolean;
   readPathContextToolRegistered: boolean;
   preSignalAuditToolRegistered: boolean;
   piToolObserverRegistered: boolean;
@@ -346,7 +345,6 @@ function createExtensionSession(): ExtensionSession {
     observedPiToolInvocationIds: new Map(),
     artifactPathsToolRegistered: false,
     queryArtifactToolRegistered: false,
-    compatibilityContextToolRegistered: false,
     readPathContextToolRegistered: false,
     preSignalAuditToolRegistered: false,
     piToolObserverRegistered: false,
@@ -1551,8 +1549,6 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
   const configPath = services.configLoader.getConfigPath();
-  const rulePaths = services.instructionLoader.compatibilityPaths(config);
-
   // Resolve skill names for the stable identity — best-effort; empty on error.
   let skillNames: string[] = [];
   try {
@@ -1569,7 +1565,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
     stateId: activeRun.stateId,
     toolNames: getConfiguredPiToolNames(config),
     skillNames,
-    ruleCategories: rulePaths,
+    ruleCategories: [],
     protocolLabel: 'ORR_ELSE_PROTOCOL_v1'
   };
 
@@ -1587,10 +1583,8 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
       llmProvider: llm.provider,
       llmModel: llm.model,
       llmThinking: llm.thinking,
-      compatibilityMode: config.settings.compatibilityMode || 'none',
       progressPath: activeRun.worktreePath ? path.join(activeRun.worktreePath, 'PROGRESS.md') : undefined,
       historyPath: activeRun.worklogManager.getWorklogPath(activeRun.beadId),
-      rulePaths,
       outstandingChecklist: checklistProtocol
     },
     identity
@@ -2796,22 +2790,6 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           summary: Type.Optional(Type.Boolean({ description: 'When true, return per-projection size estimates (byteCount + tokenEstimate) WITHOUT content. Use this first to see what is available and how large each projection is before fetching inline. Mutually exclusive with projection and selector.' }))
         }),
         execute: async (params: any) => artifactQuery.query(params)
-      }) as any);
-    }
-
-    if (!session.compatibilityContextToolRegistered) {
-      session.compatibilityContextToolRegistered = true;
-      pi.registerTool(wrapRuntimeTool({
-        name: BuiltInToolName.GET_COMPATIBILITY_CONTEXT,
-        description: 'Return the configured Claude/Codex compatibility path manifest for this project.',
-        parameters: Type.Object({
-          includeDocs: Type.Optional(Type.Boolean({ description: 'Include markdown files discovered under configured compatibility docs directories.' })),
-          includeAgents: Type.Optional(Type.Boolean({ description: 'Include markdown files discovered under configured compatibility agent directories.' })),
-          maxDocs: Type.Optional(Type.Number({ description: 'Maximum compatibility docs to return when includeDocs is true.' })),
-          maxAgents: Type.Optional(Type.Number({ description: 'Maximum compatibility agent files to return when includeAgents is true.' }))
-        }),
-        execute: async (params: { includeDocs?: boolean; includeAgents?: boolean; maxDocs?: number; maxAgents?: number }) =>
-          services.instructionLoader.compatibilityContext(await services.configLoader.load(), params)
       }) as any);
     }
 

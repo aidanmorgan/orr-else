@@ -41,7 +41,6 @@ function makeContext(overrides: Partial<PromptContext> = {}): PromptContext {
     phase: 'Planning',
     llmProvider: 'anthropic',
     llmModel: 'claude-sonnet-4-6',
-    compatibilityMode: 'none',
     skillPaths: ['/home/user/project/.pi/skills/quality/SKILL.md', '/home/user/project/.pi/skills/planner/SKILL.md'],
     rulePaths: ['/home/user/project/.pi/rules/general.md', '/home/user/project/.pi/rules/security.md'],
     outstandingChecklist: 'None provided.',

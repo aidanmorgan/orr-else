@@ -248,13 +248,6 @@ export interface ConditionalRequiredTool {
 
 export type RequiredTool = string | ConditionalRequiredTool;
 
-export interface CompatibilityDiscoveryConfig {
-  masterRules?: string[];
-  ruleDirs?: string[];
-  hookDirs?: string[];
-  docsDirs?: string[];
-  agentDirs?: string[];
-}
 
 /**
  * Rich declaration for an artifact type. Lets a project extension declare an
@@ -430,8 +423,6 @@ export interface HarnessConfig {
     harnessRestartPrompt?: string;
     contextRestartEvent: string;
     contextRestartPrompt?: string;
-    compatibilityMode?: string;
-    compatibility?: { modes?: Record<string, CompatibilityDiscoveryConfig> };
     pi?: PiIntegrationConfig;
     eventStore?: { enabled?: boolean; dir?: string; name?: string; fileName?: string };
     contextRestartRequirements?: { rereadFiles?: string[]; requireEvidence?: boolean };

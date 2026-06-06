@@ -4,7 +4,6 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { DEFAULT_OBSERVED_PI_TOOLS, PromptProvenanceKind, PromptProvenanceDefaults } from '../constants/index.js';
-import { InstructionLoader } from './InstructionLoader.js';
 
 const TemplateToken = {
   CONFIG_PATH: '{{configPath}}',
@@ -436,7 +435,7 @@ function looksLikeFilePath(value: string): boolean {
  *
  * Computes a SHA-256 for each prompt/config source that is specific to THIS
  * state's run: the state-config-subtree hash, goal prompt file, state action
- * prompt files, compatibility prompt files, and skill SKILL.md files.
+ * prompt files, and skill SKILL.md files.
  *
  * The whole harness.yaml file hash is also recorded, but only for AUDIT
  * purposes (blocking: false) — it is NOT included in the STALE rejection set.
@@ -588,30 +587,7 @@ export function resolvePromptProvenance(
     }
   }
 
-  // ── 5. Compatibility / rule prompt files ─────────────────────────────────
-  try {
-    const instructionLoader = new InstructionLoader(projectRoot);
-    const compatPaths = instructionLoader.compatibilityPaths(config);
-    for (const compatPath of compatPaths) {
-      try {
-        const { sha256, missing } = hashFile(compatPath);
-        const entry: PromptProvenanceEntry = {
-          kind: PromptProvenanceKind.COMPATIBILITY_PROMPT,
-          path: compatPath,
-          sha256
-        };
-        if (missing) entry.missing = true;
-        entries.push(entry);
-      } catch {
-        // Skip individual bad compat path rather than aborting.
-      }
-    }
-  } catch {
-    // compatibilityPaths() itself should not throw (uses existsSync internally),
-    // but guard defensively.
-  }
-
-  // ── 6. Skill SKILL.md files ───────────────────────────────────────────────
+  // ── 5. Skill SKILL.md files ───────────────────────────────────────────────
   // CONFIGURED sources: resolvePiSkillPathsForState throws for any skill that
   // is listed in the state's `skills` array (or in global `skillPaths`) but
   // cannot be found on disk.  We must NOT silently eat that error — a missing
