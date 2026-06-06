@@ -36,6 +36,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   TestPhase:
     identity: { role: "R1", expertise: "E1", constraints: [] }
@@ -44,7 +49,7 @@ states:
       - id: a1
         type: prompt
         prompt: "temp_prompt.md"
-    transitions: { SUCCESS: "done", FAILURE: "failed" }
+    transitions: { SUCCESS: "completed", FAILURE: "TestPhase" }
 `;
     fs.writeFileSync(tempConfigPath, configContent);
 
@@ -68,6 +73,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   TestPhase:
     identity: { role: "R1", expertise: "E1", constraints: [] }
@@ -77,7 +87,7 @@ states:
       - id: a1
         type: prompt
         prompt: "Inline"
-    transitions: { SUCCESS: "done", FAILURE: "failed" }
+    transitions: { SUCCESS: "completed", FAILURE: "TestPhase" }
 `;
     fs.writeFileSync(tempConfigPath, configContent);
 
@@ -111,6 +121,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `;
     fs.writeFileSync(tempConfigPath, configContent);
@@ -135,6 +150,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `;
     const secondConfig = `
@@ -146,6 +166,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `;
     fs.writeFileSync(tempConfigPath, firstConfig);
@@ -171,6 +196,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: bounded_tool
     type: command
@@ -195,6 +225,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -220,6 +255,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: framework_scan
     type: command
@@ -258,6 +298,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `;
     fs.writeFileSync(tempConfigPath, configContent);
@@ -284,6 +329,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Review:
     llmProvider: openai
@@ -291,7 +341,9 @@ states:
     thinking: "xhigh"
     identity: { role: "Reviewer", expertise: "Review", constraints: [] }
     baseInstructions: "Review"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Review" }
 `;
     fs.writeFileSync(tempConfigPath, configContent);
@@ -321,12 +373,19 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Plan:
     llmProvider: claude
     identity: { role: "Planner", expertise: "Plan", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Plan" }
 `;
     fs.writeFileSync(tempConfigPath, configContent);
@@ -356,12 +415,19 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Plan:
     llmProvider: codex
     identity: { role: "Planner", expertise: "Plan", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Plan" }
 `;
     fs.writeFileSync(tempConfigPath, configContent);
@@ -585,11 +651,19 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 tools:
   - name: run_tests
@@ -638,6 +712,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: tool_a
@@ -669,6 +748,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: tool_a
@@ -704,6 +788,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: ts_tool
@@ -735,6 +824,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: mcp_tool
@@ -758,6 +852,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: ts_tool
@@ -794,6 +893,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: bad_tool
@@ -824,6 +928,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: no_profile_tool
@@ -845,6 +954,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: ts_tool
@@ -868,6 +982,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: plain_tool
@@ -911,6 +1030,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: run_checks
@@ -939,6 +1063,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: custom_tool
@@ -962,6 +1091,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: my_tool
@@ -982,6 +1116,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: tool_replace
@@ -1003,6 +1142,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: tool_a
@@ -1021,6 +1165,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: timed_tool
@@ -1046,6 +1195,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: env_tool
@@ -1067,6 +1221,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: plain_cmd
@@ -1091,6 +1250,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: tool_with_args
@@ -1114,6 +1278,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: expanded_ts_tool
@@ -1146,6 +1315,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: valid_ts_tool
@@ -1192,6 +1366,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
@@ -1210,6 +1389,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
@@ -1231,6 +1415,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: plan_contract
@@ -1251,6 +1440,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
@@ -1267,6 +1461,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     let caught: Error | undefined;
@@ -1292,6 +1491,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: plan_contract
@@ -1324,6 +1528,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 tools:
   - name: plan_contract
@@ -1366,13 +1575,21 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
       - watch_tool
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: watch_tool
@@ -1393,6 +1610,12 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -1426,13 +1649,20 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
       - real_tool
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: watch_tool
@@ -1454,13 +1684,20 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
       - real_tool
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: real_tool
@@ -1518,6 +1755,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `;
 
@@ -1664,6 +1906,11 @@ settings:
   worktreePolicy: {}
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
@@ -1698,6 +1945,11 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
@@ -1714,6 +1966,11 @@ settings:
     default: never
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
@@ -1752,6 +2009,12 @@ settings:
   worktreePolicy:
     default: always
   compatibilityMode: claude
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states: {}
 `);
     expect(() => configLoader.load(configPath)).toThrow(/compatibilityMode.*removed|compatibility.*removed|no longer supported|removed.*buvj/i);
@@ -1767,6 +2030,12 @@ settings:
     modes:
       claude:
         masterRules: [CLAUDE.md]
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states: {}
 `);
     expect(() => configLoader.load(configPath)).toThrow(/compatibility.*removed|compatibilityMode.*removed|no longer supported|removed.*buvj/i);
@@ -1784,6 +2053,12 @@ settings:
       claude:
         masterRules: [CLAUDE.md]
         hookDirs: [.claude/hooks]
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states: {}
 `);
     expect(() => configLoader.load(configPath)).toThrow(/compatibilityMode.*removed|compatibility.*removed|no longer supported|removed.*buvj/i);
@@ -1795,6 +2070,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states: {}
 `);
     expect(() => configLoader.load(configPath)).not.toThrow();

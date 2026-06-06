@@ -46,15 +46,8 @@ export type OutcomeName = string & { readonly __outcomeName: unique symbol };
  * Typed, fail-closed outcome classification.
  *
  * Returns a typed `OutcomeCategory` enum value by delegating to
- * `outcomeCategory()`.  Because `outcomeCategory()` is now the single source
- * of truth — including its fail-closed behaviour for missing/falsy outcomes in
- * strict mode — this function simply maps its string result to the enum.
- *
- *  - In strict mode (explicit vocabulary declared): undeclared and
- *    missing/falsy outcomes classify as FAILED, never ADVANCE.
- *  - In legacy mode (no explicit vocabulary): missing/falsy outcomes
- *    fall through to ADVANCE (backward-compatible with the old behaviour
- *    where `teammateEventTypeForOutcome(undefined)` → STATE_TRANSITIONED).
+ * `outcomeCategory()`.  Always fail-closed: missing/falsy and undeclared
+ * outcomes classify as FAILED, never ADVANCE.
  *
  * Prefer this function over `outcomeCategory()` in new code that needs the
  * typed enum.
@@ -89,28 +82,19 @@ export function isTerminalState(stateId: string, config: HarnessConfig): boolean
  *  - 'failed'   — outcome is in failedOutcomes  (default ['FAILURE'])
  *  - 'blocked'  — outcome is in blockedOutcomes (default ['BLOCKED'])
  *  - 'custom'   — outcome is in customOutcomes
- *  - 'failed'   — fallback in strict mode (undeclared or missing outcome must NOT advance)
- *  - 'advance'  — fallback in legacy mode (no explicit vocab; preserves old behaviour)
+ *  - 'failed'   — fallback for all missing, falsy, or undeclared outcomes (fail-closed)
  *
- * With no explicit outcome vocabulary the defaults reproduce the old hard-coded
- * literals.
- *
- * Missing/falsy outcomes in strict mode (explicit vocabulary declared) are
- * classified as 'failed', not 'advance' — the fail-closed behaviour that
- * prevents a missing outcome from advancing progress.  In legacy mode (no
- * explicit vocabulary) falsy outcomes still return 'advance' for backward
- * compatibility.
- *
- * isAdvanceOutcome retains its own falsy guard returning false regardless of
- * mode, preserving the old `outcome === EventName.SUCCESS` semantics.
+ * With no explicit outcome vocabulary the defaults (SUCCESS/FAILURE/BLOCKED)
+ * are used. Missing/falsy/unknown outcomes always return 'failed' — there is
+ * no legacy advance fallback.
  */
 export function outcomeCategory(
   outcome: string | null | undefined,
   config: HarnessConfig
 ): 'advance' | 'failed' | 'blocked' | 'custom' {
+  // Missing/falsy outcomes always fail closed — no legacy advance fallback.
   if (!outcome || typeof outcome !== 'string') {
-    const strictMode = declaredOutcomeVocabulary(config) !== null;
-    return strictMode ? 'failed' : 'advance';
+    return 'failed';
   }
 
   const sc = config.statechart;
@@ -124,12 +108,8 @@ export function outcomeCategory(
   if (failed.map(o => o.toUpperCase()).includes(normalized)) return 'failed';
   if (blocked.map(o => o.toUpperCase()).includes(normalized)) return 'blocked';
   if (custom.map(o => o.toUpperCase()).includes(normalized)) return 'custom';
-  // Unknown outcome: in strict mode (explicit vocabulary declared) it must NOT
-  // be treated as advance — that is the root-cause bug.  In legacy mode
-  // (no explicit vocab) preserve the old fallback-to-advance behaviour so
-  // configs that predate the statechart block keep working.
-  const strictMode = declaredOutcomeVocabulary(config) !== null;
-  return strictMode ? 'failed' : 'advance';
+  // Unknown outcome: always fail closed — no legacy advance fallback.
+  return 'failed';
 }
 
 /**
@@ -145,21 +125,36 @@ export function isAdvanceOutcome(outcome: string | null | undefined, config: Har
 }
 
 /**
- * Builds the set of declared outcome keys for a config that has an EXPLICIT
- * outcome vocabulary (at least one of advanceOutcomes/failedOutcomes/
- * blockedOutcomes/customOutcomes declared in the statechart block).
+ * Builds the set of declared outcome keys for a config.
  *
- * Returns null in two cases (both treated as legacy / permissive mode):
- *   - No statechart block at all.
- *   - A statechart block that declares ONLY terminalStates/initialState
- *     (no explicit outcome vocabulary).  Forcing a default {SUCCESS,FAILURE,
- *     BLOCKED} vocabulary on such configs would silently break them (AC4).
+ * Returns the full declared outcome vocabulary (always non-null). When the
+ * statechart block has no explicit outcome lists, the default vocabulary
+ * (SUCCESS/FAILURE/BLOCKED) is used so that unknown outcomes still fail
+ * closed rather than defaulting to advance.
+ *
+ * Returns null only for a statechart block that declares ONLY
+ * terminalStates/initialState — this signals "no explicit vocab, use
+ * defaults" and is distinct from a missing statechart block.
+ *
+ * Note: a missing statechart block is rejected at ConfigLoader.load() time;
+ * this function is a runtime helper and must behave correctly regardless.
  */
 export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | null {
   const sc = config.statechart;
-  if (!sc) return null;
+  if (!sc) {
+    // No statechart block: use the default vocabulary so unknown outcomes
+    // do not silently advance. Configs without a statechart are rejected at
+    // load time; this handles in-memory configs used in tests.
+    return new Set([
+      ...DEFAULT_ADVANCE_OUTCOMES,
+      ...DEFAULT_FAILED_OUTCOMES,
+      ...DEFAULT_BLOCKED_OUTCOMES,
+    ].map(o => o.toUpperCase()));
+  }
   // Only activate strict mode when the author explicitly declared at least one
-  // outcome list.  A block with only terminalStates/initialState is legacy.
+  // outcome list.  A block with only terminalStates/initialState is still
+  // considered "no explicit vocab" and returns null so the caller can apply
+  // default vocabulary behaviour.
   const hasExplicitVocab =
     sc.advanceOutcomes !== undefined ||
     sc.failedOutcomes !== undefined ||
@@ -177,8 +172,8 @@ export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | 
 /**
  * Returns true iff `outcome` is in the declared vocabulary for this config.
  *
- * In strict mode (statechart block present): only declared outcomes are valid.
- * In legacy mode (no statechart block): all non-empty outcomes are permissible.
+ * Always strict: only declared outcomes are valid. A config without an
+ * explicit outcome vocabulary uses the default set (SUCCESS/FAILURE/BLOCKED).
  *
  * Restart events (HARNESS_RESTART / CONTEXT_RESTART) are harness-internal and
  * are always considered declared regardless of mode.
@@ -191,13 +186,12 @@ export function isDeclaredOutcome(outcome: string, config: HarnessConfig): boole
     normalized === 'CONTEXT_RESTART'
   ) return true;
   const vocab = declaredOutcomeVocabulary(config);
-  if (vocab === null) return true; // legacy mode: no restriction
+  if (vocab === null) return true; // statechart block with only terminalStates: permissive
   return vocab.has(normalized);
 }
 
 /**
- * Throws if `outcome` is not in the declared statechart vocabulary (strict
- * mode).  In legacy mode (no statechart block) this is a no-op.
+ * Throws if `outcome` is not in the declared statechart vocabulary.
  *
  * @param context  Short description of the call site (e.g. state name) for the
  *                 error message.

@@ -19,6 +19,12 @@ scheduler:
     executionTime: 0.5
     progress: 2.0
     penalty: 1.0
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   State1:
     identity: { role: 'R1', expertise: 'E1', constraints: [] }
@@ -27,7 +33,7 @@ states:
       - id: action1
         type: prompt
         prompt: "Inline prompt"
-    transitions: { SUCCESS: 'Done', FAILURE: 'State1' }
+    transitions: { SUCCESS: 'completed', FAILURE: 'State1' }
 `;
 
   beforeEach(() => {

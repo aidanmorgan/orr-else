@@ -472,13 +472,21 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
       - name: artifact_validator
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: artifact_validator
@@ -501,6 +509,12 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -531,6 +545,12 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -538,7 +558,9 @@ states:
     requiredTools:
       - name: artifact_validator
         allowDeprecated: true
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: artifact_validator
@@ -561,13 +583,21 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
       - name: artifact_validator
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
   - name: artifact_validator

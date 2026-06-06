@@ -40,6 +40,12 @@ scheduler:
     executionTime: 1
     progress: 1
     penalty: 1
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   RequirementsAnalysis:
     identity:
@@ -47,9 +53,12 @@ states:
       expertise: Analysis
       constraints: []
     baseInstructions: Analyze.
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions:
-      SUCCESS: Planning
+      SUCCESS: completed
+      FAILURE: RequirementsAnalysis
 `);
     writeFile('.pi/artifacts/bd-1/existing.json', '{}');
   });

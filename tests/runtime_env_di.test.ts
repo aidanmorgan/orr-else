@@ -42,11 +42,19 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   ${startState}:
     identity: { role: done, expertise: done, constraints: [] }
     baseInstructions: done
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: {}
 `;
 }
@@ -275,11 +283,18 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Done:
     identity: { role: done, expertise: done, constraints: [] }
     baseInstructions: done
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: {}
 `;
     fs.writeFileSync(path.join(rootA, 'harness.yaml'), minimalYaml);
@@ -341,11 +356,18 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Done:
     identity: { role: done, expertise: done, constraints: [] }
     baseInstructions: done
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: {}
 `);
     const { ArtifactPaths } = await import('../src/core/ArtifactPaths.js');

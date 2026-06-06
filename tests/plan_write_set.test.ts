@@ -51,16 +51,26 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "Implementation", FAILURE: "Planning" }
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }
     baseInstructions: "Build"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
     git(tempRoot, ['init', '--initial-branch=main']);

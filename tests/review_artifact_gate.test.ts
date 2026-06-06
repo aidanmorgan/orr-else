@@ -654,6 +654,12 @@ settings:
       store: eventStore
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }
@@ -740,6 +746,12 @@ settings:
       store: eventStore
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }
@@ -825,6 +837,12 @@ settings:
       store: eventStore
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   AdversarialPostReview:
     identity: { role: "Reviewer", expertise: "Adversarial review", constraints: [] }

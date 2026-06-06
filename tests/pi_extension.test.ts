@@ -188,11 +188,18 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     const harness = fakePi();
@@ -461,6 +468,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -596,6 +608,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -688,6 +705,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: action_gate
     type: command
@@ -785,6 +807,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: evidence_gate
     type: command
@@ -879,6 +906,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: evidence_gate
     type: command
@@ -992,6 +1024,11 @@ settings:
   startState: LessonCapture
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: artifact_validator
     type: command
@@ -1106,6 +1143,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE, REQUIREMENTS_DEFECT]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: artifact_validator
     type: command
@@ -1203,6 +1245,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: run_quality_checks
     type: command
@@ -1215,7 +1262,9 @@ states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     let harness: ReturnType<typeof fakePi> | undefined;
@@ -1267,6 +1316,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1633,6 +1687,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: required_verifier
     type: command
@@ -1736,6 +1795,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: terminal_verifier
     type: command
@@ -1840,6 +1904,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: passing_gate
     type: command
@@ -1957,6 +2026,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: passing_verifier
     type: command
@@ -2098,6 +2172,11 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implementation:
     identity: { role: "Implementer", expertise: "Coding", constraints: [] }
@@ -2210,6 +2289,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: mandatory_checker
     type: command
@@ -2371,6 +2455,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -2470,6 +2559,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: fixture_mcp_tool
     type: mcp
@@ -2566,6 +2660,11 @@ settings:
   startState: AdversarialPreReview
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: zero_target_verifier
     type: command
@@ -2660,6 +2759,11 @@ settings:
   startState: AdversarialPreReview
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: real_target_verifier
     type: command
@@ -2760,6 +2864,11 @@ describe('signal_completion gate — handoverRequired enforcement (s3wp.3)', () 
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -3132,6 +3241,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: cacheable_probe
     type: command
@@ -3258,6 +3372,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: generator_tool
     type: command
@@ -3337,6 +3456,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: plain_tool
     type: command
@@ -3421,6 +3545,11 @@ describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (rea
       "  startState: Implementing",
       "  worktreePolicy:",
       "    default: always",
+      "statechart:",
+      "  terminalStates: [completed]",
+      "  advanceOutcomes: [SUCCESS]",
+      "  failedOutcomes: [FAILURE]",
+      "  blockedOutcomes: [BLOCKED]",
       "tools:",
       "  - name: identity_probe",
       "    type: command",
@@ -3505,6 +3634,11 @@ describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (rea
       "  startState: Implementing",
       "  worktreePolicy:",
       "    default: always",
+      "statechart:",
+      "  terminalStates: [completed]",
+      "  advanceOutcomes: [SUCCESS]",
+      "  failedOutcomes: [FAILURE]",
+      "  blockedOutcomes: [BLOCKED]",
       "tools:",
       "  - name: id_cache_probe",
       "    type: command",
@@ -3669,11 +3803,18 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     const previousCwd = process.cwd();

@@ -3,8 +3,8 @@
  * FlowManager helpers, CoordinatorController, Scheduler, ConfigLoader validation.
  *
  * Two fixtures:
- *  - defaultConfig: no statechart block → must reproduce the old hard-coded literals
- *    (SUCCESS/FAILURE/BLOCKED/'completed') byte-identically.
+ *  - defaultConfig: statechart with SUCCESS/FAILURE/BLOCKED vocabulary and
+ *    'completed' terminal state (mirrors harness.yaml defaults).
  *  - genericConfig: custom SDLC-agnostic statechart (Alpha→Bravo→done,
  *    outcomes ADVANCE/REWORK/HALT) to prove zero-code-edits portability.
  */
@@ -35,7 +35,13 @@ import type { ActiveRun } from '../src/extension/SessionTypes.js';
 
 // ── Shared fixture helpers ────────────────────────────────────────────────────
 
-/** Minimal HarnessConfig with NO statechart block (default behaviour). */
+/**
+ * Minimal HarnessConfig with the standard SUCCESS/FAILURE/BLOCKED vocabulary.
+ *
+ * Mirrors the harness.yaml defaults: SUCCESS→advance, FAILURE→failed,
+ * BLOCKED→blocked, terminal state 'completed'. Statechart block is now
+ * required; this fixture includes it so tests remain behaviorally equivalent.
+ */
 function makeDefaultConfig(overrides: Partial<HarnessConfig['statechart']> = {}): HarnessConfig {
   return {
     settings: {
@@ -53,11 +59,18 @@ function makeDefaultConfig(overrides: Partial<HarnessConfig['statechart']> = {})
       harnessContextRotThreshold: 5
     },
     scheduler: { weights: { waitTime: 1, executionTime: 0.5, progress: 2, penalty: 1 } },
+    statechart: {
+      terminalStates: [BeadStatus.COMPLETED],
+      advanceOutcomes: [EventName.SUCCESS],
+      failedOutcomes: [EventName.FAILURE],
+      blockedOutcomes: [EventName.BLOCKED],
+      customOutcomes: [],
+      ...overrides
+    },
     states: {
-      Planning: { transitions: { SUCCESS: 'Implementation' }, on: {} } as any,
-      Implementation: { transitions: { SUCCESS: 'completed' }, on: {} } as any
+      Planning: { transitions: { SUCCESS: 'Implementation', FAILURE: 'Planning', BLOCKED: 'Planning' }, on: {} } as any,
+      Implementation: { transitions: { SUCCESS: 'completed', FAILURE: 'Planning', BLOCKED: 'Planning' }, on: {} } as any
     }
-    // NO statechart block — defaults must reproduce old literals
   } as unknown as HarnessConfig;
 }
 
@@ -126,14 +139,14 @@ describe('FlowManager.isTerminalState', () => {
 // ── FlowManager.outcomeCategory ───────────────────────────────────────────────
 
 describe('FlowManager.outcomeCategory', () => {
-  describe('default config (no statechart block)', () => {
+  describe('default config (SUCCESS/FAILURE/BLOCKED vocabulary)', () => {
     const cfg = makeDefaultConfig();
 
     it('SUCCESS → advance', () => expect(outcomeCategory('SUCCESS', cfg)).toBe('advance'));
     it('FAILURE → failed', () => expect(outcomeCategory('FAILURE', cfg)).toBe('failed'));
     it('BLOCKED → blocked', () => expect(outcomeCategory('BLOCKED', cfg)).toBe('blocked'));
-    it('unknown outcome → advance (fallback preserving old behaviour)', () => {
-      expect(outcomeCategory('SOMETHING_ELSE', cfg)).toBe('advance');
+    it('unknown outcome → failed (fail-closed; no advance fallback)', () => {
+      expect(outcomeCategory('SOMETHING_ELSE', cfg)).toBe('failed');
     });
     it('case-insensitive: "success" → advance', () => {
       expect(outcomeCategory('success', cfg)).toBe('advance');
@@ -336,7 +349,7 @@ states:
     expect(cfg.statechart?.terminalStates).toEqual(['done']);
   });
 
-  it('accepts legacy config WITHOUT statechart block (transition targets not validated)', () => {
+  it('rejects config WITHOUT statechart block (statechart is now mandatory)', () => {
     const yaml = `
 settings:
   maxConcurrentSlots: 2
@@ -351,12 +364,15 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done", FAILURE: "Alpha" }
 `;
     fs.writeFileSync(tempPath, yaml);
-    // "done" is not a defined state but there's no statechart block → no throw
-    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+    // No statechart block → startup-fatal error (legacy mode removed)
+    expect(() => new ConfigLoader().load(tempPath))
+      .toThrow(/statechart block is required|no-statechart legacy mode/i);
   });
 });
 
@@ -365,15 +381,15 @@ states:
 describe('Default-equivalence golden tests', () => {
   const cfg = makeDefaultConfig();
 
-  it('outcomeCategory with default config reproduces old hard-coded literal comparisons', () => {
-    // Old code: outcome === EventName.SUCCESS → advance
+  it('outcomeCategory with default config classifies declared outcomes correctly', () => {
+    // Declared advance: SUCCESS → advance
     expect(isAdvanceOutcome(EventName.SUCCESS, cfg)).toBe(true);
-    // Old code: outcome === EventName.FAILURE → failed (STATE_FAILED)
+    // Declared failed: FAILURE → failed (STATE_FAILED)
     expect(outcomeCategory(EventName.FAILURE, cfg)).toBe('failed');
-    // Old code: outcome === EventName.BLOCKED → blocked (STATE_BLOCKED)
+    // Declared blocked: BLOCKED → blocked (STATE_BLOCKED)
     expect(outcomeCategory(EventName.BLOCKED, cfg)).toBe('blocked');
-    // Old code: anything else → STATE_TRANSITIONED (advance fallback)
-    expect(outcomeCategory('SOME_OTHER', cfg)).toBe('advance');
+    // Undeclared outcome → failed (fail-closed; old "advance fallback" removed)
+    expect(outcomeCategory('SOME_OTHER', cfg)).toBe('failed');
   });
 
   it('isTerminalState with default config reproduces old nextState === BeadStatus.COMPLETED check', () => {
@@ -444,23 +460,23 @@ describe('null-safety: falsy/missing transitionEvent', () => {
     expect(isAdvanceOutcome(undefined as any, genericCfg)).toBe(false);
   });
 
-  // outcomeCategory with a falsy outcome → 'advance' (STATE_TRANSITIONED fallback)
-  // so that teammateEventTypeForOutcome(falsy) → STATE_TRANSITIONED, matching old default.
+  // outcomeCategory with a falsy outcome → 'failed' (fail-closed; no advance fallback).
+  // teammateEventTypeForOutcome(falsy) → STATE_FAILED (fail-closed).
 
-  it('outcomeCategory(undefined) → "advance" (STATE_TRANSITIONED fallback)', () => {
-    expect(outcomeCategory(undefined as any, defaultCfg)).toBe('advance');
+  it('outcomeCategory(undefined) → "failed" (fail-closed; no advance fallback)', () => {
+    expect(outcomeCategory(undefined as any, defaultCfg)).toBe('failed');
   });
 
-  it('outcomeCategory("") → "advance" (STATE_TRANSITIONED fallback)', () => {
-    expect(outcomeCategory('' as any, defaultCfg)).toBe('advance');
+  it('outcomeCategory("") → "failed" (fail-closed; no advance fallback)', () => {
+    expect(outcomeCategory('' as any, defaultCfg)).toBe('failed');
   });
 
-  it('teammateEventTypeForOutcome(undefined) → STATE_TRANSITIONED', () => {
-    expect(teammateEventTypeForOutcome(undefined as any, defaultCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  it('teammateEventTypeForOutcome(undefined) → STATE_FAILED (fail-closed)', () => {
+    expect(teammateEventTypeForOutcome(undefined as any, defaultCfg)).toBe(TeammateEventType.STATE_FAILED);
   });
 
-  it('teammateEventTypeForOutcome("") → STATE_TRANSITIONED', () => {
-    expect(teammateEventTypeForOutcome('' as any, defaultCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  it('teammateEventTypeForOutcome("") → STATE_FAILED (fail-closed)', () => {
+    expect(teammateEventTypeForOutcome('' as any, defaultCfg)).toBe(TeammateEventType.STATE_FAILED);
   });
 });
 
@@ -645,11 +661,14 @@ describe('Strict statechart outcome vocabulary: declaredOutcomeVocabulary + isDe
     expect(isDeclaredOutcome('SECURITY_FAILUER', cfg)).toBe(false); // typo
   });
 
-  it('AC4: isDeclaredOutcome returns true for any non-empty outcome in legacy config (no statechart block)', () => {
-    const cfg = makeDefaultConfig(); // no statechart block
+  it('AC4: isDeclaredOutcome only returns true for declared outcomes (no-statechart permissive removed)', () => {
+    const cfg = makeDefaultConfig(); // SUCCESS/FAILURE/BLOCKED vocabulary
     expect(isDeclaredOutcome('SUCCESS', cfg)).toBe(true);
-    expect(isDeclaredOutcome('ANY_TYPO_OUTCOME', cfg)).toBe(true);
-    expect(isDeclaredOutcome('SECURITY_FAILUER', cfg)).toBe(true);
+    expect(isDeclaredOutcome('FAILURE', cfg)).toBe(true);
+    expect(isDeclaredOutcome('BLOCKED', cfg)).toBe(true);
+    // Undeclared outcomes are NOT valid — fail-closed
+    expect(isDeclaredOutcome('ANY_TYPO_OUTCOME', cfg)).toBe(false);
+    expect(isDeclaredOutcome('SECURITY_FAILUER', cfg)).toBe(false);
   });
 
   it('AC2: assertDeclaredOutcome throws for undeclared outcome in strict mode', () => {
@@ -679,14 +698,19 @@ describe('Strict statechart outcome vocabulary: declaredOutcomeVocabulary + isDe
     expect(caught!.message).toMatch(/Declared outcomes:/);
   });
 
-  it('AC4: assertDeclaredOutcome is a no-op for legacy config (no statechart block)', () => {
-    const cfg = makeDefaultConfig();
-    expect(() => assertDeclaredOutcome('ANY_UNKNOWN', cfg, 'state "Planning"')).not.toThrow();
+  it('AC4: assertDeclaredOutcome throws for undeclared outcomes (no legacy no-op)', () => {
+    const cfg = makeDefaultConfig(); // SUCCESS/FAILURE/BLOCKED vocabulary
+    expect(() => assertDeclaredOutcome('ANY_UNKNOWN', cfg, 'state "Planning"'))
+      .toThrow(/Outcome "ANY_UNKNOWN" is not in the declared statechart vocabulary/);
   });
 
-  it('AC2: declaredOutcomeVocabulary returns null for legacy config (no statechart block)', () => {
-    const cfg = makeDefaultConfig();
-    expect(declaredOutcomeVocabulary(cfg)).toBeNull();
+  it('AC2: declaredOutcomeVocabulary returns the declared set for default config (not null)', () => {
+    const cfg = makeDefaultConfig(); // SUCCESS/FAILURE/BLOCKED vocabulary
+    const vocab = declaredOutcomeVocabulary(cfg);
+    expect(vocab).not.toBeNull();
+    expect(vocab!.has('SUCCESS')).toBe(true);
+    expect(vocab!.has('FAILURE')).toBe(true);
+    expect(vocab!.has('BLOCKED')).toBe(true);
   });
 
   it('AC2: declaredOutcomeVocabulary returns the full declared set for strict config', () => {
@@ -780,7 +804,7 @@ states:
     expect(() => new ConfigLoader().load(tempPath)).toThrow(/SECURITY_FAILUER/);
   });
 
-  it('AC4: legacy config (no statechart block) does NOT throw for undeclared outcomes in transitions', () => {
+  it('AC4: config without statechart block is rejected (no legacy permissive mode)', () => {
     const yaml = `
 settings:
   maxConcurrentSlots: 2
@@ -795,12 +819,15 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done", ANY_TYPO_OUTCOME: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
-    // No statechart block → legacy mode → no throw
-    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+    // No statechart block → startup-fatal error (no legacy mode)
+    expect(() => new ConfigLoader().load(tempPath))
+      .toThrow(/statechart block is required|no-statechart legacy mode/i);
   });
 
   it('AC1: config with fully declared vocabulary passes validation', () => {
@@ -839,8 +866,9 @@ states:
     expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
   });
 
-  // Finding 3: opt-in strict mode — statechart block with ONLY terminalStates must load
-  it('Finding-3/AC4: statechart block with ONLY terminalStates (no vocab fields) loads without throw (legacy preserved)', () => {
+  // Finding 3 (inverted): statechart block with ONLY terminalStates is now rejected —
+  // explicit outcome vocabulary is required.
+  it('Finding-3/AC4: statechart block with ONLY terminalStates (no vocab fields) is now rejected', () => {
     const yaml = `
 settings:
   maxConcurrentSlots: 2
@@ -863,11 +891,12 @@ states:
     transitions: { SUCCESS: "done", SOME_CUSTOM_TRANSITION: "done" }
 `;
     fs.writeFileSync(tempPath, yaml);
-    // No explicit vocab → legacy mode → custom transition outcomes are allowed
-    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+    // No explicit vocab → startup-fatal error (explicit vocabulary is now required)
+    expect(() => new ConfigLoader().load(tempPath))
+      .toThrow(/statechart.*no explicit outcome vocabulary|explicit outcome vocabulary|advanceOutcomes.*failedOutcomes/i);
   });
 
-  it('Finding-3: statechart block with ONLY terminalStates has null declaredOutcomeVocabulary (no strict mode)', () => {
+  it('Finding-3: statechart block with ONLY terminalStates has null declaredOutcomeVocabulary (runtime helper)', () => {
     const cfg: HarnessConfig = {
       ...makeDefaultConfig(),
       statechart: {
@@ -875,8 +904,9 @@ states:
         // No advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes
       }
     } as unknown as HarnessConfig;
+    // Runtime helper returns null for statechart-only-terminalStates (no explicit vocab)
     expect(declaredOutcomeVocabulary(cfg)).toBeNull();
-    // In legacy mode all outcomes are permissible
+    // isDeclaredOutcome returns true for the terminalStates-only case (null vocab = permissive)
     expect(isDeclaredOutcome('ANY_OUTCOME', cfg)).toBe(true);
     expect(isDeclaredOutcome('TYPO_OUTCOME', cfg)).toBe(true);
   });
@@ -1000,16 +1030,16 @@ describe('AC2 gate-level: evaluateGateReadiness rejects undeclared outcome in st
     expect(isAdvanceOutcome('SECURITY_FAILUER', config)).toBe(false);
   });
 
-  it('AC2: undeclared outcome does not advance — isAdvanceOutcome returns false in strict mode', () => {
+  it('AC2: undeclared outcome does not advance — isAdvanceOutcome returns false (always fail-closed)', () => {
     const config = makeStrictConfig();
     // Declared outcomes ARE advance
     expect(isAdvanceOutcome('ADVANCE', config)).toBe(true);
-    // Undeclared outcomes are NOT advance (strict mode — root cause fix)
+    // Undeclared outcomes are NOT advance (fail-closed)
     expect(isAdvanceOutcome('SECURITY_FAILUER', config)).toBe(false);
     expect(isAdvanceOutcome('UNKNOWN_OUTCOME', config)).toBe(false);
-    // Legacy config: unknown outcomes fall through to advance (permissive)
-    const legacy = makeDefaultConfig();
-    expect(isAdvanceOutcome('SOME_TYPO', legacy)).toBe(true);
+    // Default config: undeclared outcomes also fail closed (no advance fallback)
+    const defaultCfg = makeDefaultConfig();
+    expect(isAdvanceOutcome('SOME_TYPO', defaultCfg)).toBe(false);
   });
 
   it('AC2: declared outcomes in strict mode still classify correctly', async () => {
@@ -1034,9 +1064,9 @@ describe('AC2 gate-level: evaluateGateReadiness rejects undeclared outcome in st
 // The old dead-code gap: classifyOutcome returned FAILED but the runtime still
 // called outcomeCategory() which returned 'advance' for falsy inputs.
 
-describe('AC7 runtime: missing/falsy outcomes cannot advance in strict mode', () => {
+describe('AC7 runtime: missing/falsy outcomes always fail closed (no legacy advance)', () => {
   const strictCfg = makeGenericConfig(); // advanceOutcomes:[ADVANCE], failedOutcomes:[REWORK], blockedOutcomes:[HALT]
-  const legacyCfg = makeDefaultConfig(); // no statechart block — legacy/permissive
+  const defaultCfg = makeDefaultConfig(); // advanceOutcomes:[SUCCESS], failedOutcomes:[FAILURE], blockedOutcomes:[BLOCKED]
 
   // ── outcomeCategory (the function the runtime path actually calls) ──────────
 
@@ -1052,12 +1082,12 @@ describe('AC7 runtime: missing/falsy outcomes cannot advance in strict mode', ()
     expect(outcomeCategory('' as any, strictCfg)).toBe('failed');
   });
 
-  it('outcomeCategory(undefined, legacyCfg) → "advance" (legacy backward-compat preserved)', () => {
-    expect(outcomeCategory(undefined as any, legacyCfg)).toBe('advance');
+  it('outcomeCategory(undefined, defaultCfg) → "failed" (fail-closed; no legacy advance fallback)', () => {
+    expect(outcomeCategory(undefined as any, defaultCfg)).toBe('failed');
   });
 
-  it('outcomeCategory("", legacyCfg) → "advance" (legacy backward-compat preserved)', () => {
-    expect(outcomeCategory('' as any, legacyCfg)).toBe('advance');
+  it('outcomeCategory("", defaultCfg) → "failed" (fail-closed; no legacy advance fallback)', () => {
+    expect(outcomeCategory('' as any, defaultCfg)).toBe('failed');
   });
 
   // ── teammateEventTypeForOutcome (the runtime coordinator transition path) ───
@@ -1070,12 +1100,12 @@ describe('AC7 runtime: missing/falsy outcomes cannot advance in strict mode', ()
     expect(teammateEventTypeForOutcome('' as any, strictCfg)).toBe(TeammateEventType.STATE_FAILED);
   });
 
-  it('teammateEventTypeForOutcome(undefined, legacyCfg) → STATE_TRANSITIONED (legacy preserved)', () => {
-    expect(teammateEventTypeForOutcome(undefined as any, legacyCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  it('teammateEventTypeForOutcome(undefined, defaultCfg) → STATE_FAILED (fail-closed; no legacy advance)', () => {
+    expect(teammateEventTypeForOutcome(undefined as any, defaultCfg)).toBe(TeammateEventType.STATE_FAILED);
   });
 
-  it('teammateEventTypeForOutcome("", legacyCfg) → STATE_TRANSITIONED (legacy preserved)', () => {
-    expect(teammateEventTypeForOutcome('' as any, legacyCfg)).toBe(TeammateEventType.STATE_TRANSITIONED);
+  it('teammateEventTypeForOutcome("", defaultCfg) → STATE_FAILED (fail-closed; no legacy advance)', () => {
+    expect(teammateEventTypeForOutcome('' as any, defaultCfg)).toBe(TeammateEventType.STATE_FAILED);
   });
 
   // ── declared outcomes still classify correctly (no over-fail-closing) ────────

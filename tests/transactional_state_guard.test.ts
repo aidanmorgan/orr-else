@@ -39,11 +39,19 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }
     baseInstructions: "Build"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
     fs.writeFileSync(path.join(tempRoot, '.pi/artifacts/bd-1/plan-contract.json'), JSON.stringify({
@@ -136,11 +144,18 @@ settings:
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }
     baseInstructions: "Build"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
     configLoader.reset();

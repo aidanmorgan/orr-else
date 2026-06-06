@@ -39,11 +39,19 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
 }
@@ -212,6 +220,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: probe_join_tool
     type: command
@@ -326,6 +339,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 tools:
   - name: distinct_id_tool
     type: command

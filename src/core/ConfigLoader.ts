@@ -396,18 +396,15 @@ export class ConfigLoader {
   /**
    * Post-schema semantic checks.
    *
-   * When a `statechart` block is present (explicit opt-in):
+   * A `statechart` block with explicit outcome vocabulary is REQUIRED:
+   *   - Missing statechart block → startup-fatal error.
+   *   - Missing explicit outcome vocabulary (advanceOutcomes/failedOutcomes/
+   *     blockedOutcomes/customOutcomes) → startup-fatal error.
    *   - startState / statechart.initialState must exist in states.
    *   - Every transition target must be a defined state, a declared terminal state,
-   *     OR a recognized coarse sink status (completed / blocked / deferred) (throws otherwise).
+   *     OR a recognized coarse sink status (completed / blocked / deferred).
    *     Coarse sink targets exit the active statechart flow without spawning a worker.
-   *   - Warns when a transition outcome key is not in the declared vocabulary.
-   *
-   * When no `statechart` block is present (legacy / default config):
-   *   - startState existence is still validated.
-   *   - Transition target validation is SKIPPED (backward-safe: old configs freely
-   *     reference implicit terminals like 'done', 'completed', 'failed').
-   *   - No vocabulary warnings are emitted.
+   *   - All transition outcome keys must be in the declared vocabulary.
    */
   private validateDeprecatedRequiredTools(config: HarnessConfig): void {
     // Build a set of tool names that are both deprecated AND hidden.
@@ -591,10 +588,37 @@ export class ConfigLoader {
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;
-    const hasStatechartBlock = !!sc;
-    const terminalStates = new Set<string>(
-      sc?.terminalStates ?? [BeadStatus.COMPLETED]
-    );
+
+    // ── Mandatory statechart block ────────────────────────────────────────────
+    // A harness config without a statechart block is not a valid config.
+    // All statechart semantics are now mandatory and strict.
+    if (!sc) {
+      throw new Error(
+        'statechart block is required but missing from this harness config. ' +
+        'Add a statechart block with terminalStates, advanceOutcomes, failedOutcomes, ' +
+        'blockedOutcomes, and valid transition targets. ' +
+        'No-statechart legacy mode is no longer supported.'
+      );
+    }
+
+    // ── Mandatory explicit outcome vocabulary ─────────────────────────────────
+    // A statechart block without explicit outcome vocabulary is also rejected.
+    const hasExplicitVocab =
+      sc.advanceOutcomes !== undefined ||
+      sc.failedOutcomes !== undefined ||
+      sc.blockedOutcomes !== undefined ||
+      sc.customOutcomes !== undefined;
+    if (!hasExplicitVocab) {
+      throw new Error(
+        'statechart block is present but declares no explicit outcome vocabulary ' +
+        '(advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ' +
+        'Declare at least advanceOutcomes, failedOutcomes, and blockedOutcomes so every ' +
+        'transition outcome is deterministically classified. ' +
+        'A statechart with only terminalStates/initialState is no longer accepted.'
+      );
+    }
+
+    const terminalStates = new Set<string>(sc.terminalStates ?? [BeadStatus.COMPLETED]);
     // knownTargets = defined states ∪ declared terminal states ∪ recognized
     // coarse sink statuses (completed / blocked / deferred).  A transition
     // whose target is a coarse sink status is valid: the bead leaves the active
@@ -605,7 +629,7 @@ export class ConfigLoader {
     // Only enforced when there are defined states (avoids false positives in
     // test configs with empty states maps that only care about other features).
     const settingsStartState = config.settings.startState;
-    const scInitialState = sc?.initialState;
+    const scInitialState = sc.initialState;
     const startState = settingsStartState || scInitialState;
     if (startState && stateIds.size > 0 && !stateIds.has(startState) && !terminalStates.has(startState)) {
       throw new Error(
@@ -629,23 +653,13 @@ export class ConfigLoader {
       );
     }
 
-    if (!hasStatechartBlock) {
-      // Legacy mode: skip strict lint rules for backward compatibility with
-      // configs that predate the statechart block.
-      return;
-    }
-
     // ── AC4 (1elr.2): duplicate outcomes across sets (case-insensitive) ───────
     // Outcomes must be declared exactly once.  A duplicate means the same
     // outcome key is in two lists (e.g. both advanceOutcomes and failedOutcomes)
     // — the classification would be non-deterministic depending on evaluation
     // order.
-    if (
-      sc.advanceOutcomes !== undefined ||
-      sc.failedOutcomes !== undefined ||
-      sc.blockedOutcomes !== undefined ||
-      sc.customOutcomes !== undefined
-    ) {
+    // At this point we know hasExplicitVocab is true (checked above).
+    {
       const seenUpper = new Map<string, string>(); // normalized → first list name
       const checkList = (outcomes: string[] | undefined, listName: string): void => {
         for (const o of outcomes ?? []) {
@@ -667,28 +681,16 @@ export class ConfigLoader {
       checkList(sc.customOutcomes, 'customOutcomes');
     }
 
-    // Strict vocabulary validation only when the author explicitly declared at
-    // least one outcome list.  A statechart block with ONLY terminalStates /
-    // initialState is NOT strict: forcing default {SUCCESS,FAILURE,BLOCKED} on
-    // such configs silently breaks legacy callers.
-    const hasExplicitVocab =
-      sc.advanceOutcomes !== undefined ||
-      sc.failedOutcomes !== undefined ||
-      sc.blockedOutcomes !== undefined ||
-      sc.customOutcomes !== undefined;
-
-    // Declared outcome vocabulary — only built when strict mode is active.
-    const declaredOutcomes: Set<string> | null = hasExplicitVocab
-      ? new Set([
-          ...(sc.advanceOutcomes ?? ['SUCCESS']),
-          ...(sc.failedOutcomes ?? ['FAILURE']),
-          ...(sc.blockedOutcomes ?? ['BLOCKED']),
-          ...(sc.customOutcomes ?? []),
-          // Always include harness-internal restart events
-          EventName.HARNESS_RESTART,
-          EventName.CONTEXT_RESTART
-        ].map(o => o.toUpperCase()))
-      : null;
+    // Declared outcome vocabulary (always present — explicit vocab is required).
+    const declaredOutcomes: Set<string> = new Set([
+      ...(sc.advanceOutcomes ?? ['SUCCESS']),
+      ...(sc.failedOutcomes ?? ['FAILURE']),
+      ...(sc.blockedOutcomes ?? ['BLOCKED']),
+      ...(sc.customOutcomes ?? []),
+      // Always include harness-internal restart events
+      EventName.HARNESS_RESTART,
+      EventName.CONTEXT_RESTART
+    ].map(o => o.toUpperCase()));
 
     // ── AC2 (1elr.2): every runnable state has ≥1 action; action ids unique ──
     // A state with no actions is inert — worker startup throws because there is
@@ -772,7 +774,7 @@ export class ConfigLoader {
             `coarse sink statuses: ${[...RECOGNIZED_COARSE_SINK_STATUSES].join(', ')}`
           );
         }
-        if (declaredOutcomes !== null && !declaredOutcomes.has(outcomeKey.toUpperCase())) {
+        if (!declaredOutcomes.has(outcomeKey.toUpperCase())) {
           throw new Error(
             `State "${stateId}" uses transition outcome "${outcomeKey}" which is not in the declared ` +
             `statechart vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +

@@ -574,11 +574,18 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: planner, expertise: planning, constraints: [] }
     baseInstructions: plan
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed }
 `);
     configLoader = new ConfigLoader(undefined, root);
@@ -694,11 +701,18 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: planner, expertise: planning, constraints: [] }
     baseInstructions: plan
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed }
 `);
     const blockerConfig = new ConfigLoader(undefined, blockerRoot);
@@ -750,11 +764,18 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: planner, expertise: planning, constraints: [] }
     baseInstructions: plan
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: completed }
 `);
     configLoader = new ConfigLoader(undefined, root);

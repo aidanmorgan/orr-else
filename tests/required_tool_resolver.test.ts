@@ -33,6 +33,12 @@ settings:
     requireWriteSet: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Implementation:
     identity: { role: "Builder", expertise: "Implementation", constraints: [] }
@@ -43,7 +49,9 @@ states:
         when:
           writeSetIncludesAny:
             - "{{orrElseFrameworkRoot}}"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementation" }
 `);
     configLoader = new ConfigLoader(undefined, tempRoot);

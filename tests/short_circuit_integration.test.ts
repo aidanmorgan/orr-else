@@ -126,6 +126,12 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 tools:
   - name: prerequisite_tool
     type: command
@@ -244,6 +250,12 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 tools:
   - name: flaky_verifier
     type: command
@@ -341,11 +353,19 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     configLoader = new ConfigLoader(undefined, tempRoot);
@@ -458,11 +478,18 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Planning" }
 `);
     configLoader = new ConfigLoader(undefined, tempRoot);

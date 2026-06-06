@@ -93,6 +93,11 @@ settings:
   startState: Planning
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

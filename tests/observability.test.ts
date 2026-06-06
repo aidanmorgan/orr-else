@@ -26,11 +26,19 @@ settings:
     default: always
 scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+
 states:
   Done:
     identity: { role: done, expertise: done, constraints: [] }
     baseInstructions: done
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: {}
 `);
   }

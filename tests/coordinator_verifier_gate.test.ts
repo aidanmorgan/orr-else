@@ -74,6 +74,11 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implementing:
     identity: { role: "Eng", expertise: "x", constraints: [] }

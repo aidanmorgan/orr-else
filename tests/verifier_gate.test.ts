@@ -243,11 +243,18 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implementing:
     identity: { role: "Eng", expertise: "x", constraints: [] }
     baseInstructions: "Do"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementing" }
 `);
     configLoader = new ConfigLoader(undefined, projectRoot);
@@ -332,11 +339,18 @@ settings:
     enabled: true
   worktreePolicy:
     default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
 states:
   Implementing:
     identity: { role: "Eng", expertise: "x", constraints: [] }
     baseInstructions: "Do"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "completed", FAILURE: "Implementing" }
 `);
     configLoader = new ConfigLoader(undefined, projectRoot);

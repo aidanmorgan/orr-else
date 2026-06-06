@@ -175,8 +175,8 @@ ${minimalState('Alpha', '{ ADVANCE: "done", REWORK: "Alpha", HALT: "done" }')}
     expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
   });
 
-  it('AC2: lint only runs when statechart block present (legacy config skips)', () => {
-    // Legacy configs may have actionless states — backward compatible
+  it('AC2: config without statechart block is rejected at startup (no legacy skip)', () => {
+    // Statechart is now mandatory — a config without it is rejected before AC2 runs
     const yaml = `
 settings:
   maxConcurrentSlots: 2
@@ -191,12 +191,15 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
-    actions: []
+    actions:
+      - id: a1
+        type: prompt
     transitions: { SUCCESS: "done" }
 `;
     writeTempYaml(yaml);
-    // No statechart block → legacy mode → skip AC2 lint
-    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+    // No statechart block → startup-fatal error (no legacy mode)
+    expect(() => new ConfigLoader().load(tempPath))
+      .toThrow(/statechart block is required|no-statechart legacy mode/i);
   });
 });
 
@@ -571,7 +574,8 @@ states:
     expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
   });
 
-  it('AC6: lint only runs when statechart block present (legacy config skips gate state checks)', () => {
+  it('AC6: config without statechart block is rejected at startup (gate-state checks are moot)', () => {
+    // Statechart is now mandatory — a config without it is rejected before gate-state checks run
     const yaml = `
 settings:
   maxConcurrentSlots: 2
@@ -595,8 +599,9 @@ states:
     transitions: { SUCCESS: "done" }
 `;
     writeTempYaml(yaml);
-    // No statechart block → legacy mode → skip gate state reference checks
-    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+    // No statechart block → startup-fatal error (no legacy mode)
+    expect(() => new ConfigLoader().load(tempPath))
+      .toThrow(/statechart block is required|no-statechart legacy mode/i);
   });
 });
 
@@ -625,7 +630,7 @@ describe('AC7: OutcomeCategory enum + branded OutcomeName', () => {
     expect(classifyOutcome('missing_typo', strictCfg)).toBe(OutcomeCategory.FAILED);
   });
 
-  it('AC7: classifyOutcome for missing/falsy outcome returns FAILED (fail-closed for unknown in strict, advance-fallback for legacy)', () => {
+  it('AC7: classifyOutcome for missing/falsy outcome always returns FAILED (fail-closed, no legacy advance fallback)', () => {
     const strictCfg = makeStrictConfig();
     const legacyCfg = makeLegacyConfig();
 
@@ -634,11 +639,10 @@ describe('AC7: OutcomeCategory enum + branded OutcomeName', () => {
     expect(classifyOutcome(undefined as any, strictCfg)).toBe(OutcomeCategory.FAILED);
     expect(classifyOutcome('', strictCfg)).toBe(OutcomeCategory.FAILED);
 
-    // In legacy mode (no vocab), null/undefined/empty → ADVANCE (backward compat)
-    // This preserves the existing outcomeCategory() legacy behavior
-    expect(classifyOutcome(null as any, legacyCfg)).toBe(OutcomeCategory.ADVANCE);
-    expect(classifyOutcome(undefined as any, legacyCfg)).toBe(OutcomeCategory.ADVANCE);
-    expect(classifyOutcome('', legacyCfg)).toBe(OutcomeCategory.ADVANCE);
+    // In legacy/no-vocab config, missing/falsy also → FAILED (fail-closed; no legacy advance fallback)
+    expect(classifyOutcome(null as any, legacyCfg)).toBe(OutcomeCategory.FAILED);
+    expect(classifyOutcome(undefined as any, legacyCfg)).toBe(OutcomeCategory.FAILED);
+    expect(classifyOutcome('', legacyCfg)).toBe(OutcomeCategory.FAILED);
   });
 
   it('AC7: OutcomeName brand is a type-level string', () => {
