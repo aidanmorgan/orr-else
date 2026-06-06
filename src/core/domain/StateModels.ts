@@ -39,8 +39,8 @@ export interface BaseProjectToolConfig {
   type: ProjectToolType;
   optional?: boolean;
   // inlineResultBytes has been removed (obsolete — s3wp.24). Configs that still
-  // declare it are handled with a deprecation warning by ConfigLoader; the field
-  // is ignored at runtime. See docs/raw-output-contract.md for the policy.
+  // declare it are HARD-REJECTED by ConfigLoader at startup (unknown property,
+  // additionalProperties:false). See docs/raw-output-contract.md for the policy.
   usageNotes?: string[];
   // Hard wall-clock timeout enforced by the harness wrapper around every
   // invocation. Distinct from tool-specific request/process timeouts.

@@ -1591,7 +1591,6 @@ process.exit(sawOther ? 0 : 1);
         })); process.exit(1);`
       ],
       cwd: CwdMode.WORKTREE,
-      inlineResultBytes: 1000
     }, {
       beadId: 'bd-1',
       stateId: 'Planning',

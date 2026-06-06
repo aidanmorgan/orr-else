@@ -82,8 +82,6 @@
  *   - Context truncation for event-log display only: EVENT_PREVIEW_CHARS, EVENT_DETAIL_PREVIEW_CHARS,
  *     CHECKLIST_EVIDENCE_PREVIEW_CHARS, TOOL_AUDIT_PREVIEW_CHARS, TEXT_PREVIEW_CHARS,
  *     LONG_TEXT_PREVIEW_CHARS - these truncate harness log/event display only, never tool output.
- *   - DEPRECATED_OUTPUT_CAP_FIELDS - the configLoader strips and warns on obsolete config fields;
- *     referencing them here is the migration handler, not production usage.
  *   - ORR_ELSE_MAX_OUTPUT_TOKENS - per-request model output token limit (provider-level);
  *     not a tool-output byte cap.
  *   - SCRATCH_CLEANUP_ENABLED - post-result scratch-dir cleanup; not an output cap.
@@ -418,7 +416,7 @@ describe('registration-anchored RTK coverage guard', () => {
  * "Production code" excludes:
  *   - Lines that are pure line comments (the forbidden term only appears after //)
  *   - Lines in string literals that describe what is NOT allowed (e.g., ProtocolInjector
- *     guidance text, DEPRECATED_OUTPUT_CAP_FIELDS migration handler)
+ *     guidance text)
  *
  * EXPANDED LIST (s3wp.30 adversarial fix):
  *   Added cap-by-other-name evasions per defect report:
@@ -470,8 +468,7 @@ const FORBIDDEN_CAP_IDENTIFIERS = [
  * Lines that are ALLOWED to contain forbidden identifiers:
  *
  * 1. Lines where the forbidden term appears ONLY in a line comment (after //).
- * 2. The ConfigLoader DEPRECATED_OUTPUT_CAP_FIELDS migration handler.
- * 3. ProtocolInjector / RtkContract guidance strings.
+ * 2. ProtocolInjector / RtkContract guidance strings.
  */
 function isAllowedLine(line: string, term: string): boolean {
   const trimmed = line.trimStart();
@@ -482,10 +479,7 @@ function isAllowedLine(line: string, term: string): boolean {
   // (B) JSDoc or block comment
   if (trimmed.startsWith('*')) return true;
 
-  // (C) DEPRECATED_OUTPUT_CAP_FIELDS migration handler
-  if (trimmed.includes('DEPRECATED_OUTPUT_CAP_FIELDS')) return true;
-
-  // (D) Guidance strings
+  // (C) Guidance strings
   if (trimmed.includes('NO shared public return envelope')) return true;
   if (trimmed.includes('does not require') && trimmed.includes(term)) return true;
   if (trimmed.includes('forbidden') && !trimmed.includes('=') && !trimmed.includes(':')) return true;
