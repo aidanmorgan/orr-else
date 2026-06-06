@@ -17,6 +17,15 @@ import type { WorktreeProvisioningMode } from './domain/StateModels.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 import { projectToolFailureLimitSuggestedOutcome } from './ProjectToolFailureLimit.js';
+import {
+  routeFailure,
+  compactDescriptor,
+  FailureClass,
+  LifecyclePhase,
+  RetryBudget,
+  AuthorityLevel,
+  NextAction,
+} from './FailureTaxonomy.js';
 
 export interface SupervisorOptions {
   maxSlots: number;
@@ -132,6 +141,14 @@ export class Supervisor {
   private startedBeadAtMs = new Map<string, number>();
   private missingStartedBeadChecks = new Map<string, number>();
   private inactiveRestartedAtMs = new Map<string, number>();
+  /**
+   * Per-bead count of inactive-restart recoveries this session.
+   * Used to determine RetryBudget: AVAILABLE while count <= MAX_INACTIVE_RESTARTS,
+   * EXHAUSTED when count exceeds it. EXHAUSTED routes WORKER_PROCESS_LOSS →
+   * QUARANTINE instead of BOUNDED_RETRY per the n8fg taxonomy table.
+   * Reset when a bead is fully exited (markBeadExited without preserveInactiveRestartBackoff).
+   */
+  private readonly inactiveRestartCountByBead = new Map<string, number>();
   private processedSignals = new Set<string>();
   private stepInProgress = false;
   private stopping = false;
@@ -309,7 +326,10 @@ export class Supervisor {
     this.startedBeadAtMs.delete(id);
     this.missingStartedBeadChecks.delete(id);
     this.finalBlockedPollCounts.delete(id);
-    if (!options.preserveInactiveRestartBackoff) this.inactiveRestartedAtMs.delete(id);
+    if (!options.preserveInactiveRestartBackoff) {
+      this.inactiveRestartedAtMs.delete(id);
+      this.inactiveRestartCountByBead.delete(id);
+    }
   }
 
   public isSignalProcessed(key: string): boolean {
@@ -331,7 +351,9 @@ export class Supervisor {
     const pauseUntilIso = this.clock.date(pauseUntilMs).toISOString();
     void this.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
       pauseUntil: pauseUntilIso,
-      reason
+      reason,
+      // n8fg taxonomy: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE (budget irrelevant for this class)
+      ...this.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
     }).catch(() => {});
     // Fire SCHEDULING_PAUSED exactly once per distinct pauseUntil value so
     // operators see a single clean enter-event rather than per-poll noise.
@@ -656,6 +678,62 @@ export class Supervisor {
     });
   }
 
+  /**
+   * Route a failure through the central n8fg taxonomy table and return the
+   * taxonomy fields as a plain record suitable for embedding in domain event data.
+   *
+   * This is the ONLY entry-point for failure classification in the Supervisor.
+   * No local failure categories are defined here — use FailureClass values.
+   *
+   * retryBudget MUST be passed explicitly — use retryBudgetFor(beadId) for
+   * worker-loss/transport paths that are budget-sensitive. Do NOT hard-code AVAILABLE.
+   */
+  private taxonomyFields(
+    failureClass: FailureClass,
+    lifecyclePhase: LifecyclePhase,
+    retryBudget: RetryBudget
+  ): { taxonomyClass: string; lifecyclePhase: string; taxonomyRowId: string; taxonomyAction: string; retryBudget: string } {
+    const result = routeFailure({ failureClass, lifecyclePhase, retryBudget, authorityLevel: AuthorityLevel.HARNESS });
+    const desc = compactDescriptor(result);
+    return {
+      taxonomyClass: desc.cls,
+      lifecyclePhase,
+      taxonomyRowId: desc.rowId,
+      taxonomyAction: desc.action,
+      retryBudget,
+    };
+  }
+
+  /**
+   * Route a failure and return the RoutingResult (nextAction) directly.
+   * Use when the caller needs to ACT on result.nextAction (branch on behavior),
+   * not just record taxonomy fields.
+   */
+  private routeTaxonomy(
+    failureClass: FailureClass,
+    lifecyclePhase: LifecyclePhase,
+    retryBudget: RetryBudget
+  ) {
+    return routeFailure({ failureClass, lifecyclePhase, retryBudget, authorityLevel: AuthorityLevel.HARNESS });
+  }
+
+  /**
+   * Determine the retry budget for a given bead based on how many inactive-restart
+   * recoveries it has already consumed this session.
+   *
+   * AVAILABLE  — restarts so far ≤ MAX_INACTIVE_RESTARTS (budget remains).
+   * EXHAUSTED  — restarts so far >  MAX_INACTIVE_RESTARTS (budget consumed).
+   *
+   * This is the authoritative budget signal for WORKER_PROCESS_LOSS and
+   * TRANSIENT_TRANSPORT routing decisions in the Supervisor.
+   */
+  private retryBudgetFor(beadId: string): RetryBudget {
+    const count = this.inactiveRestartCountByBead.get(beadId) ?? 0;
+    return count > SupervisorDefaults.MAX_INACTIVE_RESTARTS
+      ? RetryBudget.EXHAUSTED
+      : RetryBudget.AVAILABLE;
+  }
+
   private configuredOutcomesForState(stateId: string, config: HarnessConfig): string[] {
     const state = config.states?.[stateId];
     if (!state) return [];
@@ -934,7 +1012,9 @@ export class Supervisor {
         // Classify and quarantine — emit once-per-quarantine structured event.
         const errorText = result.error || `Failed to provision worktree for ${claimed.id}`;
         const quarantineReason = this.classifyWorktreeError(errorText);
-        await this.quarantineBead(bead, quarantineReason);
+        // n8fg taxonomy: worktree/substrate failure at spawn → STARTUP_SUBSTRATE × SPAWN → QUARANTINE
+        // Budget is AVAILABLE at this point (pre-spawn quarantine, no restarts consumed yet).
+        await this.quarantineBead(bead, quarantineReason, this.taxonomyFields(FailureClass.STARTUP_SUBSTRATE, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE));
         return 'quarantined';
       }
       await this.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
@@ -1188,28 +1268,47 @@ export class Supervisor {
 
       const terminalRestartDetails = await this.nonRoutableTerminalFailureLimitRestartDetails(bead, config);
       if (terminalRestartDetails) {
+        // n8fg taxonomy: restart into non-routable terminal failure = lifecycle invariant violated at spawn → TERMINAL_REJECT
+        // mapped to LIFECYCLE_VIOLATION × SPAWN because the bead's spawn would loop into the same failure.
         await this.quarantineBead(
           bead,
           QuarantineReason.NON_ROUTABLE_TERMINAL_FAILURE_LIMIT,
-          terminalRestartDetails
+          { ...terminalRestartDetails, ...this.taxonomyFields(FailureClass.LIFECYCLE_VIOLATION, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE) }
         );
         continue;
       }
 
       // PREFLIGHT: MCP transport health check (s3wp.32).
       // If the bead's state has required MCP-backed tools and the bridge is
-      // unhealthy, skip this bead without spawning. The failure is logged and
-      // collapsed to a single domain event (not repeated per bead).
+      // unhealthy, quarantine the bead via BACKEND_READINESS × SPAWN → QUARANTINE.
+      // The failure event is collapsed to once-per-cache-miss (not repeated per bead).
       const requiredMcpTools = this.requiredMcpToolNamesForBead(bead.stateId, config);
       if (requiredMcpTools.length > 0) {
         const mcpHealth = await this.runMcpPreflightForTools(requiredMcpTools);
         if (!mcpHealth.healthy) {
-          Logger.warn(Component.SUPERVISOR, 'Preflight: skipping bead — required MCP tools unavailable', {
-            beadId: bead.id,
-            stateId: bead.stateId,
-            unavailableTools: mcpHealth.affectedToolNames,
-            errorMessage: mcpHealth.message
-          });
+          // n8fg taxonomy: MCP backend unavailable at spawn → BACKEND_READINESS × SPAWN → QUARANTINE.
+          // ACT on result.nextAction: QUARANTINE — quarantine the bead so it is
+          // skipped until its signature changes (backend recovers / config changes).
+          const taxonomyRoute = this.routeTaxonomy(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
+          const fields = this.taxonomyFields(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
+          // taxonomyRoute.nextAction must be QUARANTINE per the table; quarantine
+          // the bead exactly as we do for worktree failures.
+          if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
+            await this.quarantineBead(bead, QuarantineReason.UNKNOWN, {
+              ...fields,
+              unavailableTools: mcpHealth.affectedToolNames,
+              errorMessage: mcpHealth.message,
+              taxonomyReason: 'MCP backend unavailable at spawn — BACKEND_READINESS × SPAWN → QUARANTINE'
+            });
+          } else {
+            Logger.warn(Component.SUPERVISOR, 'Preflight: skipping bead — required MCP tools unavailable', {
+              beadId: bead.id,
+              stateId: bead.stateId,
+              unavailableTools: mcpHealth.affectedToolNames,
+              errorMessage: mcpHealth.message,
+              ...fields
+            });
+          }
           continue;
         }
       }
@@ -1761,6 +1860,17 @@ export class Supervisor {
         this.finalBlockedPollCounts.delete(beadId);
         this.inactiveRestartedAtMs.set(beadId, now);
 
+        // Increment restart count BEFORE computing budget so that the nth
+        // recovery sees the correct EXHAUSTED state when n > MAX_INACTIVE_RESTARTS.
+        const prevRestartCount = this.inactiveRestartCountByBead.get(beadId) ?? 0;
+        this.inactiveRestartCountByBead.set(beadId, prevRestartCount + 1);
+        const budget = this.retryBudgetFor(beadId);
+
+        // ACT on the taxonomy table's next-action — QUARANTINE when budget
+        // exhausted, BOUNDED_RETRY (restart) while budget remains.
+        const taxonomyRoute = this.routeTaxonomy(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
+        const fields = this.taxonomyFields(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
+
         const latestProgressEvent = latestProgressEvents.get(beadId);
         const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
         const blockedCategory: ScanCategory | string = finalBlockedResult.category ?? ScanCategory.PANIC_FATAL;
@@ -1779,7 +1889,10 @@ export class Supervisor {
           beadId,
           stateId,
           category: blockedCategory,
-          evidenceLine: finalBlockedResult.evidenceLine
+          evidenceLine: finalBlockedResult.evidenceLine,
+          taxonomyAction: taxonomyRoute.nextAction,
+          restartCount: prevRestartCount + 1,
+          budget
         });
 
         await this.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
@@ -1787,17 +1900,35 @@ export class Supervisor {
           stateId,
           summary,
           paneSnapshot,
-          error: summary
+          error: summary,
+          // n8fg taxonomy: driven by the table's nextAction (BOUNDED_RETRY or QUARANTINE)
+          ...fields
         }).catch(() => {});
-        await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
-          beadId,
-          stateId,
-          targetState: stateId,
-          transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
-          summary,
-          evidence,
-          handover: summary
-        }).catch(() => {});
+
+        if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
+          // Budget exhausted: quarantine instead of restarting.
+          const beadObj = await this.beadsPort().getBead(beadId).catch(() => undefined);
+          if (beadObj) {
+            await this.quarantineBead(beadObj, QuarantineReason.UNKNOWN, {
+              ...fields,
+              summary,
+              reason: 'Worker process loss retry budget exhausted — final-blocked'
+            });
+          } else {
+            Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
+          }
+        } else {
+          // BOUNDED_RETRY: restart the bead (existing behavior).
+          await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
+            beadId,
+            stateId,
+            targetState: stateId,
+            transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
+            summary,
+            evidence,
+            handover: summary
+          }).catch(() => {});
+        }
 
         await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
           Logger.warn(Component.SUPERVISOR, 'Unable to terminate final-blocked teammate panes', { beadId, error: String(error) });
@@ -1817,6 +1948,17 @@ export class Supervisor {
       const now = this.clock.now();
       if (now - lastRestartAtMs < noProgressTimeoutMs) continue;
       this.inactiveRestartedAtMs.set(beadId, now);
+
+      // Increment restart count BEFORE computing budget so that the nth
+      // recovery sees the correct EXHAUSTED state when n > MAX_INACTIVE_RESTARTS.
+      const prevRestartCount = this.inactiveRestartCountByBead.get(beadId) ?? 0;
+      this.inactiveRestartCountByBead.set(beadId, prevRestartCount + 1);
+      const budget = this.retryBudgetFor(beadId);
+
+      // ACT on the taxonomy table's next-action — QUARANTINE when budget
+      // exhausted, BOUNDED_RETRY (restart) while budget remains.
+      const taxonomyRoute = this.routeTaxonomy(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
+      const fields = this.taxonomyFields(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
 
       const latestProgressEvent = latestProgressEvents.get(beadId);
       const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
@@ -1841,17 +1983,38 @@ export class Supervisor {
         stateId,
         summary,
         paneSnapshot: paneSnapshot || undefined,
-        error: summary
+        error: summary,
+        // n8fg taxonomy: no-progress timeout = worker process loss; action driven by table
+        ...fields
       }).catch(() => {});
-      await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
-        beadId,
-        stateId,
-        targetState: stateId,
-        transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
-        summary,
-        evidence,
-        handover: summary
-      }).catch(() => {});
+
+      if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
+        // Budget exhausted: quarantine instead of restarting.
+        // Fetch the bead object for quarantine signature calculation.
+        const beadObj = await this.beadsPort().getBead(beadId).catch(() => undefined);
+        if (beadObj) {
+          await this.quarantineBead(beadObj, QuarantineReason.UNKNOWN, {
+            ...fields,
+            summary,
+            reason: 'Worker process loss retry budget exhausted — no-progress timeout'
+          });
+        } else {
+          // Best-effort: if we can't fetch the bead, record the failure event
+          // but skip quarantine entry (bead may have already been released).
+          Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
+        }
+      } else {
+        // BOUNDED_RETRY: restart the bead (existing behavior).
+        await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
+          beadId,
+          stateId,
+          targetState: stateId,
+          transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
+          summary,
+          evidence,
+          handover: summary
+        }).catch(() => {});
+      }
 
       await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
         Logger.warn(Component.SUPERVISOR, 'Unable to terminate inactive teammate panes', { beadId, error: String(error) });

@@ -1268,7 +1268,14 @@ export const SupervisorDefaults = {
    * event and logs at most once per this interval.  30 minutes matches typical
    * capacity-limit pause durations and keeps operator logs tractable.
    */
-  PAUSE_HEARTBEAT_INTERVAL_MS: 30 * TimeMs.MINUTE
+  PAUSE_HEARTBEAT_INTERVAL_MS: 30 * TimeMs.MINUTE,
+  /**
+   * Maximum number of inactive-restart recoveries allowed per bead before the
+   * retry budget is considered EXHAUSTED for the n8fg taxonomy.
+   * When a bead's restart count exceeds this threshold, WORKER_PROCESS_LOSS ×
+   * RUNNING routes to QUARANTINE instead of BOUNDED_RETRY.
+   */
+  MAX_INACTIVE_RESTARTS: 3
 } as const;
 
 export const RetentionDefaults = {
