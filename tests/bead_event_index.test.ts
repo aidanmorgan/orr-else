@@ -407,11 +407,13 @@ describe('BeadEventIndex', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Legacy compatibility: existing (no-hash) index files still resolve (AC2)
+  // Stale no-hash file is ignored as orphan (xddp: only hashed format is canon)
   // ---------------------------------------------------------------------------
 
-  it('returns undefined (triggering primary rebuild) when only a legacy no-hash index exists', async () => {
-    // Simulate a pre-c5kd environment: only the legacy filename exists on disk.
+  it('ignores a stale no-hash index file as an orphan and returns undefined (triggering primary rebuild)', async () => {
+    // A stale no-hash file (pre-c5kd orphan) must never be read as an index.
+    // eventsForBead returns undefined because the hashed index is absent,
+    // causing the caller to full-scan the primary log.
     const primaryPath = path.join(tempDir, 'project.jsonl');
     const e1 = makeDomainEvent({ id: 'e1', timestamp: '2026-01-01T00:00:01.000Z', data: { beadId: 'bd-1' } });
     fs.writeFileSync(primaryPath, `${JSON.stringify(e1)}\n`);
@@ -419,24 +421,25 @@ describe('BeadEventIndex', () => {
     const indexDir = path.join(tempDir, EventStoreDefaults.BEAD_INDEX_DIR);
     fs.mkdirSync(indexDir, { recursive: true });
 
-    // Write the LEGACY filename (no hash suffix) with a ready marker
-    const legacyIndexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
-    const legacyReadyPath = `${legacyIndexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
-    fs.writeFileSync(legacyIndexPath, `${JSON.stringify(e1)}\n`);
-    fs.writeFileSync(legacyReadyPath, JSON.stringify({ sources: { 'project.jsonl': fs.statSync(primaryPath).size } }));
+    // Plant a stale no-hash file that must not influence reads
+    const staleIndexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    const staleReadyPath = `${staleIndexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+    fs.writeFileSync(staleIndexPath, `${JSON.stringify(e1)}\n`);
+    fs.writeFileSync(staleReadyPath, JSON.stringify({ sources: { 'project.jsonl': fs.statSync(primaryPath).size } }));
 
-    // The hashed index must NOT exist
+    // Confirm no hashed index exists
     const hashedIndexPath = path.join(indexDir, index.indexFileName('bd-1'));
     expect(fs.existsSync(hashedIndexPath)).toBe(false);
 
-    // eventsForBead must return undefined (signals caller to full-scan the primary)
-    // so no events are lost even if the legacy index is present.
+    // Must return undefined — hashed index absent; stale no-hash file is ignored
     const result = await index.eventsForBead(location, 'bd-1', [primaryPath], isDomainEvent, beadIdFor, compareEvents);
     expect(result).toBeUndefined();
   });
 
-  it('rebuilds correctly from the primary log after the hashed index is created following a legacy-only state', async () => {
-    // Start with only a legacy index, then trigger a new append which creates the hashed index.
+  it('rebuilds correctly from the primary log when a stale no-hash file coexists with a freshly created hashed index', async () => {
+    // A stale no-hash file sits in the index dir as an orphan. A new append
+    // creates the hashed index. eventsForBead must use only the hashed index and
+    // produce the full event history via the top-up read (bootstrapped at offset 0).
     const primaryPath = path.join(tempDir, 'project.jsonl');
     const e1 = makeDomainEvent({ id: 'e1', timestamp: '2026-01-01T00:00:01.000Z', data: { beadId: 'bd-1' } });
     fs.writeFileSync(primaryPath, `${JSON.stringify(e1)}\n`);
@@ -444,26 +447,25 @@ describe('BeadEventIndex', () => {
     const indexDir = path.join(tempDir, EventStoreDefaults.BEAD_INDEX_DIR);
     fs.mkdirSync(indexDir, { recursive: true });
 
-    // Legacy index exists (pre-c5kd state)
-    const legacyIndexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
-    const legacyReadyPath = `${legacyIndexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
-    fs.writeFileSync(legacyIndexPath, `${JSON.stringify(e1)}\n`);
-    fs.writeFileSync(legacyReadyPath, JSON.stringify({ sources: { 'project.jsonl': fs.statSync(primaryPath).size } }));
+    // Plant a stale no-hash file (orphan — must not affect reads)
+    const staleIndexPath = path.join(indexDir, `bd-1${EventStoreDefaults.INDEX_FILE_EXTENSION}`);
+    const staleReadyPath = `${staleIndexPath}${EventStoreDefaults.INDEX_READY_FILE_EXTENSION}`;
+    fs.writeFileSync(staleIndexPath, `${JSON.stringify(e1)}\n`);
+    fs.writeFileSync(staleReadyPath, JSON.stringify({ sources: { 'project.jsonl': fs.statSync(primaryPath).size } }));
 
     // New event arrives — append creates the hashed index
     const e2 = makeDomainEvent({ id: 'e2', timestamp: '2026-01-01T00:00:02.000Z', data: { beadId: 'bd-1' } });
     fs.appendFileSync(primaryPath, `${JSON.stringify(e2)}\n`);
     await index.append(location, 'bd-1', e2, primaryPath);
 
-    // Now the hashed index exists and eventsForBead uses it
+    // Hashed index now exists
     const hashedIndexPath = path.join(indexDir, index.indexFileName('bd-1'));
     expect(fs.existsSync(hashedIndexPath)).toBe(true);
 
     const result = await index.eventsForBead(location, 'bd-1', [primaryPath], isDomainEvent, beadIdFor, compareEvents);
     expect(result).not.toBeUndefined();
-    // Both e1 (pre-upgrade) and e2 (post-upgrade) must survive: the hashed marker
-    // must be bootstrapped from offset 0 so the top-up loop re-reads the full
-    // primary log and de-duplicates — no pre-upgrade events may be lost.
+    // Both e1 and e2 must be present: the hashed marker bootstraps at offset 0
+    // so the top-up loop re-reads the full primary log and de-duplicates.
     expect(result!.map(e => e.id)).toEqual(['e1', 'e2']);
   });
 

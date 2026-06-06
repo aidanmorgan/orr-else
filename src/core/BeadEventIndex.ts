@@ -66,24 +66,12 @@ export class BeadEventIndex {
     return `${prefix}-${hash}${EventStoreDefaults.INDEX_FILE_EXTENSION}`;
   }
 
-  /** Legacy filename (no hash) used before bead c5kd. Kept for compat reads. */
-  private legacyIndexFileName(beadId: string): string {
-    const sanitized = beadId
-      .replace(EventStoreDefaults.UNSAFE_INDEX_PATH_SEGMENT_PATTERN, '-')
-      .replace(/^-+|-+$/g, '');
-    return `${sanitized || 'bead'}${EventStoreDefaults.INDEX_FILE_EXTENSION}`;
-  }
-
   private indexDir(location: BeadIndexLocation): string {
     return path.join(location.dir, EventStoreDefaults.BEAD_INDEX_DIR);
   }
 
   private indexPath(location: BeadIndexLocation, beadId: string): string {
     return path.join(this.indexDir(location), this.indexFileName(beadId));
-  }
-
-  private legacyIndexPath(location: BeadIndexLocation, beadId: string): string {
-    return path.join(this.indexDir(location), this.legacyIndexFileName(beadId));
   }
 
   private indexReadyPath(location: BeadIndexLocation, beadId: string): string {
@@ -292,18 +280,10 @@ export class BeadEventIndex {
     const iPath = this.indexPath(location, beadId);
     const marker = await this.readMarker(location, beadId);
 
-    // Legacy compat: if the hashed index is absent but a legacy (no-hash) index
-    // exists, return undefined so the caller rebuilds from the primary log.
-    // This is safe because the next append() will create the hashed index and
-    // the legacy file will be left in place (benign orphan).
+    // Only the hashed index is recognised. Any stale no-hash file on disk is an
+    // unrelated orphan and is never read. Return undefined so the caller falls
+    // back to a full primary-log scan and rebuilds a fresh hashed index.
     if (!existsSync(iPath) || marker === undefined) {
-      const legacyPath = this.legacyIndexPath(location, beadId);
-      if (existsSync(legacyPath)) {
-        Logger.debug(Component.CORE, 'Legacy bead index found without hashed counterpart; falling back to primary scan', {
-          beadId,
-          legacyPath
-        });
-      }
       return undefined;
     }
 
