@@ -7,6 +7,7 @@ import { PATH_INSTALL_ROOT } from './Paths.js';
 import { BuildProvenanceDefaults, Component, DomainEventName, TimeMs } from '../constants/index.js';
 import type { EventStore } from './EventStore.js';
 import { SignalNoiseCoalescer } from './SignalNoiseCoalescer.js';
+import { DIGEST_ID_LENGTH } from './BootstrapDigest.js';
 
 /**
  * Build provenance record attached to coordinator/worker startup events.
@@ -243,4 +244,25 @@ export async function runStalenessPreflightWarn(
       ...(suppressedCount > 0 ? { suppressedCount } : {})
     }).catch(() => {});
   }
+}
+
+/**
+ * Compute a compact harness fingerprint from a BuildProvenance record.
+ *
+ * The fingerprint binds together the three most stable identity signals:
+ *   - distArtifactHash: SHA-256 of the compiled dist/extension.js
+ *   - gitCommit:        HEAD commit SHA of the install root
+ *   - configHash:       SHA-256 of the resolved harness config file
+ *
+ * Returns `sha256:<DIGEST_ID_LENGTH-char hex>`.  Best-effort: when all three
+ * fields are 'unknown' the fingerprint is still deterministic and non-empty,
+ * so consumers can always store it without null-checking.
+ *
+ * This is the authoritative producer of admittedHarnessFingerprint for the
+ * pi-experiment-1elr.9 AC3 requirement.
+ */
+export function computeHarnessFingerprint(provenance: BuildProvenance): string {
+  const raw = `${provenance.distArtifactHash}|${provenance.gitCommit}|${provenance.configHash}`;
+  const digest = crypto.createHash('sha256').update(raw).digest('hex').slice(0, DIGEST_ID_LENGTH);
+  return `sha256:${digest}`;
 }

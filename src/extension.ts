@@ -17,7 +17,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { createHash } from 'node:crypto';
 import { v7 as uuidv7 } from 'uuid';
-import { computeBuildProvenance, runStalenessPreflightWarn } from './core/BuildProvenance.js';
+import { computeBuildProvenance, computeHarnessFingerprint, runStalenessPreflightWarn } from './core/BuildProvenance.js';
 import { Command } from 'commander';
 import { parse as parseShellCommand } from 'shell-quote';
 import { z } from 'zod';
@@ -123,6 +123,7 @@ import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
+import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -268,6 +269,30 @@ interface ExtensionSession {
    */
   recordedPromptDigestIds: Set<string>;
   /**
+   * The Pi base prompt hash admitted on the first BEFORE_AGENT_START call in a run.
+   * Used to detect drift on subsequent turns: if event.systemPrompt hashes to a
+   * different value, a PI_BASE_PROMPT_DRIFT event is emitted (hashes/sizes/rule codes
+   * only — no prompt body) before the prompt is re-admitted.
+   * Cleared on initializeWorkerRun.
+   */
+  admittedPiBasePromptHash: string | null;
+  /**
+   * Compact harness fingerprint derived from BuildProvenance at SESSION_START.
+   * Format: `sha256:<DIGEST_ID_LENGTH-char hex>`.
+   * Added to STATE_RUN_INITIALIZED and STATE_PROMPT_ASSEMBLED events (AC3).
+   * Undefined until SESSION_START resolves provenance; best-effort (undefined when
+   * provenance computation failed).
+   */
+  admittedHarnessFingerprint: string | undefined;
+  /**
+   * Pending STATE_RUN_INITIALIZED payload set by initializeWorkerRun.
+   * Held until the first BEFORE_AGENT_START call computes the finalPromptHash,
+   * at which point the payload is enriched with finalPromptHash +
+   * admittedHarnessFingerprint and recorded as STATE_RUN_INITIALIZED.
+   * Cleared after recording.
+   */
+  pendingRunInitPayload: Record<string, unknown> | undefined;
+  /**
    * In-session result memoisation for cacheable project tools.
    * Key: `${toolName}|${JSON.stringify(params)}`.
    * Cleared on fresh worker run and after any non-cacheable tool call.
@@ -311,6 +336,9 @@ function createExtensionSession(): ExtensionSession {
     toolBreakerFailures: new Map(),
     toolResultCache: new Map(),
     recordedPromptDigestIds: new Set(),
+    admittedPiBasePromptHash: null,
+    admittedHarnessFingerprint: undefined,
+    pendingRunInitPayload: undefined,
     piToolObservability: null,
     observedPiTools: new Set(),
     blockedObservedPiToolCallIds: new Set(),
@@ -1338,6 +1366,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   session.toolBreakerFailures.clear();
   session.toolResultCache.clear();
   session.recordedPromptDigestIds.clear();
+  session.admittedPiBasePromptHash = null;
+  session.pendingRunInitPayload = undefined;
 
   const config = await services.configLoader.load();
   const state = config.states[stateId];
@@ -1432,7 +1462,11 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   }
   const runId = process.env[EnvVars.SESSION_STATE_ID];
 
-  await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
+  // Stage the run-init event payload without recording it yet.  The first
+  // BEFORE_AGENT_START call will enrich it with finalPromptHash +
+  // admittedHarnessFingerprint (both unavailable here, before the Pi base
+  // prompt arrives) and then record STATE_RUN_INITIALIZED (AC3).
+  session.pendingRunInitPayload = {
     beadId,
     stateId,
     actionId: action.id,
@@ -1457,7 +1491,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     runId: runId || undefined,
     restartId: restartCorrelation?.restartId,
     previousRunId: restartCorrelation?.previousRunId
-  });
+  };
 }
 
 interface StateSystemPromptResult {
@@ -2509,11 +2543,73 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const promptResult = buildStateSystemPrompt(config, services, session);
     if (!promptResult) return;
 
+    // ── Pi base prompt admission + fingerprinting (pi-experiment-1elr.9) ────
+    //
+    // Compute stable hashes for all 4 prompt segments + the final assembled
+    // prompt BEFORE any token spend.  Diagnostics carry hashes/sizes/rule codes
+    // only — the prompt body is NEVER copied into events, logs, or model output.
+    //
+    // On the first call per run: record admission + STATE_PROMPT_ASSEMBLED with
+    // final-prompt fingerprint.  On subsequent calls: detect Pi base prompt drift
+    // (host-prompt change between turns) and emit PI_BASE_PROMPT_DRIFT (re-admit).
+    const piBase = event.systemPrompt;
+    const admission = admitPiBasePrompt({
+      stableBlock: promptResult.stableBlock,
+      piBasePrompt: piBase || undefined,
+      volatileSuffix: promptResult.volatileSuffix,
+    });
+
+    // AC3: flush pending STATE_RUN_INITIALIZED on the first BEFORE_AGENT_START
+    // call after run init.  We now have finalPromptHash + admittedHarnessFingerprint
+    // and can record the event with both fields (pi-experiment-1elr.9).
+    if (session.pendingRunInitPayload) {
+      const payload = session.pendingRunInitPayload;
+      session.pendingRunInitPayload = undefined;
+      await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
+        ...payload,
+        finalPromptHash: admission.finalPromptHash.sha256,
+        admittedHarnessFingerprint: session.admittedHarnessFingerprint,
+      }).catch(() => {});
+    }
+
+    // Drift detection: compare current Pi base hash against admitted hash.
+    // First turn: session.admittedPiBasePromptHash is null → no drift check.
+    const currentPiBaseHash = admission.piBasePromptHash.sha256;
+    const isDrift = session.admittedPiBasePromptHash !== null &&
+      session.admittedPiBasePromptHash !== currentPiBaseHash;
+
+    if (isDrift) {
+      // AC4: emit structured drift event — hashes/sizes/rule codes ONLY, no bodies.
+      await services.eventStore.record(DomainEventName.PI_BASE_PROMPT_DRIFT, {
+        beadId: session.activeRun?.beadId,
+        stateId: session.activeRun?.stateId,
+        admittedHash: session.admittedPiBasePromptHash,
+        currentHash: currentPiBaseHash,
+        currentByteLength: admission.piBasePromptHash.byteLength,
+        currentEstimatedTokens: admission.piBasePromptHash.estimatedTokens,
+        ruleCode: PiBasePromptRuleCode.DRIFT,
+        newFinalPromptHash: admission.finalPromptHash.sha256,
+      }).catch(() => {});
+      Logger.warn(Component.ORR_ELSE, 'Pi base prompt drifted between turns — re-admitting', {
+        beadId: session.activeRun?.beadId,
+        stateId: session.activeRun?.stateId,
+        admittedHash: session.admittedPiBasePromptHash,
+        currentHash: currentPiBaseHash,
+        ruleCode: PiBasePromptRuleCode.DRIFT,
+      });
+      // Re-admit: update the tracked hash to the new value.
+      session.admittedPiBasePromptHash = currentPiBaseHash;
+    } else if (session.admittedPiBasePromptHash === null) {
+      // First call: record the admitted hash.
+      session.admittedPiBasePromptHash = currentPiBaseHash;
+    }
+
     // Record the stable-block digest once per (run, digestId) — not on every turn.
     // BEFORE_AGENT_START fires on every user/agent turn; the stable block is typically
     // identical within a run, so we dedup by digestId to avoid per-turn event spam.
     // When the digest changes (e.g. config/state rebuilt the stable block) a new record
     // is emitted; repeated turns with the same digest emit nothing.
+    // 1elr.9: also record finalPromptHash and piBasePromptHash on STATE_PROMPT_ASSEMBLED.
     if (!session.recordedPromptDigestIds.has(promptResult.digestId)) {
       session.recordedPromptDigestIds.add(promptResult.digestId);
       await services.eventStore.record(DomainEventName.STATE_PROMPT_ASSEMBLED, {
@@ -2521,7 +2617,17 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         stateId: session.activeRun?.stateId,
         stableBlockDigestId: promptResult.digestId,
         stableBlockEstimatedTokens: promptResult.estimatedTokens,
-        stableBlockOverBudget: promptResult.overBudget
+        stableBlockOverBudget: promptResult.overBudget,
+        // 1elr.9: Pi base prompt + final prompt fingerprints (hashes only, no bodies).
+        piBasePromptHash: admission.piBasePromptHash.missing ? undefined : admission.piBasePromptHash.sha256,
+        piBasePromptMissing: admission.piBasePromptHash.missing || undefined,
+        piBasePromptOverBudget: admission.piBasePromptHash.overBudget || undefined,
+        piBasePromptEstimatedTokens: admission.piBasePromptHash.missing ? undefined : admission.piBasePromptHash.estimatedTokens,
+        finalPromptHash: admission.finalPromptHash.sha256,
+        finalPromptEstimatedTokens: admission.finalPromptHash.estimatedTokens,
+        admissionRuleCode: admission.ruleCode,
+        // AC3: harness fingerprint binds this event to the running build (1elr.9).
+        admittedHarnessFingerprint: session.admittedHarnessFingerprint,
       }).catch(() => {});
 
       if (promptResult.overBudget) {
@@ -2530,6 +2636,14 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           stateId: session.activeRun?.stateId,
           stableBlockDigestId: promptResult.digestId,
           stableBlockEstimatedTokens: promptResult.estimatedTokens
+        });
+      }
+      if (admission.piBasePromptHash.overBudget) {
+        Logger.warn(Component.ORR_ELSE, 'Pi base system prompt exceeds token budget', {
+          beadId: session.activeRun?.beadId,
+          stateId: session.activeRun?.stateId,
+          piBasePromptEstimatedTokens: admission.piBasePromptHash.estimatedTokens,
+          ruleCode: PiBasePromptRuleCode.OVER_BUDGET,
         });
       }
     }
@@ -2542,7 +2656,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     // any two spawns that share the same (project/config/state/tools/skills/rules)
     // but differ only in bead/task/worktree/date.  Pi's volatile date/cwd trailer
     // sits in the middle — after the cache breakpoint — so it never pollutes it.
-    const piBase = event.systemPrompt;
+    //
+    // NOTE: fingerprinting (above) does NOT modify this composition.
     const finalPrompt = piBase
       ? `${promptResult.stableBlock}\n\n${piBase}\n\n${promptResult.volatileSuffix}`
       : `${promptResult.stableBlock}\n\n${promptResult.volatileSuffix}`;
@@ -2577,6 +2692,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           buildProvenance: workerProvenance,
           hostSdkFingerprint
         }).catch(() => {});
+        // AC3: store the harness fingerprint for inclusion in STATE_RUN_INITIALIZED
+        // and STATE_PROMPT_ASSEMBLED events (pi-experiment-1elr.9).
+        session.admittedHarnessFingerprint = computeHarnessFingerprint(workerProvenance);
       }
     }
 
