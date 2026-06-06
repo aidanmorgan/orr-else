@@ -1,14 +1,20 @@
 /**
- * pi-experiment-0yt5.21 — harness-side tests for the COMMON, harness-owned
- * git_history built-in tool and its SELF-registered verify().
+ * pi-experiment-oi48 — git_history canonical ToolEvidenceHandle tests.
  *
- * AC1: git_history produces a ToolResultBase-conformant result.
- * AC2: the harness SELF-registers git_history's verify() at load — verifier.has
- *      ('git_history') is true after harness bootstrap WITHOUT a consumer
- *      extension loaded.
- * AC4: git_history's verify() returns NOT_APPLICABLE when its output content is
- *      ABSENT, and PASS / FAIL otherwise.
- * Plus the import-hygiene assertion: src/ imports NO cerdiwen consumer code.
+ * AC1 (new): git_history emits a canonical ToolEvidenceHandle (not ToolResultBase as
+ *   evidence shape). PASSED runs carry semanticArtifactPath, invocationId, rtkSummary,
+ *   admittedHarnessFingerprint, admittedExecutionBoundary. validateToolEvidenceHandle
+ *   returns valid:true.
+ * AC2 (new): missing harness-injected output identity (no PI_TOOL_OUTPUT_DIR and no
+ *   PI_TOOL_OUTPUT_FILE) → REJECTED/UNAVAILABLE result; the evidenceHandle.runStatus
+ *   is REJECTED; no tmp/cwd path can be used as verifier evidence.
+ * AC3 (new, negative): tmp/cwd artifacts, outputFile-only records, and ToolResultBase-
+ *   shaped objects CANNOT satisfy gitHistoryVerify (≠ PASS).
+ * AC4 (preserved): gitHistoryVerify() returns NOT_APPLICABLE when content absent,
+ *   PASS/FAIL based on canonical semanticArtifactPath.
+ * AC5 (preserved): the harness self-registers git_history's verify() at load.
+ * AC6 (preserved): parseArgs is pure deterministic argument parsing.
+ * AC7 (preserved): src/ imports NO cerdiwen consumer code.
  */
 import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
@@ -18,7 +24,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { verifier, VerifyVerdict, type VerifyContext, type ToolResultBase } from '../src/contract.js';
+import { verifier, VerifyVerdict, type VerifyContext } from '../src/contract.js';
 import {
   GIT_HISTORY_TOOL_NAME,
   gitHistoryVerify,
@@ -26,6 +32,10 @@ import {
   archiveOutput,
   parseArgs
 } from '../src/tools/git_history.js';
+import {
+  validateToolEvidenceHandle,
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+} from '../src/core/ToolEvidenceHandle.js';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -52,10 +62,28 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   }
 }
 
-describe('AC2: the harness self-registers git_history verify() at load (no consumer extension)', () => {
+/** Save/restore a set of env vars around an async test. */
+async function withEnvVars(vars: Record<string, string | undefined>, fn: () => Promise<void>): Promise<void> {
+  const saved: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AC5: harness self-registers git_history verify()
+// ---------------------------------------------------------------------------
+
+describe('AC5: the harness self-registers git_history verify() at load (no consumer extension)', () => {
   it('verifier has a git_history entry after merely importing the harness built-in tools barrel', async () => {
-    // Importing src/tools/index.js (the harness built-in bootstrap) self-registers
-    // git_history's verify() as an import side effect — no consumer extension loaded.
     await import('../src/tools/index.js');
     expect(verifier.has(GIT_HISTORY_TOOL_NAME)).toBe(true);
     const cb = verifier.get(GIT_HISTORY_TOOL_NAME);
@@ -70,10 +98,13 @@ describe('AC2: the harness self-registers git_history verify() at load (no consu
   });
 });
 
-describe('AC1: runGitHistory produces a ToolResultBase-conformant result', () => {
-  it('returns {tool,status,outputFile,outputFileBytes} for a real git status invocation', async () => {
+// ---------------------------------------------------------------------------
+// AC1 (new): runGitHistory emits a canonical ToolEvidenceHandle on PASSED runs
+// ---------------------------------------------------------------------------
+
+describe('AC1 (new): runGitHistory emits a canonical ToolEvidenceHandle on PASSED runs', () => {
+  it('evidenceHandle on a PASSED run validates against ToolEvidenceHandle schema', async () => {
     await withTempDir(async (dir) => {
-      // Build a tiny real git repo so the tool runs end-to-end.
       const repo = path.join(dir, 'repo');
       fs.mkdirSync(repo);
       const env = { cwd: repo };
@@ -84,53 +115,300 @@ describe('AC1: runGitHistory produces a ToolResultBase-conformant result', () =>
       await execFileAsync('git', ['add', 'a.txt'], env);
       await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
 
-      const prevWorktree = process.env.PI_WORKTREE_PATH;
-      const prevOutDir = process.env.PI_TOOL_OUTPUT_DIR;
-      const prevOutFile = process.env.PI_TOOL_OUTPUT_FILE;
-      process.env.PI_WORKTREE_PATH = repo;
-      process.env.PI_TOOL_OUTPUT_DIR = path.join(dir, 'out');
-      delete process.env.PI_TOOL_OUTPUT_FILE;
-      try {
-        const result: ToolResultBase = await runGitHistory(['log']);
-        expect(result.tool).toBe(GIT_HISTORY_TOOL_NAME);
+      const outDir = path.join(dir, 'out');
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: outDir,
+        PI_TOOL_OUTPUT_FILE: undefined,
+        PI_BEAD_ID: 'bd-1',
+        PI_STATE_ID: 'Implementing',
+        PI_ACTION_ID: 'code',
+        PI_TOOL_INVOCATION_ID: 'inv-test-001',
+      }, async () => {
+        const result = await runGitHistory(['log']);
         expect(result.status).toBe('PASSED');
-        expect(typeof result.outputFile).toBe('string');
-        expect(path.isAbsolute(result.outputFile)).toBe(true);
-        expect(fs.existsSync(result.outputFile)).toBe(true);
-        expect(typeof result.outputFileBytes).toBe('number');
-        expect(result.outputFileBytes).toBeGreaterThan(0);
-        // The base shape has EXACTLY the 5 fields (+ tool-owned extras allowed).
-        expect(result.failureCategory).toBeUndefined();
-        // Output content is real git evidence.
-        expect(fs.readFileSync(result.outputFile, 'utf8')).toContain('init');
-      } finally {
-        if (prevWorktree === undefined) delete process.env.PI_WORKTREE_PATH; else process.env.PI_WORKTREE_PATH = prevWorktree;
-        if (prevOutDir === undefined) delete process.env.PI_TOOL_OUTPUT_DIR; else process.env.PI_TOOL_OUTPUT_DIR = prevOutDir;
-        if (prevOutFile === undefined) delete process.env.PI_TOOL_OUTPUT_FILE; else process.env.PI_TOOL_OUTPUT_FILE = prevOutFile;
+
+        // evidenceHandle MUST be present on PASSED runs.
+        expect(result.evidenceHandle).toBeDefined();
+        const handle = result.evidenceHandle!;
+
+        // Schema version must match contract.
+        expect(handle.schemaVersion).toBe(TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION);
+        expect(handle.toolName).toBe(GIT_HISTORY_TOOL_NAME);
+        expect(typeof handle.invocationId).toBe('string');
+        expect(handle.invocationId.length).toBeGreaterThan(0);
+
+        // runStatus must be PASSED.
+        expect(handle.runStatus).toBe('PASSED');
+
+        // semanticArtifactPath must be inside toolOutputRoot.
+        expect(typeof handle.semanticArtifactPath).toBe('string');
+        expect(path.isAbsolute(handle.semanticArtifactPath!)).toBe(true);
+        expect(fs.existsSync(handle.semanticArtifactPath!)).toBe(true);
+        expect(handle.semanticArtifactPath!.startsWith(handle.toolOutputRoot)).toBe(true);
+
+        // Semantic artifact content is real git evidence.
+        expect(fs.readFileSync(handle.semanticArtifactPath!, 'utf8')).toContain('init');
+
+        // rtkSummary is present (summaryMode='summary').
+        expect(handle.summaryMode).toBe('summary');
+        expect(handle.rtkSummary).toBeDefined();
+        expect(handle.rtkSummary!.owningFile).toMatch(/\.ts$/);
+        expect(typeof handle.rtkSummary!.schemaTypeName).toBe('string');
+        expect(handle.rtkSummary!.summary).toBeDefined();
+
+        // Admitted provenance fields must be non-empty strings.
+        expect(typeof handle.admittedHarnessFingerprint).toBe('string');
+        expect(handle.admittedHarnessFingerprint.length).toBeGreaterThan(0);
+        expect(typeof handle.admittedExecutionBoundary).toBe('string');
+        expect(handle.admittedExecutionBoundary.length).toBeGreaterThan(0);
+
+        // Full schema validation must pass.
+        const validation = validateToolEvidenceHandle(handle, { expectedToolName: GIT_HISTORY_TOOL_NAME });
+        expect(validation.valid, `validateToolEvidenceHandle errors: ${!validation.valid ? (validation as { valid: false; errors: string[] }).errors.join(', ') : ''}`).toBe(true);
+      });
+    });
+  });
+
+  it('PASSED run: outputFile on the result object points to the same file as semanticArtifactPath', async () => {
+    await withTempDir(async (dir) => {
+      const repo = path.join(dir, 'repo');
+      fs.mkdirSync(repo);
+      const env = { cwd: repo };
+      await execFileAsync('git', ['init', '-q'], env);
+      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
+      fs.writeFileSync(path.join(repo, 'b.txt'), 'world\n');
+      await execFileAsync('git', ['add', 'b.txt'], env);
+      await execFileAsync('git', ['commit', '-q', '-m', 'second'], env);
+
+      const outDir = path.join(dir, 'out');
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: outDir,
+        PI_TOOL_OUTPUT_FILE: undefined,
+      }, async () => {
+        const result = await runGitHistory(['status']);
+        expect(result.status).toBe('PASSED');
+        expect(result.evidenceHandle).toBeDefined();
+        // The legacy outputFile must resolve to the same artifact as semanticArtifactPath.
+        expect(result.outputFile).toBe(result.evidenceHandle!.semanticArtifactPath);
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC2 (new): missing harness-injected identity → REJECTED/UNAVAILABLE
+// ---------------------------------------------------------------------------
+
+describe('AC2 (new): missing harness-injected output identity → REJECTED/UNAVAILABLE', () => {
+  it('no PI_TOOL_OUTPUT_DIR and no PI_TOOL_OUTPUT_FILE → REJECTED result with failureCategory INFRA', async () => {
+    await withTempDir(async (dir) => {
+      const repo = path.join(dir, 'repo');
+      fs.mkdirSync(repo);
+      const env = { cwd: repo };
+      await execFileAsync('git', ['init', '-q'], env);
+      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
+      await execFileAsync('git', ['add', 'a.txt'], env);
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
+
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: undefined,
+        PI_TOOL_OUTPUT_FILE: undefined,
+        PI_TOOL_TMP_DIR: undefined,
+      }, async () => {
+        const result = await runGitHistory(['log']);
+        // Must be REJECTED (not PASSED with a tmp/cwd fallback path).
+        expect(result.status).toBe('REJECTED');
+        expect(result.failureCategory).toBe('INFRA');
+        // evidenceHandle.runStatus must also be REJECTED.
+        expect(result.evidenceHandle).toBeDefined();
+        expect(result.evidenceHandle!.runStatus).toBe('REJECTED');
+      });
+    });
+  });
+
+  it('REJECTED evidenceHandle cannot satisfy gitHistoryVerify (verifier returns FAIL)', async () => {
+    await withTempDir(async (dir) => {
+      const repo = path.join(dir, 'repo');
+      fs.mkdirSync(repo);
+      const env = { cwd: repo };
+      await execFileAsync('git', ['init', '-q'], env);
+      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
+      await execFileAsync('git', ['add', 'a.txt'], env);
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
+
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: undefined,
+        PI_TOOL_OUTPUT_FILE: undefined,
+        PI_TOOL_TMP_DIR: undefined,
+      }, async () => {
+        const result = await runGitHistory(['log']);
+        expect(result.status).toBe('REJECTED');
+        // The outputFile (if any) from a REJECTED run must NOT pass the verifier.
+        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AC3 (new, negative): tmp/cwd/outputFile-only/ToolResultBase-shaped artifacts CANNOT pass
+// ---------------------------------------------------------------------------
+
+describe('AC3 (new, negative): non-canonical artifacts cannot pass gitHistoryVerify', () => {
+  it('NEGATIVE (real verifier): a tmp-dir raw git log file makes gitHistoryVerify return FAIL', async () => {
+    // A raw git log file (not a ToolEvidenceHandle JSON) written to a temp dir:
+    // gitHistoryVerify must return FAIL (fails JSON/handle validation), never PASS.
+    await withTempDir(async (dir) => {
+      const rawLogFile = path.join(dir, 'git-history.stdout.log');
+      fs.writeFileSync(rawLogFile, '4c241a5 init\n');
+      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: rawLogFile }));
+      // Raw git text is not valid JSON → not a canonical handle → FAIL (not PASS).
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBeDefined();
+    });
+  });
+
+  it('NEGATIVE (real verifier): a REJECTED run (no harness path) outputFile cannot produce PASS', async () => {
+    // When no harness-injected path is present, the run is REJECTED and outputFile is ''.
+    // gitHistoryVerify with an empty/absent path returns NOT_APPLICABLE (not PASS).
+    await withTempDir(async (dir) => {
+      const repo = path.join(dir, 'repo');
+      fs.mkdirSync(repo);
+      const env = { cwd: repo };
+      await execFileAsync('git', ['init', '-q'], env);
+      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
+      await execFileAsync('git', ['add', 'a.txt'], env);
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
+
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: undefined,
+        PI_TOOL_OUTPUT_FILE: undefined,
+        PI_TOOL_TMP_DIR: undefined,
+      }, async () => {
+        const result = await runGitHistory(['log']);
+        expect(result.status).toBe('REJECTED');
+        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        // A REJECTED run's outputFile (empty string) cannot produce PASS in the verifier.
+        expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+      });
+    });
+  });
+
+  it('NEGATIVE (real verifier): an outputFile-only record (ToolResultBase shape) written to disk makes gitHistoryVerify FAIL', async () => {
+    // A ToolResultBase-like JSON (missing invocationId, schemaVersion, etc.) written to disk:
+    // gitHistoryVerify must return FAIL when it reads this file (fails validateToolEvidenceHandle).
+    await withTempDir(async (dir) => {
+      const toolResultBaseLike = {
+        tool: GIT_HISTORY_TOOL_NAME,
+        status: 'PASSED',
+        outputFile: path.join(dir, 'git-history.stdout.log'),
+        outputFileBytes: 42,
+      };
+      const artifactFile = path.join(dir, 'git-history.json');
+      fs.writeFileSync(artifactFile, JSON.stringify(toolResultBaseLike, null, 2));
+
+      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
+      // ToolResultBase-shaped artifact fails handle validation → FAIL (not PASS).
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBeDefined();
+    });
+  });
+
+  it('NEGATIVE (real verifier): various ToolResultBase-shaped JSON files make gitHistoryVerify FAIL', async () => {
+    // Any JSON object missing canonical ToolEvidenceHandle fields must FAIL gitHistoryVerify.
+    const shapes = [
+      { tool: GIT_HISTORY_TOOL_NAME, status: 'PASSED', outputFile: '/tmp/a.log', outputFileBytes: 10 },
+      { toolName: GIT_HISTORY_TOOL_NAME, runStatus: 'PASSED', outputFile: '/tmp/a.log' },
+      { toolName: GIT_HISTORY_TOOL_NAME, runStatus: 'PASSED', toolOutputRoot: '/out', summaryMode: 'none' },
+    ];
+    await withTempDir(async (dir) => {
+      for (const shape of shapes) {
+        const artifactFile = path.join(dir, `shape-${Object.keys(shape).join('-')}.json`);
+        fs.writeFileSync(artifactFile, JSON.stringify(shape, null, 2));
+        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
+        expect(verifyResult.verdict, `expected FAIL for shape: ${JSON.stringify(shape)}`).toBe(VerifyVerdict.FAIL);
       }
     });
   });
 
-  it('a non-git directory yields a REJECTED ToolResultBase with a failureCategory', async () => {
+  it('NEGATIVE (real verifier): a near-valid handle with semanticArtifactPath outside toolOutputRoot makes gitHistoryVerify FAIL', async () => {
+    // A handle JSON that has semanticArtifactPath outside toolOutputRoot fails
+    // validateToolEvidenceHandle → gitHistoryVerify returns FAIL.
     await withTempDir(async (dir) => {
-      const notRepo = path.join(dir, 'plain');
-      fs.mkdirSync(notRepo);
-      const prevWorktree = process.env.PI_WORKTREE_PATH;
-      const prevOutFile = process.env.PI_TOOL_OUTPUT_FILE;
-      process.env.PI_WORKTREE_PATH = notRepo;
-      process.env.PI_TOOL_OUTPUT_FILE = path.join(dir, 'out.log');
-      try {
-        const result = await runGitHistory(['status']);
-        expect(result.status).toBe('REJECTED');
-        expect(result.failureCategory).toBe('INFRA');
-        expect(fs.existsSync(result.outputFile)).toBe(true);
-      } finally {
-        if (prevWorktree === undefined) delete process.env.PI_WORKTREE_PATH; else process.env.PI_WORKTREE_PATH = prevWorktree;
-        if (prevOutFile === undefined) delete process.env.PI_TOOL_OUTPUT_FILE; else process.env.PI_TOOL_OUTPUT_FILE = prevOutFile;
-      }
+      // The handle file lives inside harness-output, but semanticArtifactPath is outside.
+      const harnessOutput = path.join(dir, 'harness-output');
+      fs.mkdirSync(harnessOutput);
+      const outsideFile = path.join(dir, 'outside.log');
+      fs.writeFileSync(outsideFile, '4c241a5 init\n');
+
+      const nearValidHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: GIT_HISTORY_TOOL_NAME,
+        invocationId: 'inv-test-001',
+        runStatus: 'PASSED',
+        toolOutputRoot: harnessOutput,
+        summaryMode: 'none',
+        noSummaryReason: 'test',
+        admittedHarnessFingerprint: 'sha256:test',
+        admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
+        semanticArtifactPath: outsideFile, // OUTSIDE toolOutputRoot
+      };
+      const artifactFile = path.join(harnessOutput, 'git-history.json');
+      fs.writeFileSync(artifactFile, JSON.stringify(nearValidHandle, null, 2));
+
+      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
+      // Handle fails validateToolEvidenceHandle (semanticArtifactPath outside root) → FAIL.
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBeDefined();
+    });
+  });
+
+  it('NEGATIVE (real verifier): a REJECTED-status handle JSON makes gitHistoryVerify FAIL', async () => {
+    // A valid ToolEvidenceHandle with runStatus: 'REJECTED' must make gitHistoryVerify FAIL.
+    await withTempDir(async (dir) => {
+      const harnessOutput = path.join(dir, 'harness-output');
+      fs.mkdirSync(harnessOutput);
+      const handleFile = path.join(harnessOutput, 'git-history.json');
+
+      const rejectedHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: GIT_HISTORY_TOOL_NAME,
+        invocationId: 'inv-rejected-001',
+        runStatus: 'REJECTED',
+        failureCategory: 'INFRA',
+        toolOutputRoot: harnessOutput,
+        summaryMode: 'none',
+        noSummaryReason: 'REJECTED: not a git repository',
+        admittedHarnessFingerprint: 'sha256:test',
+        admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
+        semanticArtifactPath: handleFile,
+      };
+      fs.writeFileSync(handleFile, JSON.stringify(rejectedHandle, null, 2));
+
+      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: handleFile }));
+      // REJECTED runStatus → FAIL (not PASS).
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBe('rejected git_history run');
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/FAIL otherwise
+// ---------------------------------------------------------------------------
 
 describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/FAIL otherwise', () => {
   it('NEGATIVE: NOT_APPLICABLE when no git_history output path is recorded', () => {
@@ -152,12 +430,32 @@ describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/F
     });
   });
 
-  it('PASS: when the archived output holds non-empty git evidence', async () => {
+  it('PASS: when the artifact is a canonical PASSED ToolEvidenceHandle JSON', async () => {
     await withTempDir(async (dir) => {
-      const { outputFile } = await archiveOutput(dir, '4c241a5 some commit\n180355f another commit\n');
-      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: outputFile }));
+      // Write a valid canonical handle JSON with runStatus PASSED and a readable semanticArtifactPath.
+      const canonicalHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: GIT_HISTORY_TOOL_NAME,
+        invocationId: 'inv-pass-001',
+        runStatus: 'PASSED',
+        semanticArtifactPath: path.join(dir, 'git-history.json'), // points to self (will be written below)
+        toolOutputRoot: dir,
+        summaryMode: 'summary' as const,
+        rtkSummary: {
+          schemaTypeName: 'GitHistoryRtkSummary',
+          owningFile: 'src/tools/git_history.ts',
+          summary: { operation: 'log', repo: 'worktree', root: dir, outputLines: 2, outputFileBytes: 40, outputText: '4c241a5 some commit\n180355f another commit' },
+        },
+        admittedHarnessFingerprint: 'sha256:test',
+        admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
+      };
+      const handleFile = path.join(dir, 'git-history.json');
+      fs.writeFileSync(handleFile, JSON.stringify(canonicalHandle, null, 2));
+
+      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: handleFile }));
       expect(result.verdict).toBe(VerifyVerdict.PASS);
-      expect(result.reasons.some((r) => r.includes('git evidence'))).toBe(true);
+      // The PASS reason references the canonical handle (invocationId / admittedExecutionBoundary).
+      expect(result.reasons.some((r) => r.includes('canonical handle validated'))).toBe(true);
     });
   });
 
@@ -179,9 +477,60 @@ describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/F
       expect(result.verdict).toBe(VerifyVerdict.FAIL);
     });
   });
+
+  it('END-TO-END: a canonical PASSED run satisfies gitHistoryVerify (PASS verdict)', async () => {
+    await withTempDir(async (dir) => {
+      const repo = path.join(dir, 'repo');
+      fs.mkdirSync(repo);
+      const env = { cwd: repo };
+      await execFileAsync('git', ['init', '-q'], env);
+      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
+      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
+      await execFileAsync('git', ['add', 'a.txt'], env);
+      await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
+
+      const outDir = path.join(dir, 'out');
+      await withEnvVars({
+        PI_WORKTREE_PATH: repo,
+        PI_TOOL_OUTPUT_DIR: outDir,
+        PI_TOOL_OUTPUT_FILE: undefined,
+      }, async () => {
+        const result = await runGitHistory(['log']);
+        expect(result.status).toBe('PASSED');
+        // The verifier must return PASS when given the semantic artifact path.
+        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        expect(verifyResult.verdict).toBe(VerifyVerdict.PASS);
+      });
+    });
+  });
+
+  it('a non-git directory yields a REJECTED result that does NOT pass verifier', async () => {
+    await withTempDir(async (dir) => {
+      const notRepo = path.join(dir, 'plain');
+      fs.mkdirSync(notRepo);
+      await withEnvVars({
+        PI_WORKTREE_PATH: notRepo,
+        PI_TOOL_OUTPUT_FILE: path.join(dir, 'out.log'),
+        PI_TOOL_OUTPUT_DIR: undefined,
+      }, async () => {
+        const result = await runGitHistory(['status']);
+        expect(result.status).toBe('REJECTED');
+        expect(result.failureCategory).toBe('INFRA');
+        expect(fs.existsSync(result.outputFile)).toBe(true);
+        // REJECTED run's outputFile must not pass the verifier.
+        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+      });
+    });
+  });
 });
 
-describe('determinism: parseArgs is pure deterministic argument parsing', () => {
+// ---------------------------------------------------------------------------
+// AC6: parseArgs is pure deterministic argument parsing
+// ---------------------------------------------------------------------------
+
+describe('AC6: parseArgs is pure deterministic argument parsing', () => {
   it('maps git-native aliases to the structured ParsedArgs the tool runs on', () => {
     const a = parseArgs(['log', '--oneline', '-n', '5', '--', 'src/a.ts']);
     expect(a.operation).toBe('log');
@@ -197,11 +546,12 @@ describe('determinism: parseArgs is pure deterministic argument parsing', () => 
   });
 });
 
-describe('import hygiene: src/ imports NO cerdiwen consumer code', () => {
+// ---------------------------------------------------------------------------
+// AC7: import hygiene — src/ imports NO cerdiwen consumer code
+// ---------------------------------------------------------------------------
+
+describe('AC7: import hygiene: src/ imports NO cerdiwen consumer code', () => {
   it('rg-style scan of src/ finds zero cerdiwen/.pi/project-tools IMPORTS', () => {
-    // Match only IMPORT specifiers (import/export ... from '…', side-effect
-    // import '…', dynamic import('…')/require('…')) that reference a cerdiwen
-    // project-tools module — NOT incidental path-string constants.
     const importSpecRes = [
       /(?:import|export)\b[^;]*?\bfrom\s+['"]([^'"]+)['"]/g,
       /^\s*import\s+['"]([^'"]+)['"]\s*;?/gm,

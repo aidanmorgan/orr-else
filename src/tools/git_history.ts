@@ -3,10 +3,10 @@
  * git_history — a COMMON, harness-OWNED built-in tool (pi-experiment-0yt5.21).
  *
  * git_history is NOT cerdiwen-specific. It lives in the orr-else harness `src/`
- * tree, owns its OWN deterministic git-output parsing, produces a
- * ToolResultBase-conformant result, and ships a deterministic verify() callback
- * that the harness SELF-registers at load (see ./index.ts). This module imports
- * ONLY the contract TYPES and node builtins — never any consumer code.
+ * tree, owns its OWN deterministic git-output parsing, produces a canonical
+ * ToolEvidenceHandle (pi-experiment-oi48), and ships a deterministic verify()
+ * callback that the harness SELF-registers at load (see ./index.ts). This module
+ * imports ONLY the contract TYPES and node builtins — never any consumer code.
  *
  * Behaviour mirrors the reference implementation that previously lived in the
  * cerdiwen checkout, but the path resolution is now harness-native: it reads the
@@ -16,7 +16,14 @@
  * code (node:util parseArgs + explicit branching, minimal regex) — NOT LLM-based.
  * The verify() is pure given a paths-only VerifyContext: it reads the recorded
  * outputFile and judges presence/shape on disk.
+ *
+ * pi-experiment-oi48: git_history now emits a canonical ToolEvidenceHandle on
+ * PASSED runs. Missing harness-injected output identity (no PI_TOOL_OUTPUT_DIR
+ * and no PI_TOOL_OUTPUT_FILE) → REJECTED result; no tmp/cwd path is used as
+ * verifier evidence. The verifier checks for a REJECTED JSON payload in the
+ * output file and returns FAIL rather than PASS for such files.
  */
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { existsSync, statSync, readFileSync } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
@@ -29,6 +36,12 @@ import {
   type VerifyContext,
   type VerifyResult
 } from '../contract.js';
+import {
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  validateToolEvidenceHandle,
+  validateToolEvidenceArtifact,
+  type ToolEvidenceHandle,
+} from '../core/ToolEvidenceHandle.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 
 const execFileAsync = promisify(execFile);
@@ -58,6 +71,7 @@ const MAX_PATHS = 30;
 const DEFAULT_UNIFIED_CONTEXT_LINES = 3;
 const MAX_UNIFIED_CONTEXT_LINES = 500;
 const OUTPUT_FILE_NAME = 'git-history.stdout.log';
+const HANDLE_FILE_NAME = 'git-history.json';
 const EXEC_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 const EXEC_TIMEOUT_MS = 120_000;
 const EMPTY_HISTORY_PATTERN = /does not have any commits yet|your current branch .* does not have any commits yet/i;
@@ -97,9 +111,38 @@ export type ParsedArgs = {
 };
 
 /**
- * The model-facing git_history result. Extends the harness ToolResultBase with
- * the tool's own structured fields. The five ToolResultBase fields are the thin
- * "did the tool RUN" base — the semantic verdict lives in verify(), never here.
+ * GitHistoryRtkSummary — the TypeScript-owned, deterministic RTK summary for
+ * a git_history run. Attached to the ToolEvidenceHandle on PASSED runs.
+ *
+ * pi-experiment-oi48: this is the tool-owned summary shape. The harness only
+ * validates structure (schemaTypeName + owningFile); it does not inspect payload.
+ *
+ * outputText: the raw git stdout (embedded in the handle artifact so that
+ * readFileSync(semanticArtifactPath) contains real git evidence and the handle
+ * JSON IS the canonical on-disk artifact).
+ */
+export interface GitHistoryRtkSummary {
+  operation: string;
+  repo: string;
+  root: string;
+  outputLines: number;
+  outputFileBytes: number;
+  objectFound?: boolean;
+  lockfileReason?: string;
+  stderr?: string;
+  /** The raw git stdout, embedded so the handle artifact IS the evidence. */
+  outputText?: string;
+}
+
+/**
+ * The git_history tool result. Extends the harness ToolResultBase for backward
+ * compatibility (tool, status, outputFile, outputFileBytes, failureCategory),
+ * and additionally carries a canonical ToolEvidenceHandle (pi-experiment-oi48).
+ *
+ * The VERIFIER EVIDENCE SHAPE is the evidenceHandle (ToolEvidenceHandle), not
+ * the ToolResultBase fields. The ToolResultBase fields are retained for
+ * compatibility with existing callers; outputFile points to the same file as
+ * evidenceHandle.semanticArtifactPath on PASSED runs.
  */
 export interface GitHistoryResult extends ToolResultBase {
   operation?: Operation;
@@ -111,6 +154,8 @@ export interface GitHistoryResult extends ToolResultBase {
   outputLines?: number;
   stderr?: string;
   error?: string;
+  /** Canonical ToolEvidenceHandle (pi-experiment-oi48). Present on all runs. */
+  evidenceHandle?: ToolEvidenceHandle;
 }
 
 function print(payload: unknown): void {
@@ -381,15 +426,137 @@ function repoRoot(repo: Repository, env: RuntimeEnvironment): string {
  * Where the raw git output archive is written. Precedence:
  *   PI_TOOL_OUTPUT_FILE — the harness-assigned exact output file (if set).
  *   PI_TOOL_OUTPUT_DIR  — the harness-assigned output directory.
- *   PI_TOOL_TMP_DIR / os tmp — last-resort fallback.
+ *
+ * pi-experiment-oi48: the former PI_TOOL_TMP_DIR / cwd fallback is REMOVED.
+ * A missing harness-injected identity means the run cannot produce verifier
+ * evidence. Returns undefined when no harness-injected path is present.
  */
-function resolveOutputTarget(env: RuntimeEnvironment): { dir: string; file: string } {
+function resolveOutputTarget(env: RuntimeEnvironment): { dir: string; file: string } | undefined {
   const explicitFile = env.env('PI_TOOL_OUTPUT_FILE');
   if (explicitFile) {
     return { dir: path.dirname(path.resolve(explicitFile)), file: path.resolve(explicitFile) };
   }
-  const dir = path.resolve(env.env('PI_TOOL_OUTPUT_DIR') || env.env('PI_TOOL_TMP_DIR') || resolve(process.cwd(), '.tmp', 'git-history'));
-  return { dir, file: resolve(dir, OUTPUT_FILE_NAME) };
+  const outDir = env.env('PI_TOOL_OUTPUT_DIR');
+  if (outDir) {
+    const dir = path.resolve(outDir);
+    // The primary artifact is the canonical handle JSON (pi-experiment-oi48).
+    return { dir, file: resolve(dir, HANDLE_FILE_NAME) };
+  }
+  // No harness-injected output path — cannot produce verifier evidence.
+  return undefined;
+}
+
+/**
+ * Read harness-injected execution identity from env vars.
+ * Returns best-effort values; falls back to 'unknown' for missing vars.
+ */
+function resolveExecutionIdentity(env: RuntimeEnvironment): {
+  invocationId: string;
+  admittedExecutionBoundary: string;
+  admittedHarnessFingerprint: string;
+  toolOutputRoot: string;
+} {
+  const invocationId = env.env('PI_TOOL_INVOCATION_ID') || randomUUID();
+  const beadId = env.env('PI_BEAD_ID') || 'unknown';
+  const stateId = env.env('PI_STATE_ID') || 'unknown';
+  const actionId = env.env('PI_ACTION_ID') || 'unknown';
+  const admittedExecutionBoundary = `bead:${beadId}/state:${stateId}/action:${actionId}`;
+  const admittedHarnessFingerprint = env.env('PI_HARNESS_FINGERPRINT') || 'unknown';
+  const outDirEnv = env.env('PI_TOOL_OUTPUT_DIR');
+  const toolOutputRoot = outDirEnv ? path.resolve(outDirEnv) : '';
+  return { invocationId, admittedExecutionBoundary, admittedHarnessFingerprint, toolOutputRoot };
+}
+
+/**
+ * Compute hex SHA-256 of a file's content (read synchronously).
+ * Returns 'unknown' on any error (non-fatal for audit metadata).
+ */
+function sha256OfFile(filePath: string): string {
+  try {
+    const content = readFileSync(filePath);
+    return createHash('sha256').update(content).digest('hex');
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Build a canonical ToolEvidenceHandle for a PASSED git_history run.
+ *
+ * pi-experiment-oi48 (review fix): semanticArtifactPath is the handle JSON file
+ * (outFile). rawTransportArchivePaths carries the separate raw stdout log file.
+ * The git output is embedded in rtkSummary.summary.outputText so that
+ * readFileSync(semanticArtifactPath) contains real git evidence.
+ */
+function buildPassedHandle(params: {
+  outputFile: string;
+  outputFileBytes: number;
+  rawTransportLogFile: string;
+  toolOutputRoot: string;
+  invocationId: string;
+  admittedExecutionBoundary: string;
+  admittedHarnessFingerprint: string;
+  rtkSummary: GitHistoryRtkSummary;
+}): ToolEvidenceHandle {
+  const {
+    outputFile, toolOutputRoot,
+    rawTransportLogFile,
+    invocationId, admittedExecutionBoundary, admittedHarnessFingerprint, rtkSummary,
+  } = params;
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: GIT_HISTORY_TOOL_NAME,
+    invocationId,
+    runStatus: 'PASSED',
+    // semanticArtifactPath is the handle JSON file; bytes/sha256 are computed
+    // after writing (omitted here to avoid circular self-reference).
+    semanticArtifactPath: outputFile,
+    rawTransportArchivePaths: [rawTransportLogFile],
+    toolOutputRoot,
+    summaryMode: 'summary',
+    rtkSummary: {
+      schemaTypeName: 'GitHistoryRtkSummary',
+      owningFile: 'src/tools/git_history.ts',
+      summary: rtkSummary as unknown as Record<string, unknown>,
+    },
+    admittedHarnessFingerprint,
+    admittedExecutionBoundary,
+  };
+}
+
+/**
+ * Build a canonical ToolEvidenceHandle for a REJECTED git_history run.
+ */
+function buildRejectedHandle(params: {
+  outputFile: string;
+  outputFileBytes: number;
+  toolOutputRoot: string;
+  invocationId: string;
+  admittedExecutionBoundary: string;
+  admittedHarnessFingerprint: string;
+  failureCategory: ToolResultBase['failureCategory'];
+  noSummaryReason: string;
+}): ToolEvidenceHandle {
+  const {
+    outputFile, outputFileBytes, toolOutputRoot,
+    invocationId, admittedExecutionBoundary, admittedHarnessFingerprint,
+    failureCategory, noSummaryReason,
+  } = params;
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: GIT_HISTORY_TOOL_NAME,
+    invocationId,
+    runStatus: 'REJECTED',
+    ...(failureCategory ? { failureCategory } : {}),
+    semanticArtifactPath: outputFile,
+    semanticArtifactBytes: outputFileBytes,
+    rawTransportArchivePaths: [outputFile],
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason,
+    admittedHarnessFingerprint,
+    admittedExecutionBoundary,
+  };
 }
 
 function commandFor(args: ParsedArgs, root: string): string[] {
@@ -471,38 +638,121 @@ export async function archiveOutput(outDir: string, content: string, fileName: s
 }
 
 /**
- * Run git_history once and return the harness ToolResultBase-conformant result.
+ * Write a canonical ToolEvidenceHandle as a JSON artifact to disk.
+ * Returns the resolved file path and byte count of the written file.
+ *
+ * pi-experiment-oi48 (review fix): the handle JSON IS the primary artifact;
+ * gitHistoryVerify reads and validates this file via validateToolEvidenceHandle.
+ */
+async function writeHandleArtifact(
+  outDir: string,
+  filePath: string,
+  handle: ToolEvidenceHandle
+): Promise<{ outputFile: string; outputFileBytes: number }> {
+  await mkdir(outDir, { recursive: true });
+  const outputFile = filePath.includes(path.sep) ? resolve(filePath) : resolve(outDir, filePath);
+  const content = JSON.stringify(handle, null, 2);
+  await writeFile(outputFile, content, 'utf8');
+  const outputFileBytes = await stat(outputFile)
+    .then((s) => s.size)
+    .catch(() => Buffer.byteLength(content, 'utf8'));
+  return { outputFile, outputFileBytes };
+}
+
+/**
+ * Run git_history once and return the canonical GitHistoryResult.
  * Pure deterministic body: argv -> git argv -> exec -> archive -> result.
  * Never throws for expected git conditions (empty history, missing show object).
+ *
+ * pi-experiment-oi48: missing harness-injected output identity (no
+ * PI_TOOL_OUTPUT_DIR and no PI_TOOL_OUTPUT_FILE) → REJECTED result.
+ * PASSED runs carry a canonical ToolEvidenceHandle as evidenceHandle.
  */
 export async function runGitHistory(argv: string[], env: RuntimeEnvironment = nodeRuntimeEnvironment): Promise<GitHistoryResult> {
   const args = parseArgs(argv);
-  const { dir: outDir, file: outFile } = resolveOutputTarget(env);
+  const outputTarget = resolveOutputTarget(env);
+  const identity = resolveExecutionIdentity(env);
+
+  // pi-experiment-oi48: no harness-injected output path → REJECTED (no tmp/cwd fallback).
+  // No output file is written — there is no safe, harness-owned location for the artifact.
+  // The empty outputFile means the verifier returns NOT_APPLICABLE (cannot satisfy the gate).
+  if (!outputTarget) {
+    const message = 'git_history requires a harness-injected output path (PI_TOOL_OUTPUT_FILE or PI_TOOL_OUTPUT_DIR) to produce verifier evidence. No tmp/cwd fallback is allowed.';
+    const evidenceHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: GIT_HISTORY_TOOL_NAME,
+      invocationId: identity.invocationId,
+      runStatus: 'REJECTED',
+      failureCategory: 'INFRA',
+      toolOutputRoot: process.cwd(), // best-effort; no harness root available
+      summaryMode: 'none',
+      noSummaryReason: 'REJECTED: missing harness-injected output identity',
+      admittedHarnessFingerprint: identity.admittedHarnessFingerprint,
+      admittedExecutionBoundary: identity.admittedExecutionBoundary,
+    };
+    return {
+      tool: GIT_HISTORY_TOOL_NAME,
+      status: STATUS.REJECTED,
+      failureCategory: 'INFRA',
+      outputFile: '',
+      outputFileBytes: 0,
+      error: message,
+      evidenceHandle,
+    };
+  }
+
+  const { dir: outDir, file: outFile } = outputTarget;
 
   if (args.help) {
     const message = 'Help output is not git history evidence and cannot satisfy required git_history gates.';
-    const { outputFile, outputFileBytes } = await archiveOutput(outDir, message, outFile);
+    const toolOutputRoot = identity.toolOutputRoot || outDir;
+    // Build and write the REJECTED handle JSON as the canonical artifact.
+    const evidenceHandle = buildRejectedHandle({
+      outputFile: outFile,
+      outputFileBytes: 0,
+      toolOutputRoot,
+      invocationId: identity.invocationId,
+      admittedExecutionBoundary: identity.admittedExecutionBoundary,
+      admittedHarnessFingerprint: identity.admittedHarnessFingerprint,
+      failureCategory: 'INPUT',
+      noSummaryReason: 'REJECTED: help request',
+    });
+    const { outputFile, outputFileBytes } = await writeHandleArtifact(outDir, outFile, evidenceHandle);
     return {
       tool: GIT_HISTORY_TOOL_NAME,
       status: STATUS.REJECTED,
       failureCategory: 'INPUT',
       outputFile,
       outputFileBytes,
-      error: message
+      error: message,
+      evidenceHandle,
     };
   }
 
   const root = repoRoot(args.repo, env);
   if (!existsSync(resolve(root, '.git'))) {
     const message = `selected repository is not a git repository: ${root}`;
-    const { outputFile, outputFileBytes } = await archiveOutput(outDir, message, outFile);
+    const toolOutputRoot = identity.toolOutputRoot || outDir;
+    // Build and write the REJECTED handle JSON as the canonical artifact.
+    const evidenceHandle = buildRejectedHandle({
+      outputFile: outFile,
+      outputFileBytes: 0,
+      toolOutputRoot,
+      invocationId: identity.invocationId,
+      admittedExecutionBoundary: identity.admittedExecutionBoundary,
+      admittedHarnessFingerprint: identity.admittedHarnessFingerprint,
+      failureCategory: 'INFRA',
+      noSummaryReason: `REJECTED: not a git repository: ${root}`,
+    });
+    const { outputFile, outputFileBytes } = await writeHandleArtifact(outDir, outFile, evidenceHandle);
     return {
       tool: GIT_HISTORY_TOOL_NAME,
       status: STATUS.REJECTED,
       failureCategory: 'INFRA',
       outputFile,
       outputFileBytes,
-      error: message
+      error: message,
+      evidenceHandle,
     };
   }
 
@@ -535,9 +785,42 @@ export async function runGitHistory(argv: string[], env: RuntimeEnvironment = no
 
   const rawStdout = stdout.trim();
   const rawStderr = stderr.trim();
-
-  const { outputFile, outputFileBytes } = await archiveOutput(outDir, rawStdout, outFile);
   const outputLines = rawStdout ? rawStdout.split('\n').length : 0;
+  const toolOutputRoot = identity.toolOutputRoot || outDir;
+
+  // Archive the raw git stdout to a separate transport file (for durability).
+  const rawLogFile = resolve(outDir, OUTPUT_FILE_NAME);
+  await archiveOutput(outDir, rawStdout, rawLogFile);
+  const rawLogBytes = rawStdout ? Buffer.byteLength(rawStdout, 'utf8') : 0;
+
+  const rtkSummary: GitHistoryRtkSummary = {
+    operation: args.operation,
+    repo: args.repo,
+    root,
+    outputLines,
+    outputFileBytes: rawLogBytes,
+    ...(objectFound !== undefined ? { objectFound } : {}),
+    ...(args.lockfileReason ? { lockfileReason: args.lockfileReason } : {}),
+    ...(rawStderr ? { stderr: rawStderr } : {}),
+    // Embed the git output so the handle artifact itself contains real git evidence.
+    ...(rawStdout ? { outputText: rawStdout } : {}),
+  };
+
+  // Build the handle with outFile as the semanticArtifactPath; rawTransportArchivePaths
+  // carries the separate raw stdout log.
+  const evidenceHandle = buildPassedHandle({
+    outputFile: outFile,
+    outputFileBytes: 0, // placeholder; updated after handle JSON is written
+    rawTransportLogFile: rawLogFile,
+    toolOutputRoot,
+    invocationId: identity.invocationId,
+    admittedExecutionBoundary: identity.admittedExecutionBoundary,
+    admittedHarnessFingerprint: identity.admittedHarnessFingerprint,
+    rtkSummary,
+  });
+
+  // Write the canonical handle JSON as the primary artifact.
+  const { outputFile, outputFileBytes } = await writeHandleArtifact(outDir, outFile, evidenceHandle);
 
   return {
     tool: GIT_HISTORY_TOOL_NAME,
@@ -551,22 +834,29 @@ export async function runGitHistory(argv: string[], env: RuntimeEnvironment = no
     outputLines,
     outputFileBytes,
     outputFile,
-    stderr: rawStderr || undefined
+    stderr: rawStderr || undefined,
+    evidenceHandle,
   };
 }
 
 // ---------------------------------------------------------------------------
 // verify() — the harness-owned, deterministic semantic judgement.
 //
-// VerifyContext is PATHS-ONLY: the recorded git_history outputFile path is read
-// from ctx.toolOutputs[GIT_HISTORY_TOOL_NAME]. The verdict is decided purely
-// from on-disk presence/shape — no LLM, no external state:
-//   - NOT_APPLICABLE when the git_history output content is ABSENT (no path
-//     recorded, the path does not exist, or the archived file is empty).
-//   - PASS when the archived output exists and holds non-empty git evidence.
-//   - FAIL when the archived output exists but is structurally invalid (an empty
-//     or whitespace-only file with a recorded non-zero byte count is incoherent;
-//     a recorded REJECTED-shaped error payload is a FAIL).
+// VerifyContext is PATHS-ONLY: the recorded git_history artifact path is read
+// from ctx.toolOutputs[GIT_HISTORY_TOOL_NAME]. The artifact MUST be a canonical
+// ToolEvidenceHandle JSON file (pi-experiment-oi48 review fix). The verdict is
+// decided purely from the handle's runStatus and semanticArtifactPath readability:
+//
+//   - NOT_APPLICABLE when no path is recorded, the path does not exist, or the
+//     file is empty / unreadable.
+//   - FAIL when the file exists but is NOT a valid ToolEvidenceHandle (not JSON,
+//     fails validateToolEvidenceHandle), OR the handle's runStatus is not PASSED,
+//     OR the semanticArtifactPath is not readable (validateToolEvidenceArtifact).
+//   - PASS when the handle validates, runStatus === 'PASSED', and the semantic
+//     artifact path is readable.
+//
+// A ToolResultBase-shaped file, a raw git-log file, a tmp/cwd artifact, or a
+// REJECTED-run handle all produce FAIL — only a canonical PASSED handle passes.
 // ---------------------------------------------------------------------------
 
 export function gitHistoryVerify(ctx: VerifyContext): VerifyResult {
@@ -592,54 +882,74 @@ export function gitHistoryVerify(ctx: VerifyContext): VerifyResult {
   if (!stats.isFile() || stats.size === 0) {
     return {
       verdict: VerifyVerdict.NOT_APPLICABLE,
-      reasons: ['git_history output is absent (empty archive) — nothing to verify.']
+      reasons: ['git_history artifact is absent (empty file) — nothing to verify.']
     };
   }
 
-  let content: string;
+  // Read the artifact and parse it as a canonical ToolEvidenceHandle JSON.
+  let raw: string;
   try {
-    content = readFileSync(outputPath, 'utf8');
+    raw = readFileSync(outputPath, 'utf8');
   } catch (error: unknown) {
     return {
       verdict: VerifyVerdict.FAIL,
-      reasons: [`git_history output exists but could not be read: ${error instanceof Error ? error.message : String(error)}`],
-      failureOutcome: 'unreadable git_history output'
+      reasons: [`git_history artifact exists but could not be read: ${error instanceof Error ? error.message : String(error)}`],
+      failureOutcome: 'unreadable git_history artifact'
     };
   }
 
-  const trimmed = content.trim();
-  if (trimmed.length === 0) {
-    // Non-zero on-disk size but whitespace-only content: incoherent evidence.
+  // Attempt JSON parse; non-JSON files (raw git text, whitespace) are not valid handles.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
     return {
       verdict: VerifyVerdict.FAIL,
-      reasons: ['git_history output is whitespace-only despite a non-empty archive — no usable git evidence.'],
-      failureOutcome: 'empty git_history evidence'
+      reasons: [`git_history artifact at "${outputPath}" is not valid JSON — not a canonical ToolEvidenceHandle.`],
+      failureOutcome: 'non-canonical git_history artifact'
     };
   }
 
-  // A recorded REJECTED-shaped payload is explicit evidence the tool could not run.
-  if (isRejectedPayload(trimmed)) {
+  // Validate the parsed object as a canonical ToolEvidenceHandle.
+  const validation = validateToolEvidenceHandle(parsed, { expectedToolName: GIT_HISTORY_TOOL_NAME });
+  if (!validation.valid) {
     return {
       verdict: VerifyVerdict.FAIL,
-      reasons: ['git_history recorded a REJECTED run — the tool could not produce git evidence.'],
+      reasons: [
+        `git_history artifact at "${outputPath}" failed ToolEvidenceHandle validation: ${validation.errors.join('; ')}`
+      ],
+      failureOutcome: 'non-canonical git_history artifact'
+    };
+  }
+
+  const handle = validation.handle;
+
+  // Key verdict off runStatus: only PASSED runs can satisfy the gate.
+  if (handle.runStatus !== 'PASSED') {
+    return {
+      verdict: VerifyVerdict.FAIL,
+      reasons: [`git_history handle runStatus is "${handle.runStatus}" — tool did not complete successfully.`],
       failureOutcome: 'rejected git_history run'
+    };
+  }
+
+  // Validate that the semanticArtifactPath (the handle JSON file itself) is readable.
+  const artifactCheck = validateToolEvidenceArtifact(handle);
+  if (!artifactCheck.readable) {
+    return {
+      verdict: VerifyVerdict.FAIL,
+      reasons: [artifactCheck.error],
+      failureOutcome: 'unreadable git_history semantic artifact'
     };
   }
 
   return {
     verdict: VerifyVerdict.PASS,
-    reasons: [`git_history produced ${trimmed.split('\n').length} line(s) of git evidence (${stats.size} bytes).`]
+    reasons: [
+      `git_history canonical handle validated (runStatus=PASSED, invocationId=${handle.invocationId}, ` +
+      `admittedExecutionBoundary=${handle.admittedExecutionBoundary}).`
+    ]
   };
-}
-
-function isRejectedPayload(content: string): boolean {
-  if (!content.startsWith('{')) return false;
-  try {
-    const parsed = JSON.parse(content) as { tool?: unknown; status?: unknown };
-    return parsed.tool === GIT_HISTORY_TOOL_NAME && parsed.status === STATUS.REJECTED;
-  } catch {
-    return false;
-  }
 }
 
 async function run(): Promise<void> {
