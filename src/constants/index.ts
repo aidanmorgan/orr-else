@@ -264,7 +264,15 @@ export enum DomainEventName {
    * that hit the same failure do NOT record a new event — they reuse the cached
    * health status so failures are collapsed rather than per-worker-rediscovered.
    */
-  MCP_TRANSPORT_PREFLIGHT_FAILED = 'MCP_TRANSPORT_PREFLIGHT_FAILED'
+  MCP_TRANSPORT_PREFLIGHT_FAILED = 'MCP_TRANSPORT_PREFLIGHT_FAILED',
+  /**
+   * Emitted when a heartbeat-only live gap (a beadId present in heartbeat
+   * snapshots but absent from the live pane/tracked set) persists for N
+   * consecutive health checks or longer than the configured TTL.  Signals
+   * that the heartbeating worker is orphaned and the harness is taking action
+   * (suppressing + releasing the stale entry) to prevent indefinite noise.
+   */
+  HEARTBEAT_ONLY_GAP_ORPHANED = 'HEARTBEAT_ONLY_GAP_ORPHANED'
 }
 
 export enum BeadsCliCommand {
@@ -1216,7 +1224,20 @@ export const SupervisorDefaults = {
   STALE_HEARTBEAT_MS: 3 * WorkerDefaults.HEARTBEAT_INTERVAL_MS,
   NO_PROGRESS_TIMEOUT_MS: 15 * TimeMs.MINUTE,
   STARTUP_HEARTBEAT_GRACE_MS: TimeMs.MINUTE * 2,
-  CAPACITY_LIMIT_FALLBACK_PAUSE_MS: TimeMs.MINUTE * 10
+  CAPACITY_LIMIT_FALLBACK_PAUSE_MS: TimeMs.MINUTE * 10,
+  /**
+   * Number of consecutive slot-health checks a heartbeat-only live gap must
+   * persist before it is declared orphaned and suppressed.  Configurable via
+   * `settings.heartbeatOnlyGapOrphanChecks`.
+   */
+  HEARTBEAT_ONLY_GAP_ORPHAN_CHECKS: 3,
+  /**
+   * Wall-clock TTL (ms) after which a heartbeat-only live gap is declared
+   * orphaned even if the consecutive-check threshold has not been reached.
+   * Configurable via `settings.heartbeatOnlyGapOrphanTtlMs`.
+   * Default: 3 × SLOT_HEALTH_EVENT_INTERVAL_MS = 90 s.
+   */
+  HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS: 3 * 30 * TimeMs.SECOND
 } as const;
 
 export const RetentionDefaults = {

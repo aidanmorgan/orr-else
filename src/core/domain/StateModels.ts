@@ -361,6 +361,18 @@ export interface HarnessConfig {
     handoverTemplate: string;
     agentTurnTimeoutMs: number;
     teammateNoProgressTimeoutMs?: number;
+    /**
+     * Number of consecutive slot-health checks a heartbeat-only live gap must
+     * persist before it is declared orphaned and suppressed.
+     * Defaults to SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_CHECKS (3).
+     */
+    heartbeatOnlyGapOrphanChecks?: number;
+    /**
+     * Wall-clock TTL (ms) after which a heartbeat-only live gap is declared
+     * orphaned even if the consecutive-check threshold has not been reached.
+     * Defaults to SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS (90 s).
+     */
+    heartbeatOnlyGapOrphanTtlMs?: number;
     processReapIntervalMs: number;
     teamLeadSystemPrompt?: string;
     projectObjective?: string;

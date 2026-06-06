@@ -167,6 +167,23 @@ export class Supervisor {
    * step so that `recordSlotHealth` can include them in the releasedBeadIds set.
    */
   private releasedThisTick: string[] = [];
+  /**
+   * Per-beadId count of consecutive slot-health checks on which the bead appeared
+   * in heartbeatOnlyLiveGaps (heartbeat present, live pane absent).  Reset when the
+   * bead re-appears in the live pane set or is suppressed after orphan detection.
+   */
+  private readonly heartbeatOnlyGapCounts = new Map<string, number>();
+  /**
+   * Timestamp (ms) at which a beadId first appeared in heartbeatOnlyLiveGaps this
+   * session.  Used for the TTL-based orphan trigger.
+   */
+  private readonly heartbeatOnlyGapFirstSeenMs = new Map<string, number>();
+  /**
+   * Set of beadIds that have been declared orphaned and should be excluded from
+   * future heartbeatOnlyLiveGaps reporting.  Cleared if the bead re-appears in
+   * the live pane set (indicating a late pane-registration healed the gap).
+   */
+  private readonly suppressedHeartbeatOnlyGaps = new Set<string>();
   private readonly clock: Clock;
   /**
    * Cached MCP bridge health result (s3wp.32).
@@ -1259,8 +1276,17 @@ export class Supervisor {
     const effectiveLiveBeadIds = liveBeadIds.filter(beadId => !missingTrackedBeadIds.includes(beadId));
     const activeCount = effectiveLiveBeadIds.length;
     const workingCount = activeCount - staleBeadIds.filter(beadId => effectiveLiveBeadIds.includes(beadId)).length;
+    // Clear suppressed entries when the bead re-appears in the live pane set
+    // (late pane-registration healed the gap; restart the lifecycle cleanly).
+    for (const beadId of liveBeadIds) {
+      if (this.suppressedHeartbeatOnlyGaps.has(beadId)) {
+        this.suppressedHeartbeatOnlyGaps.delete(beadId);
+        this.heartbeatOnlyGapCounts.delete(beadId);
+        this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
+      }
+    }
     const heartbeatOnlyLiveGaps = [...heartbeatByBead.keys()]
-      .filter(beadId => !liveBeadIds.includes(beadId))
+      .filter(beadId => !liveBeadIds.includes(beadId) && !this.suppressedHeartbeatOnlyGaps.has(beadId))
       .sort();
 
     // Churn-diagnostic sets (s3wp.33).
@@ -1389,6 +1415,7 @@ export class Supervisor {
       heartbeatOnlyStaleBeadIds
     });
 
+    await this.recoverOrphanHeartbeatGaps(heartbeatOnlyLiveGaps, heartbeatDetails, now);
     await this.recoverInactiveBeads(inactiveBeadIds, effectiveLiveBeadIds, latestProgressEvents, heartbeatDetails, noProgressTimeoutMs);
   }
 
@@ -1446,6 +1473,99 @@ export class Supervisor {
     return heartbeatDetails
       .filter(heartbeat => heartbeat.beadId === beadId && heartbeat.stateId)
       .sort((a, b) => b.timestampMs - a.timestampMs)[0]?.stateId;
+  }
+
+  /**
+   * Gives heartbeat-only live gaps an explicit deterministic lifecycle.
+   *
+   * A beadId in heartbeatOnlyLiveGaps has a heartbeat but no live tmux pane.
+   * Left unchecked these entries repeat indefinitely, making health events noisy.
+   *
+   * Algorithm:
+   *   1. For beadIds currently in the gap set: increment the consecutive-check
+   *      counter; record firstSeen if new.
+   *   2. For beadIds no longer in the gap set: reset their counters (healed).
+   *   3. When a beadId exceeds orphanChecks consecutive detections OR its
+   *      firstSeen age exceeds orphanTtlMs:
+   *      a. Emit HEARTBEAT_ONLY_GAP_ORPHANED with diagnostic fields.
+   *      b. Suppress the beadId from future heartbeatOnlyLiveGaps reporting.
+   *      c. Attempt to release the bead lease (best-effort, never throws).
+   */
+  private async recoverOrphanHeartbeatGaps(
+    heartbeatOnlyLiveGaps: string[],
+    heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>,
+    nowMs: number
+  ): Promise<void> {
+    const config = await this.services.configLoader.load();
+    const orphanChecks = config.settings.heartbeatOnlyGapOrphanChecks ?? SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_CHECKS;
+    const orphanTtlMs = config.settings.heartbeatOnlyGapOrphanTtlMs ?? SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS;
+
+    const currentGapSet = new Set(heartbeatOnlyLiveGaps);
+
+    // Reset counters for beadIds that healed (no longer in gap set).
+    for (const beadId of [...this.heartbeatOnlyGapCounts.keys()]) {
+      if (!currentGapSet.has(beadId)) {
+        this.heartbeatOnlyGapCounts.delete(beadId);
+        this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
+      }
+    }
+
+    for (const beadId of heartbeatOnlyLiveGaps) {
+      // Track first-seen timestamp.
+      if (!this.heartbeatOnlyGapFirstSeenMs.has(beadId)) {
+        this.heartbeatOnlyGapFirstSeenMs.set(beadId, nowMs);
+      }
+
+      // Increment consecutive-check counter.
+      const prevCount = this.heartbeatOnlyGapCounts.get(beadId) ?? 0;
+      const newCount = prevCount + 1;
+      this.heartbeatOnlyGapCounts.set(beadId, newCount);
+
+      const firstSeenMs = this.heartbeatOnlyGapFirstSeenMs.get(beadId)!;
+      const ageMs = nowMs - firstSeenMs;
+      const ttlExpired = ageMs >= orphanTtlMs;
+      const thresholdReached = newCount >= orphanChecks;
+
+      if (!ttlExpired && !thresholdReached) continue;
+
+      // Determine reason string for the event.
+      const reason = ttlExpired
+        ? `heartbeat-only gap exceeded ttl (${ageMs}ms >= ${orphanTtlMs}ms)`
+        : `heartbeat-only gap exceeded consecutive check threshold (${newCount} >= ${orphanChecks})`;
+
+      // Collect worker IDs and last heartbeat timestamp for this beadId.
+      const beadHeartbeats = heartbeatDetails.filter(h => h.beadId === beadId);
+      const workerIds = [...new Set(beadHeartbeats.map(h => h.workerId))];
+      const lastHeartbeatMs = Math.max(...beadHeartbeats.map(h => h.timestampMs), 0);
+      const lastHeartbeatAt = lastHeartbeatMs > 0 ? this.clock.date(lastHeartbeatMs).toISOString() : undefined;
+      const stateId = this.latestStateForBead(beadId, heartbeatDetails);
+
+      Logger.warn(Component.SUPERVISOR, 'Heartbeat-only live gap declared orphaned; suppressing', {
+        beadId,
+        workerIds,
+        lastHeartbeatAt,
+        stateId,
+        reason
+      });
+
+      await this.eventStore.record(DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED, {
+        beadId,
+        workerIds,
+        lastHeartbeatAt,
+        stateId,
+        reason
+      }).catch(() => {});
+
+      // Suppress this beadId from future heartbeatOnlyLiveGaps + reset counters.
+      this.suppressedHeartbeatOnlyGaps.add(beadId);
+      this.heartbeatOnlyGapCounts.delete(beadId);
+      this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
+
+      // Best-effort lease release — clears the stale server-side claim.
+      await this.beadsPort().release(beadId).catch(error => {
+        Logger.warn(Component.SUPERVISOR, 'Unable to release orphaned heartbeat-only gap bead', { beadId, error: String(error) });
+      });
+    }
   }
 
   private async recoverInactiveBeads(

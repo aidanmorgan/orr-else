@@ -1685,4 +1685,320 @@ describe('Supervisor', () => {
     expect(event!.data.restartingBeadIds).toEqual([]);
     expect(event!.data.releasedBeadIds).toEqual([]);
   });
+
+  // ---------------------------------------------------------------------------
+  // dbcr — heartbeat-only live gap orphan detection + deterministic lifecycle
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Helper: builds a supervisor with a heartbeat for 'bead-orphan' that is NOT
+   * in the live pane set (liveBeadIds does NOT contain 'bead-orphan'), and where
+   * the configured orphan threshold is 2 consecutive checks (for fast tests).
+   *
+   * latestProgressAtMs controls the latestEventsForBeads response for 'bead-1'
+   * (the only live bead). bead-orphan has NO live pane, so it never appears in
+   * latestProgressEvents.
+   */
+  function orphanHarness(overrides: {
+    orphanChecks?: number;
+    orphanTtlMs?: number;
+    orphanStateId?: string;
+  } = {}) {
+    const { orphanChecks = 2, orphanTtlMs = 9999999, orphanStateId = 'Planning' } = overrides;
+    const clock = createFakeClock();
+    const records: Array<{ event: string; data: any }> = [];
+    const release = vi.fn(async () => {});
+    const beadsPort = fakeBeadsPort({ release });
+    const terminateTeammatesForBead = vi.fn(async () => ({ terminatedPaneIds: ['%99'] }));
+    const heartbeats = [
+      // bead-1: healthy — both pane + heartbeat
+      { workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: clock.now() },
+      // bead-orphan: heartbeat-only — no live pane
+      { workerId: 'worker-orphan', beadId: 'bead-orphan', stateId: orphanStateId, timestampMs: clock.now() - TimeMs.SECOND }
+    ];
+    // Only 'bead-1' has a live pane; 'bead-orphan' does NOT.
+    const liveBeadIds = new Set(['bead-1']);
+    const eventStore = {
+      record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+      eventsForBeads: vi.fn(async (beadIds: Iterable<string>) => new Map([...beadIds].map(id => [id, []]))),
+      latestEventsForBeads: vi.fn(async () => new Map([
+        ['bead-1', {
+          id: 'event-1',
+          type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+          timestamp: new Date(clock.now()).toISOString(),
+          sessionId: 'session-1',
+          data: { beadId: 'bead-1', stateId: 'Planning' }
+        }]
+      ])),
+      readAll: vi.fn(async () => [])
+    };
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => heartbeats } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
+        terminateTeammatesForBead,
+        captureBeadPaneText: vi.fn(async () => ''),
+        getActiveTeammateCount: vi.fn(async () => liveBeadIds.size),
+        getAvailableSlots: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: true, paneId: '%1' }))
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {
+              harnessRestartEvent: 'HARNESS_RESTART',
+              teammateNoProgressTimeoutMs: 9999999, // high — bead-1 is never inactive
+              heartbeatOnlyGapOrphanChecks: orphanChecks,
+              heartbeatOnlyGapOrphanTtlMs: orphanTtlMs
+            }
+          })
+        },
+        eventStore,
+        beadsPort,
+        worktreePort: { createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/worktree' })) },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 2, clock }
+    );
+    return { supervisor, records, release, terminateTeammatesForBead, clock };
+  }
+
+  it('(dbcr/AC1) emits HEARTBEAT_ONLY_GAP_ORPHANED with required fields after N consecutive checks', async () => {
+    // bead-orphan appears in heartbeats but NOT in the live pane set.
+    // After orphanChecks=2 consecutive slot-health calls, it must emit the orphan event.
+    const { supervisor, records } = orphanHarness({ orphanChecks: 2 });
+    (supervisor as any).startedBeads.add('bead-1');
+
+    // Poll 1: gap detected but threshold not yet reached — no orphan event.
+    await (supervisor as any).recordSlotHealth('test');
+    expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(false);
+
+    // Poll 2: reset throttle; second consecutive detection → orphan event fires.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    const orphanEvent = records.find(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED);
+    expect(orphanEvent).toBeDefined();
+    // AC1 required fields
+    expect(orphanEvent!.data.beadId).toBe('bead-orphan');
+    expect(Array.isArray(orphanEvent!.data.workerIds)).toBe(true);
+    expect(orphanEvent!.data.workerIds).toContain('worker-orphan');
+    expect(typeof orphanEvent!.data.lastHeartbeatAt).toBe('string');
+    expect(orphanEvent!.data.stateId).toBe('Planning');
+    expect(typeof orphanEvent!.data.reason).toBe('string');
+  });
+
+  it('(dbcr/AC1-ttl) emits HEARTBEAT_ONLY_GAP_ORPHANED when TTL expires even before consecutive threshold', async () => {
+    // Set orphanChecks=99 (never reachable by count alone), but TTL=0 ms so first
+    // check immediately triggers the TTL path.
+    const { supervisor, records } = orphanHarness({ orphanChecks: 99, orphanTtlMs: 0 });
+    (supervisor as any).startedBeads.add('bead-1');
+
+    await (supervisor as any).recordSlotHealth('test');
+
+    const orphanEvent = records.find(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED);
+    expect(orphanEvent).toBeDefined();
+    expect(orphanEvent!.data.beadId).toBe('bead-orphan');
+    expect(typeof orphanEvent!.data.reason).toBe('string');
+    expect(orphanEvent!.data.reason).toContain('ttl');
+  });
+
+  it('(dbcr/AC2+AC3) after orphan detection, heartbeatOnlyLiveGaps is cleared for the stale beadId', async () => {
+    // After the orphan fires, the beadId must be suppressed so subsequent
+    // TEAMMATE_SLOT_HEALTH_CHECKED events report an empty heartbeatOnlyLiveGaps.
+    const { supervisor, records } = orphanHarness({ orphanChecks: 2 });
+    (supervisor as any).startedBeads.add('bead-1');
+
+    // Poll 1 + 2: confirm orphan.
+    await (supervisor as any).recordSlotHealth('test');
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    // The orphan event must have fired.
+    expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(true);
+
+    // Poll 3: bead-orphan is now suppressed.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    // The most recent TEAMMATE_SLOT_HEALTH_CHECKED must report empty heartbeatOnlyLiveGaps.
+    const healthEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    const lastHealth = healthEvents[healthEvents.length - 1];
+    expect(lastHealth).toBeDefined();
+    expect(lastHealth!.data.heartbeatOnlyLiveGaps).toEqual([]);
+  });
+
+  it('(dbcr/AC4) startup-grace and healthy heartbeat+pane workers are not falsely orphaned', async () => {
+    // bead-1 has both heartbeat AND live pane — it must NEVER appear in
+    // heartbeatOnlyLiveGaps and must not trigger the orphan path.
+    const clock = createFakeClock();
+    const records: Array<{ event: string; data: any }> = [];
+    const heartbeats = [
+      { workerId: 'worker-1', beadId: 'bead-1', stateId: 'Planning', timestampMs: clock.now() }
+    ];
+    const liveBeadIds = new Set(['bead-1']); // bead-1 IS in the live set
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => heartbeats } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
+        terminateTeammatesForBead: vi.fn(async () => ({ terminatedPaneIds: [] })),
+        captureBeadPaneText: vi.fn(async () => ''),
+        getActiveTeammateCount: vi.fn(async () => 1),
+        getAvailableSlots: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn()
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {
+              harnessRestartEvent: 'HARNESS_RESTART',
+              teammateNoProgressTimeoutMs: 9999999,
+              heartbeatOnlyGapOrphanChecks: 1, // very aggressive — 1 check triggers
+              heartbeatOnlyGapOrphanTtlMs: 0   // and TTL=0 triggers immediately
+            }
+          })
+        },
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          eventsForBeads: vi.fn(async (beadIds: Iterable<string>) => new Map([...beadIds].map(id => [id, []]))),
+          latestEventsForBeads: vi.fn(async () => new Map([
+            ['bead-1', {
+              id: 'e1', type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+              timestamp: new Date(clock.now()).toISOString(), sessionId: 's',
+              data: { beadId: 'bead-1', stateId: 'Planning' }
+            }]
+          ])),
+          readAll: vi.fn(async () => [])
+        },
+        beadsPort: fakeBeadsPort(),
+        worktreePort: { createWorktree: vi.fn() },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 1, clock }
+    );
+    (supervisor as any).startedBeads.add('bead-1');
+
+    // Multiple polls — even with threshold=1 and TTL=0, bead-1 is healthy (pane exists).
+    for (let i = 0; i < 3; i++) {
+      (supervisor as any).lastSlotHealthEventMs = 0;
+      await (supervisor as any).recordSlotHealth('test');
+    }
+
+    // No orphan event must have fired for bead-1.
+    expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(false);
+
+    // heartbeatOnlyLiveGaps must stay empty (bead-1 has a live pane).
+    const healthEvents = records.filter(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(healthEvents.length).toBeGreaterThan(0);
+    for (const ev of healthEvents) {
+      expect(ev.data.heartbeatOnlyLiveGaps).toEqual([]);
+    }
+  });
+
+  it('(dbcr/AC5) heartbeat-only/no-pane triggers orphan; tracked-only/no-pane, pane-only/no-heartbeat, and healthy pane+heartbeat do not', async () => {
+    // Scenario matrix (one bead per category):
+    //   bead-hb-only:      heartbeat yes, live pane NO  → orphan after threshold
+    //   bead-tracked-only: tracked (startedBeads) yes, live pane NO, heartbeat NO → trackedOnly, NOT orphan
+    //   bead-pane-only:    live pane yes, tracked NO, heartbeat NO → paneOnly, NOT orphan
+    //   bead-healthy:      live pane yes, heartbeat yes → healthy, NOT orphan
+    const clock = createFakeClock();
+    const records: Array<{ event: string; data: any }> = [];
+    const heartbeats = [
+      { workerId: 'worker-hb', beadId: 'bead-hb-only', stateId: 'Planning', timestampMs: clock.now() },
+      { workerId: 'worker-healthy', beadId: 'bead-healthy', stateId: 'Planning', timestampMs: clock.now() }
+    ];
+    // Live panes: bead-healthy + bead-pane-only, but NOT bead-hb-only.
+    const liveBeadIds = new Set(['bead-healthy', 'bead-pane-only']);
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => heartbeats } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => liveBeadIds),
+        terminateTeammatesForBead: vi.fn(async () => ({ terminatedPaneIds: [] })),
+        captureBeadPaneText: vi.fn(async () => ''),
+        getActiveTeammateCount: vi.fn(async () => liveBeadIds.size),
+        getAvailableSlots: vi.fn(async () => 0),
+        spawnTeammateInTmux: vi.fn()
+      } as any,
+      { tracedAsync: (_name: string, _attrs: any, fn: any) => fn } as any,
+      {
+        configLoader: {
+          load: async () => ({
+            settings: {
+              harnessRestartEvent: 'HARNESS_RESTART',
+              teammateNoProgressTimeoutMs: 9999999,
+              heartbeatOnlyGapOrphanChecks: 2,
+              heartbeatOnlyGapOrphanTtlMs: 9999999
+            }
+          })
+        },
+        eventStore: {
+          record: vi.fn(async (event: string, data: any) => records.push({ event, data })),
+          eventsForBeads: vi.fn(async (beadIds: Iterable<string>) => new Map([...beadIds].map(id => [id, []]))),
+          latestEventsForBeads: vi.fn(async () => new Map([
+            ['bead-healthy', {
+              id: 'e1', type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+              timestamp: new Date(clock.now()).toISOString(), sessionId: 's',
+              data: { beadId: 'bead-healthy', stateId: 'Planning' }
+            }],
+            ['bead-pane-only', {
+              id: 'e2', type: DomainEventName.CONTEXT_COMPACTION_RECORDED,
+              timestamp: new Date(clock.now()).toISOString(), sessionId: 's',
+              data: { beadId: 'bead-pane-only', stateId: 'Planning' }
+            }]
+          ])),
+          readAll: vi.fn(async () => [])
+        },
+        beadsPort: fakeBeadsPort(),
+        worktreePort: { createWorktree: vi.fn() },
+        scheduler: {},
+        flowManager: {}
+      } as any,
+      { maxSlots: 4, clock }
+    );
+    // bead-tracked-only: tracked but no live pane, no heartbeat
+    (supervisor as any).startedBeads.add('bead-tracked-only');
+    (supervisor as any).startedBeadAtMs.set('bead-tracked-only', clock.now() - TimeMs.SECOND);
+    // bead-healthy: tracked + live + heartbeat
+    (supervisor as any).startedBeads.add('bead-healthy');
+    (supervisor as any).startedBeadAtMs.set('bead-healthy', clock.now() - TimeMs.SECOND);
+
+    // Poll 1: bead-hb-only detected as heartbeat-only gap (count=1 < threshold=2).
+    await (supervisor as any).recordSlotHealth('test');
+    expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(false);
+
+    // Poll 2: second consecutive detection → orphan fires for bead-hb-only only.
+    (supervisor as any).lastSlotHealthEventMs = 0;
+    await (supervisor as any).recordSlotHealth('test');
+
+    const orphanEvents = records.filter(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED);
+    // Only bead-hb-only should be orphaned.
+    expect(orphanEvents.length).toBe(1);
+    expect(orphanEvents[0].data.beadId).toBe('bead-hb-only');
+
+    // bead-tracked-only, bead-pane-only, and bead-healthy must NOT trigger the orphan path.
+    expect(orphanEvents.some((e: any) => e.data.beadId === 'bead-tracked-only')).toBe(false);
+    expect(orphanEvents.some((e: any) => e.data.beadId === 'bead-pane-only')).toBe(false);
+    expect(orphanEvents.some((e: any) => e.data.beadId === 'bead-healthy')).toBe(false);
+
+    // Verify the TEAMMATE_SLOT_HEALTH_CHECKED sets on the first poll are correct.
+    const firstHealth = records.find(r => r.event === DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED);
+    expect(firstHealth).toBeDefined();
+    expect(firstHealth!.data.heartbeatOnlyLiveGaps).toContain('bead-hb-only');
+    // bead-tracked-only appears in trackedOnly (tracked but no pane), not heartbeatOnlyLiveGaps.
+    expect(firstHealth!.data.trackedOnlyBeadIds).toContain('bead-tracked-only');
+    // bead-pane-only appears in paneOnly (live but not tracked).
+    expect(firstHealth!.data.paneOnlyBeadIds).toContain('bead-pane-only');
+    // bead-healthy appears in neither orphan-related set.
+    expect(firstHealth!.data.heartbeatOnlyLiveGaps).not.toContain('bead-healthy');
+  });
 });
