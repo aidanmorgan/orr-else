@@ -419,7 +419,21 @@ export interface HarnessConfig {
     pi?: PiIntegrationConfig;
     eventStore?: { enabled?: boolean; dir?: string; name?: string; fileName?: string };
     contextRestartRequirements?: { rereadFiles?: string[]; requireEvidence?: boolean };
-    traceability?: { requirePlanToBead?: boolean; requireBeadToPlan?: boolean; evidenceStore?: string };
+    traceability?: {
+      requirePlanToBead?: boolean;
+      requireBeadToPlan?: boolean;
+      evidenceStore?: string;
+      /**
+       * Name of the project verifier or tool that owns the traceability contract.
+       * REQUIRED when the traceability block is present: without an explicit owner
+       * declaration, the setting would be inert — implying harness enforcement when
+       * none exists. ConfigLoader rejects the config if this field is absent.
+       *
+       * Example: 'plan_contract' (cerdiwen's project verifier that validates
+       * plan-to-bead and bead-to-plan traceability internally).
+       */
+      ownedBy: string;
+    };
     reviewArtifacts?: { shipPostReview?: { state?: string; store?: string; eventType?: string; required?: boolean } };
     transactionalState?: {
       enabled?: boolean;

@@ -971,3 +971,168 @@ tools:
     expect(tool.defaultArgs[3]).toBe('--ci');
   });
 });
+
+// ---------------------------------------------------------------------------
+// r0oh: settings.traceability must declare ownedBy (non-inert contract)
+// ---------------------------------------------------------------------------
+describe('r0oh: settings.traceability binding (required ownedBy declaration)', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(process.env.TMPDIR || '/tmp', 'orr-else-r0oh-'));
+  });
+
+  afterEach(() => {
+    if (fs.existsSync(tempRoot)) fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function writeConfig(yaml: string): string {
+    const p = path.join(tempRoot, 'harness.yaml');
+    fs.writeFileSync(p, yaml);
+    return p;
+  }
+
+  // AC1: traceability without ownedBy must fail
+  it('AC1: throws when settings.traceability is present without ownedBy', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requirePlanToBead: true
+    requireBeadToPlan: true
+    evidenceStore: eventStore
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
+      /settings\.traceability requires an ownedBy declaration/
+    );
+  });
+
+  // AC1 variant: any traceability flag without ownedBy must fail
+  it('AC1: throws when only requirePlanToBead is set without ownedBy', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requirePlanToBead: true
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).toThrow(
+      /settings\.traceability requires an ownedBy declaration/
+    );
+  });
+
+  // AC3: traceability WITH ownedBy must load cleanly (ownedBy resolves to a declared tool)
+  it('AC3: loads successfully when settings.traceability includes ownedBy naming a declared tool', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requirePlanToBead: true
+    requireBeadToPlan: true
+    evidenceStore: eventStore
+    ownedBy: plan_contract
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: plan_contract
+    type: tsProjectTool
+    description: Validates the plan contract
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    expect(config.settings.traceability?.ownedBy).toBe('plan_contract');
+  });
+
+  // AC4: no traceability block at all must load cleanly (backward-safe)
+  it('AC4: loads successfully when settings.traceability is absent (backward-safe)', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+  });
+
+  // AC3 diagnostic: error message names the ownedBy field and explains the fix
+  it('AC3: error message explains how to fix the missing ownedBy field', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requireBeadToPlan: true
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+`);
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/ownedBy/);
+    expect(caught!.message).toMatch(/verifier or tool/);
+  });
+
+  // New: ownedBy naming a non-existent tool is REJECTED with a diagnostic listing known names
+  it('rejects ownedBy that does not resolve to a declared tool (lists known tools in error)', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requirePlanToBead: true
+    ownedBy: nonexistent_typo
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: plan_contract
+    type: tsProjectTool
+    description: Validates the plan contract
+`);
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/nonexistent_typo/);
+    expect(caught!.message).toMatch(/Known tools/);
+    expect(caught!.message).toMatch(/plan_contract/);
+  });
+
+  // New: cerdiwen-shaped config — traceability with ownedBy: plan_contract + tsProjectTool named plan_contract loads
+  it('loads a cerdiwen-shaped config: traceability ownedBy plan_contract with plan_contract tsProjectTool declared', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  traceability:
+    requirePlanToBead: true
+    requireBeadToPlan: true
+    evidenceStore: eventStore
+    ownedBy: plan_contract
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: plan_contract
+    type: tsProjectTool
+    description: "Validates the planContract STRUCTURE; persists a per-check report and exports verify()."
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    expect(config.settings.traceability?.ownedBy).toBe('plan_contract');
+    // plan_contract is a declared tsProjectTool (expanded to command); ownedBy resolves correctly
+    expect(config.tools?.some(t => t.name === 'plan_contract')).toBe(true);
+  });
+});

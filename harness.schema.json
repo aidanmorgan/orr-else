@@ -149,7 +149,8 @@
           "properties": {
             "requirePlanToBead": { "type": "boolean" },
             "requireBeadToPlan": { "type": "boolean" },
-            "evidenceStore": { "type": "string" }
+            "evidenceStore": { "type": "string" },
+            "ownedBy": { "type": "string" }
           }
         },
         "reviewArtifacts": {

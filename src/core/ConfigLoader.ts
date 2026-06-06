@@ -410,8 +410,44 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * r0oh: Reject inert traceability settings.
+   *
+   * settings.traceability is meaningful only when a concrete, DECLARED owner is
+   * named. Two checks are applied in sequence:
+   *   1. ownedBy must be present and non-empty.
+   *   2. ownedBy must resolve to a name in config.tools[].name (the set of
+   *      declared verifiers/tools). A typo or reference to a non-existent tool
+   *      implies the setting is still inert; that is rejected with a diagnostic
+   *      that lists the known names — mirroring the startState and
+   *      validateDeprecatedRequiredTools cross-reference patterns.
+   */
+  private validateTraceabilityOwner(config: HarnessConfig): void {
+    const traceability = config.settings.traceability;
+    if (!traceability) return; // absent → fine; no inert setting present
+    if (!traceability.ownedBy || !traceability.ownedBy.trim()) {
+      throw new Error(
+        'settings.traceability requires an ownedBy declaration naming the verifier or tool ' +
+        'that owns and enforces the traceability contract. ' +
+        'Without an explicit owner, the setting is inert and implies enforcement that does not exist. ' +
+        'Add `ownedBy: <verifierOrToolName>` (e.g. ownedBy: plan_contract) to the traceability block, ' +
+        'or remove the traceability block if no project verifier enforces it.'
+      );
+    }
+    const knownOwners = new Set<string>((config.tools || []).map(t => t.name));
+    if (!knownOwners.has(traceability.ownedBy)) {
+      const knownList = [...knownOwners].sort().join(', ') || '(none declared)';
+      throw new Error(
+        `settings.traceability.ownedBy "${traceability.ownedBy}" does not match any declared tool. ` +
+        `Known tools: ${knownList}. ` +
+        `Declare a tool whose name matches ownedBy, or correct the spelling.`
+      );
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
     this.validateDeprecatedRequiredTools(config);
+    this.validateTraceabilityOwner(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;
