@@ -210,6 +210,7 @@ export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
 export const MODEL_HIDDEN_RESULT_KEYS = new Set<string>([
   'outputFile',
   'outputBytes',
+  '_internalOutputFile', // harness-internal sequencing channel; never model-facing
   ProjectToolResultKey.STDOUT,
   ProjectToolResultKey.STDERR,
   ProjectToolResultKey.OUTPUT_ACCESS,

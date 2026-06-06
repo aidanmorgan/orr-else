@@ -3150,3 +3150,169 @@ states:
     }
   });
 });
+
+// ── demm Finding 2: AC3 fail-closed integration tests ──────────────────────
+//
+// runParentSequenceActionsBeforeActive is private; it is exercised via
+// BEFORE_AGENT_START which calls it unconditionally in worker mode.
+// AC3 (throw path): generatesFrameworkToolCalls=true + no toolCalls → throws.
+// AC3 (pass path): generatesFrameworkToolCalls unset + no toolCalls → completes.
+//
+// Previously UNTESTED: the existing AC3 helper test only exercised
+// extractSequencedToolCalls returning 'none' in isolation; it never proved
+// the throw inside runParentSequenceActionsBeforeActive fires.
+
+describe('AC3 fail-closed: runParentSequenceActionsBeforeActive via BEFORE_AGENT_START (demm)', () => {
+  it('AC3 (throw): generatesFrameworkToolCalls=true and tool produces no toolCalls — BEFORE_AGENT_START throws', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'demm-ac3-throw-')));
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-ac3');
+    fs.mkdirSync(worktreePath, { recursive: true });
+
+    // A tool that outputs PASSED but NO toolCalls — fails the AC3 guard.
+    const noToolCallsScript = `process.stdout.write(JSON.stringify({ status: 'PASSED', message: 'no calls' }));`;
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: generator_tool
+    type: command
+    command: ${process.execPath}
+    defaultArgs: ["-e", "${noToolCallsScript.replace(/"/g, '\\"')}"]
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: generate-calls
+        type: tool
+        tool: generator_tool
+        generatesFrameworkToolCalls: true
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ac3';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'do-work'; // active action; generate-calls is preceding
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+
+      // SESSION_START runs runParentSequenceActionsBeforeActive which must throw because
+      // generator_tool produced no toolCalls and generatesFrameworkToolCalls=true.
+      await expect(
+        harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot })
+      ).rejects.toThrow(/generatesFrameworkToolCalls/);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3 (pass): generatesFrameworkToolCalls unset and tool produces no toolCalls — BEFORE_AGENT_START completes', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'demm-ac3-pass-')));
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-ac3p');
+    fs.mkdirSync(worktreePath, { recursive: true });
+
+    // A tool that outputs PASSED but NO toolCalls — acceptable when generatesFrameworkToolCalls is unset.
+    const noToolCallsScript = `process.stdout.write(JSON.stringify({ status: 'PASSED', message: 'no calls' }));`;
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: plain_tool
+    type: command
+    command: ${process.execPath}
+    defaultArgs: ["-e", "${noToolCallsScript.replace(/"/g, '\\"')}"]
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: run-plain
+        type: tool
+        tool: plain_tool
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ac3p';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'do-work'; // active action; run-plain is preceding
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+
+      // SESSION_START runs runParentSequenceActionsBeforeActive which must NOT throw
+      // because generatesFrameworkToolCalls is not set on the preceding tool action.
+      await expect(
+        harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot })
+      ).resolves.not.toThrow();
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

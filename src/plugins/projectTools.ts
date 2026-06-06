@@ -43,7 +43,9 @@ import {
   normalizeCommandArguments,
   isSuccessfulCommandExitCode,
   isAcceptedMaxBufferFailure,
-  executeCommandTool
+  executeCommandTool,
+  extractSequencedToolCalls,
+  toolCallsFromOutputFile
 } from './projectTools/commandExecutor.js';
 import {
   shouldSerializeMcpTool,
@@ -87,7 +89,8 @@ export { normalizeCommandArguments } from './projectTools/commandExecutor.js';
 export { normalizeMcpPathArguments } from './projectTools/pathNormalization.js';
 export { shouldSerializeMcpTool, mcpToolRequestTimeoutMs } from './projectTools/mcpExecutor.js';
 export { projectToolFailureLimitSuggestedOutcome } from './projectTools/preflight.js';
-export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool } from './projectTools/commandExecutor.js';
+export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool, toolCallsFromOutputFile, extractSequencedToolCalls } from './projectTools/commandExecutor.js';
+export type { ToolCallSource } from './projectTools/commandExecutor.js';
 
 // ---- ProjectToolRuntimeContext ----
 
@@ -228,7 +231,15 @@ export async function executeConfiguredProjectTool(
           result: summarizeToolResult(finalResult)
         }
       );
-      return finalResult;
+      // Attach the persisted outputFile path as an internal-only field so the
+      // sequencing path (runParentSequenceActionsBeforeActive) can use it as a
+      // fallback source for framework toolCalls without changing the public
+      // function signature.  The field is already in MODEL_HIDDEN_RESULT_KEYS so
+      // it never reaches the model when the result is passed through
+      // modelFacingInlineResult in other contexts.
+      return isJsonRecord(finalResult)
+        ? { ...(finalResult as Record<string, unknown>), _internalOutputFile: context.outputFile }
+        : finalResult;
     } catch (error) {
       const failureCategory = classifyProjectToolFailure(definition, {
         status: ToolResultStatus.REJECTED,
@@ -426,12 +437,21 @@ export function registerConfiguredProjectTools(
         const configuredFrameworkRoot = frameworkRootFromConfig(config, env, injectedRoot);
         const configuredNamedRoots = namedRootsFromConfig(config, env, injectedRoot);
         const paramsRecord = params && typeof params === 'object' && !Array.isArray(params) ? params as Record<string, unknown> : {};
-        return await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
+        const result = await executeConfiguredProjectTool(eventStore, pathFactory, definition, {
           ...paramsRecord,
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {}),
           ...(configuredNamedRoots ? { namedRoots: configuredNamedRoots } : {})
         }, ctx, env, backpressure, injectedRoot);
+        // Strip _internalOutputFile at the model boundary: this field is an
+        // internal sequencing channel used only by runParentSequenceActionsBeforeActive
+        // (which calls executeConfiguredProjectTool directly). The registered tool
+        // handler must NEVER expose it to the model via toolResult().
+        if (isJsonRecord(result) && '_internalOutputFile' in (result as Record<string, unknown>)) {
+          const { _internalOutputFile: _, ...modelFacing } = result as Record<string, unknown>;
+          return modelFacing;
+        }
+        return result;
       }
     }));
   }

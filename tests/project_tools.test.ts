@@ -8,7 +8,8 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
-import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, extractSequencedToolCalls, toolCallsFromOutputFile, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, registerConfiguredProjectTools, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { toolCallsFromRecord } from '../src/plugins/projectTools/commandExecutor.js';
 import { summarizeToolResult, persistAndBoundResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ProjectToolExecutionContext } from '../src/plugins/projectTools/types.js';
 import { resolveStructuredInvocation } from '../src/plugins/projectTools/structuredInvocation.js';
@@ -2457,5 +2458,266 @@ describe('frameworkRootFromConfig — env-driven root resolution (s3wp.8)', () =
     const env = makeEnv({ [ENV_VAR]: '/env/framework' });
     const result = frameworkRootFromConfig(config, env, '/project');
     expect(result).toBe('/config/framework');
+  });
+});
+
+// ---- demm: sequenced toolCalls from outputFile with provenance ----
+// AC1: toolCalls can be extracted from outputFile when stdout omits them.
+// AC2: extractSequencedToolCalls records count + source provenance.
+// AC3: fail-closed condition tested via extractSequencedToolCalls returning 'none'.
+// AC4: covers stdout-only, outputFile-only, malformed outputFile, and missing-for-generator.
+
+describe('extractSequencedToolCalls — outputFile fallback with provenance (demm)', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'demm-tc-')));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // --- toolCallsFromOutputFile unit tests ---
+
+  it('toolCallsFromOutputFile returns undefined for absent file', async () => {
+    const result = await toolCallsFromOutputFile(path.join(tmpDir, 'nonexistent.json'));
+    expect(result).toBeUndefined();
+  });
+
+  it('toolCallsFromOutputFile returns undefined for a file with no toolCalls key', async () => {
+    const filePath = path.join(tmpDir, 'no-calls.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', message: 'ok' }));
+    const result = await toolCallsFromOutputFile(filePath);
+    expect(result).toBeUndefined();
+  });
+
+  it('toolCallsFromOutputFile returns undefined for malformed JSON (AC4: malformed outputFile)', async () => {
+    const filePath = path.join(tmpDir, 'malformed.json');
+    fs.writeFileSync(filePath, '{ not valid json at all {{}}');
+    const result = await toolCallsFromOutputFile(filePath);
+    expect(result).toBeUndefined();
+  });
+
+  it('toolCallsFromOutputFile extracts toolCalls from direct key', async () => {
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'item 1' } }];
+    const filePath = path.join(tmpDir, 'direct.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', toolCalls: calls }));
+    const result = await toolCallsFromOutputFile(filePath);
+    expect(result).toEqual(calls);
+  });
+
+  it('toolCallsFromOutputFile extracts toolCalls from frameworkToolCalls key', async () => {
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'fw item' } }];
+    const filePath = path.join(tmpDir, 'fw.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', frameworkToolCalls: calls }));
+    const result = await toolCallsFromOutputFile(filePath);
+    expect(result).toEqual(calls);
+  });
+
+  // --- extractSequencedToolCalls provenance tests ---
+
+  // AC4 / AC2: stdout-only toolCalls
+  it('AC2/AC4: source=stdout when inline result has toolCalls and no outputFile given', async () => {
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'stdout item' } }];
+    const inlineResult = { status: 'PASSED', toolCalls: calls };
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, undefined);
+    expect(source).toBe('stdout');
+    expect(toolCalls).toEqual(calls);
+  });
+
+  it('AC2/AC4: source=stdout when inline result has toolCalls and outputFile has none', async () => {
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'stdout item' } }];
+    const inlineResult = { status: 'PASSED', toolCalls: calls };
+    const filePath = path.join(tmpDir, 'empty-calls.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED' }));
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, filePath);
+    expect(source).toBe('stdout');
+    expect(toolCalls).toEqual(calls);
+  });
+
+  // AC1 / AC2 / AC4: outputFile-only toolCalls
+  it('AC1/AC2/AC4: source=outputFile when inline result omits toolCalls but outputFile has them', async () => {
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'from file' } }];
+    const inlineResult = { status: 'PASSED' }; // no toolCalls in stdout
+    const filePath = path.join(tmpDir, 'output.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', toolCalls: calls }));
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, filePath);
+    expect(source).toBe('outputFile');
+    expect(toolCalls).toEqual(calls);
+    expect(toolCalls).toHaveLength(1);
+  });
+
+  // AC2: both sources
+  it('AC2: source=both when inline result and outputFile both have toolCalls; inline takes precedence', async () => {
+    const inlineCalls = [{ tool: 'add_checklist_item', arguments: { text: 'inline' } }];
+    const fileCalls = [{ tool: 'add_checklist_item', arguments: { text: 'from file' } }];
+    const inlineResult = { status: 'PASSED', toolCalls: inlineCalls };
+    const filePath = path.join(tmpDir, 'both.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', toolCalls: fileCalls }));
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, filePath);
+    expect(source).toBe('both');
+    // inline takes precedence
+    expect(toolCalls).toEqual(inlineCalls);
+  });
+
+  // AC3 / AC4: missing toolCalls for a generator tool (source='none')
+  it('AC3/AC4: source=none when neither inline result nor outputFile has toolCalls', async () => {
+    const inlineResult = { status: 'PASSED' };
+    const filePath = path.join(tmpDir, 'no-calls-output.json');
+    fs.writeFileSync(filePath, JSON.stringify({ status: 'PASSED', message: 'no calls here' }));
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, filePath);
+    expect(source).toBe('none');
+    expect(toolCalls).toHaveLength(0);
+  });
+
+  it('AC3/AC4: source=none when outputFile is absent and inline result has no toolCalls', async () => {
+    const inlineResult = { status: 'PASSED' };
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, undefined);
+    expect(source).toBe('none');
+    expect(toolCalls).toHaveLength(0);
+  });
+
+  it('AC4: malformed outputFile yields source=none (no exception thrown)', async () => {
+    const inlineResult = { status: 'PASSED' };
+    const filePath = path.join(tmpDir, 'malformed-output.json');
+    fs.writeFileSync(filePath, '{{{{not json}}}}');
+    const { toolCalls, source } = await extractSequencedToolCalls(inlineResult, filePath);
+    expect(source).toBe('none');
+    expect(toolCalls).toHaveLength(0);
+  });
+});
+
+// AC2: executeConfiguredProjectTool attaches _internalOutputFile for sequencing path
+describe('executeConfiguredProjectTool — _internalOutputFile internal channel (demm)', () => {
+  let tempRoot: string;
+  let tempWorktree: string;
+  let previousProjectRootEnv: string | undefined;
+  let previousWorktreeEnv: string | undefined;
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let toolCallPathFactory: ToolCallPathFactory;
+
+  beforeEach(() => {
+    previousProjectRootEnv = process.env[EnvVars.PROJECT_ROOT];
+    previousWorktreeEnv = process.env[EnvVars.WORKTREE_PATH];
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'demm-iof-')));
+    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-1');
+    fs.mkdirSync(tempWorktree, { recursive: true });
+    writeMinimalHarnessConfig(tempRoot);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
+    toolCallPathFactory = new ToolCallPathFactory();
+    eventStore.setSessionId(`test-demm-iof-${process.pid}`);
+    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    if (previousProjectRootEnv === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+    else process.env[EnvVars.PROJECT_ROOT] = previousProjectRootEnv;
+    if (previousWorktreeEnv === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+    else process.env[EnvVars.WORKTREE_PATH] = previousWorktreeEnv;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('AC2: result carries _internalOutputFile as a resolvable path to the persisted artifact', async () => {
+    const script = `
+      const data = { status: 'PASSED', toolCalls: [{ tool: 'add_checklist_item', arguments: { text: 'from tool' } }] };
+      process.stdout.write(JSON.stringify(data));
+    `;
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'demm_tc_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'generate'
+    }, {} as any, undefined, new Map()) as any;
+
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    // Internal channel: _internalOutputFile is present and points to the archive.
+    expect(typeof result._internalOutputFile).toBe('string');
+    expect(result._internalOutputFile.length).toBeGreaterThan(0);
+    // The archive file exists and is readable.
+    expect(fs.existsSync(result._internalOutputFile)).toBe(true);
+    // _internalOutputFile is NOT exposed to the model (not model-facing).
+    // Verified by checking it's in MODEL_HIDDEN_RESULT_KEYS indirectly: the outputFile
+    // key itself is already hidden; _internalOutputFile is added alongside it.
+  });
+
+  it('AC1: toolCallsFromOutputFile can recover toolCalls from the internal archive when stdout is truncated', async () => {
+    // Simulate: a tool writes toolCalls to outputFile (the archive written by
+    // persistAndBoundResult). In practice the tool writes them to stdout, which the
+    // harness persists to stdoutFile and then also to outputFile (the archive) via
+    // persistAndBoundResult. We verify that toolCallsFromOutputFile can read them back.
+    const calls = [{ tool: 'add_checklist_item', arguments: { text: 'from archive' } }];
+    const script = `process.stdout.write(JSON.stringify({ status: 'PASSED', toolCalls: ${JSON.stringify(calls)} }));`;
+
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, {
+      name: 'demm_archive_tool',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script],
+      cwd: CwdMode.WORKTREE
+    }, {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'archive-test'
+    }, {} as any, undefined, new Map()) as any;
+
+    const outputFile = result._internalOutputFile as string;
+    // toolCallsFromOutputFile can recover the calls from the archive.
+    const recoveredCalls = await toolCallsFromOutputFile(outputFile);
+    expect(recoveredCalls).toEqual(calls);
+  });
+
+  // demm Finding 1: model-facing no-leak test
+  // The registered tool execute() (model boundary) must NEVER return _internalOutputFile.
+  it('model-facing: registered tool execute() strips _internalOutputFile before returning to the model', async () => {
+    const script = `process.stdout.write(JSON.stringify({ status: 'PASSED', message: 'ok' }));`;
+    const definition: ProjectCommandToolConfig = {
+      name: 'demm_leak_probe',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', script],
+      cwd: CwdMode.WORKTREE
+    };
+
+    // First verify that executeConfiguredProjectTool itself attaches _internalOutputFile
+    // (the internal channel for runParentSequenceActionsBeforeActive).
+    const rawResult = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory, definition,
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'probe' },
+      {} as any, undefined, new Map(), tempRoot
+    ) as any;
+    expect(rawResult._internalOutputFile).toBeDefined(); // must fail before fix
+
+    // Now verify that registerConfiguredProjectTools's execute() closure strips it.
+    // Use an identity wrapper so we can call the execute() directly.
+    const registeredTools: any[] = [];
+    const config = await configLoader.load();
+    registerConfiguredProjectTools(
+      eventStore, toolCallPathFactory,
+      { registerTool: (t: any) => registeredTools.push(t) } as any,
+      { ...config, tools: [definition] },
+      new Set(),
+      (t: any) => t, // identity: bypass wrapPluginTool
+      undefined, undefined, new Map(), tempRoot
+    );
+
+    expect(registeredTools).toHaveLength(1);
+    const modelFacingResult = await registeredTools[0].execute({}, {} as any) as any;
+
+    // The model-facing result must NOT contain _internalOutputFile.
+    expect(modelFacingResult._internalOutputFile).toBeUndefined();
+    expect(JSON.stringify(modelFacingResult)).not.toContain('_internalOutputFile');
+    // The result still carries model-facing fields.
+    expect(modelFacingResult.status).toBe(ToolResultStatus.PASSED);
   });
 });

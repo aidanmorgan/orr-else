@@ -318,6 +318,10 @@ export interface TeammateAction {
   contextMode?: ConfiguredActionContextMode;
   maxContextTokens?: number;
   handoverRequired?: boolean;
+  /** When true, the sequenced action is expected to produce framework toolCalls.
+   *  If neither the inline result nor the outputFile contains valid toolCalls,
+   *  the sequenced action FAILS CLOSED instead of silently completing. */
+  generatesFrameworkToolCalls?: boolean;
 }
 
 export type ActionDefinition = TeammateAction;
