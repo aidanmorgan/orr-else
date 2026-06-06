@@ -707,7 +707,8 @@ tools:
     expect(mcpTool.timeoutMs).toBeUndefined();
   });
 
-  it('warning is logged for unknown profile reference, tool still loads', async () => {
+  // s4qi: undefined profile reference is STARTUP-FATAL (not warn-and-ignore)
+  it('AC1: throws a startup-fatal error when a command tool references an undefined profile', () => {
     const configPath = writeConfig(`
 settings:
   startState: Planning
@@ -720,18 +721,68 @@ tools:
     command: node
     profile: nonExistentProfile
 `);
-    const { Logger } = await import('../src/core/Logger.js');
-    const warnSpy = vi.spyOn(Logger, 'warn');
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught, 'expected load() to throw on missing profile').toBeDefined();
+    // AC1: error must name the tool
+    expect(caught!.message).toMatch(/ts_tool/);
+    // AC1: error must name the missing profile
+    expect(caught!.message).toMatch(/nonExistentProfile/);
+    // AC1: error must list available profiles (none declared → shows empty indicator)
+    expect(caught!.message).toMatch(/available profiles/i);
+  });
 
-    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
-    expect(config.tools?.length).toBe(1);
+  // AC1: error diagnostic when toolProfiles is defined but the referenced name is absent
+  it('AC1: names the tool, missing profile, and available profiles when some profiles are defined', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolProfiles:
+    profileA:
+      timeoutMs: 30000
+    profileB:
+      timeoutMs: 60000
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: bad_tool
+    type: command
+    command: node
+    profile: missingProfile
+`);
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/bad_tool/);
+    expect(caught!.message).toMatch(/missingProfile/);
+    // Available profiles listed
+    expect(caught!.message).toMatch(/profileA/);
+    expect(caught!.message).toMatch(/profileB/);
+  });
 
-    const warnCalls = warnSpy.mock.calls;
-    const profileWarnings = warnCalls.filter(call =>
-      String(call[1] ?? '').includes('nonExistentProfile')
-    );
-    expect(profileWarnings.length).toBeGreaterThanOrEqual(1);
-    warnSpy.mockRestore();
+  // AC2: no profile reference → loads fine (no false positive)
+  it('AC2: command tool without a profile reference loads without error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: no_profile_tool
+    type: command
+    command: node
+`);
+    expect(() => new ConfigLoader(undefined, tempRoot).load(configPath)).not.toThrow();
   });
 
   it('toolDefaults.failureLimit is merged shallowly with per-tool failureLimit', () => {
@@ -982,6 +1033,55 @@ tools:
     // Script path at index 1
     expect(tool.defaultArgs[2]).toBe('--verbose');
     expect(tool.defaultArgs[3]).toBe('--ci');
+  });
+
+  // s4qi AC3/4: tsProjectTool-expanded tools with undefined profile references are fatal
+  it('AC3: tsProjectTool with an undefined profile reference throws a startup-fatal error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: expanded_ts_tool
+    type: tsProjectTool
+    profile: ghostProfile
+`);
+    let caught: Error | undefined;
+    try {
+      new ConfigLoader(undefined, tempRoot).load(configPath);
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught, 'expected load() to throw when tsProjectTool profile is undefined').toBeDefined();
+    // After expansion to type:command, the profile validation must fire
+    expect(caught!.message).toMatch(/expanded_ts_tool/);
+    expect(caught!.message).toMatch(/ghostProfile/);
+    expect(caught!.message).toMatch(/available profiles/i);
+  });
+
+  // s4qi AC3/4: tsProjectTool with a VALID profile loads fine
+  it('AC4: tsProjectTool with a valid profile reference loads without error', () => {
+    const configPath = writeConfig(`
+settings:
+  startState: Planning
+  toolProfiles:
+    nodeTs:
+      env:
+        NODE_ENV: "test"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states: {}
+tools:
+  - name: valid_ts_tool
+    type: tsProjectTool
+    profile: nodeTs
+`);
+    const config = new ConfigLoader(undefined, tempRoot).load(configPath);
+    const tool = config.tools?.find(t => t.name === 'valid_ts_tool') as any;
+    expect(tool.type).toBe('command');
+    expect(tool.env?.NODE_ENV).toBe('test');
   });
 });
 

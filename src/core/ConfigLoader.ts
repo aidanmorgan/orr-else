@@ -773,9 +773,11 @@ export class ConfigLoader {
         if (toolProfiles && cmdTool.profile in toolProfiles) {
           profile = toolProfiles[cmdTool.profile];
         } else {
-          Logger.warn(Component.CONFIG,
-            `Tool "${cmdTool.name}" references profile "${cmdTool.profile}" which is not defined in settings.toolProfiles. Profile is ignored.`,
-            { tool: cmdTool.name, profile: cmdTool.profile }
+          const available = toolProfiles ? Object.keys(toolProfiles).sort().join(', ') || '(none)' : '(none)';
+          throw new Error(
+            `Tool "${cmdTool.name}" references profile "${cmdTool.profile}" which is not defined in settings.toolProfiles. ` +
+            `Available profiles: ${available}. ` +
+            `Define the profile in settings.toolProfiles or remove the profile reference from the tool.`
           );
         }
       }
