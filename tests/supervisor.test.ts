@@ -803,17 +803,17 @@ describe('Supervisor', () => {
     expect(reason).toBe('UNKNOWN');
   });
 
-  it('isQuarantined returns false for a bead not in the quarantine map', () => {
+  it('isQuarantined returns false for a bead not in the quarantine map', async () => {
     const { supervisor } = supervisorHarness(NOW_MS);
     const bead = { id: 'bead-q', status: 'ready' } as any;
-    expect((supervisor as any).isQuarantined(bead)).toBe(false);
+    expect(await (supervisor as any).isQuarantined(bead)).toBe(false);
   });
 
   it('isQuarantined returns true for a bead with unchanged signature', async () => {
     const { supervisor } = supervisorHarness(NOW_MS);
     const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
     await (supervisor as any).quarantineBead(bead, 'ALREADY_CHECKED_OUT');
-    expect((supervisor as any).isQuarantined(bead)).toBe(true);
+    expect(await (supervisor as any).isQuarantined(bead)).toBe(true);
   });
 
   it('isQuarantined returns false and clears entry when bead signature changes (status changed)', async () => {
@@ -822,7 +822,7 @@ describe('Supervisor', () => {
     await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
     // Simulate bead state changing externally (status updated, lastActivity bumped)
     const beadAfterUpdate = { id: 'bead-q', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    expect((supervisor as any).isQuarantined(beadAfterUpdate)).toBe(false);
+    expect(await (supervisor as any).isQuarantined(beadAfterUpdate)).toBe(false);
     // Entry must be cleared from the map
     expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
   });
@@ -836,7 +836,7 @@ describe('Supervisor', () => {
     await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
     // Only lastActivity changes — status stays 'ready'
     const beadAfterActivityBump = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    expect((supervisor as any).isQuarantined(beadAfterActivityBump)).toBe(false);
+    expect(await (supervisor as any).isQuarantined(beadAfterActivityBump)).toBe(false);
     // Entry must be cleared from the map
     expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
   });
@@ -2000,5 +2000,238 @@ describe('Supervisor', () => {
     expect(firstHealth!.data.paneOnlyBeadIds).toContain('bead-pane-only');
     // bead-healthy appears in neither orphan-related set.
     expect(firstHealth!.data.heartbeatOnlyLiveGaps).not.toContain('bead-healthy');
+  });
+
+  // ---------------------------------------------------------------------------
+  // pi-experiment-sey0 — Quarantine rehydration after coordinator restart
+  // ---------------------------------------------------------------------------
+
+  it('(sey0/AC1) rehydrateQuarantinesFromEvents populates quarantine map from BEAD_QUARANTINED events', async () => {
+    // A BEAD_QUARANTINED event was recorded in a previous session for bead-q.
+    // After restart, rehydrateQuarantinesFromEvents must re-populate the in-memory
+    // quarantine map so scanAndSpawn will skip bead-q on the first scan.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-1',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-q',
+        reason: 'ALREADY_CHECKED_OUT',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
+
+    // Quarantine map starts empty (fresh Supervisor instance simulating restart).
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    // Quarantine map must now contain an entry for bead-q.
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(true);
+    expect((supervisor as any).quarantine.get('bead-q')?.reason).toBe('ALREADY_CHECKED_OUT');
+    expect((supervisor as any).quarantine.get('bead-q')?.signature).toBe('ready:2026-01-01T00:00:00.000Z');
+
+    // A BEAD_QUARANTINE_REHYDRATED event must be emitted for the rehydrated bead.
+    expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED)).toMatchObject({
+      event: DomainEventName.BEAD_QUARANTINE_REHYDRATED,
+      data: { beadId: 'bead-q', reason: 'ALREADY_CHECKED_OUT', signature: 'ready:2026-01-01T00:00:00.000Z' }
+    });
+  });
+
+  it('(sey0/AC1) isQuarantined skips a rehydrated bead with unchanged signature — no claim, worktree, or spawn', async () => {
+    // Simulate restart: bead-q was quarantined previously. After rehydration,
+    // isQuarantined(bead-q) with the same status/lastActivity must return true,
+    // causing scanAndSpawn to skip the bead without claim, worktree, or spawn.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-2',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-q',
+        reason: 'ALREADY_CHECKED_OUT',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
+
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    // Bead with the same status+lastActivity as the quarantined signature.
+    const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    expect(await (supervisor as any).isQuarantined(bead)).toBe(true);
+  });
+
+  it('(sey0/AC2) changing bead status clears the rehydrated quarantine and allows retry', async () => {
+    // A rehydrated quarantine is cleared when the bead's signature changes.
+    // The skip is lifted and a BEAD_QUARANTINE_CLEARED event is emitted.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-3',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-q',
+        reason: 'ALREADY_CHECKED_OUT',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
+
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    // Bead with CHANGED status — signature no longer matches.
+    const beadAfterStatusChange = { id: 'bead-q', status: 'in_progress', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    const result = await (supervisor as any).isQuarantined(beadAfterStatusChange);
+
+    // The bead must no longer be quarantined.
+    expect(result).toBe(false);
+    // Quarantine entry must be cleared.
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    // A BEAD_QUARANTINE_CLEARED event must be emitted to explain the retry.
+    expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED)).toMatchObject({
+      event: DomainEventName.BEAD_QUARANTINE_CLEARED,
+      data: expect.objectContaining({ beadId: 'bead-q', reason: 'ALREADY_CHECKED_OUT' })
+    });
+  });
+
+  it('(sey0/AC2) changing bead lastActivity clears the rehydrated quarantine and allows retry', async () => {
+    // Changing only lastActivity (status unchanged) also lifts the rehydrated quarantine.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-4',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-q',
+        reason: 'WORKTREE_PATH_TAKEN',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
+
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    const beadAfterActivityBump = { id: 'bead-q', status: 'ready', lastActivity: '2026-02-01T00:00:00.000Z' } as any;
+    const result = await (supervisor as any).isQuarantined(beadAfterActivityBump);
+
+    expect(result).toBe(false);
+    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    // BEAD_QUARANTINE_CLEARED must be emitted for the retry explanation.
+    expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED)).toBeDefined();
+  });
+
+  it('(sey0/AC3) durable events explain both rehydrated skip and retry: REHYDRATED then CLEARED in order', async () => {
+    // Full restart lifecycle: BEAD_QUARANTINED was recorded → restart →
+    // BEAD_QUARANTINE_REHYDRATED is emitted → bead signature changes →
+    // BEAD_QUARANTINE_CLEARED is emitted.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-5',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-lifecycle',
+        reason: 'INVALID_BRANCH_REF',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
+
+    // Simulate restart: rehydrate.
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    // Verify skip event was emitted.
+    expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED)).toBeDefined();
+
+    // Bead signature changes (status updated externally).
+    const beadChanged = { id: 'bead-lifecycle', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
+    await (supervisor as any).isQuarantined(beadChanged);
+
+    // Verify cleared event was emitted after the skip event.
+    const rehydratedIdx = records.findIndex(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED);
+    const clearedIdx = records.findIndex(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED);
+    expect(rehydratedIdx).toBeGreaterThanOrEqual(0);
+    expect(clearedIdx).toBeGreaterThan(rehydratedIdx);
+  });
+
+  it('(sey0/AC4) non-quarantined beads are unaffected by rehydration', async () => {
+    // A bead with no BEAD_QUARANTINED event in the log must not appear in the
+    // quarantine map after rehydration — existing non-quarantined startup behavior
+    // is unchanged.
+    const unrelatedEvent: DomainEvent = {
+      id: 'ue-1',
+      type: DomainEventName.BEAD_CLAIMED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: { beadId: 'bead-clean', stateId: 'Planning' }
+    };
+    const { supervisor } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [unrelatedEvent]);
+
+    await (supervisor as any).rehydrateQuarantinesFromEvents();
+
+    expect((supervisor as any).quarantine.has('bead-clean')).toBe(false);
+    // Non-rehydrated bead must not be skipped by isQuarantined.
+    const bead = { id: 'bead-clean', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    expect(await (supervisor as any).isQuarantined(bead)).toBe(false);
+  });
+
+  it('(sey0/AC4) a runtime (non-rehydrated) quarantine clear does NOT emit BEAD_QUARANTINE_CLEARED', async () => {
+    // isQuarantined on a RUNTIME quarantine entry (not rehydrated) clears the entry
+    // when signature changes but must NOT emit BEAD_QUARANTINE_CLEARED — that event
+    // is reserved for rehydrated quarantines to avoid noise on normal operation.
+    const { supervisor, records } = supervisorHarness(NOW_MS);
+
+    const bead = { id: 'bead-runtime', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
+    // Quarantine via normal runtime path (not rehydration).
+    await (supervisor as any).quarantineBead(bead, 'ALREADY_CHECKED_OUT');
+    const countAfterQuarantine = records.length;
+
+    // Now clear the runtime quarantine by presenting a changed signature.
+    const beadChanged = { id: 'bead-runtime', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
+    await (supervisor as any).isQuarantined(beadChanged);
+
+    // No BEAD_QUARANTINE_CLEARED event must be emitted for a runtime quarantine.
+    const newEvents = records.slice(countAfterQuarantine);
+    expect(newEvents.some(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED)).toBe(false);
+  });
+
+  it('(sey0) start() passes startupEvents to rehydrateQuarantinesFromEvents (single readAll pass)', async () => {
+    // Verifies that start() integrates rehydration into the shared single-pass
+    // startup flow: readAll is called exactly once even though multiple startup
+    // helpers (rebuildProcessedSignals, reconcileUnacknowledgedSignalIntents,
+    // rehydrateQuarantines) all need the event log.
+    const quarantinedEvent: DomainEvent = {
+      id: 'qe-start',
+      type: DomainEventName.BEAD_QUARANTINED,
+      timestamp: new Date(NOW_MS - TimeMs.MINUTE).toISOString(),
+      sessionId: 'session-old',
+      data: {
+        beadId: 'bead-start-q',
+        reason: 'ALREADY_CHECKED_OUT',
+        signature: 'ready:2026-01-01T00:00:00.000Z'
+      }
+    };
+    const { supervisor } = supervisorHarness(
+      NOW_MS,
+      undefined,
+      new Set(),
+      1,
+      new Map(),
+      [quarantinedEvent]
+    );
+    // Prevent the interval and step from running — only test startup rehydration.
+    vi.spyOn(supervisor as any, 'step').mockResolvedValue(undefined);
+    // restoreCapacityPauseFromStore needs latestEventByType — add it.
+    (supervisor as any).services.eventStore.latestEventByType = vi.fn(async () => undefined);
+
+    await supervisor.start();
+
+    // The quarantine map must be populated from the startup events.
+    expect((supervisor as any).quarantine.has('bead-start-q')).toBe(true);
+    // readAll must have been called exactly once (shared pass).
+    expect((supervisor as any).services.eventStore.readAll).toHaveBeenCalledTimes(1);
   });
 });

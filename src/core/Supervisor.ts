@@ -149,8 +149,14 @@ export class Supervisor {
   private lastMissingStartedBeadIds = new Set<string>();
   /** In-memory quarantine map: beadId → QuarantineEntry.
    * Quarantined beads are skipped during scanAndSpawn unless their signature changes.
-   * Single-process-local; no persistence needed (signatures are re-derived from live state). */
+   * Rehydrated on startup from BEAD_QUARANTINED events; cleared when signature changes. */
   private readonly quarantine = new Map<string, QuarantineEntry>();
+  /**
+   * Set of beadIds whose quarantine entry was rehydrated from a durable
+   * BEAD_QUARANTINED event on coordinator restart (as opposed to established at
+   * runtime this session).  Used to emit BEAD_QUARANTINE_CLEARED when a rehydrated
+   * entry is lifted — providing a durable audit trail for the retry. */
+  private readonly rehydratedQuarantineBeadIds = new Set<string>();
   /**
    * Per-bead count of consecutive supervisor polls on which the bead's pane was
    * detected as final-blocked.  Reset to zero when the bead is NOT detected as
@@ -231,6 +237,7 @@ export class Supervisor {
     }
     await this.rebuildProcessedSignalsFromEvents(startupEvents);
     await this.reconcileUnacknowledgedSignalIntents(startupEvents);
+    await this.rehydrateQuarantinesFromEvents(startupEvents);
 
     this.interval = setInterval(() => {
       this.step().catch(error => Logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
@@ -451,6 +458,60 @@ export class Supervisor {
     }
   }
 
+  /**
+   * Rehydrates the in-memory quarantine map from durable BEAD_QUARANTINED events
+   * on coordinator restart.  Replays the LATEST BEAD_QUARANTINED event per bead
+   * and restores the quarantine entry so that scanAndSpawn skips unchanged-broken
+   * beads without re-claiming, re-provisioning a worktree, or re-spawning.
+   *
+   * The rehydrated entry carries the signature recorded at quarantine time.  When
+   * isQuarantined() is next called for that bead, the CURRENT bead signature is
+   * compared against the stored one: if unchanged, the bead is still skipped; if
+   * changed (bead state evolved externally), the entry is cleared and a
+   * BEAD_QUARANTINE_CLEARED event is emitted so the retry is explained durably.
+   *
+   * Accepts an optional pre-fetched `events` array so that start() can share the
+   * single readAll() pass with rebuildProcessedSignalsFromEvents() and
+   * reconcileUnacknowledgedSignalIntents().
+   */
+  private async rehydrateQuarantinesFromEvents(events?: DomainEvent[]): Promise<void> {
+    try {
+      const allEvents = events ?? await this.eventStore.readAll();
+
+      // Collect the LATEST BEAD_QUARANTINED event per beadId (last write wins).
+      const latestByBead = new Map<string, DomainEvent>();
+      for (const event of allEvents) {
+        if (event.type !== DomainEventName.BEAD_QUARANTINED) continue;
+        const beadId = String(event.data?.beadId || '');
+        if (!beadId) continue;
+        latestByBead.set(beadId, event);
+      }
+
+      let rehydrated = 0;
+      for (const [beadId, event] of latestByBead) {
+        const reason = String(event.data?.reason || '');
+        const signature = String(event.data?.signature || '');
+        if (!reason || !signature) continue;
+
+        this.quarantine.set(beadId, { reason: reason as QuarantineReason, signature });
+        this.rehydratedQuarantineBeadIds.add(beadId);
+        rehydrated++;
+
+        await this.eventStore.record(DomainEventName.BEAD_QUARANTINE_REHYDRATED, {
+          beadId,
+          reason,
+          signature
+        }).catch(() => {});
+      }
+
+      if (rehydrated > 0) {
+        Logger.info(Component.SUPERVISOR, 'Rehydrated bead quarantines from event store on startup', { rehydrated });
+      }
+    } catch (error) {
+      Logger.warn(Component.SUPERVISOR, 'Unable to rehydrate quarantines from event store; quarantine state is in-memory only this session', { error: String(error) });
+    }
+  }
+
   private isSchedulingPaused(): boolean {
     return this.schedulingPausedUntilMs > this.clock.now();
   }
@@ -519,14 +580,33 @@ export class Supervisor {
 
   /** Returns true if the bead is currently quarantined with an UNCHANGED signature.
    * If the signature changed (bead state evolved externally) the quarantine entry is
-   * cleared and the bead is eligible for a re-attempt. */
-  private isQuarantined(bead: Bead): boolean {
+   * cleared and the bead is eligible for a re-attempt.
+   * When the cleared entry was rehydrated from a durable event, emits a
+   * BEAD_QUARANTINE_CLEARED event so the retry is explained in the event log. */
+  private async isQuarantined(bead: Bead): Promise<boolean> {
     const entry = this.quarantine.get(bead.id);
     if (!entry) return false;
     const currentSig = this.quarantineSignatureFor(bead);
     if (currentSig !== entry.signature) {
       // Signature changed — bead state evolved; clear quarantine and allow retry.
+      const wasRehydrated = this.rehydratedQuarantineBeadIds.has(bead.id);
       this.quarantine.delete(bead.id);
+      this.rehydratedQuarantineBeadIds.delete(bead.id);
+      if (wasRehydrated) {
+        // Emit a durable event so operators can trace the retry back to the cleared quarantine.
+        await this.eventStore.record(DomainEventName.BEAD_QUARANTINE_CLEARED, {
+          beadId: bead.id,
+          reason: entry.reason,
+          previousSignature: entry.signature,
+          currentSignature: currentSig
+        }).catch(() => {});
+        Logger.info(Component.SUPERVISOR, 'Rehydrated quarantine cleared — bead eligible for retry', {
+          beadId: bead.id,
+          reason: entry.reason,
+          previousSignature: entry.signature,
+          currentSignature: currentSig
+        });
+      }
       return false;
     }
     return true;
@@ -1073,7 +1153,7 @@ export class Supervisor {
         });
         continue;
       }
-      if (this.isQuarantined(bead)) {
+      if (await this.isQuarantined(bead)) {
         Logger.info(Component.SUPERVISOR, 'Preflight: skipping quarantined bead (unchanged signature)', {
           beadId: bead.id,
           reason: this.quarantine.get(bead.id)?.reason
