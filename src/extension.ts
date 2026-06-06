@@ -117,6 +117,7 @@ import {
 import { Supervisor } from './core/Supervisor.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
 import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
+import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
@@ -2306,11 +2307,15 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     await runStalenessPreflightWarn(buildProvenance, services.eventStore).catch(() => {});
   }
 
+  // Host-SDK fingerprint: recorded alongside build provenance for audit/drift detection.
+  const hostSdkFingerprint = resolveHostSdkFingerprint();
+
   await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
     beadId: options.beadId,
     maxSlots: options.maxSlots,
     autoContinue: options.autoContinue,
-    buildProvenance
+    buildProvenance,
+    hostSdkFingerprint
   });
 
   const startupConfig = await services.configLoader.load();
@@ -2556,6 +2561,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const runtimeObservability = await initializeObservability(services);
     session.piToolObservability = runtimeObservability;
 
+    // Host-SDK fingerprint: best-effort, recorded once at SESSION_START for all modes.
+    const hostSdkFingerprint = resolveHostSdkFingerprint();
+
     // Worker-mode startup provenance: best-effort, never blocks startup.
     if (isWorkerMode()) {
       const workerProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
@@ -2566,7 +2574,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           beadId: process.env[EnvVars.BEAD_ID],
           stateId: process.env[EnvVars.STATE_ID],
           workerId: process.env[EnvVars.WORKER_ID],
-          buildProvenance: workerProvenance
+          buildProvenance: workerProvenance,
+          hostSdkFingerprint
         }).catch(() => {});
       }
     }
