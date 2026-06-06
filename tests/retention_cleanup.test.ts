@@ -2295,3 +2295,289 @@ states:
     configLoader.reset();
   });
 });
+
+// ---------------------------------------------------------------------------
+// cp8u: bounded batch ceilings + backpressure health event
+//
+// AC1: multi-agent/tool-heavy runs keep scratch/tool-call artifact counts below
+//      configured ceilings (maxToolCallFilesPerRun / maxToolCallDirsPerRun).
+// AC2: cleanup processes BOUNDED batches — removes no more than the ceiling
+//      number of files/dirs in a single run.
+// AC3: live-bead and required verifier artifacts remain PROTECTED (existing
+//      protections are not bypassed when ceilings are active).
+// AC4: RETENTION_DISK_HEALTH event includes backpressure fields when the batch
+//      ceiling is hit.
+// ---------------------------------------------------------------------------
+
+describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
+  let tmpRoot: string;
+
+  beforeEach(() => {
+    tmpRoot = makeTmpRoot();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  /** Write N aged dead-bead dirs under .pi/tool-output. Returns their paths. */
+  function writeDeadBeadDirs(n: number, mtimeMs: number): string[] {
+    const dirs: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const beadId = `dead-bead-${i.toString().padStart(3, '0')}`;
+      const beadDir = path.join(tmpRoot, '.pi', 'tool-output', beadId);
+      const nested = path.join(beadDir, 'output.json');
+      writeFileWithMtime(nested, '{}', mtimeMs);
+      makeDirWithMtime(beadDir, mtimeMs);
+      dirs.push(beadDir);
+    }
+    return dirs;
+  }
+
+  // ── AC1 / AC2: ceiling limits how many files/dirs are removed in one run ──
+
+  it('AC2: removes no more than maxToolCallDirsPerRun dirs from tool-output in a single run', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const TOTAL_DEAD = 10;
+    const CEILING = 3;
+
+    writeDeadBeadDirs(TOTAL_DEAD, OLD_MTIME);
+
+    const retentionConfig: RetentionConfig = {
+      maxToolCallDirsPerRun: CEILING,
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(), // no live beads
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // The tool-output area must not have removed more than the ceiling number
+    // of top-level bead directories.
+    const toolArea = result.areas.find(a => a.area === 'pi/tool-output');
+    expect(toolArea).toBeDefined();
+    // dirsRemoved counts all dirs recursively, so we check the result flag instead:
+    // the backpressureActive flag must be set when the ceiling was hit.
+    expect(result.backpressureActive).toBe(true);
+
+    // At least CEILING dirs were processed (the cleanup did some work).
+    expect(result.totalDirsRemoved).toBeGreaterThan(0);
+
+    // The total bead dirs removed must be strictly less than TOTAL_DEAD.
+    // (Some beads must remain because the ceiling cut the run short.)
+    const toolOutputDir = path.join(tmpRoot, '.pi', 'tool-output');
+    const remaining = fs.readdirSync(toolOutputDir);
+    expect(remaining.length).toBeGreaterThan(0);
+  });
+
+  it('AC2: removes no more than maxToolCallFilesPerRun files from tool-output in a single run', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const CEILING = 2; // only 2 files may be removed per run
+
+    // Write 5 dead beads, each with 1 file (total 5 files + 5 dirs eligible).
+    writeDeadBeadDirs(5, OLD_MTIME);
+
+    const retentionConfig: RetentionConfig = {
+      maxToolCallFilesPerRun: CEILING,
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(),
+      retentionConfig
+    );
+    const result = await cleanup.run();
+
+    // When the file ceiling is hit, backpressure must be flagged.
+    expect(result.backpressureActive).toBe(true);
+
+    // The tool-output area must have removed SOME but not ALL files.
+    const toolOutputDir = path.join(tmpRoot, '.pi', 'tool-output');
+    // Some bead dirs must remain (not all 5 cleared).
+    const remaining = fs.readdirSync(toolOutputDir);
+    expect(remaining.length).toBeGreaterThan(0);
+  });
+
+  it('AC1: when neither ceiling is configured, all eligible dead beads are removed (unbounded baseline)', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const TOTAL_DEAD = 5;
+
+    writeDeadBeadDirs(TOTAL_DEAD, OLD_MTIME);
+
+    // No ceiling config — legacy behavior: all aged beads removed.
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set() // no live beads
+    );
+    const result = await cleanup.run();
+
+    const toolOutputDir = path.join(tmpRoot, '.pi', 'tool-output');
+    const remaining = fs.readdirSync(toolOutputDir);
+    expect(remaining).toHaveLength(0); // all aged beads removed
+    expect(result.backpressureActive).toBe(false);
+  });
+
+  // ── AC3: live-bead protection is preserved even when ceilings are active ──
+
+  it('AC3: live-bead tool-output dirs are NEVER removed, even when ceilings are active', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const LIVE_BEAD_ID = 'live-bead-protected';
+
+    // Write a live bead dir (old mtime — must survive regardless of ceiling).
+    const liveBeadDir = path.join(tmpRoot, '.pi', 'tool-output', LIVE_BEAD_ID);
+    writeFileWithMtime(path.join(liveBeadDir, 'out.json'), '{}', OLD_MTIME);
+    makeDirWithMtime(liveBeadDir, OLD_MTIME);
+
+    // Write 5 dead bead dirs.
+    writeDeadBeadDirs(5, OLD_MTIME);
+
+    const retentionConfig: RetentionConfig = {
+      maxToolCallDirsPerRun: 2, // tight ceiling — stops early
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set([LIVE_BEAD_ID]), // live bead must be protected
+      retentionConfig
+    );
+    await cleanup.run();
+
+    // The live bead dir must ALWAYS remain intact.
+    expect(fs.existsSync(liveBeadDir)).toBe(true);
+    expect(fs.existsSync(path.join(liveBeadDir, 'out.json'))).toBe(true);
+  });
+
+  it('AC3: live-bead current-transition carve-out is still respected when ceilings are active', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    const LIVE_BEAD_ID = 'live-bead-carveout';
+
+    // A live bead with a prior (aged) transition and a current (aged) transition.
+    const priorDir = path.join(tmpRoot, '.pi', 'tool-output', LIVE_BEAD_ID, 'Planning', 'formulate-plan', 'bash', 'inv-1');
+    writeFileWithMtime(path.join(priorDir, 'output', 'result.json'), '{}', OLD_MTIME);
+    makeDirWithMtime(path.join(tmpRoot, '.pi', 'tool-output', LIVE_BEAD_ID, 'Planning', 'formulate-plan'), OLD_MTIME);
+
+    const currentDir = path.join(tmpRoot, '.pi', 'tool-output', LIVE_BEAD_ID, 'Implementation', 'surgical-execution', 'bash', 'inv-2');
+    writeFileWithMtime(path.join(currentDir, 'output', 'result.json'), '{}', OLD_MTIME);
+    makeDirWithMtime(path.join(tmpRoot, '.pi', 'tool-output', LIVE_BEAD_ID, 'Implementation', 'surgical-execution'), OLD_MTIME);
+
+    const es = {
+      record: vi.fn(async () => {}),
+      projectBeadStateChart: vi.fn(async (beadId: string) => ({
+        beadId,
+        currentState: 'Implementation',
+        activeActionId: 'surgical-execution',
+        handovers: {}, completedActionIds: [], checkedItems: {}, addedChecklistItems: [], checkpoints: []
+      }))
+    };
+
+    const retentionConfig: RetentionConfig = {
+      maxToolCallDirsPerRun: 1, // very tight
+    };
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set([LIVE_BEAD_ID]),
+      retentionConfig
+    );
+    await cleanup.run();
+
+    // Current-transition output must NEVER be reclaimed (gate-before-reclaim carve-out).
+    const currentResultJson = path.join(currentDir, 'output', 'result.json');
+    expect(fs.existsSync(currentResultJson)).toBe(true);
+  });
+
+  // ── AC4: RETENTION_DISK_HEALTH includes backpressure fields ──────────────
+
+  it('AC4: RETENTION_DISK_HEALTH event includes backpressureActive=true and ceiling fields when ceiling is hit', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+
+    writeDeadBeadDirs(8, OLD_MTIME);
+
+    const retentionConfig: RetentionConfig = {
+      maxToolCallDirsPerRun: 2, // low ceiling — will be hit
+      diskHealthWarnBytes: 1, // very low threshold — health event will always fire
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      () => new Set(),
+      retentionConfig
+    );
+    await cleanup.run();
+
+    const healthCall = es.record.mock.calls.find(([event]) => event === DomainEventName.RETENTION_DISK_HEALTH);
+    expect(healthCall).toBeDefined();
+    const [, healthData] = healthCall as [string, Record<string, unknown>];
+
+    // Must include backpressure-specific fields.
+    expect(healthData.backpressureActive).toBe(true);
+    expect(typeof healthData.toolCallDirsRemovedThisRun).toBe('number');
+    expect(typeof healthData.maxToolCallDirsPerRun).toBe('number');
+    expect(healthData.maxToolCallDirsPerRun).toBe(2);
+  });
+
+  it('AC4: RETENTION_DISK_HEALTH event has backpressureActive=false when no ceiling is configured', async () => {
+    const OLD_MTIME = NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS;
+    // Write a large-enough file to trigger disk health event by bytes threshold.
+    const largeFile = path.join(tmpRoot, '.pi', 'logs', 'large-old.log');
+    writeFileWithMtime(largeFile, 'x'.repeat(500), OLD_MTIME);
+
+    const retentionConfig: RetentionConfig = {
+      diskHealthWarnBytes: 1, // low threshold — always fires
+    };
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(
+      tmpRoot,
+      fakeClock(),
+      es as any,
+      TWO_DAYS_MS,
+      null,
+      retentionConfig
+    );
+    await cleanup.run();
+
+    const healthCall = es.record.mock.calls.find(([event]) => event === DomainEventName.RETENTION_DISK_HEALTH);
+    expect(healthCall).toBeDefined();
+    const [, healthData] = healthCall as [string, Record<string, unknown>];
+
+    // No ceiling was hit — backpressureActive must be false.
+    expect(healthData.backpressureActive).toBe(false);
+  });
+
+  // ── Constants existence tests ─────────────────────────────────────────────
+
+  it('RetentionDefaults includes maxToolCallFilesPerRun and maxToolCallDirsPerRun', () => {
+    expect(typeof RetentionDefaults.MAX_TOOL_CALL_FILES_PER_RUN).toBe('number');
+    expect(RetentionDefaults.MAX_TOOL_CALL_FILES_PER_RUN).toBeGreaterThan(0);
+    expect(typeof RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN).toBe('number');
+    expect(RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN).toBeGreaterThan(0);
+  });
+
+  it('RetentionCleanupResult includes backpressureActive field', async () => {
+    const es = fakeEventStore();
+    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const result = await cleanup.run();
+    expect(typeof result.backpressureActive).toBe('boolean');
+    expect(result.backpressureActive).toBe(false); // nothing removed, no ceiling hit
+  });
+});

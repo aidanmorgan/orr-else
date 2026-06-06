@@ -42,6 +42,12 @@ export interface RetentionCleanupResult {
   totalErrors: number;
   /** Number of non-critical events dropped during JSONL compaction (0 when compaction disabled). */
   eventsCompacted: number;
+  /**
+   * True when the tool-output area cleanup was stopped early because a
+   * configured batch ceiling (maxToolCallFilesPerRun or maxToolCallDirsPerRun)
+   * was reached before all eligible entries were processed.
+   */
+  backpressureActive: boolean;
 }
 
 /**
@@ -402,6 +408,18 @@ function reclaimLiveBeadPriorTransitions(
 }
 
 /**
+ * Mutable budget tracker for the tool-output area batch ceilings.
+ * Both ceilings apply across the entire tool-output scan pass; when either is
+ * reached the scan stops processing further bead entries.
+ */
+interface ToolOutputBudget {
+  filesRemaining: number;
+  dirsRemaining: number;
+  /** Set to true when the scan was stopped early because a ceiling was hit. */
+  ceilingHit: boolean;
+}
+
+/**
  * Special-case scanner for `.pi/tool-output` (0yt5.27).
  *
  * The top-level `tool-output` dir mtime only bumps when a NEW per-bead subdir is
@@ -426,13 +444,19 @@ function reclaimLiveBeadPriorTransitions(
  * Fail-safe: if liveBeadIds resolution threw, the caller passes `null` here and
  * this function returns a zeroed summary (skip the entire area rather than risk
  * deleting an active bead's output tree).
+ *
+ * Batch ceilings: `budget` bounds the total files/dirs removed in one pass.
+ * When a ceiling is hit, budget.ceilingHit is set and no further bead entries
+ * are processed.  Live-bead and evidence protections are NEVER relaxed by the
+ * ceiling — the ceiling only stops scanning ADDITIONAL dead bead entries.
  */
 function scanToolOutputArea(
   toolOutputRoot: string,
   nowMs: number,
   maxAgeMs: number,
   liveBeadIds: Set<string> | null,
-  currentTransitions: Map<string, { currentState?: string; currentActionId?: string }>
+  currentTransitions: Map<string, { currentState?: string; currentActionId?: string }>,
+  budget: ToolOutputBudget
 ): RetentionAreaSummary {
   const summary: RetentionAreaSummary = {
     area: 'pi/tool-output',
@@ -472,6 +496,8 @@ function scanToolOutputArea(
     // PRIOR-transition subtrees, exempting the CURRENT state/action subtree
     // (gate-before-reclaim carve-out).  The current transition is keyed off the
     // bead's projected current state/action, NOT mtime.
+    // NOTE: live-bead processing is NOT subject to the batch ceiling — the
+    // ceiling only halts processing of additional DEAD bead entries.
     if (liveBeadIds.has(beadId)) {
       const current = currentTransitions.get(beadId);
       reclaimLiveBeadPriorTransitions(
@@ -483,6 +509,16 @@ function scanToolOutputArea(
         summary
       );
       continue;
+    }
+
+    // Batch ceiling check: stop processing dead bead entries when a ceiling is hit.
+    if (budget.filesRemaining <= 0 || budget.dirsRemaining <= 0) {
+      budget.ceilingHit = true;
+      Logger.info(Component.RETENTION, 'Tool-output batch ceiling reached; deferring remaining dead bead entries', {
+        filesRemaining: budget.filesRemaining,
+        dirsRemaining: budget.dirsRemaining
+      });
+      break;
     }
 
     let mtimeMs: number;
@@ -506,6 +542,10 @@ function scanToolOutputArea(
     summary.dirsRemoved += removeCounts.dirsRemoved;
     summary.errors += removeCounts.errors;
     summary.bytesReclaimed += bytes;
+
+    // Deduct from budget after removal so the ceiling is applied per-bead-dir.
+    budget.filesRemaining -= removeCounts.filesRemoved;
+    budget.dirsRemaining -= removeCounts.dirsRemoved;
   }
 
   return summary;
@@ -791,6 +831,8 @@ export class RetentionCleanup {
   private readonly compactionWindowMs: number;
   private readonly diskHealthWarnBytes: number;
   private readonly otelMaxBytes: number = RetentionDefaults.OTEL_MAX_BYTES;
+  private readonly maxToolCallFilesPerRun: number;
+  private readonly maxToolCallDirsPerRun: number;
 
   constructor(
     private readonly projectRoot: string,
@@ -804,6 +846,8 @@ export class RetentionCleanup {
     this.compactionEnabled = retentionConfig?.compactionEnabled ?? RetentionDefaults.COMPACTION_ENABLED;
     this.compactionWindowMs = retentionConfig?.compactionWindowMs ?? RetentionDefaults.COMPACTION_WINDOW_MS;
     this.diskHealthWarnBytes = retentionConfig?.diskHealthWarnBytes ?? RetentionDefaults.DISK_HEALTH_WARN_BYTES;
+    this.maxToolCallFilesPerRun = retentionConfig?.maxToolCallFilesPerRun ?? RetentionDefaults.MAX_TOOL_CALL_FILES_PER_RUN;
+    this.maxToolCallDirsPerRun = retentionConfig?.maxToolCallDirsPerRun ?? RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN;
   }
 
   /**
@@ -850,8 +894,16 @@ export class RetentionCleanup {
     // beadId. For a live bead, only AGED PRIOR-transition subtrees are reclaimed;
     // the CURRENT state/action subtree is exempt. If liveBeadIds resolution failed
     // (resolvedLiveBeadIds === null) the whole area is skipped.
+    //
+    // cp8u: batch ceilings bound the number of files/dirs removed per run to
+    // prevent million-file cleanup spikes from legacy scratch accumulation.
+    const toolOutputBudget: ToolOutputBudget = {
+      filesRemaining: this.maxToolCallFilesPerRun,
+      dirsRemaining: this.maxToolCallDirsPerRun,
+      ceilingHit: false
+    };
     const toolOutputRoot = resolveProjectFrom(this.projectRoot, TOOL_OUTPUT_DIR);
-    areas.push(scanToolOutputArea(toolOutputRoot, nowMs, this.maxAgeMs, resolvedLiveBeadIds, currentTransitions));
+    areas.push(scanToolOutputArea(toolOutputRoot, nowMs, this.maxAgeMs, resolvedLiveBeadIds, currentTransitions, toolOutputBudget));
 
     const totalFilesRemoved = areas.reduce((acc, a) => acc + a.filesRemoved, 0);
     const totalDirsRemoved = areas.reduce((acc, a) => acc + a.dirsRemoved, 0);
@@ -913,11 +965,12 @@ export class RetentionCleanup {
       totalDirsRemoved,
       totalBytesReclaimed,
       totalErrors,
-      eventsCompacted: compactionSummary.eventsDropped
+      eventsCompacted: compactionSummary.eventsDropped,
+      backpressureActive: toolOutputBudget.ceilingHit
     };
 
     // Only log/record when there is something noteworthy to report.
-    const anythingRemoved = totalFilesRemoved > 0 || totalDirsRemoved > 0 || totalErrors > 0;
+    const anythingRemoved = totalFilesRemoved > 0 || totalDirsRemoved > 0 || totalErrors > 0 || toolOutputBudget.ceilingHit;
     if (anythingRemoved) {
       const areaSummaries = areas
         .filter(a => a.filesRemoved > 0 || a.dirsRemoved > 0 || a.errors > 0)
@@ -928,6 +981,7 @@ export class RetentionCleanup {
         totalDirsRemoved,
         totalBytesReclaimed,
         totalErrors,
+        backpressureActive: toolOutputBudget.ceilingHit,
         areas: areaSummaries
       });
     }
@@ -954,17 +1008,26 @@ export class RetentionCleanup {
 
     // ── Disk-usage / backpressure health event ──────────────────────────────
     // Emit a RETENTION_DISK_HEALTH event when total bytes reclaimed (from both
-    // filesystem cleanup and JSONL compaction) exceeds the configured threshold.
+    // filesystem cleanup and JSONL compaction) exceeds the configured threshold,
+    // OR when the tool-output batch ceiling was hit (backpressure is active).
     // This provides write-backpressure visibility as a harness-health signal.
     const totalBytesFreed = totalBytesReclaimed + compactionSummary.bytesReclaimed;
-    if (totalBytesFreed >= this.diskHealthWarnBytes) {
+    const toolOutputArea = areas.find(a => a.area === 'pi/tool-output');
+    if (totalBytesFreed >= this.diskHealthWarnBytes || toolOutputBudget.ceilingHit) {
       await this.eventStore.record(DomainEventName.RETENTION_DISK_HEALTH, {
         totalBytesReclaimed: totalBytesFreed,
         filesystemBytesReclaimed: totalBytesReclaimed,
         compactionBytesReclaimed: compactionSummary.bytesReclaimed,
         eventsCompacted: compactionSummary.eventsDropped,
         diskHealthWarnBytes: this.diskHealthWarnBytes,
-        message: `Retention reclaimed ${totalBytesFreed} bytes (threshold: ${this.diskHealthWarnBytes})`
+        backpressureActive: toolOutputBudget.ceilingHit,
+        toolCallFilesRemovedThisRun: toolOutputArea?.filesRemoved ?? 0,
+        toolCallDirsRemovedThisRun: toolOutputArea?.dirsRemoved ?? 0,
+        maxToolCallFilesPerRun: this.maxToolCallFilesPerRun,
+        maxToolCallDirsPerRun: this.maxToolCallDirsPerRun,
+        message: toolOutputBudget.ceilingHit
+          ? `Retention batch ceiling hit (files≤${this.maxToolCallFilesPerRun}, dirs≤${this.maxToolCallDirsPerRun}); deferred remaining tool-call artifacts`
+          : `Retention reclaimed ${totalBytesFreed} bytes (threshold: ${this.diskHealthWarnBytes})`
       }).catch(error => {
         Logger.warn(Component.RETENTION, 'Failed to record RETENTION_DISK_HEALTH event', { error: String(error) });
       });

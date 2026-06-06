@@ -1261,6 +1261,19 @@ export const RetentionDefaults = {
   DISK_HEALTH_WARN_BYTES: 50 * 1024 * 1024, // 50 MiB
   /** An OTEL traces-*.jsonl file larger than this is rotated/removed even when within MAX_AGE_MS (max-bytes bound). */
   OTEL_MAX_BYTES: 50 * 1024 * 1024, // 50 MiB
+  /**
+   * Maximum number of files removed from the tool-output area in a single retention run.
+   * Bounds million-file cleanup spikes that occur when legacy scratch accumulates.
+   * Configurable via settings.retention.maxToolCallFilesPerRun.
+   * Default: 50,000 — large enough for healthy runs, bounded against pathological spikes.
+   */
+  MAX_TOOL_CALL_FILES_PER_RUN: 50_000,
+  /**
+   * Maximum number of directories removed from the tool-output area in a single retention run.
+   * Configurable via settings.retention.maxToolCallDirsPerRun.
+   * Default: 10,000 — generous for healthy project cadences, prevents million-dir spikes.
+   */
+  MAX_TOOL_CALL_DIRS_PER_RUN: 10_000,
 } as const;
 
 /**

@@ -590,6 +590,17 @@ export interface RetentionConfig {
    * Defaults to RetentionDefaults.DISK_HEALTH_WARN_BYTES (50 MiB).
    */
   diskHealthWarnBytes?: number;
+  /**
+   * Maximum number of files removed from the tool-output area in a single retention run.
+   * Bounds million-file cleanup spikes from legacy scratch accumulation.
+   * Defaults to RetentionDefaults.MAX_TOOL_CALL_FILES_PER_RUN (50,000).
+   */
+  maxToolCallFilesPerRun?: number;
+  /**
+   * Maximum number of directories removed from the tool-output area in a single retention run.
+   * Defaults to RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN (10,000).
+   */
+  maxToolCallDirsPerRun?: number;
 }
 
 /**
