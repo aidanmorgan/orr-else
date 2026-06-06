@@ -661,10 +661,13 @@ async function compactJsonlFile(
         }
 
         if (
-          eventType === DomainEventName.PROJECT_TOOL_SUCCEEDED &&
+          (eventType === DomainEventName.PROJECT_TOOL_SUCCEEDED ||
+           eventType === DomainEventName.PROJECT_TOOL_FAILED) &&
           typeof event.data?.outputFile === 'string' &&
           event.data.outputFile.length > 0
         ) {
+          // zog2.16: PROJECT_TOOL_FAILED with outputFile = evidence-bearing short-circuit
+          // rejection — must survive compaction so verifier gate can reconstruct tool status.
           writeStream.write(`${trimmed}\n`);
           eventsKept++;
           return;

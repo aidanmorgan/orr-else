@@ -54,6 +54,8 @@ import {
 } from './NativeToolPolicy.js';
 import { handleAgentLifecycleFailure } from './AgentLifecycleController.js';
 import type { ActiveRun } from './SessionTypes.js';
+import { ToolResultRecorder } from '../core/ToolResultRecorder.js';
+import { v7 as uuidv7 } from 'uuid';
 
 // ── context bags passed from extension.ts ────────────────────────────────────
 
@@ -184,6 +186,16 @@ export function registerPiToolObservers(
       message: rejection
     });
     if (span) runtimeObservability?.endSpan(span.spanId, SpanStatusValue.ERROR, rejection);
+    // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
+    const policyInvocationId = uuidv7();
+    const policyProjectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+    const policyRecorder = new ToolResultRecorder(services.toolCallPathFactory, policyProjectRoot);
+    const policyHandle = await policyRecorder.recordShortCircuit({
+      toolName: event.toolName, invocationId: policyInvocationId,
+      beadId, stateId: session.activeRun?.stateId, actionId: session.activeRun?.action?.id,
+      status: ToolResultStatus.REJECTED, failureCategory: 'TRANSPORT',
+      rejectionReason: rejection,
+    }).catch(() => undefined);
     await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
       beadId,
       tool: event.toolName,
@@ -193,7 +205,8 @@ export function registerPiToolObservers(
         status: ToolResultStatus.REJECTED,
         isError: true,
         message: rejection
-      }
+      },
+      ...(policyHandle ? { toolResult: policyHandle } : {}),
     }).catch(error => {
       Logger.warn(Component.ORR_ELSE, 'Failed to record Pi tool policy rejection', {
         tool: event.toolName,

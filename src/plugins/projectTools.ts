@@ -23,6 +23,8 @@ import type { HarnessConfig } from '../core/ConfigLoader.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, RequiredTool } from '../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../core/RuntimeServices.js';
+import { ToolResultRecorder } from '../core/ToolResultRecorder.js';
+import { v7 as uuidv7 } from 'uuid';
 
 // ---- Sub-module imports ----
 import {
@@ -133,6 +135,29 @@ export async function executeConfiguredProjectTool(
       ...(replacements !== undefined ? { replacedBy: replacements } : {}),
       ...(reason !== undefined ? { reason } : {})
     }).catch(() => {});
+    // zog2.16: also emit PROJECT_TOOL_FAILED with a durable outputFile so
+    // latestToolResultEvent can match this invocation as TOOL_REJECTED (not TOOL_NOT_INVOKED).
+    const deprecatedInvocationId = uuidv7();
+    const deprecatedRecorder = new ToolResultRecorder(pathFactory, injectedRoot);
+    const deprecatedHandle = await deprecatedRecorder.recordShortCircuit({
+      toolName: definition.name, invocationId: deprecatedInvocationId,
+      beadId: beadIdForEvent, stateId: stateIdForEvent, actionId: actionIdForEvent,
+      status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
+      rejectionReason: message,
+    }).catch(() => undefined);
+    if (deprecatedHandle && deprecatedHandle.outputFile) {
+      await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
+        beadId: beadIdForEvent,
+        stateId: stateIdForEvent,
+        actionId: actionIdForEvent,
+        tool: definition.name,
+        type: definition.type,
+        status: ToolResultStatus.REJECTED,
+        toolInvocationId: deprecatedInvocationId,
+        outputFile: deprecatedHandle.outputFile,
+        result: summarizeToolResult({ status: ToolResultStatus.REJECTED, message }),
+      }).catch(() => {});
+    }
     return { status: ToolResultStatus.REJECTED, message };
   }
 
@@ -160,6 +185,15 @@ export async function executeConfiguredProjectTool(
   if (failureLimit.reached && failureLimit.result) {
     try {
       const result = attachFailureCategory(definition, failureLimit.result);
+      // zog2.16: write durable artifact to context.outputFile so latestToolResultEvent
+      // finds a readable outputFile (status=REJECTED, not absent).
+      const failureLimitRecorder = new ToolResultRecorder(pathFactory, injectedRoot);
+      const failureLimitHandle = await failureLimitRecorder.recordShortCircuit({
+        toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? uuidv7(),
+        beadId, stateId, actionId,
+        status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
+        rejectionReason: `failure limit reached (${failureLimit.failureCount}/${failureLimit.maxFailures})`,
+      }).catch(() => undefined);
       await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
         beadId,
         stateId,
@@ -168,6 +202,7 @@ export async function executeConfiguredProjectTool(
         type: definition.type,
         status: ToolResultStatus.REJECTED,
         toolInvocationId: context.templateContext.toolInvocationId,
+        ...(failureLimitHandle?.outputFile ? { outputFile: failureLimitHandle.outputFile } : {}),
         result: summarizeToolResult(result)
       }).catch(() => {});
       return result;

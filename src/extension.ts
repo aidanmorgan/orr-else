@@ -37,6 +37,7 @@ import {
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import type { ToolResultBase } from './contract.js';
+import { ToolResultRecorder } from './core/ToolResultRecorder.js';
 import { registerBuiltInVerifiers } from './tools/index.js';
 import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
@@ -696,10 +697,33 @@ function wrapPluginTool(
     description: tool.description,
     parameters: tool.parameters || Type.Object({}),
     execute: async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: ExtensionContext) => {
+      // zog2.16: generate toolInvocationId and resolve context vars at invocation
+      // start so ALL exit paths (early short-circuits included) can record durable
+      // evidence artifacts via the ToolResultRecorder.
+      const toolInvocationId = uuidv7();
+      const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+      const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
+      const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
+      const toolResultRecorder = new ToolResultRecorder(services.toolCallPathFactory, projectRoot);
+
       // 1. Programmatic Behavioral Rules (Pre-conditions)
       const config = await services.configLoader.load();
       const ruleError = await checkToolValidationRules(tool.name, config, runtimeObservability);
       if (ruleError) {
+        const beadIdEarly = beadIdFromToolParams(params, session);
+        // zog2.16: persist durable evidence so verifier gate sees INVOKED-BUT-REJECTED
+        const validationHandle = await toolResultRecorder.recordShortCircuit({
+          toolName: tool.name, invocationId: toolInvocationId,
+          beadId: beadIdEarly, stateId: stateIdForPersist, actionId: actionIdForPersist,
+          status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
+          rejectionReason: ruleError,
+        });
+        runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: ruleError });
+        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+          beadId: beadIdEarly, tool: tool.name, toolInvocationId,
+          result: { status: ToolResultStatus.REJECTED, isError: true, message: ruleError, reason: 'validation-reject' },
+          toolResult: validationHandle,
+        }).catch(() => {});
         if (ctx.hasUI) ctx.ui.notify(ruleError, 'error');
         return toolResult(ruleError);
       }
@@ -707,6 +731,20 @@ function wrapPluginTool(
       // Framework-level safety: teammates cannot merge
       if (tool.name === PluginToolName.MERGE_AND_COMMIT && isWorkerMode()) {
         const error = `PROTOCOL VIOLATION: \`${PluginToolName.MERGE_AND_COMMIT}\` is team-leader/harness-only and cannot be called by a teammate.`;
+        const beadIdEarly = beadIdFromToolParams(params, session);
+        // zog2.16: persist durable evidence so verifier gate sees INVOKED-BUT-REJECTED
+        const mergeGuardHandle = await toolResultRecorder.recordShortCircuit({
+          toolName: tool.name, invocationId: toolInvocationId,
+          beadId: beadIdEarly, stateId: stateIdForPersist, actionId: actionIdForPersist,
+          status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
+          rejectionReason: error,
+        });
+        runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: error });
+        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+          beadId: beadIdEarly, tool: tool.name, toolInvocationId,
+          result: { status: ToolResultStatus.REJECTED, isError: true, message: error, reason: 'worker-merge-guard' },
+          toolResult: mergeGuardHandle,
+        }).catch(() => {});
         if (ctx.hasUI) ctx.ui.notify(error, 'error');
         return toolResult(error);
       }
@@ -716,9 +754,7 @@ function wrapPluginTool(
       const breakerEnabled = isWorkerMode();
       const key = breakerKey(beadId, tool.name);
       const cacheKey = toolCacheKey(tool.name, params);
-      // dl9r: generate ONE canonical toolInvocationId at invocation start and
-      // thread it through all events, token accounting, raw-output logs, and OTel.
-      const toolInvocationId = uuidv7();
+      // dl9r: toolInvocationId already generated above (moved to top for zog2.16 short-circuit coverage).
 
       // Serve cacheable tools from the in-session memo when present. Any call
       // to a non-cacheable tool below will clear the memo before executing,
@@ -761,11 +797,19 @@ function wrapPluginTool(
             isError: true,
             message
           });
+          // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
+          const circuitHandle = await toolResultRecorder.recordShortCircuit({
+            toolName: tool.name, invocationId: toolInvocationId,
+            beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
+            status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
+            rejectionReason: message,
+          });
           await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
             beadId,
             tool: tool.name,
             toolInvocationId,
-            result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' }
+            result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' },
+            toolResult: circuitHandle,
           }).catch(() => {});
           if (ctx.hasUI) ctx.ui.notify(message, 'error');
           return toolResult(message);
@@ -786,6 +830,13 @@ function wrapPluginTool(
           isError: true,
           message: terminalRejection
         });
+        // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
+        const terminalHandle = await toolResultRecorder.recordShortCircuit({
+          toolName: tool.name, invocationId: toolInvocationId,
+          beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
+          status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
+          rejectionReason: terminalRejection,
+        });
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
@@ -794,7 +845,8 @@ function wrapPluginTool(
             status: ToolResultStatus.REJECTED,
             isError: true,
             message: terminalRejection
-          }
+          },
+          toolResult: terminalHandle,
         });
         if (ctx.hasUI) ctx.ui.notify(terminalRejection, 'error');
         return toolResult(terminalRejection);
@@ -863,9 +915,8 @@ function wrapPluginTool(
         spanCompletionForToolResult
       );
 
-      const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-      const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
-      const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
+      // zog2.16: projectRoot, stateIdForPersist, actionIdForPersist are declared
+      // at the top of the execute closure (moved up to serve short-circuit exits).
 
       try {
         const result = await tracedExecute(params, ctx);

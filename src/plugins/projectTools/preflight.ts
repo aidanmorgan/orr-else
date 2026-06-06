@@ -23,6 +23,8 @@ import { summarizeToolResult, attachFailureCategory } from './resultEnvelope.js'
 import { reserveProjectToolCall, projectToolBackpressureResult } from './contextHelpers.js';
 import type { ProjectToolExecutionContext, ProjectToolFailureLimitResult } from './types.js';
 import { isJsonRecord } from './utils.js';
+import { ToolResultRecorder } from '../../core/ToolResultRecorder.js';
+import { ToolCallPathFactory } from '../../core/ToolCallPathFactory.js';
 // projectToolFailureLimitSuggestedOutcome lives in core so that core
 // orchestration (Supervisor) can use it without a core->plugin import.
 // Re-exported here to preserve the existing plugin/barrel import surface.
@@ -269,6 +271,15 @@ export async function preflightProjectTool(
       message: `Project tool ${definition.name} is registered by a Pi extension and cannot be executed directly by Orr Else. Use it as a model tool call, or configure a command/mcp tool for harness-run parent actions.`
     };
     const finalResult = attachFailureCategory(definition, result);
+    // zog2.16: write durable artifact so latestToolResultEvent sees status=REJECTED,
+    // not an absent event (TOOL_NOT_INVOKED)
+    const extensionRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const extensionHandle = await extensionRecorder.recordShortCircuit({
+      toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
+      beadId, stateId, actionId,
+      status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
+      rejectionReason: result.message,
+    }).catch(() => undefined);
     await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,
@@ -276,6 +287,8 @@ export async function preflightProjectTool(
       tool: definition.name,
       type: definition.type,
       status: result.status,
+      toolInvocationId: context.templateContext.toolInvocationId,
+      ...(extensionHandle?.outputFile ? { outputFile: extensionHandle.outputFile } : {}),
       result: summarizeToolResult(finalResult)
     }).catch(() => {});
     return { tag: 'ready', result: finalResult };
@@ -292,6 +305,14 @@ export async function preflightProjectTool(
     const result = ('capsule' in rawBpResult)
       ? rawBpResult
       : attachFailureCategory(definition, rawBpResult);
+    // zog2.16: write durable artifact so latestToolResultEvent sees status=REJECTED (not absent)
+    const bpRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const bpHandle = await bpRecorder.recordShortCircuit({
+      toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
+      beadId, stateId, actionId,
+      status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
+      rejectionReason: 'backpressure: concurrent call already in progress',
+    }).catch(() => undefined);
     await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,
@@ -299,7 +320,9 @@ export async function preflightProjectTool(
       tool: definition.name,
       type: definition.type,
       status: ToolResultStatus.REJECTED,
+      toolInvocationId: context.templateContext.toolInvocationId,
       failureCategory: ProjectToolFailureCategory.BACKPRESSURE,
+      ...(bpHandle?.outputFile ? { outputFile: bpHandle.outputFile } : {}),
       result: summarizeToolResult(result)
     }).catch(() => {});
     // Backpressure — reservation was NOT successfully made (existing found); caller should NOT release.
