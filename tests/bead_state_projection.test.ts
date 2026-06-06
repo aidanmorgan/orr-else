@@ -317,39 +317,100 @@ describe('BeadStateProjection.projectBeadFromEvents', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // SHOULD-FIX 1: null-safety — missing/falsy transitionEvent in STATE_TRANSITION_APPLIED
+  // pi-experiment-rpa0: fail-closed rejection of malformed STATE_TRANSITION_APPLIED
+  //
+  // Inverted from legacy-tolerance "SHOULD-FIX 1" tests. The old behaviour
+  // tolerated missing transitionEvent by skipping only action-completion while
+  // still advancing currentState. The new behaviour rejects the event entirely:
+  // no state mutation, no restart-field clearing, corruption diagnostic emitted.
   // ---------------------------------------------------------------------------
 
-  it('does NOT record action completion when STATE_TRANSITION_APPLIED has no transitionEvent (legacy/replayed event)', () => {
-    // Reproduces the bug: old code `outcome === EventName.SUCCESS` returned false for
-    // undefined; new makeAdvancePredicate guard ensures the same semantics.
+  it('rejects STATE_TRANSITION_APPLIED missing transitionEvent — currentState unchanged, status unchanged, diagnostic emitted (rpa0)', () => {
     const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning', owner: 'Alice' }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
       makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
         beadId: 'bd-1',
         fromState: 'Planning',
-        nextState: 'Planning',
-        // transitionEvent is intentionally absent — simulates a legacy event
+        nextState: 'Implementation',
+        // transitionEvent intentionally absent — malformed/old record
         actionId: 'formulate-plan',
         actionKey: 'formulate-plan'
-      })
+      }, { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z' })
     ];
-    const result = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true });
-    expect(result.completedActionIds ?? []).not.toContain('formulate-plan');
+
+    // stateChart: event rejected, currentState stays at Planning (not Implementation)
+    const chart = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(chart.currentState).toBe('Planning');         // NOT advanced to Implementation
+    expect(chart.previousState).toBeUndefined();          // no transition recorded
+    expect(chart.transitions).toHaveLength(0);            // transition NOT appended
+    expect(chart.completedActionIds).not.toContain('formulate-plan'); // no completion
+
+    // corruption diagnostic must be emitted
+    expect(chart.corruptionDiagnostics).toHaveLength(1);
+    expect(chart.corruptionDiagnostics![0].eventId).toBe('e2');
+    expect(chart.corruptionDiagnostics![0].missingFields).toContain('transitionEvent');
+
+    // bead projection: status also unchanged
+    const bead = projection.projectBeadFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(bead.status).toBe('Planning');                 // NOT advanced to Implementation
+    expect(bead.completedActionIds ?? []).not.toContain('formulate-plan');
   });
 
-  it('does NOT record action completion in stateChart when STATE_TRANSITION_APPLIED has no transitionEvent', () => {
+  it('rejects STATE_TRANSITION_APPLIED missing fromState — currentState unchanged, diagnostic emitted (rpa0)', () => {
     const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning', owner: 'Alice' }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        // fromState intentionally absent — malformed record
+        nextState: 'Implementation',
+        transitionEvent: 'SUCCESS',
+        actionId: 'formulate-plan'
+      }, { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z' })
+    ];
+    const chart = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(chart.currentState).toBe('Planning');
+    expect(chart.transitions).toHaveLength(0);
+    expect(chart.corruptionDiagnostics).toHaveLength(1);
+    expect(chart.corruptionDiagnostics![0].missingFields).toContain('fromState');
+  });
+
+  it('rejects STATE_TRANSITION_APPLIED missing nextState — currentState unchanged, diagnostic emitted (rpa0)', () => {
+    const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-1', stateId: 'Planning', owner: 'Alice' }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
       makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
         beadId: 'bd-1',
         fromState: 'Planning',
-        nextState: 'Planning',
-        actionId: 'formulate-plan',
-        actionKey: 'formulate-plan'
-        // transitionEvent absent
-      })
+        // nextState intentionally absent — malformed record
+        transitionEvent: 'SUCCESS',
+        actionId: 'formulate-plan'
+      }, { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z' })
     ];
-    const result = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
-    expect(result.completedActionIds).not.toContain('formulate-plan');
+    const chart = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
+    expect(chart.currentState).toBe('Planning');
+    expect(chart.transitions).toHaveLength(0);
+    expect(chart.corruptionDiagnostics).toHaveLength(1);
+    expect(chart.corruptionDiagnostics![0].missingFields).toContain('nextState');
+  });
+
+  it('does NOT clear restart fields when the transition event is malformed/rejected (rpa0)', () => {
+    // A restart was requested; a subsequent malformed STATE_TRANSITION_APPLIED must
+    // NOT clear the restart fields — the bead stays in restart-pending state.
+    const events = [
+      makeEvent(DomainEventName.HARNESS_RESTART_REQUESTED, {
+        beadId: 'bd-1', stateId: 'Planning', targetState: 'Planning', transitionEvent: EventName.HARNESS_RESTART
+      }, { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }),
+      makeEvent(DomainEventName.STATE_TRANSITION_APPLIED, {
+        beadId: 'bd-1',
+        fromState: 'Planning',
+        nextState: 'Planning'
+        // transitionEvent absent — malformed; must NOT clear restartRequested
+      }, { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z' })
+    ];
+    const chart = projection.projectBeadStateChartFromEvents('bd-1', events, undefined, { includeDetails: true });
+    // Restart fields must remain set — malformed event did not clear them
+    expect(chart.restartRequested).toBe(true);
+    expect(chart.restartKind).toBe(RestartKind.HARNESS);
+    expect(chart.corruptionDiagnostics).toHaveLength(1);
   });
 
   it('records action completion for a custom advance outcome via advanceOutcomes Set', () => {

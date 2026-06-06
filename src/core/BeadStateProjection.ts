@@ -163,9 +163,10 @@ export class BeadStateProjection {
 
   private makeAdvancePredicate(advanceOutcomes?: Set<string>): (outcome: string | null | undefined) => boolean {
     const set = advanceOutcomes ?? BeadStateProjection.DEFAULT_ADVANCE_OUTCOMES;
-    // A falsy/missing outcome must return false — matching the old literal-comparison
-    // semantics where `undefined === EventName.SUCCESS` was false (no action-completion
-    // recorded for legacy/replayed STATE_TRANSITION_APPLIED events with no transitionEvent).
+    // A falsy/missing outcome must return false. STATE_TRANSITION_APPLIED events
+    // missing transitionEvent are now rejected fail-closed before reaching this
+    // predicate (pi-experiment-rpa0), so this guard handles only other callers
+    // (e.g. ACTION_COMPLETED, CONTEXT/HARNESS_RESTART_REQUESTED).
     return (outcome: string | null | undefined) => {
       if (!outcome || typeof outcome !== 'string') return false;
       return set.has(outcome.toUpperCase()) || set.has(outcome);
@@ -266,7 +267,27 @@ export class BeadStateProjection {
           projection.currentState = data.stateId || projection.currentState;
           projection.worktreePath = data.worktreePath || projection.worktreePath;
           break;
-        case DomainEventName.STATE_TRANSITION_APPLIED:
+        case DomainEventName.STATE_TRANSITION_APPLIED: {
+          // pi-experiment-rpa0: fail-closed guard — STATE_TRANSITION_APPLIED MUST
+          // carry fromState + nextState + transitionEvent. A record missing any of
+          // these is a partial/malformed old record; reject it entirely rather than
+          // partially applying state changes (which could corrupt currentState,
+          // clear restart fields, or bypass gate checks with stale data).
+          const missingTransitionFields: string[] = [];
+          if (!data.fromState) missingTransitionFields.push('fromState');
+          if (!data.nextState) missingTransitionFields.push('nextState');
+          if (!data.transitionEvent) missingTransitionFields.push('transitionEvent');
+          if (missingTransitionFields.length > 0) {
+            if (!projection.corruptionDiagnostics) projection.corruptionDiagnostics = [];
+            projection.corruptionDiagnostics.push({
+              eventId: event.id,
+              eventType: event.type,
+              timestamp: event.timestamp,
+              missingFields: missingTransitionFields,
+              reason: `STATE_TRANSITION_APPLIED rejected: missing required fields [${missingTransitionFields.join(', ')}]; event cannot alter bead state`
+            });
+            break; // fail closed — do not apply any partial state change
+          }
           if (this.eventAppliesToWorkflow(data, workflowVersion)) {
             projection.previousState = data.fromState || projection.currentState;
             projection.currentState = data.nextState || projection.currentState;
@@ -296,6 +317,7 @@ export class BeadStateProjection {
           projection.restartFromState = undefined;
           projection.restartTargetState = undefined;
           break;
+        }
         case DomainEventName.CONTEXT_RESTART_REQUESTED:
           applyRestart(event, RestartKind.CONTEXT);
           break;
@@ -477,6 +499,10 @@ export class BeadStateProjection {
           }
           break;
         case DomainEventName.STATE_TRANSITION_APPLIED:
+          // pi-experiment-rpa0: fail-closed guard — mirrors the stateChart guard above.
+          // A STATE_TRANSITION_APPLIED missing fromState/nextState/transitionEvent is a
+          // malformed old record; skip entirely rather than partially mutating status.
+          if (!data.fromState || !data.nextState || !data.transitionEvent) break;
           if (this.eventAppliesToWorkflow(data, workflowVersion) && data.nextState) projection.status = data.nextState;
           if (includeDetails && this.eventAppliesToWorkflow(data, workflowVersion) && data.handover && data.fromState) {
               projection.handovers = {

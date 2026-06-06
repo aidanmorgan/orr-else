@@ -934,9 +934,19 @@ states:
     expect(bead.status).toBe('completed');
   });
 
-  it('projectBead does NOT record completion for missing transitionEvent (null-safety regression guard)', async () => {
+  it('projectBead rejects malformed STATE_TRANSITION_APPLIED (missing transitionEvent) fail-closed — status unchanged, no completion (rpa0)', async () => {
+    // pi-experiment-rpa0: inverted from legacy-tolerance "null-safety" test.
+    // Old behaviour: missing transitionEvent → skip action-completion but still advance status.
+    // New behaviour (fail-closed): entire event rejected; status must NOT change.
     const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
     const records = [
+      {
+        id: 'e0',
+        type: DomainEventName.BEAD_CLAIMED,
+        timestamp: '2026-01-01T00:00:00.000Z',
+        sessionId: 's1',
+        data: { beadId: 'bd-legacy', stateId: 'Planning', lease: { owner: 'Orr Else', expiresAt: '2099-01-01' } }
+      },
       {
         id: 'e1',
         type: DomainEventName.STATE_TRANSITION_APPLIED,
@@ -945,8 +955,8 @@ states:
         data: {
           beadId: 'bd-legacy',
           fromState: 'Planning',
-          nextState: 'Planning',
-          // transitionEvent is intentionally absent (legacy/replayed event)
+          nextState: 'Implementation',
+          // transitionEvent intentionally absent — malformed/old record
           actionId: 'formulate-plan',
           actionKey: 'formulate-plan'
         }
@@ -956,7 +966,9 @@ states:
 
     const bead = await eventStore.projectBead('bd-legacy', { includeDetails: true });
 
-    // Missing transitionEvent must NOT record action completion — old semantics preserved
+    // fail-closed: malformed transition event must NOT advance status to Implementation
+    expect(bead.status).toBe('Planning');
+    // and must NOT record action completion
     expect(bead.completedActionIds ?? []).not.toContain('formulate-plan');
   });
 });

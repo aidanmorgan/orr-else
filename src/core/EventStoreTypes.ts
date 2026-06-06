@@ -149,4 +149,19 @@ export interface BeadStateChartProjection {
   };
   lastEventId?: string;
   lastUpdatedAt?: string;
+  /**
+   * Deterministic corruption diagnostics (pi-experiment-rpa0).
+   *
+   * Each entry describes one event that was REJECTED by the fail-closed
+   * transition guard — missing required fields on STATE_TRANSITION_APPLIED
+   * prevented the event from altering bead state. Callers can surface these
+   * for operator alerting or log analysis without crashing projection.
+   */
+  corruptionDiagnostics?: Array<{
+    eventId: string;
+    eventType: string;
+    timestamp: string;
+    missingFields: string[];
+    reason: string;
+  }>;
 }
