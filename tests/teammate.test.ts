@@ -438,3 +438,106 @@ describe('Teammate — WI-6: WorkerContext injection', () => {
     vi.clearAllTimers();
   });
 });
+
+// ---------------------------------------------------------------------------
+// r06o AC4: auto-restart signal deduplication
+//
+// After the first accepted CONTEXT_RESTART_REQUESTED remote signal, subsequent
+// compactions in the same worker process must NOT emit additional remote restart
+// signals. The durable CONTEXT_COMPACTION_RECORDED event-store record IS still
+// written for every compaction (durable evidence preserved).
+// ---------------------------------------------------------------------------
+
+vi.mock('../src/core/HarnessApiClient.js', () => ({
+  postHarnessSignal: vi.fn().mockResolvedValue({ ok: true })
+}));
+
+describe('Teammate — r06o AC4: auto-restart signal deduplication', () => {
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    // Clear mock call history between tests so restartCalls counts are fresh.
+    const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
+    vi.mocked(postHarnessSignal).mockClear();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('AC4: only one remote restart signal after first threshold; subsequent compactions record locally only', async () => {
+    const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
+    const mockPostHarnessSignal = vi.mocked(postHarnessSignal);
+    mockPostHarnessSignal.mockResolvedValue({ ok: true });
+
+    const { pi, fire } = fakePi();
+    const controller = fakeAbortController();
+    const record = vi.fn(async () => {});
+
+    // autoRestartCompactionCount = 1 so the first compaction triggers auto-restart
+    const config = minimalConfig({ contextMonitor: { autoRestartCompactionCount: 1 } } as any);
+    const { teammate } = buildTeammate(pi, controller.signal, config, record);
+
+    await teammate.start();
+
+    // First compaction: reaches threshold → triggers auto-restart signal
+    fire(PiEventName.SESSION_COMPACT);
+    // Flush only the microtask queue (Promise resolutions from triggerAutoRestart)
+    // without running the heartbeat setInterval to avoid infinite-timer error.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Second and third compactions: beyond threshold — local record only, no new remote signal
+    fire(PiEventName.SESSION_COMPACT);
+    fire(PiEventName.SESSION_COMPACT);
+    await Promise.resolve();
+
+    // Exactly ONE remote postHarnessSignal call for CONTEXT_RESTART_REQUESTED
+    const restartCalls = mockPostHarnessSignal.mock.calls.filter(
+      args => (args[0] as any).type === 'CONTEXT_RESTART_REQUESTED'
+    );
+    expect(restartCalls).toHaveLength(1);
+
+    // All three compactions must have durable CONTEXT_COMPACTION_RECORDED records
+    const compactionRecords = record.mock.calls.filter(
+      ([name]) => name === DomainEventName.CONTEXT_COMPACTION_RECORDED
+    );
+    expect(compactionRecords).toHaveLength(3);
+
+    controller.abort();
+    vi.clearAllTimers();
+  });
+
+  it('AC4: SIGNAL_INTENT_RECORDED is written for first auto-restart; not for subsequent compactions', async () => {
+    const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
+    vi.mocked(postHarnessSignal).mockResolvedValue({ ok: true });
+
+    const { pi, fire } = fakePi();
+    const controller = fakeAbortController();
+    const record = vi.fn(async () => {});
+
+    const config = minimalConfig({ contextMonitor: { autoRestartCompactionCount: 1 } } as any);
+    const { teammate } = buildTeammate(pi, controller.signal, config, record);
+
+    await teammate.start();
+
+    // First compaction at threshold
+    fire(PiEventName.SESSION_COMPACT);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Extra compactions beyond threshold
+    fire(PiEventName.SESSION_COMPACT);
+    fire(PiEventName.SESSION_COMPACT);
+    await Promise.resolve();
+
+    // SIGNAL_INTENT_RECORDED: only once (from first triggerAutoRestart)
+    const intentRecords = record.mock.calls.filter(
+      ([name]) => name === DomainEventName.SIGNAL_INTENT_RECORDED
+    );
+    expect(intentRecords).toHaveLength(1);
+
+    controller.abort();
+    vi.clearAllTimers();
+  });
+});

@@ -593,6 +593,69 @@ states:
       }
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // r06o: coalesce repeated invalid-event log noise (AC2)
+  //
+  // Repeated malformed payloads from the same source must produce ONE Logger.warn
+  // plus an aggregate count.  The HTTP 400 response is returned for every request
+  // (no suppression at the HTTP layer).
+  // ---------------------------------------------------------------------------
+
+  describe('r06o: coalesce repeated invalid-event log noise (AC2)', () => {
+    it('AC2: repeated malformed payloads warn once then suppress log noise; every HTTP response is still 400', async () => {
+      const warnCalls: Array<unknown[]> = [];
+      const { Logger } = await import('../src/core/Logger.js');
+      const warnSpy = vi.spyOn(Logger, 'warn').mockImplementation((...args) => {
+        warnCalls.push(args);
+      });
+
+      const server = new SignalingServer(
+        () => {},
+        observability,
+        eventStore,
+        { port: 39950 + (process.pid % 1000) }
+      );
+      const port = await server.start();
+
+      try {
+        // Post the SAME malformed payload 5 times (missing workerId → fails validation)
+        const malformedBody = {
+          type: 'STATE_TRANSITIONED',
+          beadId: 'bead-noisy',
+          stateId: 'Planning',
+          timestamp: 12345,
+          idempotencyKey: 'key-noisy'
+          // workerId intentionally absent → validation failure
+        };
+
+        const responses: Response[] = [];
+        for (let i = 0; i < 5; i++) {
+          const r = await fetch(`http://127.0.0.1:${port}/signals`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(malformedBody)
+          });
+          responses.push(r);
+        }
+
+        // All 5 HTTP responses must be 400 (not suppressed)
+        for (const r of responses) {
+          expect(r.status).toBe(400);
+        }
+
+        // Only ONE 'Invalid teammate event received' warn must be logged for the
+        // repeated fingerprint; subsequent ones are coalesced into an aggregate.
+        const invalidEventWarns = warnCalls.filter(args =>
+          typeof args[1] === 'string' && args[1].includes('Invalid teammate event received')
+        );
+        expect(invalidEventWarns).toHaveLength(1);
+      } finally {
+        server.stop();
+        warnSpy.mockRestore();
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

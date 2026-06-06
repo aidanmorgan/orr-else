@@ -5,7 +5,8 @@ import { TeammateEvent, validateTeammateEvent } from './TeammateEvents.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, OtelAttr, TeammateEventType, WorkerDefaults } from '../constants/index.js';
+import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, OtelAttr, TeammateEventType, TimeMs, WorkerDefaults } from '../constants/index.js';
+import { SignalNoiseCoalescer } from './SignalNoiseCoalescer.js';
 
 /**
  * The structured gate verdict the COORDINATOR rounds back to the caller for a
@@ -104,6 +105,8 @@ export class SignalingServer {
   private readonly heldAckTimeoutMs: number;
   /** Actual bound port, populated after start() resolves. */
   private boundPort?: number;
+  /** Coalesces repeated invalid-event validation warn logs by fingerprint (r06o). */
+  private readonly invalidEventCoalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
 
   constructor(
     private readonly onSignal: SignalHandler,
@@ -137,7 +140,19 @@ export class SignalingServer {
       app.post([ApiPath.SIGNAL, ApiPath.SIGNALS, ApiPath.EVENTS], asyncRoute(async (req, res) => {
         const validation = validateTeammateEvent(req.body || {}, this.allowedCustomEvents);
         if (!validation.ok || !validation.event) {
-          Logger.warn(Component.SIGNALING, 'Invalid teammate event received', { error: validation.error, body: req.body });
+          // Fingerprint by (error, event type, beadId, workerId) so repeated identical
+          // malformed payloads from the same source produce only ONE warn + an aggregate.
+          // The HTTP 400 response is always returned (not suppressed). (r06o)
+          const body = req.body || {};
+          const fp = [validation.error || 'invalid', body.type, body.beadId, body.workerId].join(':');
+          const { shouldLog, suppressedCount } = this.invalidEventCoalescer.observe(fp);
+          if (shouldLog) {
+            Logger.warn(Component.SIGNALING, 'Invalid teammate event received', {
+              error: validation.error,
+              body: req.body,
+              ...(suppressedCount > 0 ? { suppressedCount } : {})
+            });
+          }
           res.status(HttpStatus.BAD_REQUEST).json({ error: validation.error || 'invalid teammate event' });
           return;
         }

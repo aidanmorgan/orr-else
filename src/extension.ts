@@ -198,11 +198,17 @@ import {
   teammateEventTypeForOutcome,
   shouldPersistBlockedBeadStatus as shouldPersistBlockedBeadStatusInternal
 } from './extension/CoordinatorController.js';
+import { SignalNoiseCoalescer } from './core/SignalNoiseCoalescer.js';
 
 /**
  * Orr Else Extension
  * High-reliability agentic harness with obsessive, rehearsed resilience.
  */
+
+/** Rate-limits repeated duplicate/out-of-order decision log entries (r06o AC1).
+ * Fingerprinted by (decision, event type, beadId, stateId).
+ * Durable TEAMMATE_EVENT event-store records are NEVER gated by this coalescer. */
+const duplicateDecisionCoalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
 
 const CYCLE_CAP_DEFAULT = 3;
 
@@ -1519,22 +1525,30 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     // Enrich the log with outcome/failure context so operators can distinguish
     // a benign idempotency duplicate from a repeated terminal failure signal.
     const anyEvent = event as unknown as Record<string, unknown>;
-    logDuplicateDecision(Component.ORR_ELSE, 'Ignoring teammate signal after durable processing decision', {
-      beadId,
-      type: event.type,
-      stateId: event.stateId,
-      idempotencyKey: event.idempotencyKey,
-      decision: decision.action,
-      reason: decision.reason,
-      // Outcome/failure routing context — present on status-mutating events.
-      transitionEvent: anyEvent.transitionEvent,
-      summary: anyEvent.summary,
-      actionId: anyEvent.actionId,
-      // The bead's current projected state (may differ from signal's stateId if out-of-order).
-      currentStateId,
-      // Applied event that triggered the DUPLICATE decision (if projection-derived).
-      appliedEventType: appliedEvent?.type
-    });
+    // Rate-limit repeated identical duplicate/out-of-order decisions to ONE log
+    // per fingerprint per minute (r06o AC1). Durable TEAMMATE_EVENT records above
+    // are NEVER suppressed — only this human-facing log call is coalesced.
+    const fp = `${decision.action}:${event.type}:${beadId}:${event.stateId}`;
+    const { shouldLog, suppressedCount } = duplicateDecisionCoalescer.observe(fp);
+    if (shouldLog) {
+      logDuplicateDecision(Component.ORR_ELSE, 'Ignoring teammate signal after durable processing decision', {
+        beadId,
+        type: event.type,
+        stateId: event.stateId,
+        idempotencyKey: event.idempotencyKey,
+        decision: decision.action,
+        reason: decision.reason,
+        // Outcome/failure routing context — present on status-mutating events.
+        transitionEvent: anyEvent.transitionEvent,
+        summary: anyEvent.summary,
+        actionId: anyEvent.actionId,
+        // The bead's current projected state (may differ from signal's stateId if out-of-order).
+        currentStateId,
+        // Applied event that triggered the DUPLICATE decision (if projection-derived).
+        appliedEventType: appliedEvent?.type,
+        ...(suppressedCount > 0 ? { suppressedCount } : {})
+      });
+    }
     return;
   }
 

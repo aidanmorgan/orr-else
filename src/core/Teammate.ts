@@ -114,6 +114,11 @@ export class Teammate {
   ): () => void {
     let compactionCount = 0;
     let active = true;
+    // Guard: emit at most one remote restart signal per worker process lifecycle.
+    // After the first CONTEXT_RESTART_REQUESTED is posted, subsequent compactions
+    // still record a durable CONTEXT_COMPACTION_RECORDED event (evidence preserved)
+    // but do NOT post another remote signal (r06o AC4).
+    let restartSignalSent = false;
 
     this.pi.on(PiEventName.SESSION_COMPACT, () => {
       if (!active) return;
@@ -132,6 +137,17 @@ export class Teammate {
         autoRestartCompactionCount: WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT
       };
       if (compactionCount >= (thresholds.autoRestartCompactionCount || WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT)) {
+        if (restartSignalSent) {
+          // Remote restart already in flight — record the compaction observation
+          // above (durable evidence) but suppress the redundant remote signal.
+          Logger.info(Component.TEAMMATE, 'Compaction threshold exceeded again; remote restart already requested', {
+            beadId,
+            compactionCount
+          });
+          return;
+        }
+
+        restartSignalSent = true;
         Logger.info(Component.TEAMMATE, 'Compaction threshold reached. Programmatically triggering auto-restart to prevent implementation rot.', {
           beadId,
           compactionCount

@@ -2235,3 +2235,311 @@ describe('Supervisor', () => {
     expect((supervisor as any).services.eventStore.readAll).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// r06o AC1+AC3: SignalNoiseCoalescer unit tests
+//
+// The coalescer fingerprints repeated log calls and suppresses repeats within
+// the rate-limit window. Durable event-store records are NOT suppressed —
+// only the human-facing logger calls are coalesced.
+// ---------------------------------------------------------------------------
+
+import { SignalNoiseCoalescer } from '../src/core/SignalNoiseCoalescer.js';
+
+describe('SignalNoiseCoalescer — r06o AC1+AC3', () => {
+  it('AC1: first occurrence returns shouldLog=true; repeat within window returns shouldLog=false with count', () => {
+    const coalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
+
+    const fp = 'DUPLICATE:bead-1:worker-1:Planning:key-abc';
+    const first = coalescer.observe(fp);
+    expect(first.shouldLog).toBe(true);
+    expect(first.suppressedCount).toBe(0);
+
+    // Same fingerprint again — within window
+    const second = coalescer.observe(fp);
+    expect(second.shouldLog).toBe(false);
+    expect(second.suppressedCount).toBe(1);
+
+    // Third repeat
+    const third = coalescer.observe(fp);
+    expect(third.shouldLog).toBe(false);
+    expect(third.suppressedCount).toBe(2);
+  });
+
+  it('AC1: different fingerprints are tracked independently', () => {
+    const coalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
+
+    const fpA = 'DUPLICATE:bead-A:worker-1:Planning:key-1';
+    const fpB = 'DUPLICATE:bead-B:worker-2:Review:key-2';
+
+    expect(coalescer.observe(fpA).shouldLog).toBe(true);
+    expect(coalescer.observe(fpB).shouldLog).toBe(true);
+    // Second calls for each — independent suppression
+    expect(coalescer.observe(fpA).shouldLog).toBe(false);
+    expect(coalescer.observe(fpB).shouldLog).toBe(false);
+  });
+
+  it('AC1: after window expires, fingerprint resets and logs again, carrying prior suppressedCount', () => {
+    const windowMs = 100;
+    // Use injected nowMs so the test is deterministic (no real Date.now()).
+    let nowMs = 1_000_000;
+    const coalescer = new SignalNoiseCoalescer(windowMs);
+    const fp = 'DUPLICATE:bead-1:worker-1:Planning:key-x';
+
+    // First occurrence at t=0: logs, no prior suppressed count.
+    const first = coalescer.observe(fp, nowMs);
+    expect(first.shouldLog).toBe(true);
+    expect(first.suppressedCount).toBe(0);
+
+    // Second within window: suppressed, count becomes 1.
+    nowMs += 10;
+    const second = coalescer.observe(fp, nowMs);
+    expect(second.shouldLog).toBe(false);
+    expect(second.suppressedCount).toBe(1);
+
+    // Third within window: suppressed, count becomes 2.
+    nowMs += 10;
+    const third = coalescer.observe(fp, nowMs);
+    expect(third.shouldLog).toBe(false);
+    expect(third.suppressedCount).toBe(2);
+
+    // Advance past window boundary.
+    nowMs += windowMs + 1;
+
+    // After window: should log again AND carry the 2 suppressed from the prior window.
+    const afterWindow = coalescer.observe(fp, nowMs);
+    expect(afterWindow.shouldLog).toBe(true);
+    expect(afterWindow.suppressedCount).toBe(2);
+
+    // The new window's suppressedCount starts fresh (next repeat within this window = 1).
+    nowMs += 1;
+    const nextRepeat = coalescer.observe(fp, nowMs);
+    expect(nextRepeat.shouldLog).toBe(false);
+    expect(nextRepeat.suppressedCount).toBe(1);
+  });
+
+  it('AC3: coalescer does not interact with event-store records (log-only concern)', () => {
+    // This test documents the contract: the coalescer is ONLY consulted before
+    // Logger calls. Event-store record() calls must never be gated by the coalescer.
+    // We verify this by checking coalescer has no record/store method.
+    const coalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
+    expect(typeof (coalescer as any).record).toBe('undefined');
+    expect(typeof (coalescer as any).eventStore).toBe('undefined');
+  });
+
+  // Finding 1+2: aggregate count must actually be emitted on rollover.
+  it('(finding-1+2) rollover primary carries prior-window suppressedCount so callers emit an aggregate', () => {
+    // Verifies the fix for the "LOST AGGREGATE" defect: when the window expires
+    // and a new occurrence arrives, observe() returns shouldLog:true with the
+    // prior window's suppressedCount > 0, so the caller can include it in the log.
+    let nowMs = 5_000_000;
+    const windowMs = 1_000;
+    const coalescer = new SignalNoiseCoalescer(windowMs);
+    const fp = 'INVALID:missing-workerId:bead-x:undefined';
+
+    // Window 1: 1 primary + 4 suppressed.
+    coalescer.observe(fp, nowMs);               // primary
+    coalescer.observe(fp, nowMs + 100);         // suppressed 1
+    coalescer.observe(fp, nowMs + 200);         // suppressed 2
+    coalescer.observe(fp, nowMs + 300);         // suppressed 3
+    coalescer.observe(fp, nowMs + 400);         // suppressed 4
+
+    // Window 2 rollover: first call after expiry carries count=4.
+    const rollover = coalescer.observe(fp, nowMs + windowMs + 1);
+    expect(rollover.shouldLog).toBe(true);
+    expect(rollover.suppressedCount).toBe(4);
+
+    // Window 2 primary has no prior suppressed count yet (fresh window just started).
+    const withinWindow2 = coalescer.observe(fp, nowMs + windowMs + 2);
+    expect(withinWindow2.shouldLog).toBe(false);
+    expect(withinWindow2.suppressedCount).toBe(1);
+
+    // Window 3 rollover with only 1 suppressed in window 2.
+    const rollover2 = coalescer.observe(fp, nowMs + windowMs * 2 + 2);
+    expect(rollover2.shouldLog).toBe(true);
+    expect(rollover2.suppressedCount).toBe(1);
+  });
+
+  // Finding 3: memory must be bounded.
+  it('(finding-3) map size stays bounded after many distinct expired fingerprints', () => {
+    // Each distinct fingerprint with an externally-controlled suffix (e.g. from
+    // validation.error) must not accumulate indefinitely.  After MAX_ENTRIES
+    // distinct fingerprints, older entries are evicted so the map stays bounded.
+    const windowMs = 1;
+    let nowMs = 9_000_000;
+    const coalescer = new SignalNoiseCoalescer(windowMs);
+    const MAX_ENTRIES = 256; // matches the constant in SignalNoiseCoalescer.ts
+
+    // Insert MAX_ENTRIES + 50 distinct fingerprints, each well past their window.
+    for (let i = 0; i < MAX_ENTRIES + 50; i++) {
+      coalescer.observe(`fp-distinct-${i}`, nowMs);
+      nowMs += windowMs + 1; // each in its own expired window
+    }
+
+    // The internal map must not exceed MAX_ENTRIES.
+    const mapSize = (coalescer as any).entries.size;
+    expect(mapSize).toBeLessThanOrEqual(MAX_ENTRIES);
+  });
+
+  // Genuine AC3: durable TEAMMATE_EVENT records must be written on EVERY occurrence,
+  // even when the LOG is coalesced (shouldLog=false).
+  //
+  // This test drives the REAL handleTeammateEvent path in extension.ts by booting
+  // orrElseExtension in coordinator mode, capturing the SignalHandler closure that
+  // extension.ts passes to SignalingServer, then calling it N times with the same
+  // duplicate event.  Assertions:
+  //   (a) eventStore.record(TEAMMATE_EVENT) called N times — durable evidence is never
+  //       suppressed regardless of coalescer state.
+  //   (b) Logger.info called only ONCE (the first occurrence) — log IS coalesced.
+  //
+  // The test FAILS when the production record() call is moved after the coalescer gate
+  // because then record() is never reached for suppressed occurrences.
+  it('(genuine-AC3) durable TEAMMATE_EVENT record is written on every duplicate signal, even when log is coalesced', async () => {
+    // Dynamic imports so that vi.spyOn can intercept before the module is used.
+    const { SignalingServer } = await import('../src/core/SignalingServer.js');
+    const { TeammateFactory } = await import('../src/plugins/teammates.js');
+    const { createTeammateEventIdempotencyKey } = await import('../src/core/TeammateEvents.js');
+    const { PiEventName, BuiltInToolName } = await import('../src/constants/index.js');
+    const orrElseExtension = (await import('../src/extension.js')).default;
+
+    // Prevent the Supervisor's polling loop from running (avoids real tmux calls).
+    const supervisorStartSpy = vi.spyOn(Supervisor.prototype, 'start').mockResolvedValue(undefined as any);
+    // Prevent tmux window setup (not needed for signal handling).
+    const ensureWindowSpy = vi.spyOn(TeammateFactory.prototype, 'ensureAgentsWindow')
+      .mockResolvedValue({ ok: true } as any);
+
+    // Capture the SignalHandler closure that extension.ts passes to new SignalingServer().
+    // The handler IS handleTeammateEvent (closed over pi/ctx/services/session).
+    let capturedHandler: ((event: any, ack: any) => Promise<void>) | undefined;
+    const signalingStartSpy = vi.spyOn(SignalingServer.prototype, 'start').mockImplementation(
+      async function (this: any) {
+        // The handler is stored as 'onSignal' (private readonly field) by the constructor.
+        capturedHandler = (this as any).onSignal;
+        return 19999;
+      }
+    );
+
+    // Spy on Logger.info to count log emissions (only the first duplicate should log).
+    const logInfoSpy = vi.spyOn(Logger, 'info').mockImplementation(() => undefined);
+
+    // Spy on EventStore.record via module-level import.  We need to intercept the
+    // concrete EventStore instance that extension.ts will use.  We spy on the prototype
+    // so every instance (including the one created inside createRuntimeServices) is
+    // covered.
+    const { EventStore } = await import('../src/core/EventStore.js');
+    const recordedCalls: Array<{ event: string; data: any }> = [];
+    const recordSpy = vi.spyOn(EventStore.prototype, 'record').mockImplementation(
+      async (event: string, data: any) => { recordedCalls.push({ event, data }); }
+    );
+    // eventsForBead must return [] so appliedEvent is always null (no prior STATE_TRANSITION_APPLIED).
+    const eventsForBeadSpy = vi.spyOn(EventStore.prototype, 'eventsForBead').mockResolvedValue([]);
+    // projectBead must resolve to an object so currentStateId can be derived.
+    const projectBeadSpy = vi.spyOn(EventStore.prototype, 'projectBead').mockResolvedValue({
+      status: 'Planning'
+    } as any);
+    // eventsForBeads needed by Supervisor internals.
+    const eventsForBeadsSpy = vi.spyOn(EventStore.prototype, 'eventsForBeads').mockResolvedValue(new Map());
+
+    // --- fake Pi API surface (minimal coordinator setup) ---
+    const tools: any[] = [];
+    const commands: Record<string, any> = {};
+    const callbacks: Record<string, Function> = {};
+    const fakePiApi = {
+      on: (name: string, cb: Function) => { callbacks[name] = cb; },
+      registerTool: (t: any) => tools.push(t),
+      registerCommand: (name: string, opts: any) => { commands[name] = opts; },
+      getActiveTools: () => [] as string[],
+      setActiveTools: () => {},
+      setThinkingLevel: () => {},
+      setModel: async () => true,
+      sendUserMessage: () => {}
+    } as any;
+
+    try {
+      // Boot the extension (registers commands/tools/event callbacks).
+      await orrElseExtension(fakePiApi);
+
+      // Fire SESSION_START so session.teammateFactory is populated.
+      await callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: process.cwd() });
+
+      // Invoke /orr-else to run startOrrElse.
+      // This creates new SignalingServer(handler, ...) — our spy captures handler.
+      const commandHandler = commands[BuiltInToolName.ORR_ELSE]?.handler;
+      expect(commandHandler, '/orr-else command must be registered').toBeDefined();
+      await commandHandler('--bead bead-ac3-test', { ui: { notify: () => {} }, hasUI: true } as any);
+
+      // Sanity: the SignalingServer constructor must have been called.
+      // If capturedHandler is still undefined, fall back: the field name may differ.
+      // In that case retrieve it from the SignalingServer prototype spy.
+      // The real field is named 'handler' on the SignalingServer instance (see SignalingServer.ts).
+      if (!capturedHandler) {
+        // Retrieve the instance from the mocked 'start' context (already stored above).
+        // If the field name differs, throw a clear error so the test self-documents.
+        throw new Error(
+          'capturedHandler not set — check the SignalingServer field name that stores the handler callback'
+        );
+      }
+
+      // Build a duplicate event: same fingerprint repeated N times.
+      // Pre-mark the idempotency key as processed so EVERY invocation returns DUPLICATE.
+      const baseEvent = {
+        type: 'STATE_TRANSITIONED' as const,
+        beadId: 'bead-ac3-test',
+        workerId: 'worker-ac3',
+        stateId: 'Planning',
+        timestamp: 1_779_000_000_000,
+        actionId: 'ac3-action',
+        transitionEvent: 'SUCCESS',
+        summary: 'AC3 duplicate test',
+        evidence: 'AC3 evidence',
+        handover: 'AC3 handover'
+      };
+      const idempotencyKey = createTeammateEventIdempotencyKey(baseEvent);
+      const dupEvent = { ...baseEvent, idempotencyKey };
+
+      // Mark the key as already processed so decideTeammateEventProcessing returns DUPLICATE.
+      // session.supervisor is the Supervisor created by startOrrElse; its start() was called
+      // by startOrrElse immediately after construction.  vi.spyOn captures 'this' in
+      // spy.mock.instances, giving us the instance without accessing private session state.
+      const supervisorInstance = supervisorStartSpy.mock.instances[0];
+      expect(supervisorInstance, 'Supervisor instance must be created by startOrrElse').toBeDefined();
+      supervisorInstance.markSignalProcessed(idempotencyKey);
+
+      // Clear any record() calls that happened during startOrrElse setup.
+      recordedCalls.length = 0;
+      logInfoSpy.mockClear();
+
+      // Call the real handleTeammateEvent closure N times with the same duplicate event.
+      const N = 5;
+      const fakeAck = { hold: () => {}, send: () => {} };
+      for (let i = 0; i < N; i++) {
+        await capturedHandler(dupEvent, fakeAck);
+      }
+
+      // (a) Durable records: N TEAMMATE_EVENT records — one per occurrence, regardless
+      //     of coalescer suppression.
+      const teammateEventRecords = recordedCalls.filter(r => r.event === DomainEventName.TEAMMATE_EVENT);
+      expect(teammateEventRecords).toHaveLength(N);
+      // Every record must carry a processingDecision of DUPLICATE.
+      for (const rec of teammateEventRecords) {
+        expect(rec.data.processingDecision).toBe(TeammateEventDecisionAction.DUPLICATE);
+      }
+
+      // (b) Logger.info called exactly ONCE — the first occurrence logs; repeats are
+      //     coalesced by duplicateDecisionCoalescer inside extension.ts.
+      const duplicateLogCalls = logInfoSpy.mock.calls.filter(
+        args => typeof args[1] === 'string' && args[1].includes('Ignoring teammate signal')
+      );
+      expect(duplicateLogCalls).toHaveLength(1);
+    } finally {
+      signalingStartSpy.mockRestore();
+      supervisorStartSpy.mockRestore();
+      ensureWindowSpy.mockRestore();
+      logInfoSpy.mockRestore();
+      recordSpy.mockRestore();
+      eventsForBeadSpy.mockRestore();
+      projectBeadSpy.mockRestore();
+      eventsForBeadsSpy.mockRestore();
+    }
+  });
+});
