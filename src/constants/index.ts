@@ -1497,7 +1497,6 @@ export enum PromptProvenanceKind {
   STATE_PROMPT = 'statePrompt',
   COMPATIBILITY_PROMPT = 'compatibilityPrompt',
   SKILL_PROMPT = 'skillPrompt',
-  CUSTOM_AGENT_PROMPT = 'customAgentPrompt',
   HARNESS_CONFIG = 'harnessConfig'
 }
 
