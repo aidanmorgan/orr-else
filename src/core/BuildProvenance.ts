@@ -4,8 +4,9 @@ import * as path from 'path';
 import { simpleGit } from 'simple-git';
 import { Logger } from './Logger.js';
 import { PATH_INSTALL_ROOT } from './Paths.js';
-import { BuildProvenanceDefaults, Component, DomainEventName } from '../constants/index.js';
+import { BuildProvenanceDefaults, Component, DomainEventName, TimeMs } from '../constants/index.js';
 import type { EventStore } from './EventStore.js';
+import { SignalNoiseCoalescer } from './SignalNoiseCoalescer.js';
 
 /**
  * Build provenance record attached to coordinator/worker startup events.
@@ -34,6 +35,14 @@ export interface BuildProvenance {
 const DIST_EXTENSION_REL = path.join('dist', 'extension.js');
 const PACKAGE_JSON_REL = 'package.json';
 const SRC_DIR_REL = 'src';
+
+/**
+ * Module-level coalescer: deduplicates DIST_ARTIFACT_STALE warnings and events
+ * by provenance key (distArtifactHash + gitCommit + configHash) within a 1-hour
+ * window per process.  Tests may inject their own coalescer via the optional
+ * parameter to runStalenessPreflightWarn.
+ */
+const defaultStaleCoalescer = new SignalNoiseCoalescer(TimeMs.HOUR);
 
 function sha256(content: Buffer | string): string {
   return crypto.createHash('sha256').update(content).digest('hex');
@@ -153,6 +162,17 @@ export async function computeBuildProvenance(
 }
 
 /**
+ * Build the provenance key used to deduplicate stale-dist warnings.
+ *
+ * The key is (distArtifactHash, gitCommit, configHash).  pid / sessionId are
+ * implicitly scoped by the module-level coalescer (one instance per process),
+ * so they are not included in the key itself.
+ */
+function provenanceKey(provenance: BuildProvenance): string {
+  return `${provenance.distArtifactHash}|${provenance.gitCommit}|${provenance.configHash}`;
+}
+
+/**
  * Run the staleness preflight check.
  *
  * WARN (never hard-reject) when dist/extension.js is missing or older than
@@ -163,43 +183,64 @@ export async function computeBuildProvenance(
  * Records a DIST_ARTIFACT_STALE domain event when stale so monitors can
  * correlate staleness with unexpected worker behaviour.
  *
+ * Duplicate warnings for the same provenance key (distArtifactHash + gitCommit
+ * + configHash) within the same window are coalesced: the FIRST occurrence emits
+ * both a Logger.warn and a durable event; subsequent occurrences within the same
+ * window are silently dropped.  HARNESS_STARTED.buildProvenance is never gated
+ * and is always emitted by callers.
+ *
  * @param provenance  - Already-computed BuildProvenance record
  * @param eventStore  - Used to record the staleness event (optional, for best-effort)
+ * @param coalescer   - Optional coalescer override for testing; defaults to the
+ *                      module-level singleton scoped to this process.
  */
 export async function runStalenessPreflightWarn(
   provenance: BuildProvenance,
-  eventStore?: Pick<EventStore, 'record'>
+  eventStore?: Pick<EventStore, 'record'>,
+  coalescer: SignalNoiseCoalescer = defaultStaleCoalescer
 ): Promise<void> {
   // Dist missing entirely
   if (provenance.distBuildTimestamp === undefined) {
+    const key = provenanceKey(provenance);
+    const { shouldLog, suppressedCount } = coalescer.observe(key);
+    if (!shouldLog) return;
+
     const message =
       '[BuildProvenance] dist/extension.js is MISSING. ' +
       'Workers will not start. Run `npm run build` to produce the dist artifact.';
     Logger.warn(Component.BUILD_PROVENANCE, message, {
       distArtifactHash: provenance.distArtifactHash,
       packageVersion: provenance.packageVersion,
-      gitCommit: provenance.gitCommit
+      gitCommit: provenance.gitCommit,
+      ...(suppressedCount > 0 ? { suppressedCount } : {})
     });
     await eventStore?.record(DomainEventName.DIST_ARTIFACT_STALE, {
       reason: 'dist-missing',
-      provenance
+      provenance,
+      ...(suppressedCount > 0 ? { suppressedCount } : {})
     }).catch(() => {});
     return;
   }
 
   // Dist present but older than source
   if (provenance.distIsStale === true) {
+    const key = provenanceKey(provenance);
+    const { shouldLog, suppressedCount } = coalescer.observe(key);
+    if (!shouldLog) return;
+
     const message =
       '[BuildProvenance] dist/extension.js is STALE: source files are newer than the compiled artifact. ' +
       'Workers may run old code. Run `npm run build` to rebuild.';
     Logger.warn(Component.BUILD_PROVENANCE, message, {
       distBuildTimestamp: provenance.distBuildTimestamp,
       packageVersion: provenance.packageVersion,
-      gitCommit: provenance.gitCommit
+      gitCommit: provenance.gitCommit,
+      ...(suppressedCount > 0 ? { suppressedCount } : {})
     });
     await eventStore?.record(DomainEventName.DIST_ARTIFACT_STALE, {
       reason: 'dist-older-than-src',
-      provenance
+      provenance,
+      ...(suppressedCount > 0 ? { suppressedCount } : {})
     }).catch(() => {});
   }
 }

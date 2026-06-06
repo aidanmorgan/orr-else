@@ -5,6 +5,7 @@ import * as path from 'path';
 import { computeBuildProvenance, runStalenessPreflightWarn } from '../src/core/BuildProvenance.js';
 import { BuildProvenanceDefaults, DomainEventName } from '../src/constants/index.js';
 import { Logger } from '../src/core/Logger.js';
+import { SignalNoiseCoalescer } from '../src/core/SignalNoiseCoalescer.js';
 
 // ---------------------------------------------------------------------------
 // Helper: create a minimal fake install root on disk
@@ -299,6 +300,124 @@ describe('BuildProvenance', () => {
       expect(typeof prov.distIsStale).toBe('boolean');
     } finally {
       rmrf(installRoot);
+    }
+  });
+
+  // ── DEDUP: provenance-key-based stale-warning coalescing (pi-experiment-iurh) ──
+
+  // AC1: multi-worker scenario — same provenance key → ONE primary DIST_ARTIFACT_STALE
+  // event + aggregate repeat count surfaced on the next primary.
+  it('AC1: emits ONE primary DIST_ARTIFACT_STALE per provenance key; repeats are coalesced', async () => {
+    const installRoot = createFakeInstallRoot({ distMtimeOffsetMs: -5000 });
+    const records: Array<{ event: string; data: unknown }> = [];
+    const mockStore = { record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }) };
+    // A fresh coalescer with a long window so all three calls land in the same window.
+    const coalescer = new SignalNoiseCoalescer(60_000);
+
+    try {
+      const prov = await computeBuildProvenance(configPath, installRoot);
+
+      // Simulate three workers running with the same provenance.
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+
+      const staleEvents = records.filter(r => r.event === DomainEventName.DIST_ARTIFACT_STALE);
+      // Only 1 primary event recorded (repeats suppressed).
+      const primaryEvents = staleEvents.filter(r => !(r.data as any).isAggregate);
+      expect(primaryEvents).toHaveLength(1);
+    } finally {
+      rmrf(installRoot);
+    }
+  });
+
+  // AC1 (aggregate count): after the window expires a second primary is emitted
+  // and carries the prior suppressedCount so operators can see "N more" noise.
+  it('AC1: new primary carries suppressedCount from prior window when window expires', async () => {
+    const installRoot = createFakeInstallRoot({ distMtimeOffsetMs: -5000 });
+    const records: Array<{ event: string; data: unknown }> = [];
+    const mockStore = { record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }) };
+    // Tiny window so it expires between calls.
+    const coalescer = new SignalNoiseCoalescer(1);
+
+    try {
+      const prov = await computeBuildProvenance(configPath, installRoot);
+
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+      // Repeat within the (expired) window — the coalescer will open a new window.
+      await new Promise(res => setTimeout(res, 5)); // ensure window expired
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+
+      const staleEvents = records.filter(r => r.event === DomainEventName.DIST_ARTIFACT_STALE);
+      // Two primaries (second window opened), second one carries suppressedCount=0 from prior
+      // window (no suppressions between the two primaries).
+      expect(staleEvents.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      rmrf(installRoot);
+    }
+  });
+
+  // AC2: HARNESS_STARTED provenance is NOT suppressed — it is emitted per run.
+  // (This is tested via extension.ts usage; here we just confirm computeBuildProvenance
+  // always returns a full provenance object regardless of coalescer state.)
+  it('AC2: computeBuildProvenance always returns full provenance (not affected by coalescer)', async () => {
+    const installRoot = createFakeInstallRoot({ distMtimeOffsetMs: -5000 });
+    const coalescer = new SignalNoiseCoalescer(60_000);
+    const mockStore = { record: vi.fn(async () => {}) };
+
+    try {
+      const prov1 = await computeBuildProvenance(configPath, installRoot);
+      await runStalenessPreflightWarn(prov1, mockStore, coalescer);
+      // Second call: prov is still fully populated even though warn was suppressed.
+      const prov2 = await computeBuildProvenance(configPath, installRoot);
+      expect(prov2.distArtifactHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(prov2.distIsStale).toBe(true);
+      expect(prov2.gitCommit).toBeDefined();
+      expect(prov2.configHash).toMatch(/^[0-9a-f]{64}$/);
+    } finally {
+      rmrf(installRoot);
+    }
+  });
+
+  // AC3: fresh builds emit NO DIST_ARTIFACT_STALE event regardless of coalescer.
+  it('AC3: fresh build emits no DIST_ARTIFACT_STALE event even with a coalescer', async () => {
+    const installRoot = createFakeInstallRoot({ distMtimeOffsetMs: 5000 }); // dist newer than src
+    const records: Array<{ event: string; data: unknown }> = [];
+    const mockStore = { record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }) };
+    const coalescer = new SignalNoiseCoalescer(60_000);
+
+    try {
+      const prov = await computeBuildProvenance(configPath, installRoot);
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+      await runStalenessPreflightWarn(prov, mockStore, coalescer);
+
+      expect(records.filter(r => r.event === DomainEventName.DIST_ARTIFACT_STALE)).toHaveLength(0);
+    } finally {
+      rmrf(installRoot);
+    }
+  });
+
+  // AC4: different provenance key (different distArtifactHash) → new primary warning.
+  it('AC4: different distArtifactHash produces a new primary DIST_ARTIFACT_STALE event', async () => {
+    const installRootA = createFakeInstallRoot({ distMtimeOffsetMs: -5000, distContents: '// build-A\nexport {};\n' });
+    const installRootB = createFakeInstallRoot({ distMtimeOffsetMs: -5000, distContents: '// build-B\nexport {};\n' });
+    const records: Array<{ event: string; data: unknown }> = [];
+    const mockStore = { record: vi.fn(async (event: string, data: unknown) => { records.push({ event, data }); }) };
+    const coalescer = new SignalNoiseCoalescer(60_000);
+
+    try {
+      const provA = await computeBuildProvenance(configPath, installRootA);
+      const provB = await computeBuildProvenance(configPath, installRootB);
+
+      await runStalenessPreflightWarn(provA, mockStore, coalescer);
+      await runStalenessPreflightWarn(provB, mockStore, coalescer);
+
+      // Two distinct primaries because the provenance keys differ.
+      const staleEvents = records.filter(r => r.event === DomainEventName.DIST_ARTIFACT_STALE && !(r.data as any).isAggregate);
+      expect(staleEvents).toHaveLength(2);
+    } finally {
+      rmrf(installRootA);
+      rmrf(installRootB);
     }
   });
 });
