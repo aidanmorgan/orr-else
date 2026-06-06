@@ -18,6 +18,7 @@ import {
 } from '../constants/index.js';
 import { BeadEventIndex } from './BeadEventIndex.js';
 import { BeadStateProjection } from './BeadStateProjection.js';
+import { DOMAIN_EVENT_SCHEMAS } from './DomainEventSchemas.js';
 
 // Re-export all public types so existing callers of EventStore remain unaffected.
 export type {
@@ -44,18 +45,20 @@ import type { HarnessBeadMetadata } from '../types/index.js';
 const existsSync = fs.existsSync;
 
 // ---------------------------------------------------------------------------
-// Production payload validation (pi-experiment-y2ax)
+// Production payload validation (pi-experiment-y2ax + pi-experiment-g0bi)
 // ---------------------------------------------------------------------------
 
 /**
- * Required-field schemas for critical domain events.
- * Only the two events with live evidence of field-thin synthetic pollution are
- * covered; extend this map as new events need protection.
+ * Required-field schemas for production domain events.
+ *
+ * Sourced from the canonical DomainEventSchemas registry (pi-experiment-g0bi).
+ * Previously this was a two-entry inline map (y2ax); now the full registry
+ * covering all replay-critical and startup-critical events is imported here.
+ *
+ * The validation logic below (validateProductionPayload, EventStoreValidationError)
+ * is unchanged — this const is the only thing that changed.
  */
-const PRODUCTION_PAYLOAD_SCHEMAS: Readonly<Record<string, readonly string[]>> = {
-  [DomainEventName.BEAD_CLAIMED]: ['beadId', 'lease'],
-  [DomainEventName.STATE_RUN_INITIALIZED]: ['beadId', 'stateId', 'actionId']
-};
+const PRODUCTION_PAYLOAD_SCHEMAS: Readonly<Record<string, readonly string[]>> = DOMAIN_EVENT_SCHEMAS;
 
 /**
  * Structured diagnostic attached to EventStoreValidationError as `.diagnostic`.

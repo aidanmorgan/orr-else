@@ -223,8 +223,10 @@ describe('AC3 – synthetic:true escape hatch', () => {
     expect(events[0].data.synthetic).toBe(true);
   });
 
-  it('non-validated event types are unaffected by the synthetic flag (no regression)', async () => {
-    // CHECKLIST_ITEM_TICKED has no required-field schema — always passes
+  it('events with an empty required-field schema (no enforcement) are unaffected (no regression)', async () => {
+    // CHECKLIST_ITEM_TICKED is registered in the g0bi registry with an empty
+    // required-field list — it accepts any payload shape including { text: 'Done' }
+    // without beadId (grandfathered: test fixtures predate the registry).
     await expect(
       store.record(DomainEventName.CHECKLIST_ITEM_TICKED, { text: 'Done' })
     ).resolves.toBeUndefined();
