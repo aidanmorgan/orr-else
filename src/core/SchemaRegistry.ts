@@ -673,6 +673,15 @@ export type SchemaId = typeof SchemaId[keyof typeof SchemaId];
  * harness schema registry.  Any id in this set that lacks a registry entry
  * causes a conformance test failure.  Any registry entry whose id is not in
  * this set also causes a conformance test failure.
+ *
+ * When adding new boundary contracts (dsm2.2+ beads), add the id here AND
+ * register the schema entry in the appropriate module.
+ *
+ * NOTE (dsm2.3): Handoff/statechart boundary contracts are registered by
+ * HandoffSchemas.ts and tracked in HANDOFF_BOUNDARY_IDS (exported from there).
+ * They are not listed here to avoid a circular import (HandoffSchemas.ts →
+ * SchemaRegistry.ts). The conformance tests for those schemas live in
+ * tests/handoff_schemas.test.ts.
  */
 export const REQUIRED_BOUNDARY_IDS: ReadonlySet<string> = new Set<string>([
   SchemaId.SCHEDULER_WEIGHTS,

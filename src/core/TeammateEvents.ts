@@ -7,6 +7,7 @@ import {
   TeammateEventDecisionAction,
   TeammateEventType
 } from '../constants/index.js';
+import { validateHandoffPayload, HandoffSchemaId } from './HandoffSchemas.js';
 
 export { TeammateEventType };
 
@@ -299,6 +300,12 @@ export function validateTeammateEvent(value: unknown, allowedCustomEvents?: Read
   if (type === TeammateEventType.CHECKPOINT_ACCEPTED) {
     const error = requireStrings(obj, ['actionId']);
     if (error) return { ok: false, error };
+    // Schema validation: fail closed on structural violations (dsm2.3).
+    const schemaResult = validateHandoffPayload(HandoffSchemaId.CHECKPOINT_ACCEPTED_EVENT, obj);
+    if (!schemaResult.valid) {
+      const paths = schemaResult.diagnostic.failurePath.join('; ');
+      return { ok: false, error: `Schema validation failed for CHECKPOINT_ACCEPTED: ${paths}` };
+    }
   }
 
   if (
@@ -310,6 +317,15 @@ export function validateTeammateEvent(value: unknown, allowedCustomEvents?: Read
   ) {
     const error = requireStrings(obj, ['actionId', 'transitionEvent', 'summary', 'evidence', 'handover']);
     if (error) return { ok: false, error };
+    // Schema validation: fail closed on structural violations (dsm2.3).
+    // Validates all field types including LLM-authored (summary/evidence/handover must
+    // be strings) and deterministic (timestamp must be number). A non-valid result
+    // is a deterministic BLOCKED transition — the payload cannot advance state.
+    const schemaResult = validateHandoffPayload(HandoffSchemaId.STATUS_MUTATING_EVENT, obj);
+    if (!schemaResult.valid) {
+      const paths = schemaResult.diagnostic.failurePath.join('; ');
+      return { ok: false, error: `Schema validation failed for ${type}: ${paths}` };
+    }
     return { ok: true, event: { ...obj, handover: truncateHandover(obj.handover as string) } as TeammateEvent };
   }
 
