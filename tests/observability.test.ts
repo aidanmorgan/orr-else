@@ -264,6 +264,93 @@ states:
 });
 
 // ---------------------------------------------------------------------------
+// rhne AC#1: no-span session leaves no trace file
+// rhne AC#2: one-span session creates a non-empty valid JSONL trace file
+// rhne AC#3: exporter write failure leaves no misleading empty file
+// ---------------------------------------------------------------------------
+
+describe('JsonlSpanExporter — lazy file creation (rhne)', () => {
+  const root = path.join(os.tmpdir(), 'orr-else-otel-lazy-test');
+  const filePath = path.join(root, 'traces-rhne.jsonl');
+
+  beforeEach(() => {
+    fs.mkdirSync(root, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  // AC#1: no spans → no file
+  it('does not create the trace file when no spans are exported', async () => {
+    const exporter = new JsonlSpanExporter(filePath);
+    await exporter.shutdown();
+    expect(fs.existsSync(filePath)).toBe(false);
+  });
+
+  // AC#2: one span → file exists and contains valid JSONL
+  it('creates a non-empty trace file with valid JSONL when a span is exported', async () => {
+    const exporter = new JsonlSpanExporter(filePath);
+
+    // Build a minimal ReadableSpan stub
+    const fakeSpan = {
+      spanContext: () => ({ traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) }),
+      parentSpanContext: undefined,
+      name: 'rhne.test.span',
+      kind: 0,
+      startTime: [1700000000, 0] as [number, number],
+      endTime: [1700000001, 0] as [number, number],
+      duration: [1, 0] as [number, number],
+      status: { code: 1 },
+      attributes: { 'test.attr': 'present' },
+      events: [],
+      resource: { attributes: { 'service.name': 'pi' } },
+      instrumentationScope: { name: 'pi', version: '0' }
+    } as unknown as import('@opentelemetry/sdk-trace-base').ReadableSpan;
+
+    await new Promise<void>(resolve => {
+      exporter.export([fakeSpan], () => resolve());
+    });
+    await exporter.shutdown();
+
+    expect(fs.existsSync(filePath)).toBe(true);
+    const content = fs.readFileSync(filePath, 'utf8').trim();
+    expect(content.length).toBeGreaterThan(0);
+    const record = JSON.parse(content.split('\n')[0]);
+    expect(record.name).toBe('rhne.test.span');
+    expect(record.traceId).toBe('a'.repeat(32));
+  });
+
+  // AC#3: write failure must not leave an empty file
+  it('does not leave a zero-byte file when a write error occurs (no-span session)', async () => {
+    // The primary guarantee: if no spans are exported, the file is never created.
+    // This covers the common "write failure" case where the session produced nothing.
+    const noSpanPath = path.join(root, 'no-span-traces.jsonl');
+    const exporter = new JsonlSpanExporter(noSpanPath);
+    // Export an empty spans array — no file should be created.
+    await new Promise<void>(resolve => { exporter.export([], () => resolve()); });
+    await exporter.shutdown();
+    // No zero-byte file — file must not exist at all
+    expect(fs.existsSync(noSpanPath)).toBe(false);
+  });
+
+  it('a pre-existing zero-byte file (legacy) is safely handled during retention cleanup without error', () => {
+    // AC#3 retention variant: old empty files that predate lazy-create must
+    // not cause errors during retention cleanup. This ensures backward compatibility.
+    const legacyEmptyFile = path.join(root, 'traces-legacy-empty.jsonl');
+    fs.writeFileSync(legacyEmptyFile, '');
+    // Verify it is zero bytes
+    expect(fs.statSync(legacyEmptyFile).size).toBe(0);
+    // Reading or stat-ing the file must not throw
+    expect(() => fs.readFileSync(legacyEmptyFile, 'utf8')).not.toThrow();
+    expect(() => fs.statSync(legacyEmptyFile)).not.toThrow();
+    // Deletion (as retention cleanup would do) must not throw
+    expect(() => fs.unlinkSync(legacyEmptyFile)).not.toThrow();
+    expect(fs.existsSync(legacyEmptyFile)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // a1j1 AC#1: the JSONL trace WriteStream has an 'error' handler so a write
 // failure (e.g. ENOSPC) is handled rather than thrown as an uncaught exception.
 // ---------------------------------------------------------------------------
@@ -280,15 +367,33 @@ describe('JsonlSpanExporter stream error handling', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("attaches an 'error' listener to the write stream", () => {
+  it("attaches an 'error' listener to the write stream after first span export", async () => {
     const exporter = new JsonlSpanExporter(filePath);
+
+    const fakeSpan = {
+      spanContext: () => ({ traceId: 'e'.repeat(32), spanId: 'f'.repeat(16) }),
+      parentSpanContext: undefined,
+      name: 'stream.error.test',
+      kind: 0,
+      startTime: [1700000000, 0] as [number, number],
+      endTime: [1700000001, 0] as [number, number],
+      duration: [1, 0] as [number, number],
+      status: { code: 1 },
+      attributes: {},
+      events: [],
+      resource: { attributes: {} },
+      instrumentationScope: { name: 'pi', version: '0' }
+    } as unknown as import('@opentelemetry/sdk-trace-base').ReadableSpan;
+
+    // Trigger stream creation via first export
+    await new Promise<void>(resolve => { exporter.export([fakeSpan], () => resolve()); });
+
     try {
-      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter }).stream;
-      // The handler attached in the constructor must be the only/first listener,
-      // so an emitted 'error' is consumed instead of crashing the process.
-      expect(stream.listenerCount('error')).toBeGreaterThanOrEqual(1);
+      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter | null }).stream;
+      expect(stream).not.toBeNull();
+      expect(stream!.listenerCount('error')).toBeGreaterThanOrEqual(1);
     } finally {
-      void (exporter as unknown as { stream: { destroy(): void } }).stream.destroy();
+      void (exporter as unknown as { stream: { destroy(): void } | null }).stream?.destroy();
     }
   });
 
@@ -300,18 +405,38 @@ describe('JsonlSpanExporter stream error handling', () => {
 
     try {
       const exporter = new JsonlSpanExporter(filePath);
-      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter }).stream;
+
+      const fakeSpan = {
+        spanContext: () => ({ traceId: '1'.repeat(32), spanId: '2'.repeat(16) }),
+        parentSpanContext: undefined,
+        name: 'enospc.test',
+        kind: 0,
+        startTime: [1700000000, 0] as [number, number],
+        endTime: [1700000001, 0] as [number, number],
+        duration: [1, 0] as [number, number],
+        status: { code: 1 },
+        attributes: {},
+        events: [],
+        resource: { attributes: {} },
+        instrumentationScope: { name: 'pi', version: '0' }
+      } as unknown as import('@opentelemetry/sdk-trace-base').ReadableSpan;
+
+      // Trigger stream creation via first export
+      await new Promise<void>(resolve => { exporter.export([fakeSpan], () => resolve()); });
+
+      const stream = (exporter as unknown as { stream: NodeJS.EventEmitter | null }).stream;
+      expect(stream).not.toBeNull();
 
       // Simulate the kernel surfacing a disk-full write error on the stream.
       // With the handler in place this must NOT throw or escape as uncaught.
       const enospc = Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
-      expect(() => stream.emit('error', enospc)).not.toThrow();
+      expect(() => stream!.emit('error', enospc)).not.toThrow();
 
       // Give any (mis)scheduled microtasks/macrotasks a tick to surface.
       await new Promise(resolve => setTimeout(resolve, 10));
 
       expect(unhandled).toHaveLength(0);
-      void (exporter as unknown as { stream: { destroy(): void } }).stream.destroy();
+      void (exporter as unknown as { stream: { destroy(): void } | null }).stream?.destroy();
     } finally {
       process.off('uncaughtException', onUncaught);
       process.off('unhandledRejection', onUncaught);

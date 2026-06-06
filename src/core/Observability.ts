@@ -74,28 +74,43 @@ class SessionIdGenerator implements IdGenerator {
  * Exported for testability: the gate-before-reclaim/ENOSPC error-handler test
  * (a1j1 AC#1) constructs an exporter and simulates a stream 'error' event to
  * assert the handler swallows it rather than crashing the process.
+ *
+ * The stream is created lazily on first span write so that sessions with no
+ * spans leave no zero-byte trace file (rhne). Absence of a file means no spans;
+ * presence means the file contains at least one valid JSONL span record.
  */
 export class JsonlSpanExporter implements SpanExporter {
-  private readonly stream: fs.WriteStream;
+  // Null until the first span is written (lazy creation).
+  stream: fs.WriteStream | null = null;
 
-  constructor(private readonly filePath: string) {
-    this.stream = fs.createWriteStream(filePath, { flags: 'a' });
-    // A WriteStream with no 'error' listener re-throws as an uncaught exception
-    // when the underlying write fails (e.g. ENOSPC on a full disk), crashing the
-    // process. Observability is best-effort telemetry: log and swallow the error
-    // so a failed trace write never takes down the harness.
-    this.stream.on('error', error => {
-      Logger.warn(Component.OBSERVABILITY, 'OTEL JSONL trace stream write failed', {
-        filePath: this.filePath,
-        error: String(error)
+  constructor(private readonly filePath: string) {}
+
+  private getOrCreateStream(): fs.WriteStream {
+    if (!this.stream) {
+      this.stream = fs.createWriteStream(this.filePath, { flags: 'a' });
+      // A WriteStream with no 'error' listener re-throws as an uncaught exception
+      // when the underlying write fails (e.g. ENOSPC on a full disk), crashing the
+      // process. Observability is best-effort telemetry: log and swallow the error
+      // so a failed trace write never takes down the harness.
+      this.stream.on('error', error => {
+        Logger.warn(Component.OBSERVABILITY, 'OTEL JSONL trace stream write failed', {
+          filePath: this.filePath,
+          error: String(error)
+        });
       });
-    });
+    }
+    return this.stream;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: { code: ExportResultCode; error?: Error }) => void): void {
+    if (spans.length === 0) {
+      resultCallback({ code: ExportResultCode.SUCCESS });
+      return;
+    }
     try {
+      const stream = this.getOrCreateStream();
       for (const span of spans) {
-        this.stream.write(`${JSON.stringify(this.serialize(span))}\n`);
+        stream.write(`${JSON.stringify(this.serialize(span))}\n`);
       }
       resultCallback({ code: ExportResultCode.SUCCESS });
     } catch (error) {
@@ -104,14 +119,16 @@ export class JsonlSpanExporter implements SpanExporter {
   }
 
   async shutdown(): Promise<void> {
+    if (!this.stream) return;
     await new Promise<void>(resolve => {
-      this.stream.end(() => resolve());
+      this.stream!.end(() => resolve());
     });
   }
 
   async forceFlush(): Promise<void> {
+    if (!this.stream) return;
     await new Promise<void>((resolve, reject) => {
-      this.stream.write('', error => {
+      this.stream!.write('', error => {
         if (error) reject(error);
         else resolve();
       });
