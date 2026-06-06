@@ -46,8 +46,6 @@
  *   - missing replay policy
  *   - duplicate ids at registration time
  *   - version downgrade (new major < current major)
- *   - unhandled legacy version: a schema registered with legacyVersions but without
- *     a migrationNote, OR getValidator() called with a known-legacy version id
  */
 
 import AjvModule from 'ajv';
@@ -164,26 +162,6 @@ export interface SchemaRegistryEntry {
    * At least one negative fixture is required for conformance.
    */
   readonly negativeFixtures: readonly NegativeFixture[];
-  /**
-   * When present, indicates this entry supersedes a prior schema at this id whose
-   * major version was lower.  Include a short migration note for reviewers.
-   * Example: "Migrated from v1 (array-only) to v2 (object with items array)."
-   *
-   * REQUIRED when legacyVersions is non-empty: the registry REJECTS any entry that
-   * declares legacyVersions without a migrationNote (fail-closed).
-   */
-  readonly migrationNote?: string;
-  /**
-   * Version strings that are known-superseded by this entry.
-   * Querying the registry for any of these version-tagged ids will throw.
-   *
-   * When legacyVersions is non-empty, migrationNote MUST be provided.
-   * Registration throws SchemaRegistryError if migrationNote is absent.
-   *
-   * Convention: pair with migrationNote so reviewers understand the migration path.
-   * Example: legacyVersions: ['1.0.0'] means v1 callers must migrate to this entry.
-   */
-  readonly legacyVersions?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -193,15 +171,6 @@ export interface SchemaRegistryEntry {
 interface CompiledEntry {
   entry: SchemaRegistryEntry;
   validate: ValidateFunction;
-}
-
-/**
- * Tracks which (id, version) pairs are known-legacy across all registered entries.
- * Key: `${id}@${version}` — any getValidator() call matching a legacy key is rejected.
- */
-type LegacyKey = string;
-function legacyKey(id: string, version: string): LegacyKey {
-  return `${id}@${version}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,13 +183,11 @@ function legacyKey(id: string, version: string): LegacyKey {
  * Responsibilities:
  *  - Register schemas with stable ids, versions, owners, and replay policies.
  *  - Compile AJV validators at registration time (fail-fast on bad schemas).
- *  - Expose getValidator() with fail-closed semantics (throws on any unknown/bad id).
+ *  - Expose getValidator(id) with fail-closed semantics (throws on any unknown/bad id).
  *  - Detect duplicate ids and version downgrades at registration time.
  */
 export class SchemaRegistry {
   private readonly _entries = new Map<string, CompiledEntry>();
-  /** Set of `id@version` keys for all known-legacy versions across all entries. */
-  private readonly _legacyKeys = new Set<LegacyKey>();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly _ajv: any;
 
@@ -241,16 +208,6 @@ export class SchemaRegistry {
    */
   register(entry: SchemaRegistryEntry): void {
     this._assertComplete(entry);
-
-    // Fail-closed: legacyVersions requires migrationNote.
-    if (entry.legacyVersions && entry.legacyVersions.length > 0) {
-      if (!entry.migrationNote || !entry.migrationNote.trim()) {
-        throw new SchemaRegistryError(
-          `Schema "${entry.id}" declares legacyVersions [${entry.legacyVersions.join(', ')}] ` +
-          `but has no migrationNote. A migration note is REQUIRED when marking versions as legacy.`
-        );
-      }
-    }
 
     const existing = this._entries.get(entry.id);
     if (existing) {
@@ -288,13 +245,6 @@ export class SchemaRegistry {
     }
 
     this._entries.set(entry.id, { entry, validate });
-
-    // Register known-legacy version keys so getValidator() can reject them.
-    if (entry.legacyVersions) {
-      for (const legacyVer of entry.legacyVersions) {
-        this._legacyKeys.add(legacyKey(entry.id, legacyVer));
-      }
-    }
   }
 
   /**
@@ -305,22 +255,10 @@ export class SchemaRegistry {
    *   - missing validator (internal invariant — should not occur)
    *   - missing owner
    *   - missing replay policy
-   *   - querying a known-legacy (id, version) pair (caller must migrate to current version)
    *
-   * @param id      The stable schema id.
-   * @param version Optional: the schema version the caller expects. If this version is
-   *                marked legacy in the registry, the call is rejected (fail-closed).
+   * @param id The stable schema id.
    */
-  getValidator(id: string, version?: string): ValidateFunction {
-    // Fail-closed: reject queries for known-legacy (id, version) pairs.
-    if (version !== undefined && this._legacyKeys.has(legacyKey(id, version))) {
-      throw new SchemaRegistryError(
-        `Schema "${id}" version "${version}" is a known-legacy version and has been superseded. ` +
-        `Callers must migrate to the current version. ` +
-        `See the migrationNote on the current entry for guidance.`
-      );
-    }
-
+  getValidator(id: string): ValidateFunction {
     const compiled = this._entries.get(id);
     if (!compiled) {
       throw new SchemaRegistryError(
