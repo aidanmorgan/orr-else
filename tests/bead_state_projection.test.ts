@@ -504,3 +504,98 @@ describe('BeadStateProjection — replay idempotency and out-of-order determinis
     expect(JSON.stringify(resultFromB)).toBe(JSON.stringify(resultInOrder));
   });
 });
+
+// ---------------------------------------------------------------------------
+// AC3 (pi-experiment-y2ax): synthetic:true events are IGNORED by production
+// projections — a synthetic BEAD_CLAIMED / STATE_RUN_INITIALIZED carrying a
+// real lease / stateId must NOT poison projection output.
+// ---------------------------------------------------------------------------
+
+describe('BeadStateProjection — synthetic:true events are ignored (AC3, pi-experiment-y2ax)', () => {
+  const projection = new BeadStateProjection();
+
+  it('projectBeadStateChartFromEvents: synthetic BEAD_CLAIMED does not set lease or currentState', () => {
+    const events = [
+      // synthetic BEAD_CLAIMED with a real-looking lease and stateId
+      makeEvent(DomainEventName.BEAD_CLAIMED, {
+        beadId: 'bd-syn',
+        stateId: 'Implementation',
+        owner: 'Ghost',
+        lease: { owner: 'Ghost', expiresAt: '2099-01-01T00:00:00.000Z' },
+        synthetic: true
+      })
+    ];
+    const result = projection.projectBeadStateChartFromEvents('bd-syn', events);
+    // synthetic event must be ignored — no lease or currentState projected
+    expect(result.lease).toBeUndefined();
+    expect(result.currentState).toBeUndefined();
+    expect(result.assignedTo).toBeUndefined();
+  });
+
+  it('projectBeadStateChartFromEvents: synthetic STATE_RUN_INITIALIZED does not set currentState', () => {
+    const events = [
+      makeEvent(DomainEventName.STATE_RUN_INITIALIZED, {
+        beadId: 'bd-syn',
+        stateId: 'Poisoned',
+        actionId: 'bad-action',
+        synthetic: true
+      })
+    ];
+    const result = projection.projectBeadStateChartFromEvents('bd-syn', events);
+    expect(result.currentState).toBeUndefined();
+  });
+
+  it('projectBeadFromEvents: synthetic BEAD_CLAIMED does not set lease, status, or assigned_to', () => {
+    const events = [
+      makeEvent(DomainEventName.BEAD_CLAIMED, {
+        beadId: 'bd-syn',
+        stateId: 'Implementation',
+        owner: 'Ghost',
+        lease: { owner: 'Ghost', expiresAt: '2099-01-01T00:00:00.000Z' },
+        synthetic: true
+      })
+    ];
+    const result = projection.projectBeadFromEvents('bd-syn', events);
+    expect(result.lease).toBeUndefined();
+    expect(result.status).toBeUndefined();
+    expect(result.assigned_to).toBeUndefined();
+  });
+
+  it('non-synthetic BEAD_CLAIMED after a synthetic one projects correctly (synthetic does not bleed)', () => {
+    const events = [
+      // synthetic first — must be ignored
+      makeEvent(
+        DomainEventName.BEAD_CLAIMED,
+        {
+          beadId: 'bd-syn',
+          stateId: 'PoisonState',
+          owner: 'Ghost',
+          lease: { owner: 'Ghost', expiresAt: '2099-01-01T00:00:00.000Z' },
+          synthetic: true
+        },
+        { id: 'e1', timestamp: '2026-01-01T00:00:01.000Z' }
+      ),
+      // real event after — must project normally
+      makeEvent(
+        DomainEventName.BEAD_CLAIMED,
+        {
+          beadId: 'bd-syn',
+          stateId: 'Planning',
+          owner: 'Alice',
+          lease: { owner: 'Alice', expiresAt: '2099-06-01T00:00:00.000Z' }
+        },
+        { id: 'e2', timestamp: '2026-01-01T00:00:02.000Z', sessionId: 's2' }
+      )
+    ];
+    const chart = projection.projectBeadStateChartFromEvents('bd-syn', events);
+    // Real event projects; synthetic event does not contaminate
+    expect(chart.currentState).toBe('Planning');
+    expect(chart.assignedTo).toBe('Alice');
+    expect(chart.lease).toMatchObject({ owner: 'Alice' });
+
+    const bead = projection.projectBeadFromEvents('bd-syn', events);
+    expect(bead.status).toBe('Planning');
+    expect(bead.assigned_to).toBe('Alice');
+    expect(bead.lease).toMatchObject({ owner: 'Alice' });
+  });
+});

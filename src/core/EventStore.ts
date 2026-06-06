@@ -43,6 +43,77 @@ import type { HarnessBeadMetadata } from '../types/index.js';
 
 const existsSync = fs.existsSync;
 
+// ---------------------------------------------------------------------------
+// Production payload validation (pi-experiment-y2ax)
+// ---------------------------------------------------------------------------
+
+/**
+ * Required-field schemas for critical domain events.
+ * Only the two events with live evidence of field-thin synthetic pollution are
+ * covered; extend this map as new events need protection.
+ */
+const PRODUCTION_PAYLOAD_SCHEMAS: Readonly<Record<string, readonly string[]>> = {
+  [DomainEventName.BEAD_CLAIMED]: ['beadId', 'lease'],
+  [DomainEventName.STATE_RUN_INITIALIZED]: ['beadId', 'stateId', 'actionId']
+};
+
+/**
+ * Structured diagnostic attached to EventStoreValidationError as `.diagnostic`.
+ */
+export interface EventStoreValidationDiagnostic {
+  eventType: string;
+  missingFields: string[];
+  receivedKeys: string[];
+}
+
+/**
+ * Thrown when a production event write fails required-field validation.
+ * Carries a structured `.diagnostic` for programmatic inspection.
+ */
+export class EventStoreValidationError extends Error {
+  public readonly diagnostic: EventStoreValidationDiagnostic;
+
+  constructor(diagnostic: EventStoreValidationDiagnostic) {
+    const missing = diagnostic.missingFields.join(', ');
+    super(
+      `${diagnostic.eventType}: missing required field(s) [${missing}] in production event payload. ` +
+      `Received keys: [${diagnostic.receivedKeys.join(', ')}]. ` +
+      `Either supply the required fields or mark the event synthetic:true for test/fixture writes.`
+    );
+    this.name = 'EventStoreValidationError';
+    this.diagnostic = diagnostic;
+  }
+}
+
+/**
+ * Validates the payload of a domain event before it is written to the
+ * production event store.
+ *
+ * Returns `null` when the payload is valid (or the event has no schema).
+ * Returns an `EventStoreValidationDiagnostic` when required fields are absent.
+ *
+ * Pass `synthetic: true` in the data to bypass validation for test/fixture writes.
+ */
+function validateProductionPayload(
+  eventType: string,
+  data: Record<string, unknown>
+): EventStoreValidationDiagnostic | null {
+  // synthetic:true is the test/fixture escape hatch — bypass all validation.
+  if (data.synthetic === true) return null;
+
+  const requiredFields = PRODUCTION_PAYLOAD_SCHEMAS[eventType];
+  if (!requiredFields) return null;
+
+  const missingFields = requiredFields.filter(field => !(field in data) || data[field] === undefined);
+  if (missingFields.length === 0) return null;
+
+  return {
+    eventType,
+    missingFields,
+    receivedKeys: Object.keys(data)
+  };
+}
+
 /** Path segment that marks the start of the PROJECT-scoped tool-output archive. */
 const TOOL_OUTPUT_DIR_SEGMENT = 'tool-output';
 
@@ -155,6 +226,20 @@ export class EventStore implements ProjectionCapableStore {
     return isRecord(value) && typeof value.type === 'string' && typeof value.timestamp === 'string';
   }
 
+  /**
+   * Returns true for events that carry `data.synthetic === true`.
+   *
+   * Synthetic events are test/fixture writes that bypass production payload
+   * validation (AC3, pi-experiment-y2ax).  They must NEVER appear in production
+   * replay, projection, or gate reads — filtering them at the read layer ensures
+   * every consumer (BeadStateProjection, WorkerRunController, EventStore circuit-
+   * breaker, RestartCorrelation, preflight) is uniformly covered without
+   * requiring per-consumer guards.
+   */
+  private isSyntheticEvent(event: DomainEvent): boolean {
+    return isRecord(event.data) && event.data.synthetic === true;
+  }
+
   private beadIdFor(event: DomainEvent): string | undefined {
     const data = event.data;
     const beadId = typeof data.beadId === 'string' ? data.beadId : undefined;
@@ -203,7 +288,7 @@ export class EventStore implements ProjectionCapableStore {
 
     for (const filePath of await this.eventLog.eventFilePaths(location.dir)) {
       await this.eventLog.scan(filePath, value => {
-        if (this.isDomainEvent(value)) visitor(value);
+        if (this.isDomainEvent(value) && !this.isSyntheticEvent(value)) visitor(value);
       });
     }
   }
@@ -213,6 +298,14 @@ export class EventStore implements ProjectionCapableStore {
   // ---------------------------------------------------------------------------
 
   public async record(event: DomainEventName | string, data: unknown): Promise<void> {
+    const normalized = isRecord(data) ? data : {};
+
+    // Validate required payload fields before touching the store (y2ax).
+    const diagnostic = validateProductionPayload(event, normalized);
+    if (diagnostic) {
+      throw new EventStoreValidationError(diagnostic);
+    }
+
     const location = await this.init();
 
     const entry: DomainEvent = {
@@ -220,7 +313,7 @@ export class EventStore implements ProjectionCapableStore {
       type: event,
       timestamp: new Date(this.clock.now()).toISOString(),
       sessionId: this.sessionId,
-      data: isRecord(data) ? data : {}
+      data: normalized
     };
 
     if (location) {
@@ -273,7 +366,9 @@ export class EventStore implements ProjectionCapableStore {
       if (indexedEvents === undefined) {
         missing.add(beadId);
       } else {
-        grouped.set(beadId, indexedEvents);
+        // Filter synthetic events at the read layer: no production consumer
+        // should ever see a synthetic:true event (pi-experiment-y2ax review fix).
+        grouped.set(beadId, indexedEvents.filter(e => !this.isSyntheticEvent(e)));
       }
     }
 
@@ -282,6 +377,7 @@ export class EventStore implements ProjectionCapableStore {
     for (const filePath of primaryFilePaths) {
       await this.eventLog.scan(filePath, value => {
         if (!this.isDomainEvent(value)) return;
+        if (this.isSyntheticEvent(value)) return;
         const beadId = this.beadIdFor(value);
         if (!beadId || !missing.has(beadId)) return;
         grouped.get(beadId)!.push(value);

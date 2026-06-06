@@ -20,10 +20,10 @@ describe('DomainEventEmitter', () => {
       hookData = data;
     });
 
-    await emitter.emitEvent(DomainEvent.BEAD_CLAIMED, { test: 'data' });
+    await emitter.emitEvent(DomainEvent.BEAD_CLAIMED, { test: 'data', synthetic: true });
 
     expect(hookTriggered).toBe(true);
-    expect(hookData).toEqual({ test: 'data' });
+    expect(hookData).toMatchObject({ test: 'data' });
   });
 
   it('should support multiple hooks for the same event', async () => {
@@ -32,7 +32,7 @@ describe('DomainEventEmitter', () => {
     emitter.registerHook(DomainEvent.PHASE_STARTED, async () => { count++; });
     emitter.registerHook(DomainEvent.PHASE_STARTED, async () => { count++; });
 
-    await emitter.emitEvent(DomainEvent.PHASE_STARTED, {});
+    await emitter.emitEvent(DomainEvent.PHASE_STARTED, { synthetic: true });
 
     expect(count).toBe(2);
   });

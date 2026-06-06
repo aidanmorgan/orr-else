@@ -56,7 +56,8 @@ states:
   it('fans out recorded bead events without an existing ready marker', async () => {
     await eventStore.record(DomainEventName.BEAD_CLAIMED, {
       beadId: 'bd-new',
-      stateId: 'Planning'
+      stateId: 'Planning',
+      lease: { owner: 'Orr Else', expiresAt: '2026-01-01T01:00:00.000Z' }
     });
 
     const indexPath = path.join(
@@ -85,7 +86,8 @@ states:
   it('keeps events recorded before and after ready marker publication in the by-bead file', async () => {
     await eventStore.record(DomainEventName.BEAD_CLAIMED, {
       beadId: 'bd-1',
-      stateId: 'Planning'
+      stateId: 'Planning',
+      lease: { owner: 'Orr Else', expiresAt: '2026-01-01T01:00:00.000Z' }
     });
 
     const indexPath = path.join(
@@ -125,7 +127,8 @@ states:
   it('keeps writing to the resolved event path after a temporary config validation failure', async () => {
     await eventStore.record(DomainEventName.BEAD_CLAIMED, {
       beadId: 'bd-stable',
-      stateId: 'Planning'
+      stateId: 'Planning',
+      lease: { owner: 'Orr Else', expiresAt: '2026-01-01T01:00:00.000Z' }
     });
 
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
@@ -1373,7 +1376,7 @@ states:
     eventStore.setSessionId('clock-session');
 
     const before = Date.now();
-    await eventStore.record(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-clock', stateId: 'Planning' });
+    await eventStore.record(DomainEventName.BEAD_CLAIMED, { beadId: 'bd-clock', stateId: 'Planning', lease: { owner: 'Orr Else', expiresAt: '2026-01-01T01:00:00.000Z' } });
     const after = Date.now();
 
     const events = await eventStore.readAll();

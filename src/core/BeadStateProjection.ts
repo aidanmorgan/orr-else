@@ -219,6 +219,11 @@ export class BeadStateProjection {
 
     for (const event of events) {
       const data = this.eventData(event);
+      // Synthetic events are filtered at the EventStore read layer (eventsForBeads).
+      // This guard is retained so BeadStateProjection remains correct when called
+      // directly (e.g. in unit tests) with a raw event list that may include
+      // synthetic events — it does not fire in production (events are pre-filtered).
+      if (data.synthetic === true) continue;
       projection.lastEventId = event.id;
       projection.lastUpdatedAt = event.timestamp;
 
@@ -420,6 +425,11 @@ export class BeadStateProjection {
     const includeDetails = this.includeDetails(options);
     for (const event of events) {
       const data = this.eventData(event);
+      // Synthetic events are filtered at the EventStore read layer (eventsForBeads).
+      // This guard is retained so BeadStateProjection remains correct when called
+      // directly (e.g. in unit tests) with a raw event list that may include
+      // synthetic events — it does not fire in production (events are pre-filtered).
+      if (data.synthetic === true) continue;
       // lastActivity tracks genuine bead activity. Supervisor-internal scheduling
       // bookkeeping (e.g. BEAD_QUARANTINED) must NOT advance it: the quarantine
       // signature is derived from status+lastActivity, so bumping lastActivity on
