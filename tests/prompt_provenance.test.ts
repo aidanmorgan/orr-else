@@ -1146,3 +1146,985 @@ states:
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// r3yq: AC1-4 — configured source failures must propagate, not be silently skipped
+// ---------------------------------------------------------------------------
+
+describe('resolvePromptProvenance — configured source failures (r3yq)', () => {
+  it('AC1: sets configuredSourceFailed when a configured state skill SKILL.md is missing', () => {
+    // A state with skills: [nonexistent-skill] where .pi/skills/nonexistent-skill/SKILL.md
+    // does not exist.  resolvePiSkillPathsForState already throws for missing configured
+    // skill paths.  resolvePromptProvenance must NOT silently swallow this — it must
+    // propagate as configuredSourceFailed: true so the gate can hard-block SUCCESS.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-missing-skill-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    skills:
+      - nonexistent-skill
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            skills: ['nonexistent-skill'],
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      // The skill directory .pi/skills/nonexistent-skill/SKILL.md does NOT exist.
+      // resolvePromptProvenance must NOT silently succeed — it must signal failure.
+      let threw = false;
+      let result: any;
+      try {
+        result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      } catch {
+        threw = true;
+      }
+
+      // Either it threw OR returned configuredSourceFailed: true.
+      // Both signal that a CONFIGURED source could not be resolved.
+      const failed = threw || result?.configuredSourceFailed === true;
+      expect(failed).toBe(true);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: sets configuredSourceFailed when a configured global skill path is missing', () => {
+    // settings.pi.skillPaths references a path that does not exist.
+    // resolveGlobalSkills already throws for this — must propagate as configuredSourceFailed.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-missing-global-skill-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: {
+          workflowVersion: '1.0',
+          pi: { skillPaths: ['does/not/exist/SKILL.md'] }
+        },
+        states: {
+          Planning: {
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      let threw = false;
+      let result: any;
+      try {
+        result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      } catch {
+        threw = true;
+      }
+
+      const failed = threw || result?.configuredSourceFailed === true;
+      expect(failed).toBe(true);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: sets configuredSourceFailed when a configured action prompt FILE is missing', () => {
+    // When the raw YAML action prompt looks like a file path (e.g. "plan.md") but
+    // the file does not exist, resolvePromptProvenance must detect this as a
+    // configured-source failure and set configuredSourceFailed: true.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-missing-action-prompt-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "missing_plan.md"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            actions: [{ id: 'formulate-plan', prompt: 'missing_plan.md' }]
+          }
+        }
+      };
+
+      // missing_plan.md does NOT exist in tempDir.
+      const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+
+      // Must signal configured-source failure (not silently skip).
+      expect(result.configuredSourceFailed).toBe(true);
+      // Must emit a missing STATE_PROMPT entry for tracking.
+      const statePromptEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.STATE_PROMPT);
+      expect(statePromptEntries.length).toBeGreaterThan(0);
+      expect(statePromptEntries.some(e => e.missing === true)).toBe(true);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: sets configuredSourceFailed when a configured goal prompt FILE is missing', () => {
+    // When settings.projectObjective looks like a file path (e.g. "GOAL.md") but
+    // the file does not exist, resolvePromptProvenance must set configuredSourceFailed.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-missing-goal-prompt-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+  projectObjective: "GOAL.md"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0', projectObjective: 'GOAL.md' },
+        states: {
+          Planning: {
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      // GOAL.md does NOT exist in tempDir.
+      const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+
+      // Must signal configured-source failure.
+      expect(result.configuredSourceFailed).toBe(true);
+      // Must emit a missing GOAL_PROMPT entry.
+      const goalEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.GOAL_PROMPT);
+      expect(goalEntries.length).toBeGreaterThan(0);
+      expect(goalEntries.some(e => e.missing === true)).toBe(true);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: inline prompt text is NOT treated as a configured file reference', () => {
+    // When a prompt value is genuine inline text (no .md extension, no path separator,
+    // no absolute path), it must NOT be treated as a file reference even if the file
+    // cannot be found.  configuredSourceFailed must remain false.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-inline-prompt-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work carefully and thoroughly"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work carefully and thoroughly' }]
+          }
+        }
+      };
+
+      const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+
+      // Inline text — must NOT set configuredSourceFailed.
+      expect(result.configuredSourceFailed).toBeUndefined();
+      // No STATE_PROMPT entry emitted for inline text.
+      const statePromptEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.STATE_PROMPT);
+      expect(statePromptEntries.length).toBe(0);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('slash-containing inline objective text is NOT treated as a missing file reference', () => {
+    // Regression guard: "Implement the auth/login flow", "and/or cleanup", and
+    // "Use TypeScript/JavaScript" contain slashes but are multi-word inline text.
+    // looksLikeFilePath must return false for these (whitespace check fires first),
+    // so configuredSourceFailed must remain UNSET.
+    const slashInlineValues = [
+      'Implement the auth/login flow',
+      'Refactor input/output handling and/or cleanup',
+      'Use TypeScript/JavaScript best practices'
+    ];
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-slash-inline-unit-'));
+    try {
+      for (const objective of slashInlineValues) {
+        const configPath = path.join(tempDir, 'harness.yaml');
+        fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+  projectObjective: "${objective.replace(/"/g, '\\"')}"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "${objective.replace(/"/g, '\\"')}"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+        const config: any = {
+          settings: { workflowVersion: '1.0', projectObjective: objective },
+          states: {
+            Planning: {
+              actions: [{ id: 'formulate-plan', prompt: objective }]
+            }
+          }
+        };
+
+        const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+
+        // Inline text with slashes must NOT set configuredSourceFailed.
+        expect(result.configuredSourceFailed, `configuredSourceFailed should be unset for: "${objective}"`).toBeUndefined();
+        // No GOAL_PROMPT or STATE_PROMPT entry emitted for inline text.
+        const goalEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.GOAL_PROMPT);
+        expect(goalEntries.length, `no GOAL_PROMPT entry expected for: "${objective}"`).toBe(0);
+        const stateEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.STATE_PROMPT);
+        expect(stateEntries.length, `no STATE_PROMPT entry expected for: "${objective}"`).toBe(0);
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('single-token file path with extension still detected as missing configured file', () => {
+    // Confirm the whitespace tightening does NOT break genuine single-token missing
+    // file detection: "missing_plan.md" and "prompts/x.md" have no whitespace and
+    // must still set configuredSourceFailed when the file does not exist.
+    const singleTokenPaths = [
+      'missing_plan.md',
+      'prompts/x.md'
+    ];
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-single-token-missing-'));
+    try {
+      for (const promptValue of singleTokenPaths) {
+        const configPath = path.join(tempDir, 'harness.yaml');
+        fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "${promptValue}"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+        const config: any = {
+          settings: { workflowVersion: '1.0' },
+          states: {
+            Planning: {
+              actions: [{ id: 'formulate-plan', prompt: promptValue }]
+            }
+          }
+        };
+
+        // The file does NOT exist — configuredSourceFailed must be set.
+        const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+        expect(result.configuredSourceFailed, `configuredSourceFailed should be true for: "${promptValue}"`).toBe(true);
+        const stateEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.STATE_PROMPT);
+        expect(stateEntries.length, `STATE_PROMPT entry expected for: "${promptValue}"`).toBeGreaterThan(0);
+        expect(stateEntries.some(e => e.missing === true), `missing entry expected for: "${promptValue}"`).toBe(true);
+      }
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3: missing configured skill is NOT silently omitted from the fingerprint', () => {
+    // Ensure that when a configured skill is missing, the provenance entries do NOT
+    // silently contain zero skill entries (which would make the fingerprint incomplete
+    // and allow a run to proceed with an unresolved context).
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-skill-not-omitted-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    skills:
+      - missing-skill
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            skills: ['missing-skill'],
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      let threw = false;
+      let result: any;
+      try {
+        result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      } catch {
+        threw = true;
+      }
+
+      // Must not return a "success" result with empty skill entries —
+      // that would silently omit a configured source from the fingerprint.
+      if (!threw) {
+        expect(result.configuredSourceFailed).toBe(true);
+      }
+      // Either path is acceptable: threw or configuredSourceFailed.
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC4: valid configured skill resolves successfully and is stable across calls', () => {
+    // When a configured skill SKILL.md exists, it must resolve without failure
+    // and produce a stable, non-empty sha256.  This ensures the fix does not
+    // break normal provenance resolution for valid configured sources.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-valid-skill-'));
+    try {
+      const skillDir = path.join(tempDir, '.pi', 'skills', 'my-skill');
+      fs.mkdirSync(skillDir, { recursive: true });
+      const skillContent = '# My Skill\nI help with things.';
+      fs.writeFileSync(path.join(skillDir, 'SKILL.md'), skillContent);
+
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    skills:
+      - my-skill
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            skills: ['my-skill'],
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      const result1 = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      expect(result1.resolutionFailed).toBeUndefined();
+
+      const skillEntry = result1.entries.find(e => e.kind === PromptProvenanceKind.SKILL_PROMPT);
+      expect(skillEntry).toBeDefined();
+      expect(skillEntry!.sha256).toBe(sha256(skillContent));
+      expect(skillEntry!.missing).toBeUndefined();
+
+      // Stable across calls
+      const result2 = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      const skillEntry2 = result2.entries.find(e => e.kind === PromptProvenanceKind.SKILL_PROMPT);
+      expect(skillEntry2!.sha256).toBe(skillEntry!.sha256);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('AC4: compatibility paths from optional discovery remain optional — absent compat mode succeeds', () => {
+    // Compatibility paths come from InstructionLoader.compatibilityContext() which already
+    // uses existsSync-based discovery — these are OPTIONAL.  When no compat mode is set,
+    // no compat entries are added but provenance resolution succeeds without failure.
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-compat-optional-'));
+    try {
+      const configPath = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(configPath, `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+      const config: any = {
+        settings: { workflowVersion: '1.0' },
+        states: {
+          Planning: {
+            actions: [{ id: 'formulate-plan', prompt: 'Plan the work' }]
+          }
+        }
+      };
+
+      // No compat mode configured — resolution must succeed (no failure) with
+      // no compat entries.  Optional discovery does NOT set resolutionFailed or configuredSourceFailed.
+      const result = resolvePromptProvenance(config, tempDir, 'Planning', configPath);
+      expect(result.resolutionFailed).toBeUndefined();
+      expect(result.configuredSourceFailed).toBeUndefined();
+      const compatEntries = result.entries.filter(e => e.kind === PromptProvenanceKind.COMPATIBILITY_PROMPT);
+      expect(compatEntries.length).toBe(0);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// r3yq: AC2/AC4 — gate-level blocking: configured source failure blocks SUCCESS
+// ---------------------------------------------------------------------------
+
+describe('completion gate — configured source failures BLOCK SUCCESS (r3yq AC2/AC4)', () => {
+  it('AC2: BLOCKS SUCCESS when a configured skill is missing at run start', async () => {
+    // A configured state skill that is missing must cause the gate to HARD-BLOCK
+    // SUCCESS.  provenanceValid must be false and blockingEvidence must be non-empty.
+    // We simulate this by injecting a STATE_RUN_INITIALIZED event with
+    // promptProvenanceConfiguredSourceFailed: true (what the harness records when a
+    // configured skill cannot be resolved).
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-gate-skill-block-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), minimalHarnessYaml());
+
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-gate-skill-block';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      // Inject a STATE_RUN_INITIALIZED event with promptProvenanceConfiguredSourceFailed: true
+      // to simulate what the harness records when a configured skill is missing.
+      // We append it after the real one so the gate (which reverses events) sees it first.
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const eventDir = path.join(tempRoot, '.pi', 'events');
+      const eventFiles = fs.existsSync(eventDir)
+        ? fs.readdirSync(eventDir).filter(f => f.endsWith('.jsonl'))
+        : [];
+      const configuredSourceFailedInitEvent = JSON.stringify({
+        id: 'fake-init-configured-source-failed',
+        type: DomainEventName.STATE_RUN_INITIALIZED,
+        timestamp: new Date().toISOString(),
+        data: {
+          beadId: 'bd-gate-skill-block',
+          stateId: 'Planning',
+          actionId: 'formulate-plan',
+          actionKey: 'formulate-plan',
+          promptProvenanceConfiguredSourceFailed: true
+          // No promptProvenance — to confirm the configuredSourceFailed path wins
+        }
+      }) + '\n';
+      for (const file of eventFiles) {
+        fs.appendFileSync(path.join(eventDir, file), configuredSourceFailedInitEvent);
+      }
+
+      // Drop the bead index so the gate falls back to a full scan and sees the injected event.
+      const beadIndexDir = path.join(eventDir, EventStoreDefaults.BEAD_INDEX_DIR);
+      fs.rmSync(beadIndexDir, { recursive: true, force: true });
+
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      await submitCheckpoint.execute('checkpoint-skill-block', { summary: 'done', evidence: 'proof' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-skill-block', {
+        outcome: 'SUCCESS',
+        summary: 'completed despite missing configured skill'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Gate must HARD-BLOCK SUCCESS when a configured source was unresolvable at init.
+      expect(result.details).toContain('REJECTED');
+      // Must not be merely a warn-only path (provenanceValid must be false).
+      expect(result.details).not.toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2: BLOCKS SUCCESS when a configured goal prompt file is missing at run start', async () => {
+    // A configured goal prompt file that is missing must block SUCCESS at the gate.
+    // Simulated via a STATE_RUN_INITIALIZED event with promptProvenanceConfiguredSourceFailed: true.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-gate-goal-block-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), minimalHarnessYaml());
+
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-gate-goal-block';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      await new Promise(resolve => setTimeout(resolve, 30));
+      const eventDir = path.join(tempRoot, '.pi', 'events');
+      const eventFiles = fs.existsSync(eventDir)
+        ? fs.readdirSync(eventDir).filter(f => f.endsWith('.jsonl'))
+        : [];
+      const goalFailedInitEvent = JSON.stringify({
+        id: 'fake-init-goal-failed',
+        type: DomainEventName.STATE_RUN_INITIALIZED,
+        timestamp: new Date().toISOString(),
+        data: {
+          beadId: 'bd-gate-goal-block',
+          stateId: 'Planning',
+          actionId: 'formulate-plan',
+          actionKey: 'formulate-plan',
+          promptProvenanceConfiguredSourceFailed: true
+        }
+      }) + '\n';
+      for (const file of eventFiles) {
+        fs.appendFileSync(path.join(eventDir, file), goalFailedInitEvent);
+      }
+
+      const beadIndexDir = path.join(eventDir, EventStoreDefaults.BEAD_INDEX_DIR);
+      fs.rmSync(beadIndexDir, { recursive: true, force: true });
+
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      await submitCheckpoint.execute('checkpoint-goal-block', { summary: 'done', evidence: 'proof' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-goal-block', {
+        outcome: 'SUCCESS',
+        summary: 'completed despite missing goal prompt file'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      expect(result.details).toContain('REJECTED');
+      expect(result.details).not.toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2: BLOCKS SUCCESS when a configured action prompt file is missing at run start', async () => {
+    // A configured action prompt FILE that is missing must block SUCCESS at the gate.
+    // We start a run where harness.yaml references a missing_plan.md action prompt,
+    // which triggers configuredSourceFailed at init, blocking SUCCESS.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-gate-action-block-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+
+    // The action prompt file is configured but MISSING.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "missing_plan.md"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    // Do NOT create missing_plan.md — it is intentionally absent.
+
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-gate-action-block';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      // BEFORE_AGENT_START resolves provenance and records STATE_RUN_INITIALIZED
+      // with promptProvenanceConfiguredSourceFailed: true (missing_plan.md is absent).
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      await submitCheckpoint.execute('checkpoint-action-block', { summary: 'done', evidence: 'proof' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-action-block', {
+        outcome: 'SUCCESS',
+        summary: 'completed despite missing action prompt file'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Gate must HARD-BLOCK SUCCESS — the configured action prompt file was missing.
+      expect(result.details).toContain('REJECTED');
+      expect(result.details).not.toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2 regression: inline objective/prompt text with a slash does NOT trigger configuredSourceFailed', async () => {
+    // Regression guard for the looksLikeFilePath false-positive fix.
+    // Values like "Implement the auth/login flow" contain a slash but are inline
+    // text.  Before the fix, looksLikeFilePath returned true for these, causing
+    // configuredSourceFailed to be set and SUCCESS to be hard-blocked.
+    // After the fix, the whitespace check short-circuits before the slash check.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-inline-slash-gate-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+
+    // An action prompt that is inline text containing slashes (the false-positive case).
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+  projectObjective: "Implement the auth/login flow using TypeScript/JavaScript best practices"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Refactor input/output handling and/or cleanup"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-inline-slash-gate';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      await submitCheckpoint.execute('checkpoint-inline-slash', { summary: 'done', evidence: 'proof' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-inline-slash', {
+        outcome: 'SUCCESS',
+        summary: 'completed with inline slash text'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Inline text with slashes must NOT block SUCCESS.
+      expect(result.details).not.toContain('REJECTED');
+      expect(result.details).toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('AC4: normal run with valid configured skill passes the gate (no regression)', async () => {
+    // When a configured skill SKILL.md EXISTS, provenance resolution succeeds and
+    // signal_completion SUCCESS is NOT blocked.  Ensures the fix does not regress
+    // normal runs with valid configured sources.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+      apiBase: process.env[EnvVars.API_BASE]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'r3yq-gate-skill-pass-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+
+    // Create a valid skill SKILL.md
+    const skillDir = path.join(tempRoot, '.pi', 'skills', 'my-valid-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, 'SKILL.md'), '# My Valid Skill\nHelps with planning.');
+
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    skills:
+      - my-valid-skill
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+    const receivedEvents: unknown[] = [];
+    let server: Server | undefined;
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      server = await startSignalAckServer(receivedEvents);
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-gate-skill-pass';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const submitCheckpoint = harness.tools.find(tool => tool.name === BuiltInToolName.SUBMIT_CHECKPOINT);
+      const signalCompletion = harness.tools.find(tool => tool.name === BuiltInToolName.SIGNAL_COMPLETION);
+
+      await submitCheckpoint.execute('checkpoint-skill-pass', { summary: 'done', evidence: 'proof' }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      const result = await signalCompletion.execute('signal-skill-pass', {
+        outcome: 'SUCCESS',
+        summary: 'completed with valid configured skill'
+      }, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Valid configured skill — gate must PASS, not block.
+      expect(result.details).not.toContain('REJECTED');
+      expect(result.details).toContain('Completion signaled with outcome: SUCCESS');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await closeServer(server);
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (previousEnv.apiBase === undefined) delete process.env[EnvVars.API_BASE];
+      else process.env[EnvVars.API_BASE] = previousEnv.apiBase;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

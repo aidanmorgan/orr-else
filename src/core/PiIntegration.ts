@@ -261,14 +261,21 @@ export interface PromptProvenanceEntry {
  * The full provenance record stored on STATE_RUN_INITIALIZED.
  *
  * `resolutionFailed` — set to true when the provenance resolver encountered an
- *   unrecoverable error during init.  The completion gate treats this as a
- *   warning (never a hard block) because the agent should not be penalised for
- *   a harness-level resolution problem.
+ *   unexpected harness-level error during init (e.g. an unhandled exception in
+ *   the outer guard).  The completion gate treats this as WARN-ONLY — the agent
+ *   should not be penalised for a harness-level resolution problem.
+ *
+ * `configuredSourceFailed` — set to true when a CONFIGURED / author-declared
+ *   required source (a skill listed in state.skills, a global skillPath, or a
+ *   prompt field that looks like a file path) could not be resolved at run start.
+ *   The completion gate treats this as a HARD BLOCK: SUCCESS cannot be claimed
+ *   when a configured required context was absent.
  */
 export interface PromptProvenance {
   entries: PromptProvenanceEntry[];
   harnessConfigVersion: string | undefined;
   resolutionFailed?: true;
+  configuredSourceFailed?: true;
 }
 
 /**
@@ -398,6 +405,33 @@ function resolveFileReference(value: string | undefined, projectRoot: string): s
 }
 
 /**
+ * Heuristic: does this string look like a file path rather than inline text?
+ *
+ * A value is treated as a CONFIGURED file reference ONLY if its trimmed form
+ * contains NO whitespace AND at least one of:
+ *   - it is an absolute path (starts with '/'), OR
+ *   - it contains a path separator ('/' or '\'), OR
+ *   - it has a recognisable file extension (e.g. .md, .txt, .yaml, .yml, .json).
+ *
+ * If the trimmed value contains ANY whitespace it is definitively inline text
+ * (sentences, objectives, multi-word prompts) and returns false unconditionally.
+ * Configured file paths in this harness are always single tokens; multi-word
+ * values cannot be file paths, so slashes inside them (e.g. "auth/login flow",
+ * "TypeScript/JavaScript") must never trigger missing-file detection.
+ */
+function looksLikeFilePath(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  // Multi-word / whitespace-containing values are always inline text, never file refs.
+  if (/\s/.test(trimmed)) return false;
+  if (path.isAbsolute(trimmed)) return true;
+  if (trimmed.includes('/') || trimmed.includes('\\')) return true;
+  // Has a recognisable file extension
+  const ext = path.extname(trimmed).toLowerCase();
+  return ['.md', '.txt', '.yaml', '.yml', '.json', '.prompt', '.instructions'].includes(ext);
+}
+
+/**
  * Resolve the prompt provenance for a single run.
  *
  * Computes a SHA-256 for each prompt/config source that is specific to THIS
@@ -463,13 +497,36 @@ export function resolvePromptProvenance(
 
   // ── 3. Goal / objective prompt ─────────────────────────────────────────────
   // The "goal prompt" is the projectObjective if it resolves to a file.
+  //
+  // CONFIGURED-SOURCE detection: if the value looks like a file path (has a
+  // file extension, path separator, or is absolute) but the file does not exist
+  // on disk, this is a CONFIGURED source that failed to resolve.  Emit a
+  // missing entry and set configuredSourceFailed so the gate can hard-block.
+  let configuredSourceFailed = false;
   try {
-    const goalRef = resolveFileReference(config.settings.projectObjective, projectRoot);
-    if (goalRef) {
-      const { sha256, missing } = hashFile(goalRef);
-      const entry: PromptProvenanceEntry = { kind: PromptProvenanceKind.GOAL_PROMPT, path: goalRef, sha256 };
-      if (missing) entry.missing = true;
-      entries.push(entry);
+    const goalValue = config.settings.projectObjective;
+    if (goalValue && goalValue.trim()) {
+      const goalRef = resolveFileReference(goalValue, projectRoot);
+      if (goalRef) {
+        const { sha256, missing } = hashFile(goalRef);
+        const entry: PromptProvenanceEntry = { kind: PromptProvenanceKind.GOAL_PROMPT, path: goalRef, sha256 };
+        if (missing) entry.missing = true;
+        entries.push(entry);
+      } else if (looksLikeFilePath(goalValue)) {
+        // Looks like a file path but does not exist — CONFIGURED source missing.
+        const resolvedCandidate = path.isAbsolute(goalValue)
+          ? goalValue
+          : path.resolve(projectRoot, goalValue.trim());
+        const entry: PromptProvenanceEntry = {
+          kind: PromptProvenanceKind.GOAL_PROMPT,
+          path: resolvedCandidate,
+          sha256: PromptProvenanceDefaults.MISSING_HASH,
+          missing: true
+        };
+        entries.push(entry);
+        configuredSourceFailed = true;
+      }
+      // else: genuine inline text — not a file reference, skip silently.
     }
   } catch {
     // Degrade gracefully — skip goal prompt entry rather than aborting all provenance.
@@ -483,6 +540,11 @@ export function resolvePromptProvenance(
   // longer functions as a file path reference and resolveFileReference() will not
   // find it as an existing file.  By reading the raw YAML we recover the original
   // authored path (e.g. "default_plan.md") and can hash the file directly.
+  //
+  // CONFIGURED-SOURCE detection: if the raw prompt value looks like a file path
+  // (has a file extension, path separator, or is absolute) but the file does not
+  // exist, this is a CONFIGURED prompt-file source that failed.  Emit a missing
+  // entry and set configuredSourceFailed so the gate hard-blocks SUCCESS.
   if (stateId) {
     try {
       const rawState = readRawStateSubtree(configPath, stateId) as Record<string, unknown> | undefined;
@@ -501,7 +563,21 @@ export function resolvePromptProvenance(
               };
               if (missing) entry.missing = true;
               entries.push(entry);
+            } else if (looksLikeFilePath(promptValue)) {
+              // Looks like a file path but does not exist — CONFIGURED prompt-file source missing.
+              const resolvedCandidate = path.isAbsolute(promptValue)
+                ? promptValue
+                : path.resolve(projectRoot, promptValue.trim());
+              const entry: PromptProvenanceEntry = {
+                kind: PromptProvenanceKind.STATE_PROMPT,
+                path: resolvedCandidate,
+                sha256: PromptProvenanceDefaults.MISSING_HASH,
+                missing: true
+              };
+              entries.push(entry);
+              configuredSourceFailed = true;
             }
+            // else: genuine inline text — not a file reference, skip silently.
           }
         } catch {
           // Skip this action's prompt rather than aborting all provenance.
@@ -536,30 +612,44 @@ export function resolvePromptProvenance(
   }
 
   // ── 6. Skill SKILL.md files ───────────────────────────────────────────────
+  // CONFIGURED sources: resolvePiSkillPathsForState throws for any skill that
+  // is listed in the state's `skills` array (or in global `skillPaths`) but
+  // cannot be found on disk.  We must NOT silently eat that error — a missing
+  // configured skill means the run would proceed without a deterministic context
+  // that the author declared as required.  Propagate the failure as
+  // `configuredSourceFailed: true` so the completion gate hard-blocks SUCCESS.
+  //
+  // Within a successful skill list, individual hashFile calls still degrade
+  // gracefully (unexpected I/O error on a file that DID resolve) to avoid
+  // aborting provenance for a transient read fault.
   try {
     const skills = resolvePiSkillPathsForState(config, projectRoot, stateId);
     for (const skill of skills) {
-      try {
-        const { sha256, missing } = hashFile(skill.path);
-        const entry: PromptProvenanceEntry = {
-          kind: PromptProvenanceKind.SKILL_PROMPT,
-          path: skill.path,
-          sha256
-        };
-        if (missing) entry.missing = true;
-        entries.push(entry);
-      } catch {
-        // Skip individual skill rather than aborting all provenance.
-      }
+      const { sha256, missing } = hashFile(skill.path);
+      const entry: PromptProvenanceEntry = {
+        kind: PromptProvenanceKind.SKILL_PROMPT,
+        path: skill.path,
+        sha256
+      };
+      if (missing) entry.missing = true;
+      entries.push(entry);
     }
-  } catch {
-    // resolvePiSkillPathsForState can throw (missing skill dir / path traversal).
-    // Best-effort: skip skill entries rather than aborting all provenance.
+  } catch (err) {
+    // resolvePiSkillPathsForState threw — a CONFIGURED skill or global skill
+    // path could not be resolved.  This is a deterministic configured-source
+    // failure: return configuredSourceFailed: true so the completion gate
+    // hard-blocks SUCCESS.
+    return {
+      entries,
+      harnessConfigVersion: config.settings.workflowVersion,
+      configuredSourceFailed: true
+    };
   }
 
   return {
     entries,
-    harnessConfigVersion: config.settings.workflowVersion
+    harnessConfigVersion: config.settings.workflowVersion,
+    ...(configuredSourceFailed ? { configuredSourceFailed: true as const } : {})
   };
 }
 

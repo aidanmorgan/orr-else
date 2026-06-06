@@ -699,9 +699,12 @@ export async function evaluateGateReadiness(
   // projection/index for "latest init event for bead+state" would reduce this
   // to O(1) if the event store ever grows to support it.
   //
-  // Local reason constants for the two distinct failure modes.
+  // Local reason constants for the distinct failure modes.
   const REJECT_REASON_RESOLUTION_FAILED =
     'Prompt provenance could not be resolved at run start (harness error; warn only — completion allowed)';
+  const REJECT_REASON_CONFIGURED_SOURCE_FAILED =
+    'A configured required source (skill or prompt file) could not be resolved at run start. ' +
+    'SUCCESS is blocked until all configured skills and prompt files are available.';
 
   let provenanceValid = true;
   let provenanceReason: string | undefined;
@@ -715,13 +718,25 @@ export async function evaluateGateReadiness(
       .reverse()
       .find(e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === activeRun.stateId);
 
-    // If resolution failed at init, warn but do not block completion.
+    // HARD-BLOCK: a CONFIGURED required source (skill, prompt file) was missing at
+    // run start.  The agent cannot claim SUCCESS when its declared required context
+    // was absent.  This is distinct from a harness-level error (warn-only below).
+    const configuredSourceFailed = initEvent?.data?.promptProvenanceConfiguredSourceFailed === true;
+    if (configuredSourceFailed) {
+      provenanceValid = false;
+      provenanceReason = REJECT_REASON_CONFIGURED_SOURCE_FAILED;
+      blockingEvidence.push(`${REJECT_REASON_CONFIGURED_SOURCE_FAILED}`);
+    }
+
+    // WARN-ONLY: harness-level resolution error at init — do not penalise the agent.
     const resolutionFailed = initEvent?.data?.promptProvenanceResolutionFailed === true;
-    if (resolutionFailed) {
+    if (!configuredSourceFailed && resolutionFailed) {
       // Warn via provenanceReason but leave provenanceValid = true (allow completion).
       provenanceReason = REJECT_REASON_RESOLUTION_FAILED;
       // Do NOT push to blockingEvidence — this is a warn-only path.
-    } else {
+    }
+
+    if (!configuredSourceFailed && !resolutionFailed) {
       const recorded = initEvent?.data?.promptProvenance as
         | { entries: PromptProvenanceEntry[]; harnessConfigVersion?: string }
         | undefined;

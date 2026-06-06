@@ -1435,9 +1435,18 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   const configPath = services.configLoader.getConfigPath();
   let promptProvenance: { entries: PromptProvenanceEntry[]; harnessConfigVersion: string | undefined } | undefined;
   let promptProvenanceResolutionFailed = false;
+  let promptProvenanceConfiguredSourceFailed = false;
   try {
-    promptProvenance = resolvePromptProvenance(config, projectRoot, stateId, configPath);
-    if ((promptProvenance as any).resolutionFailed) {
+    const resolved = resolvePromptProvenance(config, projectRoot, stateId, configPath);
+    promptProvenance = resolved;
+    if (resolved.configuredSourceFailed) {
+      // A CONFIGURED/author-declared required source (skill, prompt file) could not
+      // be resolved.  Record this flag so the completion gate hard-blocks SUCCESS.
+      promptProvenanceConfiguredSourceFailed = true;
+      Logger.warn(Component.ORR_ELSE, 'Prompt provenance: a configured required source (skill or prompt file) could not be resolved; gate will hard-block SUCCESS for this run.');
+    }
+    if (resolved.resolutionFailed) {
+      // Unexpected harness-level resolution error — warn-only (agent not penalised).
       promptProvenanceResolutionFailed = true;
       Logger.warn(Component.ORR_ELSE, 'Prompt provenance resolution reported failure; provenance gate will warn-only for this run.');
     }
@@ -1486,6 +1495,9 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     // completion gate to warn only rather than hard-reject (the agent should not
     // be penalised for a harness resolution error).
     promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined,
+    // Set when a CONFIGURED required source (skill, prompt file) could not be
+    // resolved — signals the completion gate to hard-block SUCCESS.
+    promptProvenanceConfiguredSourceFailed: promptProvenanceConfiguredSourceFailed || undefined,
     // Restart lifecycle correlation (pi-experiment-nyug): present only when this
     // run was initiated by a restart request. runId identifies this worker session.
     runId: runId || undefined,
