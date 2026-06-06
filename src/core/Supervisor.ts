@@ -345,24 +345,19 @@ export class Supervisor {
     if (pauseUntilMs <= this.schedulingPausedUntilMs) return;
     this.schedulingPausedUntilMs = pauseUntilMs;
     this.schedulingPausedReason = reason;
-    // Persist the legacy HARNESS_CAPACITY_LIMIT_REACHED event (used by
-    // restoreCapacityPauseFromStore on coordinator restart) and the new
-    // SCHEDULING_PAUSED event (fired exactly once per distinct pause window).
     const pauseUntilIso = this.clock.date(pauseUntilMs).toISOString();
-    void this.eventStore.record(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED, {
-      pauseUntil: pauseUntilIso,
-      reason,
-      // n8fg taxonomy: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE (budget irrelevant for this class)
-      ...this.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
-    }).catch(() => {});
     // Fire SCHEDULING_PAUSED exactly once per distinct pauseUntil value so
     // operators see a single clean enter-event rather than per-poll noise.
+    // SCHEDULING_PAUSED is the sole canonical capacity-pause event (j0tp).
+    // It carries reason + pauseUntil + l3k4 taxonomy fields (PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE).
     if (pauseUntilMs !== this.lastSchedulingPausedEventMs) {
       this.lastSchedulingPausedEventMs = pauseUntilMs;
       this.lastPauseHeartbeatMs = this.clock.now();
       void this.eventStore.record(DomainEventName.SCHEDULING_PAUSED, {
         pauseUntil: pauseUntilIso,
-        reason
+        reason,
+        // n8fg taxonomy: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE (budget irrelevant for this class)
+        ...this.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
       }).catch(() => {});
       Logger.warn(Component.SUPERVISOR, 'Scheduling paused; entering quiet capacity-pause mode', {
         pauseUntil: pauseUntilIso,
@@ -372,15 +367,17 @@ export class Supervisor {
   }
 
   private async restoreCapacityPauseFromStore(): Promise<void> {
-    const latestCapacityEvent = await this.eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED).catch((error: unknown) => {
+    // j0tp: restore from SCHEDULING_PAUSED (canonical event). Legacy
+    // HARNESS_CAPACITY_LIMIT_REACHED events alone do NOT restore scheduler state.
+    const latestPausedEvent = await this.eventStore.latestEventByType(DomainEventName.SCHEDULING_PAUSED).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
       return undefined;
     });
-    const pauseUntilMs = Date.parse(String(latestCapacityEvent?.data?.pauseUntil || ''));
+    const pauseUntilMs = Date.parse(String(latestPausedEvent?.data?.pauseUntil || ''));
     if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= this.clock.now()) return;
 
     this.schedulingPausedUntilMs = pauseUntilMs;
-    this.schedulingPausedReason = String(latestCapacityEvent?.data?.reason || latestCapacityEvent?.data?.summary || 'Harness capacity limit reached');
+    this.schedulingPausedReason = String(latestPausedEvent?.data?.reason || 'Scheduling paused');
     Logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
       pauseUntil: this.pausedUntilIso(),
       reason: this.schedulingPausedReason

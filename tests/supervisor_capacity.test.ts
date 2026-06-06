@@ -104,7 +104,9 @@ describe('Supervisor capacity pause handling', () => {
     expect(createWorktree).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
     expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
-    expect(records.some(record => record.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED)).toBe(true);
+    // j0tp: capacity pause uses SCHEDULING_PAUSED (not legacy HARNESS_CAPACITY_LIMIT_REACHED)
+    expect(records.some(record => record.event === DomainEventName.SCHEDULING_PAUSED)).toBe(true);
+    expect(records.some(record => record.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED)).toBe(false);
   });
 
   it('restores an active capacity pause before scanning the backlog', async () => {
@@ -135,10 +137,11 @@ describe('Supervisor capacity pause handling', () => {
         },
         flowManager: {},
         scheduler: {},
+        // j0tp: restore reads from SCHEDULING_PAUSED, not legacy HARNESS_CAPACITY_LIMIT_REACHED
         eventStore: fakeProjectionStore({
           latestEventByType: vi.fn(async () => ({
             id: 'capacity-event',
-            type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
+            type: DomainEventName.SCHEDULING_PAUSED,
             timestamp: clock.date().toISOString(),
             sessionId: 'previous-session',
             data: { pauseUntil, reason: 'subscription capacity exhausted' }
@@ -157,6 +160,53 @@ describe('Supervisor capacity pause handling', () => {
     expect(claim).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
+  });
+
+  it('legacy-only replay: HARNESS_CAPACITY_LIMIT_REACHED alone does NOT restore scheduler state', async () => {
+    // j0tp AC4: a replay fixture with ONLY HARNESS_CAPACITY_LIMIT_REACHED must NOT
+    // restore a capacity pause — the legacy event is rejected/quarantined, not acted on.
+    const clock = createFakeClock();
+    const claim = vi.fn(async ({ id }: { id: string }) => ({ id, status: 'Planning' } as any));
+    const spawnTeammateInTmux = vi.fn(async () => ({ success: true, paneId: '%1' }));
+    const pauseUntil = clock.date(clock.now() + TimeMs.MINUTE).toISOString();
+
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      { id: 'bead-1', stateId: 'Planning', score: 1 }
+    ]);
+
+    const supervisor = new Supervisor(
+      {} as any,
+      { hasUI: false } as any,
+      { getHeartbeatSnapshot: () => [] } as any,
+      {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        getAvailableSlots: vi.fn(async () => 1),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        spawnTeammateInTmux
+      } as any,
+      { tracedAsync: (_name: string, _attrs: unknown, fn: () => unknown) => fn } as any,
+      {
+        configLoader: { load: async () => ({ settings: {} }) },
+        flowManager: {},
+        scheduler: {},
+        // Only a legacy HARNESS_CAPACITY_LIMIT_REACHED event — no SCHEDULING_PAUSED
+        eventStore: fakeProjectionStore({
+          latestEventByType: vi.fn(async (type: string) => {
+            if (type === DomainEventName.SCHEDULING_PAUSED) return undefined;
+            return undefined; // HARNESS_CAPACITY_LIMIT_REACHED also returns undefined (not read)
+          })
+        }),
+        beadsPort: fakeBeadsPort({ claim }),
+        worktreePort: fakeWorktreePort()
+      } as any,
+      { maxSlots: 1, clock }
+    );
+
+    await (supervisor as any).restoreCapacityPauseFromStore();
+
+    // The scheduler must NOT be paused — legacy event alone cannot restore pause
+    expect((supervisor as any).isSchedulingPaused()).toBe(false);
+    expect((supervisor as any).schedulingPausedUntilMs).toBe(0);
   });
 
   it('uses live teammate panes, not stale tracked bead ids, when filling capacity', async () => {

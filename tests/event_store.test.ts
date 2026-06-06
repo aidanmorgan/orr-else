@@ -341,14 +341,15 @@ settings:
   });
 
   it('streams the latest project event by type', async () => {
+    // j0tp: test updated to use SCHEDULING_PAUSED (canonical capacity-pause event)
     const eventsPath = path.join(tempRoot, '.pi/events/project.jsonl');
     const records = [
       {
         id: 'e1',
-        type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
+        type: DomainEventName.SCHEDULING_PAUSED,
         timestamp: '2026-01-01T00:00:01.000Z',
         sessionId: 's1',
-        data: { pauseUntil: '2026-01-01T00:10:00.000Z' }
+        data: { pauseUntil: '2026-01-01T00:10:00.000Z', reason: 'usage_limit' }
       },
       {
         id: 'e2',
@@ -359,15 +360,15 @@ settings:
       },
       {
         id: 'e3',
-        type: DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED,
+        type: DomainEventName.SCHEDULING_PAUSED,
         timestamp: '2026-01-01T00:00:03.000Z',
         sessionId: 's2',
-        data: { pauseUntil: '2026-01-01T00:20:00.000Z' }
+        data: { pauseUntil: '2026-01-01T00:20:00.000Z', reason: 'usage_limit' }
       }
     ];
     fs.writeFileSync(eventsPath, `${records.map(record => JSON.stringify(record)).join('\n')}\n`);
 
-    const latest = await eventStore.latestEventByType(DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED);
+    const latest = await eventStore.latestEventByType(DomainEventName.SCHEDULING_PAUSED);
 
     expect(latest?.id).toBe('e3');
     expect(latest?.sessionId).toBe('s2');

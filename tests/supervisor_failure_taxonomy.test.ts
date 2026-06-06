@@ -417,9 +417,10 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
     expect(records.some(r => r.event === DEN.HARNESS_RESTART_REQUESTED)).toBe(true);
   });
 
-  it('HARNESS_CAPACITY_LIMIT_REACHED events for usage limit carry taxonomy fields (PROVIDER_LIMIT → SCHEDULING_PAUSE)', async () => {
-    // The capacity-pause path records HARNESS_CAPACITY_LIMIT_REACHED.
-    // After l3k4 wiring, this event must include taxonomy fields.
+  // j0tp: taxonomy fields are on SCHEDULING_PAUSED (legacy HARNESS_CAPACITY_LIMIT_REACHED removed)
+  it('SCHEDULING_PAUSED events for usage limit carry taxonomy fields (PROVIDER_LIMIT → SCHEDULING_PAUSE)', async () => {
+    // The capacity-pause path records SCHEDULING_PAUSED (sole event after j0tp).
+    // l3k4 taxonomy fields are preserved on SCHEDULING_PAUSED.
     const { Supervisor } = await import('../src/core/Supervisor.js');
     const { TimeMs } = await import('../src/constants/index.js');
 
@@ -467,13 +468,16 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
     const pauseUntilMs = NOW_MS + TimeMs.MINUTE;
     supervisor.pauseSchedulingUntil(pauseUntilMs, 'provider usage limit reached');
 
-    // The HARNESS_CAPACITY_LIMIT_REACHED event must carry taxonomy fields
-    const capacityEvent = records.find(r => r.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED);
-    expect(capacityEvent).toBeDefined();
-    expect(capacityEvent!.data.taxonomyClass).toBe(FailureClass.PROVIDER_LIMIT);
-    expect(capacityEvent!.data.taxonomyRowId).toBe('provider_limit.running');
-    expect(capacityEvent!.data.taxonomyAction).toBe(NextAction.SCHEDULING_PAUSE);
-    expect(capacityEvent!.data.lifecyclePhase).toBe(LifecyclePhase.RUNNING);
+    // j0tp: SCHEDULING_PAUSED is the sole capacity-pause event and carries taxonomy fields
+    const schedulingPausedEvent = records.find(r => r.event === DomainEventName.SCHEDULING_PAUSED);
+    expect(schedulingPausedEvent).toBeDefined();
+    expect(schedulingPausedEvent!.data.taxonomyClass).toBe(FailureClass.PROVIDER_LIMIT);
+    expect(schedulingPausedEvent!.data.taxonomyRowId).toBe('provider_limit.running');
+    expect(schedulingPausedEvent!.data.taxonomyAction).toBe(NextAction.SCHEDULING_PAUSE);
+    expect(schedulingPausedEvent!.data.lifecyclePhase).toBe(LifecyclePhase.RUNNING);
+
+    // j0tp: legacy HARNESS_CAPACITY_LIMIT_REACHED must NOT be emitted
+    expect(records.some(r => r.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED)).toBe(false);
   });
 
   it('BEAD_QUARANTINED events for MCP backend record taxonomy row BACKEND_READINESS.spawn → QUARANTINE', () => {
@@ -771,18 +775,23 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
   });
 
   // Path 2: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE
-  it('path 2: usage limit (PROVIDER_LIMIT) → SCHEDULING_PAUSE → HARNESS_CAPACITY_LIMIT_REACHED carries taxonomy fields', async () => {
+  // j0tp: taxonomy fields moved onto SCHEDULING_PAUSED (legacy HARNESS_CAPACITY_LIMIT_REACHED removed)
+  it('path 2: usage limit (PROVIDER_LIMIT) → SCHEDULING_PAUSE → SCHEDULING_PAUSED carries taxonomy fields', async () => {
     const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
     const { supervisor, records } = await makeTestSupervisor({ nowMs: NOW_MS });
 
     supervisor.pauseSchedulingUntil(NOW_MS + TimeMs.MINUTE, 'provider usage limit reached');
 
-    const capacityEvent = records.find(r => r.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED);
-    expect(capacityEvent, 'HARNESS_CAPACITY_LIMIT_REACHED must be emitted').toBeDefined();
-    expect(capacityEvent!.data.taxonomyClass).toBe(FailureClass.PROVIDER_LIMIT);
-    expect(capacityEvent!.data.taxonomyRowId).toBe('provider_limit.running');
-    expect(capacityEvent!.data.taxonomyAction).toBe(NextAction.SCHEDULING_PAUSE);
-    expect(capacityEvent!.data.lifecyclePhase).toBe(LifecyclePhase.RUNNING);
+    // j0tp: SCHEDULING_PAUSED is the sole capacity-pause event; must carry taxonomy fields
+    const schedulingPausedEvent = records.find(r => r.event === DomainEventName.SCHEDULING_PAUSED);
+    expect(schedulingPausedEvent, 'SCHEDULING_PAUSED must be emitted').toBeDefined();
+    expect(schedulingPausedEvent!.data.taxonomyClass).toBe(FailureClass.PROVIDER_LIMIT);
+    expect(schedulingPausedEvent!.data.taxonomyRowId).toBe('provider_limit.running');
+    expect(schedulingPausedEvent!.data.taxonomyAction).toBe(NextAction.SCHEDULING_PAUSE);
+    expect(schedulingPausedEvent!.data.lifecyclePhase).toBe(LifecyclePhase.RUNNING);
+
+    // j0tp: legacy HARNESS_CAPACITY_LIMIT_REACHED must NOT be emitted
+    expect(records.some(r => r.event === DomainEventName.HARNESS_CAPACITY_LIMIT_REACHED)).toBe(false);
 
     // Table action SCHEDULING_PAUSE → supervisor pauses scheduling
     expect((supervisor as any).isSchedulingPaused()).toBe(true);
