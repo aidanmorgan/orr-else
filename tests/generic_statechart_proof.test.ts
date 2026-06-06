@@ -334,16 +334,18 @@ describe('AC-2: FlowManager outcome classification is purely YAML-driven', () =>
       expect(outcomeCategory('PARK', cfg)).toBe('blocked');
     });
 
-    it('SUCCESS (SDLC default) is not in any declared set → fallback advance', () => {
-      // SDLC SUCCESS is an unknown outcome in this config.
-      // Unknown outcomes fall back to 'advance' (safe default), proving that
-      // the classification is config-driven: PROMOTE is the real advance outcome.
-      expect(outcomeCategory(EventName.SUCCESS, cfg)).toBe('advance');
+    it('SUCCESS (SDLC default) is not in any declared set → classified as failed (strict mode)', () => {
+      // SDLC SUCCESS is an undeclared outcome in this config (PROMOTE is the
+      // real advance outcome).  In strict mode (explicit vocab declared) an
+      // undeclared outcome is classified as 'failed', not 'advance', so it can
+      // never count as progress (pi-experiment-lgwk root-cause fix).
+      expect(outcomeCategory(EventName.SUCCESS, cfg)).toBe('failed');
     });
 
-    it('FAILURE (SDLC default) is not in any declared set → fallback advance', () => {
-      // FAILURE is unknown in this config (RETURN is the failure outcome)
-      expect(outcomeCategory(EventName.FAILURE, cfg)).toBe('advance');
+    it('FAILURE (SDLC default) is not in any declared set → classified as failed (strict mode)', () => {
+      // FAILURE is undeclared in this config (RETURN is the failure outcome).
+      // In strict mode, undeclared → 'failed' (not 'advance').
+      expect(outcomeCategory(EventName.FAILURE, cfg)).toBe('failed');
     });
   });
 

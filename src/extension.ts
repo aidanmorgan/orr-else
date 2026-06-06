@@ -119,7 +119,7 @@ import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
-import { isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
+import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { PathContext } from './core/PathContext.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
@@ -1561,6 +1561,35 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   if (event.type === TeammateEventType.STATE_TRANSITIONED) {
     const state = config.states[event.stateId];
+
+    // ── AC2: strict-mode undeclared-outcome guard (pi-experiment-lgwk) ───────────
+    // The coordinator is the SOLE binding authority.  In strict mode (explicit
+    // outcome vocabulary declared) an undeclared transitionEvent must NOT advance,
+    // mutate completedActionIds, or record STATE_TRANSITION_APPLIED.  We block
+    // immediately — before any state mutation — and surface the rejection so the
+    // worker can remediate.
+    if (event.transitionEvent) {
+      try {
+        assertDeclaredOutcome(event.transitionEvent, config, `state "${event.stateId}" [coordinator binding]`);
+      } catch (declaredError) {
+        Logger.warn(Component.ORR_ELSE, 'Coordinator rejected undeclared outcome — not advancing', {
+          beadId,
+          stateId: event.stateId,
+          transitionEvent: event.transitionEvent,
+          error: String(declaredError)
+        });
+        ack?.send({
+          pass: false,
+          failures: [{ tool: 'outcome-vocabulary', kind: 'undeclared', verdict: 'FAIL' }],
+          rejectMessage: String(declaredError)
+        });
+        await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+          Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after undeclared-outcome rejection', { beadId, error: String(error) });
+        });
+        currentSupervisor.markBeadExited(beadId);
+        return;
+      }
+    }
 
     // ── COORDINATOR-side artifact-presence gate (pi-experiment-0yt5.20) ─────────
     // The BINDING authority (decision B): before applying an ADVANCE transition,

@@ -15,7 +15,7 @@ import type { Observability } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
 import { Logger } from '../core/Logger.js';
 import { missingMandatoryChecklistItems } from '../core/ChecklistRequirements.js';
-import { isAdvanceOutcome } from '../core/FlowManager.js';
+import { isAdvanceOutcome, assertDeclaredOutcome } from '../core/FlowManager.js';
 import {
   DomainEventName,
   EventName,
@@ -432,15 +432,28 @@ export async function evaluateGateReadiness(
   void obs;
   const blockingEvidence: string[] = [];
 
-  // ── 1. nextState transition validity ─────────────────────────────────────
+  // ── 0. Strict-mode outcome-vocabulary check ───────────────────────────────
+  // When a statechart block is present the vocabulary is explicit and closed.
+  // An undeclared outcome is rejected before any state mutation can occur.
   let transitionValid = true;
   let transitionError: string | undefined;
   try {
-    services.flowManager.nextState(activeRun.state, outcome, activeRun.stateId);
+    assertDeclaredOutcome(outcome, config, `state "${activeRun.stateId}"`);
   } catch (error) {
     transitionValid = false;
     transitionError = String(error);
-    blockingEvidence.push(`Invalid transition: ${transitionError}`);
+    blockingEvidence.push(`Undeclared outcome: ${transitionError}`);
+  }
+
+  // ── 1. nextState transition validity ─────────────────────────────────────
+  if (transitionValid) {
+    try {
+      services.flowManager.nextState(activeRun.state, outcome, activeRun.stateId);
+    } catch (error) {
+      transitionValid = false;
+      transitionError = String(error);
+      blockingEvidence.push(`Invalid transition: ${transitionError}`);
+    }
   }
 
   // ── 2. Terminal failure limit ─────────────────────────────────────────────

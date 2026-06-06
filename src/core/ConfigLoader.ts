@@ -396,16 +396,28 @@ export class ConfigLoader {
       return;
     }
 
-    // Declared outcome vocabulary for warning (only when statechart block present)
-    const declaredOutcomes = new Set([
-      ...(sc.advanceOutcomes ?? ['SUCCESS']),
-      ...(sc.failedOutcomes ?? ['FAILURE']),
-      ...(sc.blockedOutcomes ?? ['BLOCKED']),
-      ...(sc.customOutcomes ?? []),
-      // Always include restart events which are harness-internal
-      EventName.HARNESS_RESTART,
-      EventName.CONTEXT_RESTART
-    ].map(o => o.toUpperCase()));
+    // Strict vocabulary validation only when the author explicitly declared at
+    // least one outcome list.  A statechart block with ONLY terminalStates /
+    // initialState is NOT strict: forcing default {SUCCESS,FAILURE,BLOCKED} on
+    // such configs silently breaks legacy callers (AC4 violation).
+    const hasExplicitVocab =
+      sc.advanceOutcomes !== undefined ||
+      sc.failedOutcomes !== undefined ||
+      sc.blockedOutcomes !== undefined ||
+      sc.customOutcomes !== undefined;
+
+    // Declared outcome vocabulary — only built when strict mode is active.
+    const declaredOutcomes: Set<string> | null = hasExplicitVocab
+      ? new Set([
+          ...(sc.advanceOutcomes ?? ['SUCCESS']),
+          ...(sc.failedOutcomes ?? ['FAILURE']),
+          ...(sc.blockedOutcomes ?? ['BLOCKED']),
+          ...(sc.customOutcomes ?? []),
+          // Always include harness-internal restart events
+          EventName.HARNESS_RESTART,
+          EventName.CONTEXT_RESTART
+        ].map(o => o.toUpperCase()))
+      : null;
 
     for (const [stateId, state] of Object.entries(config.states || {})) {
       const allTransitions: Record<string, string> = {
@@ -421,11 +433,12 @@ export class ConfigLoader {
             `coarse sink statuses: ${[...RECOGNIZED_COARSE_SINK_STATUSES].join(', ')}`
           );
         }
-        if (!declaredOutcomes.has(outcomeKey.toUpperCase())) {
-          Logger.warn(Component.CONFIG,
-            `State "${stateId}" uses transition outcome "${outcomeKey}" which is not declared ` +
-            `in statechart advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes. ` +
-            `Add it to customOutcomes to suppress this warning.`
+        if (declaredOutcomes !== null && !declaredOutcomes.has(outcomeKey.toUpperCase())) {
+          throw new Error(
+            `State "${stateId}" uses transition outcome "${outcomeKey}" which is not in the declared ` +
+            `statechart vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
+            `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+            `Add "${outcomeKey}" to customOutcomes (or the appropriate list) to permit it.`
           );
         }
       }

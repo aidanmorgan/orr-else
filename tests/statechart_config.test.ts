@@ -9,13 +9,16 @@
  *    outcomes ADVANCE/REWORK/HALT) to prove zero-code-edits portability.
  */
 
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   isTerminalState,
   outcomeCategory,
-  isAdvanceOutcome
+  isAdvanceOutcome,
+  isDeclaredOutcome,
+  assertDeclaredOutcome,
+  declaredOutcomeVocabulary
 } from '../src/core/FlowManager.js';
 import {
   teammateEventTypeForOutcome,
@@ -24,8 +27,11 @@ import {
 import { Scheduler } from '../src/core/Scheduler.js';
 import { FlowManager } from '../src/core/FlowManager.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
+import { evaluateGateReadiness } from '../src/extension/WorkerRunController.js';
 import { BeadStatus, EventName, TeammateEventType } from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
+import type { SDLCState } from '../src/core/domain/StateModels.js';
+import type { ActiveRun } from '../src/extension/SessionTypes.js';
 
 // ── Shared fixture helpers ────────────────────────────────────────────────────
 
@@ -140,9 +146,11 @@ describe('FlowManager.outcomeCategory', () => {
     it('ADVANCE → advance', () => expect(outcomeCategory('ADVANCE', cfg)).toBe('advance'));
     it('REWORK → failed', () => expect(outcomeCategory('REWORK', cfg)).toBe('failed'));
     it('HALT → blocked', () => expect(outcomeCategory('HALT', cfg)).toBe('blocked'));
-    it('SUCCESS is NOT an advance outcome in generic config → fallback advance', () => {
-      // SUCCESS is not in any declared set → treated as advance (unknown fallback)
-      expect(outcomeCategory('SUCCESS', cfg)).toBe('advance');
+    it('SUCCESS is NOT in generic config vocabulary → classified as failed (strict mode)', () => {
+      // SUCCESS is not in any declared set.  In strict mode (explicit vocab declared)
+      // an undeclared outcome is classified as 'failed', not 'advance', so it can
+      // never count as progress (this is the root-cause fix for pi-experiment-lgwk).
+      expect(outcomeCategory('SUCCESS', cfg)).toBe('failed');
     });
   });
 });
@@ -586,5 +594,397 @@ describe('shouldPersistBlockedBeadStatus — default and custom cases', () => {
   it('generic config: nextState === BLOCKED → true', () => {
     const genericCfg = makeGenericConfig();
     expect(shouldPersistBlockedBeadStatus(TeammateEventType.STATE_FAILED, BeadStatus.BLOCKED, genericCfg)).toBe(true);
+  });
+});
+
+// ── Strict statechart outcome vocabulary ──────────────────────────────────────
+// AC1: ConfigLoader fails on undeclared outcome in transition (strict mode)
+// AC2: isDeclaredOutcome / assertDeclaredOutcome reject undeclared outcomes
+// AC3: Typo like SECURITY_FAILUER is rejected in strict mode
+// AC4: Legacy configs (no statechart block) preserve permissive behavior
+
+describe('Strict statechart outcome vocabulary: declaredOutcomeVocabulary + isDeclaredOutcome + assertDeclaredOutcome', () => {
+  // ── AC2 / AC3: isDeclaredOutcome ──────────────────────────────────────────
+  it('AC2: isDeclaredOutcome returns true for every declared outcome in strict config', () => {
+    const cfg = makeGenericConfig(); // statechart block with ADVANCE/REWORK/HALT
+    expect(isDeclaredOutcome('ADVANCE', cfg)).toBe(true);
+    expect(isDeclaredOutcome('REWORK', cfg)).toBe(true);
+    expect(isDeclaredOutcome('HALT', cfg)).toBe(true);
+  });
+
+  it('AC2: isDeclaredOutcome returns false for an outcome not in the vocabulary (strict config)', () => {
+    const cfg = makeGenericConfig();
+    expect(isDeclaredOutcome('SUCCESS', cfg)).toBe(false); // not declared in genericConfig
+    expect(isDeclaredOutcome('UNKNOWN_OUTCOME', cfg)).toBe(false);
+  });
+
+  it('AC3: SECURITY_FAILUER (typo) is not declared in a strict config that declares SECURITY_FAILURE', () => {
+    const cfg: HarnessConfig = {
+      ...makeDefaultConfig(),
+      statechart: {
+        terminalStates: ['completed'],
+        advanceOutcomes: ['SUCCESS'],
+        failedOutcomes: ['FAILURE', 'SECURITY_FAILURE'],
+        blockedOutcomes: ['BLOCKED'],
+        customOutcomes: []
+      }
+    } as unknown as HarnessConfig;
+    expect(isDeclaredOutcome('SECURITY_FAILURE', cfg)).toBe(true);
+    expect(isDeclaredOutcome('SECURITY_FAILUER', cfg)).toBe(false); // typo
+  });
+
+  it('AC4: isDeclaredOutcome returns true for any non-empty outcome in legacy config (no statechart block)', () => {
+    const cfg = makeDefaultConfig(); // no statechart block
+    expect(isDeclaredOutcome('SUCCESS', cfg)).toBe(true);
+    expect(isDeclaredOutcome('ANY_TYPO_OUTCOME', cfg)).toBe(true);
+    expect(isDeclaredOutcome('SECURITY_FAILUER', cfg)).toBe(true);
+  });
+
+  it('AC2: assertDeclaredOutcome throws for undeclared outcome in strict mode', () => {
+    const cfg = makeGenericConfig();
+    expect(() => assertDeclaredOutcome('UNKNOWN', cfg, 'state "Alpha"')).toThrow(
+      /Outcome "UNKNOWN" is not in the declared statechart vocabulary/
+    );
+  });
+
+  it('AC2: assertDeclaredOutcome throws with the offending outcome and context in the message', () => {
+    const cfg = makeGenericConfig();
+    expect(() => assertDeclaredOutcome('SECURITY_FAILUER', cfg, 'state "Implementation"')).toThrow(
+      /SECURITY_FAILUER.*state "Implementation"/
+    );
+  });
+
+  it('AC3: assertDeclaredOutcome names the offending outcome key and the declared vocabulary', () => {
+    const cfg = makeGenericConfig();
+    let caught: Error | undefined;
+    try {
+      assertDeclaredOutcome('SECURITY_FAILUER', cfg, 'state "Planning"');
+    } catch (e) {
+      caught = e as Error;
+    }
+    expect(caught).toBeDefined();
+    expect(caught!.message).toMatch(/SECURITY_FAILUER/);
+    expect(caught!.message).toMatch(/Declared outcomes:/);
+  });
+
+  it('AC4: assertDeclaredOutcome is a no-op for legacy config (no statechart block)', () => {
+    const cfg = makeDefaultConfig();
+    expect(() => assertDeclaredOutcome('ANY_UNKNOWN', cfg, 'state "Planning"')).not.toThrow();
+  });
+
+  it('AC2: declaredOutcomeVocabulary returns null for legacy config (no statechart block)', () => {
+    const cfg = makeDefaultConfig();
+    expect(declaredOutcomeVocabulary(cfg)).toBeNull();
+  });
+
+  it('AC2: declaredOutcomeVocabulary returns the full declared set for strict config', () => {
+    const cfg = makeGenericConfig();
+    const vocab = declaredOutcomeVocabulary(cfg);
+    expect(vocab).not.toBeNull();
+    expect(vocab!.has('ADVANCE')).toBe(true);
+    expect(vocab!.has('REWORK')).toBe(true);
+    expect(vocab!.has('HALT')).toBe(true);
+  });
+
+  it('Restart events are always considered declared regardless of mode', () => {
+    const cfg = makeGenericConfig(); // strict config, only ADVANCE/REWORK/HALT declared
+    expect(isDeclaredOutcome('HARNESS_RESTART', cfg)).toBe(true);
+    expect(isDeclaredOutcome('CONTEXT_RESTART', cfg)).toBe(true);
+  });
+});
+
+// ── AC1: ConfigLoader strict validation — undeclared transition outcome → throw ─
+describe('ConfigLoader strict validation: undeclared transition outcome throws (AC1)', () => {
+  const tempPath = path.join(process.cwd(), 'temp_strict_vocab_test.yaml');
+
+  afterEach(() => {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  });
+
+  it('AC1: throws when a transition uses an outcome key not in the declared vocabulary', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+  advanceOutcomes: [ADVANCE]
+  failedOutcomes: [REWORK]
+  blockedOutcomes: [HALT]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { ADVANCE: "Bravo", REWORK: "Alpha", UNDECLARED_OUTCOME: "done" }
+  Bravo:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    expect(() => new ConfigLoader().load(tempPath)).toThrow(
+      /UNDECLARED_OUTCOME.*not in the declared statechart vocabulary/
+    );
+  });
+
+  it('AC3: throws when a transition uses a typo outcome (SECURITY_FAILUER instead of SECURITY_FAILURE)', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE, SECURITY_FAILURE]
+  blockedOutcomes: [BLOCKED]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { SUCCESS: "done", SECURITY_FAILUER: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    expect(() => new ConfigLoader().load(tempPath)).toThrow(/SECURITY_FAILUER/);
+  });
+
+  it('AC4: legacy config (no statechart block) does NOT throw for undeclared outcomes in transitions', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { SUCCESS: "done", ANY_TYPO_OUTCOME: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    // No statechart block → legacy mode → no throw
+    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+  });
+
+  it('AC1: config with fully declared vocabulary passes validation', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+  advanceOutcomes: [ADVANCE]
+  failedOutcomes: [REWORK]
+  blockedOutcomes: [HALT]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { ADVANCE: "Bravo", REWORK: "Alpha", HALT: "done" }
+  Bravo:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { ADVANCE: "done", REWORK: "Alpha", HALT: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+  });
+
+  // Finding 3: opt-in strict mode — statechart block with ONLY terminalStates must load
+  it('Finding-3/AC4: statechart block with ONLY terminalStates (no vocab fields) loads without throw (legacy preserved)', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { SUCCESS: "done", SOME_CUSTOM_TRANSITION: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    // No explicit vocab → legacy mode → custom transition outcomes are allowed
+    expect(() => new ConfigLoader().load(tempPath)).not.toThrow();
+  });
+
+  it('Finding-3: statechart block with ONLY terminalStates has null declaredOutcomeVocabulary (no strict mode)', () => {
+    const cfg: HarnessConfig = {
+      ...makeDefaultConfig(),
+      statechart: {
+        terminalStates: ['done']
+        // No advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes
+      }
+    } as unknown as HarnessConfig;
+    expect(declaredOutcomeVocabulary(cfg)).toBeNull();
+    // In legacy mode all outcomes are permissible
+    expect(isDeclaredOutcome('ANY_OUTCOME', cfg)).toBe(true);
+    expect(isDeclaredOutcome('TYPO_OUTCOME', cfg)).toBe(true);
+  });
+
+  it('Finding-3: explicit vocab + undeclared outcome = still throws (strict mode)', () => {
+    const yaml = `
+settings:
+  maxConcurrentSlots: 2
+  handoverTemplate: "test"
+  defaultModel: "m1"
+  startState: Alpha
+statechart:
+  terminalStates: [done]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+states:
+  Alpha:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "i"
+    actions: []
+    transitions: { SUCCESS: "done", UNDECLARED_OUTCOME: "done" }
+`;
+    fs.writeFileSync(tempPath, yaml);
+    expect(() => new ConfigLoader().load(tempPath)).toThrow(/UNDECLARED_OUTCOME/);
+  });
+});
+
+// ── AC2: gate-level regression — undeclared outcome in strict mode is REJECTED ──
+//
+// Proves that the actual binding path (evaluateGateReadiness) rejects an
+// undeclared outcome in strict mode: ready=false, blockingEvidence names the
+// offending outcome, transitionValid=false.  Uses the same mocking pattern as
+// s3wp3_state_action_defaults.test.ts.
+
+describe('AC2 gate-level: evaluateGateReadiness rejects undeclared outcome in strict mode', () => {
+  /** Strict config: only ADVANCE/REWORK/HALT declared. */
+  function makeStrictConfig(): HarnessConfig {
+    return makeGenericConfig(); // advanceOutcomes:[ADVANCE], failedOutcomes:[REWORK], blockedOutcomes:[HALT]
+  }
+
+  /** Minimal services that pass every gate except the one under test. */
+  function makePassthroughServices(config: HarnessConfig) {
+    return {
+      flowManager: {
+        nextState: vi.fn().mockReturnValue('Bravo')
+      },
+      eventStore: {
+        latestProjectToolFailureLimitEvent: vi.fn().mockResolvedValue(undefined),
+        projectBead: vi.fn().mockResolvedValue({ checklists: {} }),
+        eventsForBead: vi.fn().mockResolvedValue([
+          {
+            type: 'STATE_RUN_INITIALIZED',
+            data: {
+              beadId: 'bd-gate-test',
+              stateId: 'Alpha',
+              actionId: 'a1',
+              promptProvenanceResolutionFailed: true // warn-only; doesn't block
+            }
+          }
+        ])
+      },
+      requiredToolResolver: {
+        resolve: vi.fn().mockResolvedValue({ toolNames: [] })
+      },
+      planWriteSet: {
+        validatePlanContract: vi.fn().mockResolvedValue({ passed: true })
+      },
+      transactionalStateGuard: {
+        validateSuccessReadOnly: vi.fn().mockResolvedValue({ passed: true })
+      },
+      configLoader: {
+        load: vi.fn().mockResolvedValue(config),
+        getConfigPath: vi.fn().mockReturnValue('/fake/harness.yaml')
+      },
+      projectRoot: '/fake/root'
+    } as any;
+  }
+
+  function makeActiveRunStrict(overrides: Partial<ActiveRun> = {}): ActiveRun {
+    const state: SDLCState = {
+      id: 'Alpha',
+      identity: { role: 'R', expertise: 'E', constraints: [] },
+      actions: [{ id: 'a1', type: 'prompt' as any }],
+      transitions: { ADVANCE: 'Bravo', REWORK: 'Alpha', HALT: 'done' }
+    } as unknown as SDLCState;
+    return {
+      beadId: 'bd-gate-test',
+      stateId: 'Alpha',
+      state,
+      action: { id: 'a1', type: 'prompt' as any } as any,
+      requiredItems: [],
+      startedAt: Date.now(),
+      worklogManager: { appendEntry: vi.fn() } as any,
+      checkpointAccepted: true,
+      parentSequenceCompleted: false,
+      completedActionIds: [],
+      ...overrides
+    };
+  }
+
+  it('AC2: undeclared outcome (SECURITY_FAILUER typo) in strict mode → ready=false, transitionValid=false', async () => {
+    const config = makeStrictConfig();
+    const services = makePassthroughServices(config);
+    const run = makeActiveRunStrict();
+    const obs = { getToolResult: vi.fn().mockReturnValue(undefined) } as any;
+
+    const gate = await evaluateGateReadiness(run, 'SECURITY_FAILUER', services, { activeRun: run }, obs, config, true);
+
+    expect(gate.ready).toBe(false);
+    expect(gate.transitionValid).toBe(false);
+    // blockingEvidence must name the offending outcome
+    expect(gate.blockingEvidence.some(e => e.includes('SECURITY_FAILUER'))).toBe(true);
+    // Undeclared outcome must NOT be treated as advance (the root-cause bug)
+    expect(isAdvanceOutcome('SECURITY_FAILUER', config)).toBe(false);
+  });
+
+  it('AC2: undeclared outcome does not advance — isAdvanceOutcome returns false in strict mode', () => {
+    const config = makeStrictConfig();
+    // Declared outcomes ARE advance
+    expect(isAdvanceOutcome('ADVANCE', config)).toBe(true);
+    // Undeclared outcomes are NOT advance (strict mode — root cause fix)
+    expect(isAdvanceOutcome('SECURITY_FAILUER', config)).toBe(false);
+    expect(isAdvanceOutcome('UNKNOWN_OUTCOME', config)).toBe(false);
+    // Legacy config: unknown outcomes fall through to advance (permissive)
+    const legacy = makeDefaultConfig();
+    expect(isAdvanceOutcome('SOME_TYPO', legacy)).toBe(true);
+  });
+
+  it('AC2: declared outcomes in strict mode still classify correctly', async () => {
+    const config = makeStrictConfig();
+    const services = makePassthroughServices(config);
+    const run = makeActiveRunStrict({ checkpointAccepted: true });
+    const obs = { getToolResult: vi.fn().mockReturnValue(undefined) } as any;
+
+    const gate = await evaluateGateReadiness(run, 'ADVANCE', services, { activeRun: run }, obs, config, true);
+
+    // transitionValid=true: ADVANCE is declared and the flowManager mock returns 'Bravo'
+    expect(gate.transitionValid).toBe(true);
+    // No outcome-vocabulary blocking evidence
+    expect(gate.blockingEvidence.some(e => e.includes('Undeclared'))).toBe(false);
   });
 });
