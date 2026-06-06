@@ -38,6 +38,7 @@
 import { readFile, readdir, access } from 'node:fs/promises';
 import { constants as FS } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import net from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -190,6 +191,22 @@ async function checkPreconditions() {
     );
   }
 
+  // (i.b) `.pi/extensions/` must contain ONLY real extensions. Pi auto-loads
+  // every `.ts` there as a runtime extension and CRASHES (exit 1) on a file with
+  // no default factory export — e.g. a stray `*.test.ts`. Catch it here with an
+  // actionable message instead of an opaque mid-run "Failed to load extension".
+  const extensionsDir = path.join(resolvedRoot, '.pi', 'extensions');
+  if (await pathExists(extensionsDir)) {
+    const stray = (await readdir(extensionsDir)).filter(f => f.endsWith('.test.ts'));
+    if (stray.length > 0) {
+      throw new PreconditionError(
+        `${extensionsDir} contains test file(s) Pi will try to load as extensions and crash on: ` +
+          `${stray.join(', ')}. Move them to .pi/extension-tests/ (run them with ` +
+          `\`node --experimental-strip-types --test .pi/extension-tests/*.test.ts\`).`
+      );
+    }
+  }
+
   // (ii) SSE MCP backends reachable (codemap + sonarqube), ports resolved from
   // the cerdiwen .pi config (NOT hard-coded).
   const backends = await resolveMcpBackends(resolvedRoot);
@@ -206,12 +223,17 @@ async function checkPreconditions() {
     );
   }
 
-  // (iii) LLM credentials present.
-  const haveCreds = LLM_CREDENTIAL_ENV_VARS.some(name => !!process.env[name]);
-  if (!haveCreds) {
+  // (iii) LLM credentials present. Pi accepts EITHER a provider key in the env
+  // OR a stored auth token at ~/.pi/agent/auth.json (its OAuth/login flow). An
+  // env-only check is a false negative when the operator is logged in via `pi`,
+  // so accept either.
+  const haveEnvCreds = LLM_CREDENTIAL_ENV_VARS.some(name => !!process.env[name]);
+  const piAuthPath = path.join(os.homedir(), '.pi', 'agent', 'auth.json');
+  const haveStoredAuth = await pathExists(piAuthPath);
+  if (!haveEnvCreds && !haveStoredAuth) {
     throw new PreconditionError(
-      `No LLM credentials found. Export one of: ${LLM_CREDENTIAL_ENV_VARS.join(', ')} ` +
-        `(the provider key pi uses to run the real beads).`
+      `No LLM credentials found. Either export one of: ${LLM_CREDENTIAL_ENV_VARS.join(', ')}, ` +
+        `or log in with \`pi\` (stores a token at ${piAuthPath}).`
     );
   }
 
@@ -248,14 +270,20 @@ async function checkPreconditions() {
  * Run the REAL orr-else coordinator over one seeded bead via Pi non-interactive
  * mode. The orchestrator is the Pi command registered by the extension
  * (`/orr-else --bead <id>`), NOT the `orr-else` binary (which only scaffolds).
+ *
+ * orr-else is auto-loaded by Pi from the consuming project's `.pi/settings.json`
+ * `packages` entry (npm:orr-else@<ver>, resolved from the local registry) — there
+ * is NO `.pi/extensions/orr-else.ts` shim to pass via `-e`. Running `pi` with the
+ * cwd at the project root therefore loads the installed orr-else package plus the
+ * project's own `.pi/extensions/*.ts` (which must contain ONLY real extensions —
+ * test files belong in `.pi/extension-tests/`, else Pi crashes on load).
  * Returns the spawn result so the caller can surface failures.
  */
 function runBead(projectRoot, beadId) {
   logStep(`Running real orr-else over bead ${beadId} ...`);
-  const extensionPath = path.join(projectRoot, '.pi', 'extensions', 'orr-else.ts');
   const result = spawnSync(
     'pi',
-    ['-e', extensionPath, '--print', `/orr-else --bead ${beadId}`],
+    ['--print', `/orr-else --bead ${beadId}`],
     {
       cwd: projectRoot,
       env: { ...process.env, PI_PROJECT_ROOT: projectRoot },
