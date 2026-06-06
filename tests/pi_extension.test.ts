@@ -3039,3 +3039,114 @@ ${handoverLine}
     }
   });
 });
+
+// ── pi-experiment-q64l regression: cache-hit plugin events must carry durable toolResult ──
+describe('pi-experiment-q64l — cacheable tool invoked twice records toolResult on cache-hit event', () => {
+  it('AC1/AC2: second invocation (cache hit) records TOOL_INVOCATION_SUCCEEDED with toolResult.status + toolResult.outputFile', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-q64l-cache-hit-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+tools:
+  - name: cacheable_probe
+    type: command
+    command: node
+    defaultArgs:
+      - "-e"
+      - "console.log(JSON.stringify({ tool: 'cacheable_probe', status: 'PASSED', value: 42 }));"
+    cacheable: true
+states:
+  Planning:
+    identity: { role: "Eng", expertise: "x", constraints: [] }
+    baseInstructions: "Do"
+    actions:
+      - id: probe-action
+        type: prompt
+        prompt: "Probe"
+    requiredTools: [cacheable_probe]
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-q64l';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'probe-action';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const cacheableTool = harness.tools.find((t: any) => t.name === 'cacheable_probe');
+      expect(cacheableTool).toBeDefined();
+
+      // First invocation — non-cached, runs the command, writes the raw output file.
+      await cacheableTool.execute('call-1', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Second invocation — same params, served from cache.
+      await cacheableTool.execute('call-2', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      // Allow async event store writes to flush.
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const events = readEventStoreLines(tempRoot);
+      const succeeded = events.filter(
+        (e: any) => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED
+          && e.data?.tool === 'cacheable_probe'
+      );
+
+      // Two TOOL_INVOCATION_SUCCEEDED events must have been recorded.
+      expect(succeeded).toHaveLength(2);
+
+      // AC2: the cache-hit event (cached:true) must carry toolResult.status + toolResult.outputFile.
+      const cacheHitEvent = succeeded.find((e: any) => e.data?.cached === true);
+      expect(cacheHitEvent).toBeDefined();
+      const tr = (cacheHitEvent as any).data?.toolResult;
+      expect(tr).toBeDefined();
+      expect(tr.status).toBe('PASSED');
+      expect(typeof tr.outputFile).toBe('string');
+      expect(tr.outputFile.length).toBeGreaterThan(0);
+
+      // AC5: model-facing result field is unchanged between the two events.
+      const nonCachedEvent = succeeded.find((e: any) => !e.data?.cached);
+      expect(nonCachedEvent).toBeDefined();
+      expect((nonCachedEvent as any).data?.result).toEqual((cacheHitEvent as any).data?.result);
+
+      // The cache-hit event reuses the original outputFile (no fresh persist on cache hit).
+      expect(tr.outputFile).toBe((nonCachedEvent as any).data?.toolResult?.outputFile);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

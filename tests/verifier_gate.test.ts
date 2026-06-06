@@ -312,3 +312,159 @@ states:
     expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_REJECTED);
   });
 });
+
+// ── pi-experiment-q64l: cache-hit events must carry durable tool-result shape ──
+describe('pi-experiment-q64l: AC2/AC3/AC4 — cache-hit TOOL_INVOCATION_SUCCEEDED carries durable toolResult', () => {
+  let projectRoot: string;
+  let configLoader: ConfigLoader;
+  let store: EventStore;
+
+  beforeEach(() => {
+    projectRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-q64l-')));
+    fs.writeFileSync(path.join(projectRoot, 'harness.yaml'), `
+settings:
+  startState: Implementing
+  eventStore:
+    enabled: true
+states:
+  Implementing:
+    identity: { role: "Eng", expertise: "x", constraints: [] }
+    baseInstructions: "Do"
+    actions: []
+    transitions: { SUCCESS: "completed", FAILURE: "Implementing" }
+`);
+    configLoader = new ConfigLoader(undefined, projectRoot);
+    store = new EventStore(configLoader, undefined, undefined, projectRoot);
+    store.setSessionId(`test-${process.pid}`);
+  });
+
+  afterEach(() => {
+    configLoader.reset();
+    vi.restoreAllMocks();
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  // AC2: the second (cache-hit) TOOL_INVOCATION_SUCCEEDED carries toolResult.status + toolResult.outputFile.
+  it('AC2 — cache-hit TOOL_INVOCATION_SUCCEEDED includes toolResult.status and toolResult.outputFile', async () => {
+    // Simulate what the non-cached path records (first invocation).
+    const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
+    const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 42 };
+
+    // First invocation — non-cached, durable shape.
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: { ok: true },
+      toolResult
+    });
+
+    // Second invocation — cache hit. Must include the SAME toolResult handle + cached:true.
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: { ok: true },
+      cached: true,
+      cacheAgeMs: 10,
+      toolResult
+    });
+
+    // AC2: the cached event carries toolResult.status + toolResult.outputFile.
+    const events = await store.readAll();
+    const cacheHitEvent = events.filter(
+      e => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED
+        && (e.data as Record<string, unknown>).cached === true
+    );
+    expect(cacheHitEvent).toHaveLength(1);
+    const data = cacheHitEvent[0].data as Record<string, unknown>;
+    const tr = data.toolResult as Record<string, unknown>;
+    expect(tr).toBeDefined();
+    expect(tr.status).toBe(ToolResultStatus.PASSED);
+    expect(tr.outputFile).toBe(outputFile);
+    // Model-facing output unchanged: result is still present, cached:true is added, no new fields on result.
+    expect(data.result).toEqual({ ok: true });
+    expect(data.cached).toBe(true);
+  });
+
+  // AC3: latestToolResultEvent resolves the cache-hit event.
+  it('AC3 — latestToolResultEvent resolves a cache-hit event with toolResult.outputFile', async () => {
+    const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
+    const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 42 };
+
+    // First invocation at t=1.
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: { ok: true }, toolResult
+    });
+
+    // Cache-hit at t=2 — same toolResult handle, cached:true.
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: { ok: true }, cached: true, cacheAgeMs: 5,
+      toolResult
+    });
+
+    // AC3: latestToolResultEvent must resolve the SECOND (cache-hit) event.
+    const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'cacheableTool');
+    expect(event).toBeDefined();
+    expect(event?.type).toBe(DomainEventName.TOOL_INVOCATION_SUCCEEDED);
+    const tr = (event!.data as Record<string, unknown>).toolResult as Record<string, unknown>;
+    expect(tr.outputFile).toBe(outputFile);
+    expect(tr.status).toBe(ToolResultStatus.PASSED);
+    // The resolved event IS the cache-hit one.
+    expect((event!.data as Record<string, unknown>).cached).toBe(true);
+  });
+
+  // AC4: the verifier gate validates using the cache-hit event output.
+  it('AC4 — verifier gate validates cache-hit event output (PASS path)', async () => {
+    const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ verified: true }));
+    const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 20 };
+
+    // Only the cache-hit event is recorded (no prior non-cached event).
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: { ok: true }, cached: true, cacheAgeMs: 0,
+      toolResult
+    });
+
+    let verifyReadPath: string | undefined;
+    verifier.register('cacheableTool', (ctx): VerifyResult => {
+      verifyReadPath = ctx.toolOutputs['cacheableTool'];
+      return { verdict: VerifyVerdict.PASS, reasons: [] };
+    });
+
+    const result = await runVerifierGate(
+      { beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', writeSet: [], artifacts: {} },
+      ['cacheableTool'],
+      store
+    );
+
+    // Gate passes, and verify() received the correct outputFile path.
+    expect(result.pass).toBe(true);
+    expect(verifyReadPath).toBe(outputFile);
+
+    // Cleanup registry.
+    verifier.register('cacheableTool', () => ({ verdict: VerifyVerdict.NOT_APPLICABLE, reasons: [] }));
+  });
+
+  // AC5 (model-facing output unchanged): the result field on a cache-hit event is unchanged.
+  it('AC5 — model-facing result is unchanged on cache-hit (cached:true added, result field untouched)', async () => {
+    const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
+    const originalResult = { field: 'value', nested: { x: 1 } };
+    const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 30 };
+
+    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+      beadId: 'bd-1', tool: 'cacheableTool',
+      result: originalResult, cached: true, cacheAgeMs: 200,
+      toolResult
+    });
+
+    const events = await store.readAll();
+    const hit = events.find(e => (e.data as Record<string, unknown>).cached === true);
+    expect(hit).toBeDefined();
+    // The result is unchanged.
+    expect((hit!.data as Record<string, unknown>).result).toEqual(originalResult);
+    // cached + cacheAgeMs are additive, not replacing result.
+    expect((hit!.data as Record<string, unknown>).cached).toBe(true);
+    expect((hit!.data as Record<string, unknown>).cacheAgeMs).toBe(200);
+  });
+});

@@ -395,6 +395,7 @@
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
+              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
               "serialize": { "type": "boolean", "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)." },
               "successExitCodes": {
                 "type": "array",
@@ -451,6 +452,7 @@
               "type": { "const": "mcp" },
               "server": { "type": "string" },
               "configPath": { "type": "string" },
+              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
               "serialize": { "type": "boolean", "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)." },
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
@@ -538,6 +540,7 @@
               },
               "type": { "const": "extension" },
               "optional": { "type": "boolean" },
+              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
               "validationRules": {
                 "type": "array",
                 "items": {
@@ -589,6 +592,7 @@
               "timeoutMs": { "type": "integer", "minimum": 1 },
               "wrapperTimeoutMs": { "type": "integer", "minimum": 1 },
               "acceptMaxBuffer": { "type": "boolean" },
+              "cacheable": { "type": "boolean", "description": "When true, the harness memoises this tool's results within a single worker session keyed by (toolName, params). Intended for stable read-only structural queries." },
               "serialize": { "type": "boolean", "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)." },
               "successExitCodes": {
                 "type": "array",

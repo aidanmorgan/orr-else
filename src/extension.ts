@@ -255,8 +255,10 @@ interface ExtensionSession {
    * In-session result memoisation for cacheable project tools.
    * Key: `${toolName}|${JSON.stringify(params)}`.
    * Cleared on fresh worker run and after any non-cacheable tool call.
+   * The ToolResultBase handle is stored alongside the result so cache-hit
+   * TOOL_INVOCATION_SUCCEEDED events carry the durable outputFile + status.
    */
-  toolResultCache: Map<string, { result: unknown; recordedAt: number }>;
+  toolResultCache: Map<string, { result: unknown; recordedAt: number; toolResult: ToolResultBase }>;
   // ── pi-tool observability ─────────────────────────────────────────────────
   piToolObservability: Observability | null;
   observedPiTools: Set<string>;
@@ -712,6 +714,7 @@ function wrapPluginTool(
             beadId,
             tool: tool.name,
             result: summarizeForEvent(hit.result),
+            toolResult: hit.toolResult,
             cached: true,
             cacheAgeMs: ageMs
           }).catch(() => {});
@@ -822,7 +825,7 @@ function wrapPluginTool(
           } else {
             if (breakerEnabled) session.toolBreakerFailures.delete(key);
             if (cacheable && isWorkerMode()) {
-              session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now() });
+              session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now(), toolResult: toolResultHandle });
             }
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
