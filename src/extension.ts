@@ -279,6 +279,8 @@ interface ExtensionSession {
   observedPiTools: Set<string>;
   blockedObservedPiToolCallIds: Set<string>;
   observedPiToolSpans: Map<string, SpanContext>;
+  /** Maps Pi toolCallId → harness toolInvocationId (generated at TOOL_CALL time). */
+  observedPiToolInvocationIds: Map<string, string>;
   // ── registration guards (reset each invocation so a second call re-registers) ──
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
@@ -312,6 +314,7 @@ function createExtensionSession(): ExtensionSession {
     observedPiTools: new Set(),
     blockedObservedPiToolCallIds: new Set(),
     observedPiToolSpans: new Map(),
+    observedPiToolInvocationIds: new Map(),
     artifactPathsToolRegistered: false,
     queryArtifactToolRegistered: false,
     compatibilityContextToolRegistered: false,
@@ -703,7 +706,8 @@ function wrapPluginTool(
         });
         runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: ruleError });
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId: beadIdEarly, tool: tool.name, toolInvocationId,
+          beadId: beadIdEarly, tool: tool.name, toolName: tool.name, toolInvocationId,
+          stateId: stateIdForPersist, actionId: actionIdForPersist,
           result: { status: ToolResultStatus.REJECTED, isError: true, message: ruleError, reason: 'validation-reject' },
           toolResult: validationHandle,
         }).catch(() => {});
@@ -724,7 +728,8 @@ function wrapPluginTool(
         });
         runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: error });
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId: beadIdEarly, tool: tool.name, toolInvocationId,
+          beadId: beadIdEarly, tool: tool.name, toolName: tool.name, toolInvocationId,
+          stateId: stateIdForPersist, actionId: actionIdForPersist,
           result: { status: ToolResultStatus.REJECTED, isError: true, message: error, reason: 'worker-merge-guard' },
           toolResult: mergeGuardHandle,
         }).catch(() => {});
@@ -750,7 +755,10 @@ function wrapPluginTool(
           await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
             beadId,
             tool: tool.name,
+            toolName: tool.name,
             toolInvocationId,
+            stateId: stateIdForPersist,
+            actionId: actionIdForPersist,
             result: summarizeForEvent(hit.result),
             toolResult: hit.toolResult,
             cached: true,
@@ -790,7 +798,10 @@ function wrapPluginTool(
           await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
             beadId,
             tool: tool.name,
+            toolName: tool.name,
             toolInvocationId,
+            stateId: stateIdForPersist,
+            actionId: actionIdForPersist,
             result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' },
             toolResult: circuitHandle,
           }).catch(() => {});
@@ -823,7 +834,10 @@ function wrapPluginTool(
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
+          toolName: tool.name,
           toolInvocationId,
+          stateId: stateIdForPersist,
+          actionId: actionIdForPersist,
           result: {
             status: ToolResultStatus.REJECTED,
             isError: true,
@@ -871,7 +885,10 @@ function wrapPluginTool(
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
               beadId,
               tool: tool.name,
+              toolName: tool.name,
               toolInvocationId,
+              stateId: stateIdForPersist,
+              actionId: actionIdForPersist,
               result: summarizeForEvent(result),
               toolResult: toolResultHandle
             });
@@ -888,7 +905,10 @@ function wrapPluginTool(
             await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
               beadId,
               tool: tool.name,
+              toolName: tool.name,
               toolInvocationId,
+              stateId: stateIdForPersist,
+              actionId: actionIdForPersist,
               result: summarizeForEvent(result),
               toolResult: toolResultHandle
             });
@@ -934,7 +954,10 @@ function wrapPluginTool(
         await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
           beadId,
           tool: tool.name,
+          toolName: tool.name,
           toolInvocationId,
+          stateId: stateIdForPersist,
+          actionId: actionIdForPersist,
           error: String(error),
           toolResult: errorHandle
         }).catch(() => {});
@@ -2469,6 +2492,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     session.observedPiTools = new Set<string>();
     session.blockedObservedPiToolCallIds = new Set<string>();
     session.observedPiToolSpans = new Map<string, SpanContext>();
+    session.observedPiToolInvocationIds = new Map<string, string>();
     const runtimeObservability = services.observability;
     void runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
   });

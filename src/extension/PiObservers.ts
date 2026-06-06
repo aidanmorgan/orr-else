@@ -42,7 +42,8 @@ import {
   summarizeForEvent,
   stringifySpanAttribute,
   eventToolCallId,
-  externalPiToolResultFromEvent
+  externalPiToolResultFromEvent,
+  mapPiToolCallIdToInvocationId
 } from './PiEventAdapters.js';
 import {
   shellPolicyRejection,
@@ -68,6 +69,8 @@ export interface PiToolObserverSession {
   observedPiTools: Set<string>;
   blockedObservedPiToolCallIds: Set<string>;
   observedPiToolSpans: Map<string, import('../core/Observability.js').SpanContext>;
+  /** Maps Pi toolCallId → harness toolInvocationId (generated at TOOL_CALL time). */
+  observedPiToolInvocationIds: Map<string, string>;
   piToolObserverRegistered: boolean;
   activeRun: ActiveRun | null;
 }
@@ -146,6 +149,11 @@ export function registerPiToolObservers(
     if (!session.observedPiTools.has(event.toolName)) return;
     const runtimeObservability = session.piToolObservability;
     const toolCallId = eventToolCallId(event);
+    // dsm2.12: generate a harness toolInvocationId for this Pi tool call and
+    // store it keyed by toolCallId so TOOL_RESULT can retrieve it and populate
+    // explicit identity on the result event.
+    const piToolInvocationId = uuidv7();
+    if (toolCallId) session.observedPiToolInvocationIds.set(toolCallId, piToolInvocationId);
     const fileMutationPolicyResult = await services.fileMutationPolicy.apply(event);
     const input = event.input as Record<string, unknown>;
     const beadId = callbacks.beadIdFromToolParams(input);
@@ -196,11 +204,16 @@ export function registerPiToolObservers(
       status: ToolResultStatus.REJECTED, failureCategory: 'TRANSPORT',
       rejectionReason: rejection,
     }).catch(() => undefined);
+    // dsm2.12: wire Pi adapter and populate explicit identity on the rejection event.
+    const piRejectionMapping = mapPiToolCallIdToInvocationId(toolCallId, policyInvocationId);
     await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
       beadId,
       tool: event.toolName,
+      toolName: event.toolName,
+      stateId: session.activeRun?.stateId,
+      actionId: session.activeRun?.action?.id,
       externalPiTool: true,
-      toolCallId,
+      ...piRejectionMapping,
       result: {
         status: ToolResultStatus.REJECTED,
         isError: true,
@@ -228,6 +241,7 @@ export function registerPiToolObservers(
     const toolCallId = eventToolCallId(event);
     if (toolCallId && session.blockedObservedPiToolCallIds.delete(toolCallId)) {
       session.observedPiToolSpans.delete(toolCallId);
+      session.observedPiToolInvocationIds.delete(toolCallId);
       return;
     }
     const result = externalPiToolResultFromEvent(event);
@@ -241,13 +255,23 @@ export function registerPiToolObservers(
       );
       session.observedPiToolSpans.delete(toolCallId!);
     }
+    // dsm2.12: retrieve the harness toolInvocationId generated at TOOL_CALL time
+    // and wire the Pi adapter to produce the canonical toolCallId↔toolInvocationId
+    // mapping. This is the live wiring of mapPiToolCallIdToInvocationId.
+    const rawInvocationId = toolCallId ? session.observedPiToolInvocationIds.get(toolCallId) : undefined;
+    if (toolCallId) session.observedPiToolInvocationIds.delete(toolCallId);
+    const toolInvocationId = rawInvocationId ?? uuidv7();
+    const piIdMapping = mapPiToolCallIdToInvocationId(toolCallId, toolInvocationId);
     await services.eventStore.record(
       result.isError ? DomainEventName.TOOL_INVOCATION_FAILED : DomainEventName.TOOL_INVOCATION_SUCCEEDED,
       {
         beadId,
         tool: event.toolName,
+        toolName: event.toolName,
+        stateId: session.activeRun?.stateId,
+        actionId: session.activeRun?.action?.id,
         externalPiTool: true,
-        toolCallId,
+        ...piIdMapping,
         result: summarizeForEvent(result)
       }
     ).catch(error => {

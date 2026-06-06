@@ -500,18 +500,39 @@ export class EventStore implements ProjectionCapableStore {
     }
 
     if (event.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED || event.type === DomainEventName.TOOL_INVOCATION_FAILED) {
-      // NESTED shape — tool name is top-level; state/action are recovered from
-      // the toolResult.outputFile path so a retry's freshest event still wins.
+      // Tool name check is always top-level (both legacy and explicit shapes).
       if (data.tool !== tool) return false;
+
+      // EXPLICIT IDENTITY PATH (dsm2.12): when stateId and actionId are present
+      // at the top level of the event data, prefer them over path parsing.
+      // This is the canonical path for all newly-written events.
+      if (typeof data.stateId === 'string' && typeof data.actionId === 'string') {
+        return data.stateId === stateId && data.actionId === actionId;
+      }
+
+      // LEGACY PATH FALLBACK (dsm2.12): events written before dsm2.12 carry no
+      // explicit stateId/actionId at the top level. Fall back to path parsing on
+      // the toolResult.outputFile. This is a BOUNDED fallback — emit a diagnostic
+      // warning so operators know which events are running on the legacy path.
       const toolResult = isRecord(data.toolResult) ? data.toolResult : undefined;
       const outputFile = typeof toolResult?.outputFile === 'string' ? toolResult.outputFile : undefined;
       if (!outputFile) return false;
       const segments = toolOutputPathSegments(outputFile);
-      return segments !== undefined
-        && segments.beadId === beadId
-        && segments.stateId === stateId
-        && segments.actionId === actionId
-        && segments.tool === tool;
+      if (segments === undefined) return false;
+      if (segments.beadId !== beadId || segments.stateId !== stateId || segments.actionId !== actionId || segments.tool !== tool) {
+        return false;
+      }
+      // Emit migration diagnostic — this event is a legacy record using path-only identity.
+      Logger.debug(Component.CORE, 'latestToolResultEvent: legacy path-fallback match (event lacks explicit stateId/actionId; migrate to dsm2.12 identity fields)', {
+        eventId: event.id,
+        eventType: event.type,
+        beadId,
+        stateId,
+        actionId,
+        tool,
+        outputFile
+      });
+      return true;
     }
 
     return false;

@@ -3241,7 +3241,7 @@ states:
     }
   });
 
-  it('AC3 (pass): generatesFrameworkToolCalls unset and tool produces no toolCalls — BEFORE_AGENT_START completes', async () => {
+  it('AC3 (pass-demm): generatesFrameworkToolCalls unset and tool produces no toolCalls — BEFORE_AGENT_START completes', async () => {
     const previousCwd = process.cwd();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
@@ -3313,6 +3313,186 @@ states:
       else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
       if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
       else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- dsm2.12: explicit identity on TOOL_INVOCATION_* events from real recording sites --
+//
+// These tests drive the REAL wrapPluginTool code paths (normal success,
+// cache-hit) and assert that every emitted TOOL_INVOCATION_SUCCEEDED/FAILED
+// carries explicit stateId/actionId/toolName/toolInvocationId at the top
+// level -- the fields populated by the dsm2.12 writer fix.
+
+describe("dsm2.12 -- explicit verifier identity on TOOL_INVOCATION_* events (real recording sites)", () => {
+  it("DSM2-12-REAL-1: normal success event carries explicit stateId/actionId/toolName/toolInvocationId", async () => {
+    const previousCwd = process.cwd();
+    const previousEnvR1 = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dsm2-12-real-1-")));
+    const worktreePath = path.join(tempRoot, "worktree");
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, "harness.yaml"), [
+      "settings:",
+      "  startState: Implementing",
+      "tools:",
+      "  - name: identity_probe",
+      "    type: command",
+      "    command: node",
+      "    defaultArgs:",
+      "      - \"-e\"",
+      "      - \"console.log(JSON.stringify({ tool: 'identity_probe', status: 'PASSED', value: 1 }));\"",
+      "states:",
+      "  Implementing:",
+      "    identity: { role: \"Eng\", expertise: \"x\", constraints: [] }",
+      "    baseInstructions: \"Do\"",
+      "    actions:",
+      "      - id: impl-action",
+      "        type: prompt",
+      "        prompt: \"Implement\"",
+      "    transitions: { SUCCESS: \"completed\", FAILURE: \"Implementing\" }",
+    ].join("\n"));
+    let harnessR1: ReturnType<typeof fakePi> | undefined;
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = "bd-dsm2-real";
+      process.env[EnvVars.STATE_ID] = "Implementing";
+      process.env[EnvVars.ACTION_ID] = "impl-action";
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harnessR1 = fakePi();
+      await orrElseExtension(harnessR1.pi);
+      await harnessR1.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harnessR1.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: "" }, { hasUI: false, cwd: worktreePath });
+      const probeTool = harnessR1.tools.find((t: any) => t.name === "identity_probe");
+      expect(probeTool).toBeDefined();
+      await probeTool.execute("call-real-1", {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const events = readEventStoreLines(tempRoot);
+      const succeeded = events.filter(
+        (e: any) => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED && e.data?.tool === "identity_probe"
+      );
+      expect(succeeded).toHaveLength(1);
+      const data = (succeeded[0] as any).data;
+      expect(data.stateId).toBe("Implementing");
+      expect(data.actionId).toBe("impl-action");
+      expect(data.toolName).toBe("identity_probe");
+      expect(typeof data.toolInvocationId).toBe("string");
+      expect(data.toolInvocationId.length).toBeGreaterThan(0);
+      expect(data.toolResult?.outputFile).toBeDefined();
+    } finally {
+      await harnessR1?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnvR1.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnvR1.workerMode;
+      if (previousEnvR1.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnvR1.beadId;
+      if (previousEnvR1.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnvR1.stateId;
+      if (previousEnvR1.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnvR1.actionId;
+      if (previousEnvR1.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnvR1.projectRoot;
+      if (previousEnvR1.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnvR1.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("DSM2-12-REAL-2: cache-hit event carries the same explicit identity fields as the original invocation", async () => {
+    const previousCwd = process.cwd();
+    const previousEnvR2 = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "dsm2-12-real-2-")));
+    const worktreePath = path.join(tempRoot, "worktree");
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, "harness.yaml"), [
+      "settings:",
+      "  startState: Implementing",
+      "tools:",
+      "  - name: id_cache_probe",
+      "    type: command",
+      "    command: node",
+      "    defaultArgs:",
+      "      - \"-e\"",
+      "      - \"console.log(JSON.stringify({ tool: 'id_cache_probe', status: 'PASSED', value: 2 }));\"",
+      "    cacheable: true",
+      "states:",
+      "  Implementing:",
+      "    identity: { role: \"Eng\", expertise: \"x\", constraints: [] }",
+      "    baseInstructions: \"Do\"",
+      "    actions:",
+      "      - id: cache-action",
+      "        type: prompt",
+      "        prompt: \"Cache test\"",
+      "    transitions: { SUCCESS: \"completed\", FAILURE: \"Implementing\" }",
+    ].join("\n"));
+    let harnessR2: ReturnType<typeof fakePi> | undefined;
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = "bd-dsm2-cache";
+      process.env[EnvVars.STATE_ID] = "Implementing";
+      process.env[EnvVars.ACTION_ID] = "cache-action";
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harnessR2 = fakePi();
+      await orrElseExtension(harnessR2.pi);
+      await harnessR2.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harnessR2.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: "" }, { hasUI: false, cwd: worktreePath });
+      const cacheTool = harnessR2.tools.find((t: any) => t.name === "id_cache_probe");
+      expect(cacheTool).toBeDefined();
+      await cacheTool.execute("call-cache-1", {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      await cacheTool.execute("call-cache-2", {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const events = readEventStoreLines(tempRoot);
+      const succeeded = events.filter(
+        (e: any) => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED && e.data?.tool === "id_cache_probe"
+      );
+      expect(succeeded).toHaveLength(2);
+      for (const ev of succeeded) {
+        const data = (ev as any).data;
+        expect(data.stateId).toBe("Implementing");
+        expect(data.actionId).toBe("cache-action");
+        expect(data.toolName).toBe("id_cache_probe");
+        expect(typeof data.toolInvocationId).toBe("string");
+        expect(data.toolInvocationId.length).toBeGreaterThan(0);
+      }
+      const cacheHit = succeeded.find((e: any) => (e as any).data?.cached === true);
+      expect(cacheHit).toBeDefined();
+      expect((cacheHit as any).data.stateId).toBe("Implementing");
+      expect((cacheHit as any).data.toolName).toBe("id_cache_probe");
+    } finally {
+      await harnessR2?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnvR2.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnvR2.workerMode;
+      if (previousEnvR2.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnvR2.beadId;
+      if (previousEnvR2.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnvR2.stateId;
+      if (previousEnvR2.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnvR2.actionId;
+      if (previousEnvR2.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnvR2.projectRoot;
+      if (previousEnvR2.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnvR2.worktreePath;
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });
