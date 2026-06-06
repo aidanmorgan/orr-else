@@ -3,7 +3,8 @@
  *
  * AC1: BEAD_CLAIMED without beadId+lease/status is REJECTED before writing.
  * AC2: STATE_RUN_INITIALIZED without beadId+stateId+actionId is REJECTED.
- * AC3: Tests/fixtures use synthetic:true to bypass validation (isolated path).
+ * AC3: Production write path REJECTS synthetic:true; fixture writes use
+ *      TestEventStore (raw JSONL injection) — isolated from the production store.
  * AC4: Malformed production writes are rejected with a structured diagnostic.
  */
 
@@ -11,10 +12,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { EventStore } from '../src/core/EventStore.js';
+import { EventStore, EventStoreSyntheticRejectedError } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName } from '../src/constants/index.js';
+import { writeFixtureEvent } from './support/TestEventStore.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -182,11 +184,13 @@ describe('AC2 – STATE_RUN_INITIALIZED production payload validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC3: synthetic:true escape — lets tests write malformed events without
-//       hitting production validation or projection paths
+// AC3: Production write path REJECTS synthetic:true.
+//      Fixture/test writes use writeFixtureEvent() (raw JSONL injection).
+//      Read-layer legacy filter (isSyntheticEvent) is the defense for any
+//      on-disk synthetic records that pre-date this bead.
 // ---------------------------------------------------------------------------
 
-describe('AC3 – synthetic:true escape hatch', () => {
+describe('AC3 – production rejects synthetic:true; fixture path via raw JSONL injection', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -201,26 +205,37 @@ describe('AC3 – synthetic:true escape hatch', () => {
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('allows BEAD_CLAIMED with {test:"data"} when synthetic:true is present', async () => {
+  it('REJECTS BEAD_CLAIMED with synthetic:true through the production write path', async () => {
     await expect(
       store.record(DomainEventName.BEAD_CLAIMED, { test: 'data', synthetic: true })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/BEAD_CLAIMED.*production EventStore.*rejects.*synthetic/i);
   });
 
-  it('allows STATE_RUN_INITIALIZED with empty data when synthetic:true is present', async () => {
-    await expect(
-      store.record(DomainEventName.STATE_RUN_INITIALIZED, { synthetic: true })
-    ).resolves.toBeUndefined();
+  it('rejection of synthetic:true carries EventStoreSyntheticRejectedError type', async () => {
+    let caught: unknown;
+    try {
+      await store.record(DomainEventName.STATE_RUN_INITIALIZED, { synthetic: true });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EventStoreSyntheticRejectedError);
+    expect((caught as EventStoreSyntheticRejectedError).eventType).toBe(DomainEventName.STATE_RUN_INITIALIZED);
   });
 
-  it('synthetic events are written to the same store but carry synthetic:true as a discriminator', async () => {
-    await store.record(DomainEventName.BEAD_CLAIMED, { test: 'data', synthetic: true });
+  it('fixture write via writeFixtureEvent() lands on disk with synthetic:true (raw JSONL)', async () => {
+    // LEGACY-COMPAT: inject a synthetic record directly onto disk (as if it were
+    // a pre-y2ax-redesign record written by an older harness version).
+    await writeFixtureEvent(tempRoot, DomainEventName.BEAD_CLAIMED, { test: 'data', synthetic: true });
 
     const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
-    const events = fs.readFileSync(eventsPath, 'utf8')
+    const rawEvents = fs.readFileSync(eventsPath, 'utf8')
       .trim().split('\n').map(l => JSON.parse(l));
-    expect(events).toHaveLength(1);
-    expect(events[0].data.synthetic).toBe(true);
+    expect(rawEvents).toHaveLength(1);
+    expect(rawEvents[0].data.synthetic).toBe(true);
+
+    // But the production read layer must hide it (legacy defense).
+    const productionEvents = await store.readAll();
+    expect(productionEvents.some(e => (e.data as Record<string, unknown>)?.synthetic === true)).toBe(false);
   });
 
   it('events with an empty required-field schema (no enforcement) are unaffected (no regression)', async () => {

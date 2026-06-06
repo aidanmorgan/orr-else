@@ -1,13 +1,14 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { DomainEventEmitter, DomainEvent } from '../src/core/DomainEvents.js';
-import { EventStore } from '../src/core/EventStore.js';
+import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 
+// hooks.test.ts verifies hook wiring only — event persistence is not under test
+// here. Use fakeProjectionStore so tests don't go through production validation.
 describe('DomainEventEmitter', () => {
   let emitter: DomainEventEmitter;
 
   beforeEach(() => {
-    emitter = new DomainEventEmitter(new EventStore(new ConfigLoader()));
+    emitter = new DomainEventEmitter(fakeProjectionStore() as any);
     emitter.clearHooks();
   });
 
@@ -20,7 +21,7 @@ describe('DomainEventEmitter', () => {
       hookData = data;
     });
 
-    await emitter.emitEvent(DomainEvent.BEAD_CLAIMED, { test: 'data', synthetic: true });
+    await emitter.emitEvent(DomainEvent.BEAD_CLAIMED, { test: 'data' });
 
     expect(hookTriggered).toBe(true);
     expect(hookData).toMatchObject({ test: 'data' });
@@ -32,7 +33,7 @@ describe('DomainEventEmitter', () => {
     emitter.registerHook(DomainEvent.PHASE_STARTED, async () => { count++; });
     emitter.registerHook(DomainEvent.PHASE_STARTED, async () => { count++; });
 
-    await emitter.emitEvent(DomainEvent.PHASE_STARTED, { synthetic: true });
+    await emitter.emitEvent(DomainEvent.PHASE_STARTED, {});
 
     expect(count).toBe(2);
   });

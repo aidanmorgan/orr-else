@@ -10,7 +10,8 @@
  * AC2: Production EventStore writes validate required fields and reject malformed
  *      payloads with structured diagnostics (extending y2ax's mechanism).
  *
- * AC3: synthetic:true bypass continues to work (y2ax regression guard).
+ * AC3: Production write path REJECTS synthetic:true (y2ax redesign); fixture writes
+ *      use writeFixtureEvent() (raw JSONL injection, isolated from production).
  *
  * AC4: Replay tests FAIL if required fields for covered event categories are
  *      absent.
@@ -23,11 +24,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { EventStore, EventStoreValidationError } from '../src/core/EventStore.js';
+import { EventStore, EventStoreValidationError, EventStoreSyntheticRejectedError } from '../src/core/EventStore.js';
 import { DOMAIN_EVENT_SCHEMAS } from '../src/core/DomainEventSchemas.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES, TeammateEventType } from '../src/constants/index.js';
+import { writeFixtureEvent } from './support/TestEventStore.js';
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
@@ -384,10 +386,14 @@ describe('AC2 – extended registry validates production writes for new event ca
 });
 
 // ---------------------------------------------------------------------------
-// AC3: synthetic:true bypass continues to work (y2ax regression guard)
+// AC3: Production write path REJECTS synthetic:true (y2ax redesign).
+//      Fixture writes use writeFixtureEvent() (raw JSONL injection).
+//      This group is the y2ax redesign regression guard: confirms that the
+//      extended g0bi registry does NOT restore the synthetic bypass on the
+//      production write path.
 // ---------------------------------------------------------------------------
 
-describe('AC3 – synthetic:true bypass is not regressed by the extended registry', () => {
+describe('AC3 – production rejects synthetic:true; g0bi registry does not restore the bypass', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -402,27 +408,34 @@ describe('AC3 – synthetic:true bypass is not regressed by the extended registr
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('allows STATE_TRANSITION_APPLIED with synthetic:true and no required fields', async () => {
+  it('REJECTS STATE_TRANSITION_APPLIED with synthetic:true through production write path', async () => {
     await expect(
       store.record(DomainEventName.STATE_TRANSITION_APPLIED, { synthetic: true, beadId: 'bd-1' })
-    ).resolves.toBeUndefined();
+    ).rejects.toBeInstanceOf(EventStoreSyntheticRejectedError);
   });
 
-  it('allows TEAMMATE_SPAWNED with synthetic:true even when workerId is absent', async () => {
+  it('REJECTS TEAMMATE_SPAWNED with synthetic:true through production write path', async () => {
     await expect(
       store.record(DomainEventName.TEAMMATE_SPAWNED, { synthetic: true, beadId: 'bd-1' })
-    ).resolves.toBeUndefined();
+    ).rejects.toBeInstanceOf(EventStoreSyntheticRejectedError);
   });
 
-  it('allows TOOL_INVOCATION_STARTED with synthetic:true even when tool is absent', async () => {
+  it('REJECTS TOOL_INVOCATION_STARTED with synthetic:true through production write path', async () => {
     await expect(
       store.record(DomainEventName.TOOL_INVOCATION_STARTED, { synthetic: true, beadId: 'bd-1' })
-    ).resolves.toBeUndefined();
+    ).rejects.toBeInstanceOf(EventStoreSyntheticRejectedError);
   });
 
-  it('allows CONTEXT_RESTART_REQUESTED with synthetic:true even when transitionEvent absent', async () => {
+  it('REJECTS CONTEXT_RESTART_REQUESTED with synthetic:true through production write path', async () => {
     await expect(
       store.record(DomainEventName.CONTEXT_RESTART_REQUESTED, { synthetic: true, beadId: 'bd-1', stateId: 'Planning' })
+    ).rejects.toBeInstanceOf(EventStoreSyntheticRejectedError);
+  });
+
+  it('fixture write via writeFixtureEvent() bypasses production validation (isolated test path)', async () => {
+    // writeFixtureEvent goes directly to JSONL — no production validation.
+    await expect(
+      writeFixtureEvent(tempRoot, DomainEventName.STATE_TRANSITION_APPLIED, { synthetic: true, beadId: 'bd-1' })
     ).resolves.toBeUndefined();
   });
 

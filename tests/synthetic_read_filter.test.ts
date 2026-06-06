@@ -1,21 +1,26 @@
 /**
- * pi-experiment-y2ax review fix: read-layer synthetic filter.
+ * pi-experiment-y2ax (redesign): LEGACY-COMPAT read-layer synthetic filter.
  *
  * Proves that filtering synthetic:true events at the EventStore read layer
- * (eventsForBeads / eventsForBead / scanEvents) uniformly protects the four
- * production consumers that the original per-consumer approach missed:
+ * (eventsForBeads / eventsForBead / scanEvents) defensively protects production
+ * consumers from any legacy synthetic records already on disk.
+ *
+ * Under the y2ax redesign the production write path now REJECTS synthetic events,
+ * so these tests use raw JSONL injection (writeFixtureEvent) to place synthetic
+ * records on disk — exactly as a pre-redesign harness would have written them.
  *
  *   (a) WorkerRunController SHIP_POST_REVIEW gate / prompt-provenance —
- *       a synthetic STATE_RUN_INITIALIZED must NOT shift the current-run
+ *       a legacy synthetic STATE_RUN_INITIALIZED must NOT shift the current-run
  *       boundary used by the review-artifact gate or the provenance check.
  *
  *   (b) EventStore.latestProjectToolFailureLimitEvent circuit-breaker —
- *       a synthetic STATE_RUN_INITIALIZED must NOT reset the failure-limit
- *       window, so a real failure before and after the synthetic event is
+ *       a legacy synthetic STATE_RUN_INITIALIZED must NOT reset the failure-limit
+ *       window, so a real failure before and after the synthetic record is
  *       still visible to the circuit breaker.
  *
- * Both tests use a real EventStore writing to a temp directory so the actual
- * read path (eventsForBead → isSyntheticEvent filter) is exercised end-to-end.
+ * Both test groups use raw JSONL injection so the actual read path
+ * (eventsForBead → isSyntheticEvent filter) is exercised end-to-end with
+ * realistic on-disk legacy data.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -26,6 +31,7 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, TeammateEventType } from '../src/constants/index.js';
+import { writeFixtureEvent } from './support/TestEventStore.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -55,15 +61,20 @@ function makeStore(tempRoot: string): EventStore {
 }
 
 // ---------------------------------------------------------------------------
-// (a) WorkerRunController gate: current-run boundary must NOT shift on
-//     a synthetic STATE_RUN_INITIALIZED.
+// (a) LEGACY-COMPAT: current-run boundary must NOT shift on a legacy synthetic
+//     STATE_RUN_INITIALIZED record already on disk.
 //
 // The gate reads eventsForBead and reverse-finds the LATEST
 // STATE_RUN_INITIALIZED for activeRun.stateId to determine when the current
-// run started.  A synthetic one with the same stateId must be invisible.
+// run started.  A legacy synthetic record with the same stateId must be
+// invisible at the read layer.
+//
+// Synthetic records are injected via writeFixtureEvent() (raw JSONL) to
+// simulate pre-redesign records that were written before production write
+// validation was enforced.
 // ---------------------------------------------------------------------------
 
-describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not shift it', () => {
+describe('(a) LEGACY-COMPAT: current-run boundary — legacy on-disk synthetic STATE_RUN_INITIALIZED does not shift it', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -78,11 +89,11 @@ describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not 
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('eventsForBead omits a synthetic STATE_RUN_INITIALIZED — real init event remains latest', async () => {
+  it('eventsForBead omits a legacy synthetic STATE_RUN_INITIALIZED — real init event remains latest', async () => {
     const beadId = 'bd-gate-test';
     const stateId = 'AdversarialPostReview';
 
-    // Real STATE_RUN_INITIALIZED — the run boundary.
+    // Real STATE_RUN_INITIALIZED — the run boundary (written via production path).
     await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
@@ -90,8 +101,9 @@ describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not 
       promptProvenanceResolutionFailed: true
     });
 
-    // Synthetic STATE_RUN_INITIALIZED for the same stateId — must be invisible.
-    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
+    // LEGACY: inject a synthetic STATE_RUN_INITIALIZED for the same stateId via
+    // raw JSONL (simulating a pre-redesign harness record already on disk).
+    await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
       actionId: 'injected-action',
@@ -100,7 +112,7 @@ describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not 
 
     const events = await store.eventsForBead(beadId);
 
-    // The synthetic event must not appear in the production read.
+    // The synthetic record must not appear in the production read (legacy defense).
     expect(events.some(e => e.data?.synthetic === true)).toBe(false);
 
     // The real init event must still be present.
@@ -111,18 +123,19 @@ describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not 
     expect(initEvents[0].data?.actionId).toBe('review');
   });
 
-  it('synthetic STATE_RUN_INITIALIZED is persisted on disk (raw JSONL confirms AC3 write)', async () => {
+  it('LEGACY-COMPAT: raw JSONL synthetic record is on disk but hidden by the read-layer filter', async () => {
     const beadId = 'bd-persistence-check';
     const stateId = 'Planning';
 
-    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
+    // Inject legacy synthetic record directly onto disk.
+    await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
       actionId: 'sentinel',
       synthetic: true
     });
 
-    // Raw JSONL read — synthetic event must be on disk.
+    // Raw JSONL confirms the record is present on disk.
     const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
     const rawEvents = fs.readFileSync(eventsPath, 'utf8')
       .trim().split('\n').map(l => JSON.parse(l));
@@ -131,27 +144,29 @@ describe('(a) current-run boundary — synthetic STATE_RUN_INITIALIZED does not 
     expect(rawEvents[0].type).toBe(DomainEventName.STATE_RUN_INITIALIZED);
     expect(rawEvents[0].data.synthetic).toBe(true);
 
-    // But the production read must hide it.
+    // Production read layer hides it (legacy defense).
     const productionEvents = await store.eventsForBead(beadId);
     expect(productionEvents).toHaveLength(0);
   });
 });
 
 // ---------------------------------------------------------------------------
-// (b) Circuit-breaker window: latestProjectToolFailureLimitEvent must NOT
-//     reset on a synthetic STATE_RUN_INITIALIZED.
+// (b) LEGACY-COMPAT: Circuit-breaker window must NOT reset on a legacy
+//     synthetic STATE_RUN_INITIALIZED record already on disk.
 //
 // Sequence:
 //   1. SIGNAL_ACKNOWLEDGED (STATE_TRANSITIONED) — terminal outcome acknowledged
-//   2. Synthetic STATE_RUN_INITIALIZED — must NOT be seen as a run-start reset
+//   2. LEGACY synthetic STATE_RUN_INITIALIZED (raw JSONL) — must NOT be seen as
+//      a run-start reset by the read layer
 //   3. Real PROJECT_TOOL_FAILED with failureLimit — must still be returned
 //
-// Without the read-layer filter the synthetic event was treated as a new run
-// boundary, which cleared `latest` and caused `latestProjectToolFailureLimitEvent`
-// to return undefined even though a real failure-limit event was present.
+// Without the read-layer filter a legacy synthetic record would be treated as a
+// new run boundary, clearing `latest` and causing
+// latestProjectToolFailureLimitEvent to return undefined even though a real
+// failure-limit event was present.
 // ---------------------------------------------------------------------------
 
-describe('(b) circuit-breaker window — synthetic STATE_RUN_INITIALIZED does not reset it', () => {
+describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic STATE_RUN_INITIALIZED does not reset it', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -166,7 +181,7 @@ describe('(b) circuit-breaker window — synthetic STATE_RUN_INITIALIZED does no
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('failure-limit event before the synthetic init is still returned (circuit breaker intact)', async () => {
+  it('failure-limit event before the legacy synthetic init is still returned (circuit breaker intact)', async () => {
     const beadId = 'bd-circuit-test';
     const stateId = 'Planning';
     const actionId = 'formulate-plan';
@@ -183,16 +198,18 @@ describe('(b) circuit-breaker window — synthetic STATE_RUN_INITIALIZED does no
       }
     });
 
-    // 2. A synthetic STATE_RUN_INITIALIZED — must NOT reset the window.
-    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
+    // 2. LEGACY: inject a synthetic STATE_RUN_INITIALIZED via raw JSONL —
+    //    simulating a pre-redesign record on disk.  The read-layer filter must
+    //    make it invisible so it cannot act as a window-reset boundary.
+    await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
       actionId,
       synthetic: true
     });
 
-    // latestProjectToolFailureLimitEvent reads via eventsForBead; the synthetic
-    // event is invisible so it cannot act as a window-reset boundary.
+    // latestProjectToolFailureLimitEvent reads via eventsForBead; the legacy
+    // synthetic record is filtered out so it cannot reset the circuit-breaker window.
     const result = await store.latestProjectToolFailureLimitEvent(beadId, { stateId, actionId });
 
     expect(result).toBeDefined();

@@ -81,10 +81,31 @@ export class EventStoreValidationError extends Error {
     super(
       `${diagnostic.eventType}: missing required field(s) [${missing}] in production event payload. ` +
       `Received keys: [${diagnostic.receivedKeys.join(', ')}]. ` +
-      `Either supply the required fields or mark the event synthetic:true for test/fixture writes.`
+      `Use a TestEventStore (tests/helpers/TestEventStore.ts) for test/fixture writes.`
     );
     this.name = 'EventStoreValidationError';
     this.diagnostic = diagnostic;
+  }
+}
+
+/**
+ * Thrown when production EventStore.record() is called with data.synthetic === true.
+ *
+ * Synthetic events must go through TestEventStore (isolated test namespace).
+ * Writing synthetic events into the production store is rejected to ensure the
+ * production write path stays clean and no test artifact can pollute production
+ * replay/projection reads.
+ */
+export class EventStoreSyntheticRejectedError extends Error {
+  public readonly eventType: string;
+
+  constructor(eventType: string) {
+    super(
+      `${eventType}: production EventStore.record() rejects data.synthetic === true. ` +
+      `Use a TestEventStore (tests/helpers/TestEventStore.ts) to write fixture/synthetic events.`
+    );
+    this.name = 'EventStoreSyntheticRejectedError';
+    this.eventType = eventType;
   }
 }
 
@@ -95,15 +116,13 @@ export class EventStoreValidationError extends Error {
  * Returns `null` when the payload is valid (or the event has no schema).
  * Returns an `EventStoreValidationDiagnostic` when required fields are absent.
  *
- * Pass `synthetic: true` in the data to bypass validation for test/fixture writes.
+ * NOTE: synthetic:true is no longer an escape hatch here — it is rejected
+ * before this function is called (see EventStore.record()).
  */
 function validateProductionPayload(
   eventType: string,
   data: Record<string, unknown>
 ): EventStoreValidationDiagnostic | null {
-  // synthetic:true is the test/fixture escape hatch — bypass all validation.
-  if (data.synthetic === true) return null;
-
   const requiredFields = PRODUCTION_PAYLOAD_SCHEMAS[eventType];
   if (!requiredFields) return null;
 
@@ -302,6 +321,12 @@ export class EventStore implements ProjectionCapableStore {
 
   public async record(event: DomainEventName | string, data: unknown): Promise<void> {
     const normalized = isRecord(data) ? data : {};
+
+    // Production write path rejects synthetic events (y2ax redesign).
+    // Fixture/test writes must go through TestEventStore (tests/helpers/TestEventStore.ts).
+    if (normalized.synthetic === true) {
+      throw new EventStoreSyntheticRejectedError(event);
+    }
 
     // Validate required payload fields before touching the store (y2ax).
     const diagnostic = validateProductionPayload(event, normalized);
