@@ -152,6 +152,11 @@ import {
   handleAgentLifecycleFailure
 } from './extension/AgentLifecycleController.js';
 import {
+  deriveRestartId,
+  computeRestartAttempt,
+  extractRestartCorrelation
+} from './core/RestartCorrelation.js';
+import {
   nativeToolPath,
   toSlashPath,
   relativeOperationalPath,
@@ -1314,6 +1319,20 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     Logger.warn(Component.ORR_ELSE, `Prompt provenance resolution threw unexpectedly: ${String(err)}. Gate will warn-only for this run.`);
   }
 
+  // Extract restart correlation from the event history (pi-experiment-nyug).
+  // If the most recent event for this bead+state is a restart request (and no
+  // STATE_RUN_INITIALIZED has followed it yet), carry restartId + previousRunId
+  // forward so operators can chain: restart event → this run → terminal outcome.
+  // The current worker's sessionStateId serves as the new run's identity (runId).
+  let restartCorrelation: { restartId: string; previousRunId: string } | undefined;
+  try {
+    const beadEventsForCorrelation = await services.eventStore.eventsForBead(beadId);
+    restartCorrelation = extractRestartCorrelation(beadEventsForCorrelation, beadId, stateId);
+  } catch (err) {
+    Logger.warn(Component.ORR_ELSE, `Failed to extract restart correlation: ${String(err)}`);
+  }
+  const runId = process.env[EnvVars.SESSION_STATE_ID];
+
   await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
     beadId,
     stateId,
@@ -1333,7 +1352,12 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     // Set when provenance resolution itself failed at init time — signals the
     // completion gate to warn only rather than hard-reject (the agent should not
     // be penalised for a harness resolution error).
-    promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined
+    promptProvenanceResolutionFailed: promptProvenanceResolutionFailed || undefined,
+    // Restart lifecycle correlation (pi-experiment-nyug): present only when this
+    // run was initiated by a restart request. runId identifies this worker session.
+    runId: runId || undefined,
+    restartId: restartCorrelation?.restartId,
+    previousRunId: restartCorrelation?.previousRunId
   });
 }
 
@@ -1876,6 +1900,8 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   if (event.type === TeammateEventType.CONTEXT_RESTART_REQUESTED) {
     const state = config.states[event.stateId];
     const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
+    const beadEventsForRestart = await services.eventStore.eventsForBead(beadId);
+    const restartAttempt = computeRestartAttempt(beadEventsForRestart, beadId, event.stateId);
     await services.eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
       beadId,
       workerId: event.workerId,
@@ -1887,13 +1913,20 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       actionId: event.actionId,
       summary: event.summary,
       evidence: event.evidence,
-      handover: event.handover
+      handover: event.handover,
+      // Restart lifecycle correlation fields (pi-experiment-nyug)
+      restartId: deriveRestartId(event.idempotencyKey),
+      previousRunId: event.sessionStateId,
+      reason: event.transitionEvent,
+      attempt: restartAttempt
     });
   }
 
   if (event.type === TeammateEventType.HARNESS_RESTART_REQUESTED) {
     const state = config.states[event.stateId];
     const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
+    const beadEventsForRestart = await services.eventStore.eventsForBead(beadId);
+    const restartAttempt = computeRestartAttempt(beadEventsForRestart, beadId, event.stateId);
     await services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
       beadId,
       workerId: event.workerId,
@@ -1905,7 +1938,12 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       actionId: event.actionId,
       summary: event.summary,
       evidence: event.evidence,
-      handover: event.handover
+      handover: event.handover,
+      // Restart lifecycle correlation fields (pi-experiment-nyug)
+      restartId: deriveRestartId(event.idempotencyKey),
+      previousRunId: event.sessionStateId,
+      reason: event.transitionEvent,
+      attempt: restartAttempt
     });
   }
 
