@@ -136,29 +136,6 @@ function validateProductionPayload(
   };
 }
 
-/** Path segment that marks the start of the PROJECT-scoped tool-output archive. */
-const TOOL_OUTPUT_DIR_SEGMENT = 'tool-output';
-
-/**
- * Recover the (beadId, stateId, actionId, tool) tuple from a tool-output
- * outputFile path. The archive layout is deterministic
- * (`.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}/…`), so the
- * four segments immediately after `tool-output` carry the tuple. Returns
- * undefined when the path is not a recognisable tool-output path.
- */
-function toolOutputPathSegments(outputFile: string):
-  | { beadId: string; stateId: string; actionId: string; tool: string }
-  | undefined {
-  const parts = outputFile.split(/[\\/]+/).filter(Boolean);
-  const anchor = parts.lastIndexOf(TOOL_OUTPUT_DIR_SEGMENT);
-  if (anchor < 0 || parts.length < anchor + 5) return undefined;
-  return {
-    beadId: parts[anchor + 1],
-    stateId: parts[anchor + 2],
-    actionId: parts[anchor + 3],
-    tool: parts[anchor + 4]
-  };
-}
 
 interface EventStoreLocation {
   dir: string;
@@ -463,11 +440,12 @@ export class EventStore implements ProjectionCapableStore {
    *  - FLAT (command / MCP tools): PROJECT_TOOL_SUCCEEDED / PROJECT_TOOL_FAILED
    *    carry top-level { beadId, stateId, actionId, tool, status, outputFile }.
    *  - NESTED (wrapped plugin tools): TOOL_INVOCATION_SUCCEEDED /
-   *    TOOL_INVOCATION_FAILED carry top-level { beadId, tool } plus a nested
-   *    { toolResult: ToolResultBase }. The plugin event does NOT carry stateId /
-   *    actionId at the top level, so the (state, action) are recovered from the
-   *    deterministic outputFile path layout
-   *    `.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}/…`.
+   *    TOOL_INVOCATION_FAILED carry top-level { beadId, stateId, actionId, tool }
+   *    plus a nested { toolResult: ToolResultBase }.
+   *
+   * Matching uses ONLY explicit canonical identity fields (beadId, stateId,
+   * actionId, tool). Events missing explicit stateId/actionId at the top level
+   * do NOT satisfy the query — path-layout parsing was removed (u7cl).
    */
   public async latestToolResultEvent(
     beadId: string,
@@ -500,39 +478,12 @@ export class EventStore implements ProjectionCapableStore {
     }
 
     if (event.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED || event.type === DomainEventName.TOOL_INVOCATION_FAILED) {
-      // Tool name check is always top-level (both legacy and explicit shapes).
-      if (data.tool !== tool) return false;
-
-      // EXPLICIT IDENTITY PATH (dsm2.12): when stateId and actionId are present
-      // at the top level of the event data, prefer them over path parsing.
-      // This is the canonical path for all newly-written events.
-      if (typeof data.stateId === 'string' && typeof data.actionId === 'string') {
-        return data.stateId === stateId && data.actionId === actionId;
-      }
-
-      // LEGACY PATH FALLBACK (dsm2.12): events written before dsm2.12 carry no
-      // explicit stateId/actionId at the top level. Fall back to path parsing on
-      // the toolResult.outputFile. This is a BOUNDED fallback — emit a diagnostic
-      // warning so operators know which events are running on the legacy path.
-      const toolResult = isRecord(data.toolResult) ? data.toolResult : undefined;
-      const outputFile = typeof toolResult?.outputFile === 'string' ? toolResult.outputFile : undefined;
-      if (!outputFile) return false;
-      const segments = toolOutputPathSegments(outputFile);
-      if (segments === undefined) return false;
-      if (segments.beadId !== beadId || segments.stateId !== stateId || segments.actionId !== actionId || segments.tool !== tool) {
-        return false;
-      }
-      // Emit migration diagnostic — this event is a legacy record using path-only identity.
-      Logger.debug(Component.CORE, 'latestToolResultEvent: legacy path-fallback match (event lacks explicit stateId/actionId; migrate to dsm2.12 identity fields)', {
-        eventId: event.id,
-        eventType: event.type,
-        beadId,
-        stateId,
-        actionId,
-        tool,
-        outputFile
-      });
-      return true;
+      // Canonical explicit-identity match (u7cl): stateId, actionId, and tool
+      // must all be present and correct at the top level of the event data.
+      // Events without explicit stateId/actionId do NOT match — path-layout
+      // parsing was removed (u7cl). Events missing these fields are rejected.
+      if (typeof data.stateId !== 'string' || typeof data.actionId !== 'string') return false;
+      return data.stateId === stateId && data.actionId === actionId && data.tool === tool;
     }
 
     return false;

@@ -2071,7 +2071,10 @@ states:
       }),
       makeEvent(DomainEventName.STATE_RUN_INITIALIZED, beadId, oldMs + 1000, { stateId, actionId }),
       // Evidence-bearing TOOL_INVOCATION event — must survive compaction.
+      // Explicit identity required (u7cl): stateId/actionId at top level.
       makeEvent(DomainEventName.TOOL_INVOCATION_SUCCEEDED, beadId, oldMs + 2000, {
+        stateId,
+        actionId,
         tool,
         toolResult: { status: 'PASSED', outputFile, outputFileBytes: 128 }
       }),

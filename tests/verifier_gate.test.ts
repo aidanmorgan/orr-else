@@ -273,10 +273,12 @@ states:
     expect((event!.data as Record<string, unknown>).status).toBe(ToolResultStatus.PASSED);
   });
 
-  it('resolves the NESTED (plugin) shape via the toolResult.outputFile path segments', async () => {
+  it('resolves the NESTED (plugin) shape via explicit canonical identity fields (u7cl: path-segment fallback removed)', async () => {
+    // u7cl: NESTED plugin events must carry explicit stateId/actionId at the
+    // top level — path-segment parsing from toolResult.outputFile is removed.
     const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'pluginTool', 'inv', 'output', 'plugin-raw.json');
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'pluginTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'pluginTool',
       toolResult: { tool: 'pluginTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 12 }
     });
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'pluginTool');
@@ -354,16 +356,16 @@ states:
     const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
     const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 42 };
 
-    // First invocation — non-cached, durable shape.
+    // First invocation — non-cached, durable shape. Explicit identity required (u7cl).
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true },
       toolResult
     });
 
     // Second invocation — cache hit. Must include the SAME toolResult handle + cached:true.
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true },
       cached: true,
       cacheAgeMs: 10,
@@ -392,15 +394,15 @@ states:
     const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
     const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 42 };
 
-    // First invocation at t=1.
+    // First invocation at t=1. Explicit identity required (u7cl).
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true }, toolResult
     });
 
-    // Cache-hit at t=2 — same toolResult handle, cached:true.
+    // Cache-hit at t=2 — same toolResult handle, cached:true. Explicit identity required (u7cl).
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true }, cached: true, cacheAgeMs: 5,
       toolResult
     });
@@ -423,9 +425,9 @@ states:
     fs.writeFileSync(outputFile, JSON.stringify({ verified: true }));
     const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 20 };
 
-    // Only the cache-hit event is recorded (no prior non-cached event).
+    // Only the cache-hit event is recorded (no prior non-cached event). Explicit identity (u7cl).
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true }, cached: true, cacheAgeMs: 0,
       toolResult
     });
@@ -457,7 +459,7 @@ states:
     const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 30 };
 
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1', tool: 'cacheableTool',
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: originalResult, cached: true, cacheAgeMs: 200,
       toolResult
     });

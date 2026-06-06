@@ -633,7 +633,7 @@ async function compactJsonlFile(
 
         // SAFETY 1.5: never drop evidence-bearing tool-result events.
         //
-        // Two recorded shapes are reconciled here (see EventStore.toolResultEventMatches):
+        // Two recorded shapes exist:
         //
         // NESTED (wrapped plugin tools): TOOL_INVOCATION_SUCCEEDED / TOOL_INVOCATION_FAILED
         //   carry toolResult.outputFile at data.toolResult.outputFile.
@@ -646,6 +646,10 @@ async function compactJsonlFile(
         // required tool ran for the current bead/state/action. They must survive compaction
         // even when the bead is no longer live, so the verifier gate can still reconstruct
         // required-tool status from the event log.
+        //
+        // Note: compaction protection is based on the presence of an outputFile handle,
+        // not on path-layout parsing. Path-layout parsing was removed from the matching
+        // path (u7cl) — identity is determined solely by explicit canonical fields.
         //
         // Events WITHOUT an outputFile (e.g. TOOL_INVOCATION_STARTED, or SUCCEEDED/FAILED
         // without an outputFile) are NOT evidence and remain compactable as pure telemetry.

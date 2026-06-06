@@ -1,17 +1,19 @@
 /**
- * pi-experiment-dsm2.12 — Explicit verifier identity on tool result events.
+ * pi-experiment-dsm2.12 + pi-experiment-u7cl — Explicit verifier identity on tool result events.
  *
- * ACCEPTANCE CRITERIA (11 AC5 scenarios):
+ * u7cl: path-derived identity matching removed from production code. Events missing
+ * explicit stateId/actionId at the top level do NOT satisfy latestToolResultEvent
+ * or verifier gates. Tests updated to reflect explicit-only matching.
+ *
+ * ACCEPTANCE CRITERIA (11 scenarios):
  *  1. explicit-identity success: flat project tool event carries beadId,
  *     stateId, actionId, toolName, toolInvocationId, schemaId, schemaVersion.
  *  2. explicit-identity success: nested plugin tool event carries the same
  *     identity fields at the top level (not only inside toolResult path).
- *  3. legacy path fallback: TOOL_INVOCATION_* event WITHOUT top-level identity
- *     fields is still matched by latestToolResultEvent via path parsing (with
- *     a diagnostics warning).
- *  4. malformed path rejection: TOOL_INVOCATION_* event with a toolResult.outputFile
- *     that does NOT follow the known path layout is rejected (undefined returned)
- *     when there are no explicit identity fields to fall back to.
+ *  3. NEGATIVE (u7cl): TOOL_INVOCATION_* event WITHOUT explicit stateId/actionId
+ *     is NOT matched by latestToolResultEvent regardless of outputFile path layout.
+ *  4. NEGATIVE (u7cl): path-only TOOL_INVOCATION_* event (even with a well-formed
+ *     outputFile path) cannot satisfy a verifier gate — gate sees TOOL_NOT_INVOKED.
  *  5. wrong-state/action guard: an event with explicit stateId=X,actionId=Y does
  *     NOT match latestToolResultEvent(…, stateId=A, actionId=B, …).
  *  6. cache-hit identity: a TOOL_INVOCATION_SUCCEEDED with cached:true carries
@@ -25,9 +27,8 @@
  * 10. out-of-order update/end: a TOOL_INVOCATION_STARTED with an earlier timestamp
  *     never beats a TOOL_INVOCATION_SUCCEEDED with a later timestamp even when
  *     written second.
- * 11. partialResult replacement / replay compatibility: a legacy event (no explicit
- *     identity) followed by a modern event (with explicit identity) for the same
- *     (bead,state,action,tool) returns the modern event.
+ * 11. mixed legacy+modern: a legacy (path-only) event is not matched; the modern
+ *     explicit-identity event for the same (bead,state,action,tool) IS matched.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -160,38 +161,67 @@ describe('dsm2.12: explicit verifier identity on tool result events', () => {
     expect(data.schemaVersion).toBe('1.0');
   });
 
-  // ── Scenario 3: legacy path fallback (no explicit identity) ──────────────
-  it('SC3: legacy TOOL_INVOCATION_SUCCEEDED without explicit identity fields is still matched via path parsing', async () => {
+  // ── Scenario 3: NEGATIVE — path-only event is NOT matched (u7cl) ─────────
+  it('SC3: TOOL_INVOCATION_SUCCEEDED without explicit stateId/actionId is NOT matched (path-only events rejected)', async () => {
+    // Path-only (legacy) shape: no stateId/actionId at top level.
+    // The outputFile path IS a well-formed tool-output layout, but that no longer
+    // confers identity — matching requires explicit canonical fields (u7cl).
     const outputFile = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'legacyTool');
-    // Legacy event: no stateId/actionId/toolName/toolInvocationId at top level
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
       beadId: 'bd-1',
       tool: 'legacyTool',
-      // No stateId, actionId, toolName, toolInvocationId at the top level
+      // No stateId, actionId, toolName, toolInvocationId — path-only shape
       toolResult: { tool: 'legacyTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 30 }
     });
 
-    // latestToolResultEvent must still find this event via path parsing fallback
+    // Must return undefined — explicit identity fields absent; path parsing removed (u7cl).
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'legacyTool');
-    expect(event).toBeDefined();
-    expect(event!.type).toBe(DomainEventName.TOOL_INVOCATION_SUCCEEDED);
-    const toolResult = (event!.data as Record<string, unknown>).toolResult as Record<string, unknown>;
-    expect(toolResult.outputFile).toBe(outputFile);
+    expect(event).toBeUndefined();
   });
 
-  // ── Scenario 4: malformed path rejection ─────────────────────────────────
-  it('SC4: TOOL_INVOCATION_SUCCEEDED with malformed toolResult.outputFile and no explicit identity is not matched', async () => {
-    // A path that does NOT follow .pi/tool-output/{bead}/{state}/{action}/{tool}/… layout
-    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1',
-      tool: 'malformedTool',
-      // No explicit stateId/actionId
-      toolResult: { tool: 'malformedTool', status: ToolResultStatus.PASSED, outputFile: '/tmp/random/path.json', outputFileBytes: 5 }
-    });
+  // ── Scenario 4: NEGATIVE — path-only event cannot satisfy a verifier gate ─
+  it('SC4: path-only TOOL_INVOCATION_SUCCEEDED (no explicit identity) yields TOOL_NOT_INVOKED from the verifier gate', async () => {
+    // This is the load-bearing negative test (u7cl): inject a real path-only
+    // event with a well-formed tool-output path. The gate must see TOOL_NOT_INVOKED
+    // because latestToolResultEvent returns undefined (no explicit identity).
+    // If path-fallback were reintroduced, latestToolResultEvent would return the
+    // event and the gate would instead see TOOL_REJECTED or PASS — so this test
+    // will FAIL if the fallback comes back.
+    const { runVerifierGate, VerifierGateBlockKind } = await import('../src/core/VerifierGate.js');
 
-    // Must return undefined — path doesn't match the expected layout
-    const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'malformedTool');
+    const outputFile = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'pathOnlyTool');
+    const eventsPath = path.join(projectRoot, '.pi', 'events', `${path.basename(projectRoot)}.jsonl`);
+
+    // Write a path-only event (no stateId/actionId) directly to the JSONL to
+    // simulate a pre-u7cl legacy record (schema only requires 'tool').
+    const pathOnlyEvent = {
+      id: 'ev-path-only',
+      type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
+      timestamp: new Date().toISOString(),
+      sessionId: 'test',
+      data: {
+        beadId: 'bd-1',
+        tool: 'pathOnlyTool',
+        // No stateId, actionId — path-only shape (pre-dsm2.12 / pre-u7cl legacy)
+        toolResult: { tool: 'pathOnlyTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 30 }
+      }
+    };
+    fs.writeFileSync(eventsPath, `${JSON.stringify(pathOnlyEvent)}\n`);
+
+    // latestToolResultEvent returns undefined — explicit identity absent.
+    const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'pathOnlyTool');
     expect(event).toBeUndefined();
+
+    // Gate uses the same store — must see TOOL_NOT_INVOKED (not TOOL_REJECTED / PASS).
+    const result = await runVerifierGate(
+      { beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', writeSet: [], artifacts: {} },
+      ['pathOnlyTool'],
+      store
+    );
+    expect(result.pass).toBe(false);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_NOT_INVOKED);
+    expect(result.failures[0].tool).toBe('pathOnlyTool');
   });
 
   // ── Scenario 5: wrong state/action guard ─────────────────────────────────
@@ -415,13 +445,14 @@ describe('dsm2.12: explicit verifier identity on tool result events', () => {
     expect(event!.id).toBe('ev-order-succeed');
   });
 
-  // ── Scenario 11: legacy → modern event (replay compatibility) ────────────
-  it('SC11: a modern explicit-identity event replaces a legacy path-parsed event for the same tool', async () => {
+  // ── Scenario 11: mixed legacy+modern — only modern matches (u7cl) ─────────
+  it('SC11: legacy path-only event is not matched; modern explicit-identity event IS matched', async () => {
     const eventsPath = path.join(projectRoot, '.pi', 'events', `${path.basename(projectRoot)}.jsonl`);
     const legacyOutput = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'migTool', 'inv-11-legacy');
     const modernOutput = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'migTool', 'inv-11-modern');
 
-    // Legacy event (t=1): no explicit stateId/actionId — relies on path parsing
+    // Legacy event (t=1): no explicit stateId/actionId — path-only shape.
+    // After u7cl this event DOES NOT match the query (explicit identity required).
     const legacyEvent = {
       id: 'ev-legacy',
       type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
@@ -430,11 +461,11 @@ describe('dsm2.12: explicit verifier identity on tool result events', () => {
       data: {
         beadId: 'bd-1',
         tool: 'migTool',
-        // No explicit stateId/actionId/toolName — legacy shape
+        // No stateId/actionId/toolName — path-only shape, not matchable
         toolResult: { tool: 'migTool', status: ToolResultStatus.PASSED, outputFile: legacyOutput, outputFileBytes: 10 }
       }
     };
-    // Modern event (t=2): full explicit identity
+    // Modern event (t=2): full explicit identity — this IS matchable.
     const modernEvent = {
       id: 'ev-modern',
       type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
@@ -454,7 +485,7 @@ describe('dsm2.12: explicit verifier identity on tool result events', () => {
     };
     fs.writeFileSync(eventsPath, `${JSON.stringify(legacyEvent)}\n${JSON.stringify(modernEvent)}\n`);
 
-    // Modern event (fresher timestamp) must win
+    // Only the modern event matches — the legacy event is invisible (no explicit identity).
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'migTool');
     expect(event).toBeDefined();
     expect(event!.id).toBe('ev-modern');
@@ -483,10 +514,10 @@ describe('dsm2.12: PiToolCallIdAdapter — typed toolCallId↔toolInvocationId m
 });
 
 // ---------------------------------------------------------------------------
-// latestToolResultEvent: explicit-first preference + bounded legacy fallback
+// latestToolResultEvent: explicit-only matching (u7cl)
 // ---------------------------------------------------------------------------
 
-describe('dsm2.12: latestToolResultEvent — explicit-first with bounded legacy fallback', () => {
+describe('dsm2.12 + u7cl: latestToolResultEvent — explicit-only matching, no path fallback', () => {
   let projectRoot: string;
   let configLoader: ConfigLoader;
   let store: EventStore;
@@ -506,12 +537,15 @@ describe('dsm2.12: latestToolResultEvent — explicit-first with bounded legacy 
     fs.rmSync(projectRoot, { recursive: true, force: true });
   });
 
-  it('prefers an event with explicit stateId/actionId over path-only match at the same timestamp', async () => {
+  it('explicit event is returned; co-resident path-only event for the same tool is invisible', async () => {
+    // u7cl: even when a path-only event exists for the same tool, only the
+    // event with explicit stateId/actionId is returned. The path-only event
+    // is silently excluded (undefined from path parsing, no fallback).
     const eventsPath = path.join(projectRoot, '.pi', 'events', `${path.basename(projectRoot)}.jsonl`);
     const legacyOutput = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'prefTool', 'inv-p-a');
     const explicitOutput = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'prefTool', 'inv-p-b');
 
-    // Legacy (path-only) event at t=1
+    // Path-only (legacy) event — no explicit stateId/actionId; not matchable (u7cl)
     const legacyEvent = {
       id: 'ev-pref-legacy',
       type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
@@ -523,7 +557,7 @@ describe('dsm2.12: latestToolResultEvent — explicit-first with bounded legacy 
         toolResult: { tool: 'prefTool', status: ToolResultStatus.PASSED, outputFile: legacyOutput, outputFileBytes: 10 }
       }
     };
-    // Explicit event at t=2 (fresher — normal timestamp ordering should pick this)
+    // Explicit event — has stateId/actionId; IS matchable
     const explicitEvent = {
       id: 'ev-pref-explicit',
       type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
@@ -545,24 +579,33 @@ describe('dsm2.12: latestToolResultEvent — explicit-first with bounded legacy 
 
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'prefTool');
     expect(event).toBeDefined();
-    // The explicit event (newer timestamp) wins
+    // The explicit event is the only matchable one
     expect(event!.id).toBe('ev-pref-explicit');
   });
 
-  it('emits a diagnostic warning when falling back to path parsing for a legacy event', async () => {
+  it('NEGATIVE: path-only event alone returns undefined (no explicit identity, no fallback)', async () => {
+    // Load-bearing negative test (u7cl): a TOOL_INVOCATION_SUCCEEDED with a
+    // well-formed tool-output path but no explicit stateId/actionId CANNOT
+    // satisfy latestToolResultEvent. If path-fallback were reintroduced this
+    // test would start returning a defined event and fail.
+    const eventsPath = path.join(projectRoot, '.pi', 'events', `${path.basename(projectRoot)}.jsonl`);
     const outputFile = toolOutputPath(projectRoot, 'bd-1', 'Implementing', 'code', 'diagTool');
-    // Legacy event: no stateId/actionId at top level
-    await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-      beadId: 'bd-1',
-      tool: 'diagTool',
-      toolResult: { tool: 'diagTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 25 }
-    });
 
-    // The event should still be found (legacy fallback works)
+    const pathOnlyEvent = {
+      id: 'ev-path-only-alone',
+      type: DomainEventName.TOOL_INVOCATION_SUCCEEDED,
+      timestamp: new Date().toISOString(),
+      sessionId: 'test',
+      data: {
+        beadId: 'bd-1',
+        tool: 'diagTool',
+        // No stateId/actionId at top level — path-only shape
+        toolResult: { tool: 'diagTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 25 }
+      }
+    };
+    fs.writeFileSync(eventsPath, `${JSON.stringify(pathOnlyEvent)}\n`);
+
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'diagTool');
-    expect(event).toBeDefined();
-    // We cannot easily assert the Logger.warn call here without mocking,
-    // but at minimum the event must be resolved without throwing.
-    expect(event!.type).toBe(DomainEventName.TOOL_INVOCATION_SUCCEEDED);
+    expect(event).toBeUndefined();
   });
 });
