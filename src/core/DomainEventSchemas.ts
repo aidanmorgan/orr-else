@@ -1,5 +1,6 @@
 /**
  * pi-experiment-g0bi: Canonical domain-event schema registry.
+ * pi-experiment-kutb: Extended with version, replayImpact, and optionalFields metadata.
  *
  * Defines required-field schemas for every replay-critical and startup-critical
  * domain event. This is the authoritative, code-owned contract for event shapes
@@ -40,9 +41,308 @@
  *   - TOOL_INVOCATION_*: beadIdFromToolParams() returns string|undefined (extension.ts:416)
  *     and PiObservers.ts:149 does the same — beadId absent when no bead context;
  *     schema requires only tool.
+ *
+ * KUTB EXTENSION (pi-experiment-kutb):
+ *   DOMAIN_EVENT_SCHEMA_METADATA adds per-event:
+ *   - version:       Schema version. Bump when required-field set changes.
+ *   - replayImpact:  CRITICAL | INFORMATIONAL | AUDIT — how compaction treats the event.
+ *   - optionalFields: Fields that are typed but NOT required (writer may omit them).
+ *                    Consumers must tolerate absence. Documented here so replay
+ *                    reconstruction logic can warn when expected-but-optional fields
+ *                    are absent from historical events.
+ *
+ *   DOMAIN_EVENT_SCHEMAS (g0bi required-field map) is UNCHANGED.
+ *   EventStore.validateProductionPayload() is UNCHANGED.
  */
 
 import { DomainEventName } from '../constants/index.js';
+
+// ---------------------------------------------------------------------------
+// pi-experiment-kutb: per-event schema metadata
+// ---------------------------------------------------------------------------
+
+/**
+ * How the absence of this event type from the event log affects replay
+ * correctness.
+ *
+ * CRITICAL    — loss of this event type means replay cannot reconstruct
+ *               authoritative bead/run state. Compaction must NEVER drop
+ *               these events. Listed in REPLAY_CRITICAL_EVENT_TYPES.
+ *
+ * INFORMATIONAL — event feeds monitoring, slot-health, or observability but
+ *               its loss does not break state reconstruction. May be compacted
+ *               once the observation window passes.
+ *
+ * AUDIT       — pure telemetry / substrate record. Safe to compact.
+ */
+export type ReplayImpact = 'CRITICAL' | 'INFORMATIONAL' | 'AUDIT';
+
+/**
+ * Per-event richer metadata added by pi-experiment-kutb.
+ *
+ * - version:        Monotonic integer. Increment when the required-field set
+ *                   or optionalFields list changes in a meaningful way.
+ * - replayImpact:   Classification for compaction decisions.
+ * - optionalFields: Fields that some writers supply and replay readers may
+ *                   use if present, but that are NEVER required. Absence must
+ *                   not crash projections or reconstruction logic.
+ */
+export interface DomainEventSchemaMetadata {
+  readonly version: number;
+  readonly replayImpact: ReplayImpact;
+  readonly optionalFields: readonly string[];
+}
+
+/**
+ * Per-event metadata map (pi-experiment-kutb).
+ *
+ * Key: DomainEventName (string literal)
+ * Value: DomainEventSchemaMetadata
+ *
+ * Coverage mirrors DOMAIN_EVENT_SCHEMAS (g0bi) — every key present there
+ * has a corresponding entry here. The required-field enforcement remains
+ * in DOMAIN_EVENT_SCHEMAS; this map adds classification and optional-field
+ * documentation only.
+ */
+export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSchemaMetadata>> = {
+  // ── Core bead lifecycle ────────────────────────────────────────────────────
+  [DomainEventName.BEAD_CLAIMED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // stateId: present in claim writes; absent when a bead is claimed without
+    // an initial state assignment (edge path in tests).
+    // owner: carried inside lease object; top-level owner absent.
+    optionalFields: ['stateId', 'owner', 'worktreePath']
+  },
+  [DomainEventName.BEAD_CLOSED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId', 'reason']
+  },
+  [DomainEventName.BEAD_RELEASED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['reason']
+  },
+  [DomainEventName.BEAD_STATUS_UPDATED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['reason', 'stateId']
+  },
+  [DomainEventName.BEAD_TOMBSTONED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['reason', 'stateId']
+  },
+
+  // ── State execution ───────────────────────────────────────────────────────
+  [DomainEventName.STATE_RUN_INITIALIZED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // runId: present only when SESSION_STATE_ID env var is set (worker mode).
+    // restartId/previousRunId: present only on restart-initiated runs (nyug).
+    // actionKey, workflowVersion, worktreePath, promptProvenance: optional metadata.
+    optionalFields: ['runId', 'restartId', 'previousRunId', 'actionKey', 'workflowVersion', 'worktreePath', 'promptProvenance']
+  },
+  [DomainEventName.STATE_TRANSITION_APPLIED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // workerId: absent in some test writes (project_tools.test.ts:1071).
+    // actionId/handover: not always supplied; handover only on restart transitions.
+    optionalFields: ['workerId', 'actionId', 'handover', 'stateId']
+  },
+  [DomainEventName.ACTION_COMPLETED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // result: the tool/action outcome object; always written by extension.ts
+    // but left optional here because test writes sometimes omit it.
+    optionalFields: ['result', 'workerId', 'runId']
+  },
+
+  // ── Restart lifecycle ─────────────────────────────────────────────────────
+  [DomainEventName.CONTEXT_RESTART_REQUESTED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // restartId/previousRunId: added pi-experiment-nyug; absent in older writes.
+    // targetState: default = stateId; absent in pre-nyug events.
+    // handover: present on some restart signals, absent on others.
+    optionalFields: ['restartId', 'previousRunId', 'targetState', 'handover', 'actionId']
+  },
+  [DomainEventName.HARNESS_RESTART_REQUESTED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['restartId', 'previousRunId', 'targetState', 'handover', 'actionId']
+  },
+
+  // ── Teammate / worktree ────────────────────────────────────────────────────
+  [DomainEventName.TEAMMATE_SPAWNED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['worktreePath', 'paneId', 'branchName']
+  },
+  [DomainEventName.WORKTREE_CREATED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['branchName', 'fromBranch', 'worktreePath']
+  },
+  [DomainEventName.WORKTREE_REUSED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['branchName', 'worktreePath']
+  },
+  [DomainEventName.WORKTREE_PROVISIONED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // worktreePath: written by Supervisor but not guaranteed on all paths.
+    optionalFields: ['worktreePath', 'branchName']
+  },
+  [DomainEventName.WORKTREE_REMOVED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['reason', 'branchName']
+  },
+
+  // ── Slot-health pruning ───────────────────────────────────────────────────
+  [DomainEventName.TEAMMATE_PROCESS_EXITED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // reason/terminatedPaneIds: absent when Supervisor writes only { beadId }.
+    optionalFields: ['reason', 'terminatedPaneIds', 'workerId']
+  },
+
+  // ── Signal idempotency & intent reconciliation ─────────────────────────────
+  [DomainEventName.TEAMMATE_EVENT]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // idempotencyKey, stateId, workerId, processingReason: present in most writes
+    // but not required (some test writes omit them).
+    optionalFields: ['idempotencyKey', 'stateId', 'workerId', 'processingReason']
+  },
+  [DomainEventName.SIGNAL_INTENT_RECORDED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['idempotencyKey', 'stateId', 'workerId', 'targetState']
+  },
+  [DomainEventName.SIGNAL_ACKNOWLEDGED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['idempotencyKey', 'stateId', 'workerId']
+  },
+  [DomainEventName.SIGNAL_INTENT_RECONCILED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['type', 'stateId', 'reason']
+  },
+
+  // ── Project-tool circuit breaker ───────────────────────────────────────────
+  [DomainEventName.PROJECT_TOOL_FAILED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // beadId/stateId/actionId: optional — beadIdFromArgs() returns undefined
+    // when called without bead context; stateId/actionId omitted in some tests.
+    // toolInvocationId: always written by extension.ts path; absent in direct writes.
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result']
+  },
+  [DomainEventName.PROJECT_TOOL_SUCCEEDED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result']
+  },
+  [DomainEventName.PROJECT_TOOL_STARTED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId']
+  },
+
+  // ── Tool invocation correlation ────────────────────────────────────────────
+  [DomainEventName.TOOL_INVOCATION_STARTED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    // beadId: absent when tool runs without bead context.
+    // toolInvocationId: always generated by extension.ts (uuidv7); optional
+    //   because older or direct writes may not supply it.
+    optionalFields: ['beadId', 'toolInvocationId', 'params', 'stateId', 'actionId']
+  },
+  [DomainEventName.TOOL_INVOCATION_SUCCEEDED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['beadId', 'toolInvocationId', 'rawFile', 'rawBytes', 'rawChecksum', 'stateId', 'actionId']
+  },
+  [DomainEventName.TOOL_INVOCATION_FAILED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['beadId', 'toolInvocationId', 'error', 'stateId', 'actionId']
+  },
+
+  // ── Checklist / checkpoint (replay-critical) ──────────────────────────────
+  [DomainEventName.CHECKLIST_ITEM_TICKED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    // beadId/stateId/text: present in most writes; beadId absent in some test fixtures.
+    optionalFields: ['beadId', 'stateId', 'text', 'evidence', 'mandatory']
+  },
+  [DomainEventName.CHECKLIST_ITEM_ADDED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['beadId', 'stateId', 'text', 'mandatory', 'type']
+  },
+  [DomainEventName.CHECKPOINT_SUBMITTED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['actionId', 'workerId', 'outcome']
+  },
+
+  // ── Merge lifecycle (replay-critical) ────────────────────────────────────
+  [DomainEventName.MERGE_AND_COMMIT_STARTED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId', 'actionId', 'workerId']
+  },
+  [DomainEventName.MERGE_AND_COMMIT_SUCCEEDED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId', 'actionId', 'commitSha', 'workerId']
+  },
+  [DomainEventName.MERGE_AND_COMMIT_FAILED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId', 'actionId', 'reason', 'workerId']
+  },
+
+  // ── Context compaction counter ─────────────────────────────────────────────
+  [DomainEventName.CONTEXT_COMPACTION_RECORDED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId', 'actionId', 'count']
+  },
+
+  // ── Startup / substrate events ─────────────────────────────────────────────
+  [DomainEventName.BEAD_CREATED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['stateId', 'owner', 'description']
+  },
+  [DomainEventName.HARNESS_STARTED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'requestedBeadId', 'mode', 'version']
+  },
+  [DomainEventName.HARNESS_STOPPED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'requestedBeadId', 'reason', 'exitCode']
+  },
+};
+
+/**
+ * Look up per-event schema metadata by event type string.
+ *
+ * Returns undefined when the event type has no metadata entry (unregistered
+ * or dynamically-named events). Callers must tolerate undefined gracefully.
+ */
+export function getDomainEventMeta(eventType: string): DomainEventSchemaMetadata | undefined {
+  return DOMAIN_EVENT_SCHEMA_METADATA[eventType];
+}
 
 /**
  * The canonical required-field registry for domain events.
