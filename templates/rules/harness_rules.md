@@ -5,7 +5,7 @@ These rules apply to all agents running in this project.
 ## Core Principles
 
 1. **Always use checklist items** — register checklist items with `add_checklist_item`
-   before performing work. Tick them with `tick_item` providing concrete evidence.
+   before performing work. Tick them with `tick_items` (one or more at once) providing concrete evidence.
 
 2. **Signal explicitly** — call `signal_completion` when your state's work is done.
    Never assume the harness will infer completion.

@@ -27,7 +27,7 @@ export class ProtocolParser {
 
     return `
 ### MANDATORY PROTOCOL: TICK CHECKLIST ITEMS
-To complete this task, you MUST use the \`${BuiltInToolName.TICK_ITEMS}\` tool to record evidence for completed checklist items. Prefer one batched call for all completed items; use \`${BuiltInToolName.TICK_ITEM}\` only for a single-item compatibility update.
+To complete this task, you MUST use the \`${BuiltInToolName.TICK_ITEMS}\` tool to record evidence for completed checklist items (one or more items per call).
 
 ${items}
 

@@ -6,7 +6,7 @@ Orr Else runs as a pi.dev extension. `/orr-else` starts the coordinator in the c
 
 Each teammate process automatically enters teammate mode when launched with `PI_ORR_ELSE_WORKER=1`, `PI_BEAD_ID`, and `PI_STATE_ID`. The extension injects the configured state prompt and enables these tools:
 
-- `tick_item`: mark an exact checklist item complete with concrete evidence.
+- `tick_items`: mark one or more exact checklist items complete with concrete evidence.
 - `get_outstanding_tasks`: list mandatory items still missing evidence.
 - `add_checklist_item`: add a runtime checklist item to the active state turn.
 - `submit_checkpoint`: finalize the state with a dense summary, handover evidence, and an `outcome`.
@@ -16,7 +16,7 @@ The state turn must tick every mandatory item before a `SUCCESS` checkpoint can 
 
 Checklist items are owned by the configured harness YAML file, which defaults to `harness.yaml` and can be changed with `/orr-else --config <path>` or `ORR_ELSE_CONFIG`. A state-level `checklist` applies to every action in that state, and an action-level `checklist` adds items for that action only. Either value can be an inline YAML array or a file path to a YAML/JSON checklist. The runtime derives the active list from required validation gates, state items, and action items, with exact-text de-duplication; the first item's metadata is preserved and `mandatory: true` wins across duplicates.
 
-States can also add dynamic checklist items after startup. `add_checklist_item` accepts one item at a time, appends it to the active checklist, persists it in Bead metadata, and makes it enforceable by `tick_item`, `get_outstanding_tasks`, and `signal_completion`. A project-specific sequenced tool action may return JSON `toolCalls` or `frameworkToolCalls` entries that invoke `add_checklist_item`; the framework executes those generic tool calls without knowing the project tool's purpose.
+States can also add dynamic checklist items after startup. `add_checklist_item` accepts one item at a time, appends it to the active checklist, persists it in Bead metadata, and makes it enforceable by `tick_items`, `get_outstanding_tasks`, and `signal_completion`. A project-specific sequenced tool action may return JSON `toolCalls` or `frameworkToolCalls` entries that invoke `add_checklist_item`; the framework executes those generic tool calls without knowing the project tool's purpose.
 
 Actions are ordered sub-state steps inside the parent state. An action may declare `context: parent` or `context: fresh`; omitted context defaults to `parent`. Parent-context tool actions before the selected prompt run in the current worker. Fresh-context actions run as isolated sub-state turns: successful non-final actions are recorded as completed while the Bead remains in the parent state, then the coordinator spawns the next pending action.
 

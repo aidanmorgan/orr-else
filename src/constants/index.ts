@@ -714,7 +714,6 @@ export const ProcessFlag = {
  */
 export enum BuiltInToolName {
   ORR_ELSE = 'orr-else',
-  TICK_ITEM = 'tick_item',
   TICK_ITEMS = 'tick_items',
   GET_OUTSTANDING_TASKS = 'get_outstanding_tasks',
   ADD_CHECKLIST_ITEM = 'add_checklist_item',

@@ -33,7 +33,7 @@ The harness is designed around deterministic control:
 
 6. The teammate receives a generated state prompt containing its identity, state instructions, checklist protocol, project tools, provider metadata, paths, rules, and action prompt.
 
-7. The teammate records evidence with `tick_item`, writes checkpoints with `submit_checkpoint`, and finishes by calling `signal_completion`.
+7. The teammate records evidence with `tick_items`, writes checkpoints with `submit_checkpoint`, and finishes by calling `signal_completion`.
 
 8. The coordinator receives a typed event, validates idempotency, advances the Bead through the configured state transition, releases the lease, and replenishes slots.
 
@@ -425,7 +425,7 @@ States may declare `requiredTools`. On `SUCCESS`, `signal_completion` checks tha
 
 ### Dynamic Checklist Items
 
-Runtime tools may add checklist items after a state starts by calling `add_checklist_item`. Project-specific tools may also return JSON `toolCalls` or `frameworkToolCalls` entries that invoke `add_checklist_item`; ordered parent-context tool actions execute those calls before the selected prompt action starts. Added items are appended to the active turn checklist, persisted in Bead metadata under `dynamicChecklists`, and then enforced by `tick_item`, `get_outstanding_tasks`, and `signal_completion`.
+Runtime tools may add checklist items after a state starts by calling `add_checklist_item`. Project-specific tools may also return JSON `toolCalls` or `frameworkToolCalls` entries that invoke `add_checklist_item`; ordered parent-context tool actions execute those calls before the selected prompt action starts. Added items are appended to the active turn checklist, persisted in Bead metadata under `dynamicChecklists`, and then enforced by `tick_items`, `get_outstanding_tasks`, and `signal_completion`.
 
 ### Tool Validation Rules
 
@@ -451,9 +451,9 @@ tools:
         message: "Quality checks must pass first."
 ```
 
-### `tick_item`
+### `tick_items`
 
-`tick_item(text, evidence)` marks an exact checklist item complete and stores concrete evidence in Bead metadata. It also appends to the state worklog and `PROGRESS.md`.
+`tick_items(items)` marks one or more exact checklist items complete and stores concrete evidence in Bead metadata. It also appends to the state worklog and `PROGRESS.md`.
 
 ### `get_outstanding_tasks`
 
@@ -650,7 +650,7 @@ These are protocol-level tools:
 
 - `orr-else`
 - `harness_status`
-- `tick_item`
+- `tick_items`
 - `get_outstanding_tasks`
 - `add_checklist_item`
 - `submit_checkpoint`

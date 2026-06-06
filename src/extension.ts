@@ -370,7 +370,6 @@ let processLifecycleObserversRegistered = false;
 
 const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
   BuiltInToolName.ADD_CHECKLIST_ITEM,
-  BuiltInToolName.TICK_ITEM,
   BuiltInToolName.TICK_ITEMS,
   BuiltInToolName.GET_OUTSTANDING_TASKS,
   BuiltInToolName.SUBMIT_CHECKPOINT,
@@ -3032,21 +3031,6 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     validateNativePiExtensionProjectToolInventory(pi, config);
 
     pi.registerTool(wrapRuntimeTool({
-      name: BuiltInToolName.TICK_ITEM,
-      description: 'Tick one mandatory or optional checklist item for the current phase. Prefer tick_items for batched checklist updates. Supply evidence either inline via `evidence` or by reference via `evidencePath` (a worktree-relative path the harness reads; preferred for evidence larger than ~500 characters because the path stays small in your conversation history).',
-      parameters: Type.Object({
-        text: Type.String({ description: 'The EXACT text of the checklist item' }),
-        evidence: Type.Optional(Type.String({ description: 'Inline evidence of completion. Use this for short evidence (≲500 chars).' })),
-        evidencePath: Type.Optional(Type.String({ description: 'Worktree-relative path to a file containing the evidence. Preferred for long evidence — keeps the prompt cache stable and your subsequent turns cheaper.' }))
-      }),
-      execute: async ({ text, evidence, evidencePath }: { text: string, evidence?: string, evidencePath?: string }, ctx: ExtensionContext) => {
-        const result = await tickChecklistItems([{ text, evidence, evidencePath }], services, session);
-        if (result.status === ToolResultStatus.PASSED) return `Successfully ticked: ${text}`;
-        return `Error: ${result.message || 'Checklist item was rejected.'}`;
-      }
-    }));
-
-    pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.TICK_ITEMS,
       description: 'Batch tick mandatory or optional checklist items for the current phase using event-store-backed state. For each item, supply evidence either inline via `evidence` or by reference via `evidencePath` (preferred for long evidence — keeps your conversation history small).',
       parameters: Type.Object({
@@ -3075,7 +3059,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.ADD_CHECKLIST_ITEM,
-      description: 'Add a runtime checklist item to the current phase so it is enforced by tick_item/get_outstanding_tasks/signal_completion.',
+      description: 'Add a runtime checklist item to the current phase so it is enforced by tick_items/get_outstanding_tasks/signal_completion.',
       parameters: Type.Object({
         text: Type.String({ description: 'The checklist item text to add.' }),
         mandatory: Type.Optional(Type.Boolean({ description: 'Whether the item is mandatory. Defaults to true.' })),

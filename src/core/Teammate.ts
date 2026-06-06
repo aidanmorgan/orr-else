@@ -78,7 +78,7 @@ export class Teammate {
 
     // Activate tools for teammate
     this.flowManager.activateTools(this.pi, [
-      BuiltInToolName.TICK_ITEM,
+      BuiltInToolName.TICK_ITEMS,
       BuiltInToolName.GET_OUTSTANDING_TASKS,
       BuiltInToolName.SUBMIT_CHECKPOINT,
       BuiltInToolName.REQUEST_CONTEXT_RESTART,

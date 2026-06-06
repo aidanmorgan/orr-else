@@ -405,7 +405,9 @@ states:
     const toolNames = harness.tools.map(tool => tool.name);
     expect(harness.commands['orr-else']).toBeDefined();
     expect(toolNames).toContain('harness_status');
-    expect(toolNames).toContain('tick_item');
+    expect(toolNames).toContain('tick_items');
+    // tick_item (compat shim) must not be registered
+    expect(toolNames.some((n: string) => n === 'tick_item')).toBe(false);
     expect(toolNames).toContain('add_checklist_item');
     expect(toolNames).toContain('submit_checkpoint');
     expect(toolNames).toContain('request_context_restart');
@@ -413,6 +415,31 @@ states:
     expect(toolNames).toContain(`spawn_${'teammate'}`);
     expect(toolNames).toContain(`signal_${'completion'}`);
     expect(harness.commands['orr-else'].description).toContain('--config');
+  });
+
+  it('tick_items accepts a single-item array and tick_item is unavailable', async () => {
+    const harness = fakePi();
+    await orrElseExtension(harness.pi);
+    await harness.callbacks[PiEventName.SESSION_START]?.({}, HEADLESS_TOOL_CONTEXT);
+
+    const toolNames = harness.tools.map((t: any) => t.name);
+    // tick_item (compat shim) must not be registered
+    expect(toolNames.some((n: string) => n === 'tick_item')).toBe(false);
+    // tick_items must be present and accept a one-item array
+    const tickItemsTool = harness.tools.find((t: any) => t.name === 'tick_items');
+    expect(tickItemsTool).toBeDefined();
+    // Invoke with a single item — no active run means it will reject gracefully,
+    // but the tool must exist and be callable (not throw "tool not found")
+    const result = await tickItemsTool.execute(
+      'tick-one',
+      { items: [{ text: 'Single item', evidence: 'evidence text' }] },
+      undefined,
+      undefined,
+      HEADLESS_TOOL_CONTEXT
+    );
+    // Should return a tool-result object (rejected due to no active run, not an error about wrong tool name)
+    expect(result).toBeDefined();
+    expect(result.content?.[0]?.text ?? result).not.toContain('tick_item');
   });
 
   it('requires a durable checkpoint before completion can be signaled', async () => {

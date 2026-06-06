@@ -139,17 +139,6 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   },
 
   {
-    toolName: BuiltInToolName.TICK_ITEM,
-    toolClass: 'built_in',
-    owningFile: 'src/extension.ts',
-    schemaTypeName: 'untyped_record',
-    skillPath: '.pi/skills/tool-routing/SKILL.md',
-    rawOutputLocation: 'none_minimal',
-    deterministicCompaction: false,
-    mutating: true
-  },
-
-  {
     toolName: BuiltInToolName.TICK_ITEMS,
     toolClass: 'built_in',
     owningFile: 'src/extension.ts',

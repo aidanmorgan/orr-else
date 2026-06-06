@@ -14,7 +14,7 @@ the Planning phase.
 
 ## Checklist
 
-Use `add_checklist_item` to register items, then `tick_item` to mark them complete
+Use `add_checklist_item` to register items, then `tick_items` (one or more at once) to mark them complete
 with evidence.
 
 ## Completion

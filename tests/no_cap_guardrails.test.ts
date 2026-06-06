@@ -1369,8 +1369,9 @@ describe('tool count summary', () => {
       `(built_in=${builtInCount}, plugin=${pluginCount}, native_pi=${nativeCount})`
     );
     // run_quality_checks was removed from orr-else by gzy0 (see bead s3wp.30).
-    // Current counts: built_in=16, plugin=21, native_pi=8
-    expect(builtInCount, 'BuiltInToolName count must be 16').toBe(16);
+    // tick_item was retired by i0d5; tick_items handles one-or-more items.
+    // Current counts: built_in=15, plugin=21, native_pi=8
+    expect(builtInCount, 'BuiltInToolName count must be 15').toBe(15);
     expect(pluginCount, 'PluginToolName count must be 21').toBe(21);
     expect(nativeCount, 'DEFAULT_OBSERVED_PI_TOOLS count must be 8').toBe(8);
     expect(total, 'RTK_INVENTORY total must equal sum of all three sources').toBe(builtInCount + pluginCount + nativeCount);

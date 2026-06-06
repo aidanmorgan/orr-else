@@ -1,8 +1,15 @@
 import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { BuiltInToolName } from '../src/constants/index.js';
 import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, normalizeChecklistTickText, resolveChecklistTickText } from '../src/core/ChecklistRequirements.js';
 import { ProtocolInjector } from '../src/core/ProtocolInjector.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, '..');
 
 function stateWithChecklist(checklist: SDLCState['checklist'], actions: TeammateAction[] = []): SDLCState {
   return {
@@ -120,11 +127,36 @@ describe('ChecklistRequirements', () => {
       { text: 'State-level only review', mandatory: true }
     ], [{ id: 'state-action', type: 'prompt' }]));
 
-    expect(protocol).toContain(BuiltInToolName.TICK_ITEM);
+    expect(protocol).toContain(BuiltInToolName.TICK_ITEMS);
+    // tick_item (without trailing 's') must not appear as a standalone tool reference
+    expect(protocol).not.toMatch(/`tick_item`/);
     expect(protocol).toContain(BuiltInToolName.GET_OUTSTANDING_TASKS);
     expect(protocol).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
     expect(protocol).toContain(BuiltInToolName.SIGNAL_COMPLETION);
     expect(protocol).toContain('Tool Result Contract');
     expect(protocol).toContain('minimal schema');
+  });
+});
+
+describe('Runtime template text does not reference removed tick_item tool', () => {
+  // harness_rules.md is loaded at runtime by InstructionLoader and copied into
+  // every project's .pi/ by init. Any instruction to call `tick_item` (the
+  // removed singular tool) would break teammate agents at runtime.
+  const TICK_ITEM_WORD_BOUNDARY = /\btick_item\b(?!s)/;
+
+  it('templates/rules/harness_rules.md contains no tick_item tool reference', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'templates', 'rules', 'harness_rules.md'),
+      'utf8'
+    );
+    expect(content).not.toMatch(TICK_ITEM_WORD_BOUNDARY);
+  });
+
+  it('templates/prompts/implementer.md contains no tick_item tool reference', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'templates', 'prompts', 'implementer.md'),
+      'utf8'
+    );
+    expect(content).not.toMatch(TICK_ITEM_WORD_BOUNDARY);
   });
 });
