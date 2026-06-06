@@ -11,7 +11,7 @@
 import type { BeadId } from '../types/ids.js';
 import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { createTeammateEventIdempotencyKey, findAppliedTeammateSignal } from '../core/TeammateEvents.js';
-import { postHarnessSignal } from '../core/HarnessApiClient.js';
+import { postHarnessSignal, CoordinatorRejectionError } from '../core/HarnessApiClient.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
 import { DomainEventName, OtelAttr, SpanName } from '../constants/index.js';
 import type { TeammateEventType } from '../constants/index.js';
@@ -109,6 +109,23 @@ export async function postWorkerSignal(services: RuntimeServices, event: Teammat
     return;
   }
 
+  // Coordinator rejection (ok !== true in response body): this is NOT a transport
+  // failure and MUST NOT be reconciled via the event-store. Record a structured
+  // rejection failure and re-throw — never record SIGNAL_ACKNOWLEDGED.
+  if (postError instanceof CoordinatorRejectionError) {
+    await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
+      ...teammateSignalEventData(event),
+      coordinatorRejection: true,
+      rule: postError.rule,
+      ...(postError.timedOut ? { timedOut: true } : {}),
+      ...(postError.blocked ? { blocked: true } : {}),
+      ...(postError.gate !== undefined ? { gate: postError.gate } : {}),
+      error: postError.message
+    }).catch(() => {});
+    throw postError;
+  }
+
+  // Transport failure: attempt event-store reconcile before failing.
   const applied = await hasAppliedTeammateSignal(services, event).catch(() => false);
   await services.eventStore.record(DomainEventName.TEAMMATE_SIGNAL_FAILED, {
     ...teammateSignalEventData(event),
