@@ -25,8 +25,20 @@
 // verify() callback, never here.
 // ---------------------------------------------------------------------------
 
-/** Did the tool RUN? Not a semantic verdict. */
-export type ToolRunStatus = 'PASSED' | 'REJECTED';
+/**
+ * Did the tool RUN? Not a semantic verdict.
+ *
+ *   PASSED      — the tool ran to completion; its raw output is durable.
+ *   REJECTED    — the tool could not complete (transport, timeout, input, infra).
+ *   UNAVAILABLE — the tool binary / MCP server was not found (ENOENT / module
+ *                 probe failure). Always non-PASSED; always blocks required-tool
+ *                 satisfaction at the verifier gate.
+ *
+ * This is the SINGLE verifier-visible run-status union. All consumers must
+ * import from this module; do NOT redefine a local PASSED/REJECTED/UNAVAILABLE
+ * union elsewhere.
+ */
+export type ToolRunStatus = 'PASSED' | 'REJECTED' | 'UNAVAILABLE';
 
 /** Why a tool could not RUN (advisory categorisation of a REJECTED run). */
 export type ToolFailureCategory = 'TRANSPORT' | 'TIMEOUT' | 'INPUT' | 'INFRA';

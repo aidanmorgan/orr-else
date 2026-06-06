@@ -44,7 +44,8 @@ import {
   type Registry,
   type VerifyCallback,
   type VerifyContext,
-  type VerifyResult
+  type VerifyResult,
+  type ToolRunStatus
 } from '../contract.js';
 import { DomainEventName, ToolResultStatus } from '../constants/index.js';
 import { isRecord } from './RecordUtils.js';
@@ -63,8 +64,21 @@ export interface VerifierGateEventStore {
 export enum VerifierGateBlockKind {
   /** The required tool's latest event has status === REJECTED (it ran, failed). */
   TOOL_REJECTED = 'TOOL_REJECTED',
+  /**
+   * The required tool's latest event has status === UNAVAILABLE (the tool
+   * binary was not found / ENOENT, or the MCP server module failed its
+   * preflight probe). Always blocks — the tool did not produce usable output.
+   */
+  TOOL_UNAVAILABLE = 'TOOL_UNAVAILABLE',
   /** The required tool has no tool-result event for this attempt (never invoked). */
   TOOL_NOT_INVOKED = 'TOOL_NOT_INVOKED',
+  /**
+   * The required tool's latest event carries a status value that is not a
+   * member of the known ToolRunStatus union (unknown, missing, or malformed).
+   * Gate fails CLOSED on any unrecognized status — this is the exhaustive
+   * never-escape-hatch for future or legacy-unmapped status strings.
+   */
+  TOOL_STATUS_UNRECOGNIZED = 'TOOL_STATUS_UNRECOGNIZED',
   /** The tool's registered verify() callback returned verdict === FAIL. */
   VERIFY_FAIL = 'VERIFY_FAIL'
 }
@@ -224,6 +238,10 @@ async function runIsolatedVerify(
 /**
  * Read a tool-result event's run status (did the tool RUN to completion) and
  * its outputFile path, reconciling the FLAT and NESTED recorded shapes.
+ *
+ * Returns the raw status string exactly as recorded (may be undefined when
+ * the field is absent / malformed). The gate caller is responsible for
+ * exhaustive handling of every possible value.
  */
 function readToolRun(event: DomainEvent): { status: string | undefined; outputFile: string | undefined } {
   const data = isRecord(event.data) ? event.data : {};
@@ -242,6 +260,46 @@ function readToolRun(event: DomainEvent): { status: string | undefined; outputFi
     status: typeof toolResult?.status === 'string' ? toolResult.status : undefined,
     outputFile: typeof toolResult?.outputFile === 'string' ? toolResult.outputFile : undefined
   };
+}
+
+/**
+ * Exhaustive status classifier for the verifier gate.
+ *
+ * Returns:
+ *   'PASSED'       — tool ran to completion; proceed to verify().
+ *   'REJECTED'     — tool ran but failed (REJECTED); block with TOOL_REJECTED.
+ *   'UNAVAILABLE'  — tool binary / MCP server not found; block with TOOL_UNAVAILABLE.
+ *   'UNRECOGNIZED' — status is missing, undefined, or an unknown future value;
+ *                    gate fails CLOSED with TOOL_STATUS_UNRECOGNIZED.
+ *
+ * This function is the SINGLE place that classifies a raw status string into
+ * gate action. Adding a new ToolRunStatus value in contract.ts requires adding
+ * a branch here — the TypeScript exhaustiveness check below enforces this.
+ */
+function classifyRunStatus(rawStatus: string | undefined): 'PASSED' | 'REJECTED' | 'UNAVAILABLE' | 'UNRECOGNIZED' {
+  // Map through the known ToolRunStatus values explicitly.
+  // The local variable forces TypeScript to check the switch is exhaustive
+  // when ToolRunStatus gains new members.
+  const known: ToolRunStatus[] = ['PASSED', 'REJECTED', 'UNAVAILABLE'];
+  if (rawStatus === undefined || rawStatus === null) return 'UNRECOGNIZED';
+  if (known.includes(rawStatus as ToolRunStatus)) {
+    const status = rawStatus as ToolRunStatus;
+    switch (status) {
+      case 'PASSED': return 'PASSED';
+      case 'REJECTED': return 'REJECTED';
+      case 'UNAVAILABLE': return 'UNAVAILABLE';
+      default: {
+        // TypeScript exhaustiveness check: if ToolRunStatus gains a new member
+        // and this switch is not updated, this line becomes unreachable AND
+        // TypeScript raises a type error (never assignment). This is the
+        // compile-time gate that enforces exhaustive handling.
+        const _exhaustive: never = status;
+        void _exhaustive;
+        return 'UNRECOGNIZED';
+      }
+    }
+  }
+  return 'UNRECOGNIZED';
 }
 
 function renderRejectMessage(failures: VerifierGateFailure[]): string {
@@ -317,15 +375,40 @@ export async function runVerifierGate(
       continue;
     }
 
-    // (2) Did the tool run to completion? REJECTED ⇒ it ran and failed ⇒ block.
-    const { status } = readToolRun(event);
-    if (status === ToolResultStatus.REJECTED) {
+    // (2) Classify the tool's run status exhaustively + fail closed on non-PASSED.
+    const { status: rawStatus } = readToolRun(event);
+    const statusClass = classifyRunStatus(rawStatus);
+
+    if (statusClass === 'REJECTED') {
       const reasons = [`Required tool "${tool}" did not run to completion (latest tool-result status === REJECTED).`];
       failures.push({ tool, kind: VerifierGateBlockKind.TOOL_REJECTED, reasons });
       perTool.push({ tool, reasons, durationMs: 0 });
       continue;
     }
 
+    if (statusClass === 'UNAVAILABLE') {
+      const reasons = [
+        `Required tool "${tool}" is UNAVAILABLE (tool binary not found or MCP server module probe failed; status === UNAVAILABLE). ` +
+        `The tool did not produce usable output; required-tool satisfaction cannot be met.`
+      ];
+      failures.push({ tool, kind: VerifierGateBlockKind.TOOL_UNAVAILABLE, reasons });
+      perTool.push({ tool, reasons, durationMs: 0 });
+      continue;
+    }
+
+    if (statusClass === 'UNRECOGNIZED') {
+      // Fail CLOSED: unknown, missing, or malformed status — never allow gate passage.
+      const statusDisplay = rawStatus === undefined ? 'undefined (missing)' : JSON.stringify(rawStatus);
+      const reasons = [
+        `Required tool "${tool}" has an unrecognized run status: ${statusDisplay}. ` +
+        `Gate fails closed on any non-PASSED or unknown status (zog2.15 exhaustive handling).`
+      ];
+      failures.push({ tool, kind: VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED, reasons });
+      perTool.push({ tool, reasons, durationMs: 0 });
+      continue;
+    }
+
+    // statusClass === 'PASSED': the tool ran to completion — proceed to verify().
     // (3) The tool ran — run its registered verify() callback (if any).
     const verify = registry.get(tool);
     if (!verify) {

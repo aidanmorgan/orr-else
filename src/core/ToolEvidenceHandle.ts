@@ -63,7 +63,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { ToolResultBase } from '../contract.js';
+import type { ToolResultBase, ToolRunStatus } from '../contract.js';
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -78,12 +78,14 @@ export const TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION = '1.0.0';
 
 /**
  * Did the tool EXECUTE to completion?
+ * Re-exported from contract.ts — NOT a local redefinition (AC2 of zog2.15).
  * Mirrors ToolResultBase.status — NOT a semantic pass/fail verdict.
  *
- *   PASSED   — the tool ran to completion; its raw output is durable.
- *   REJECTED — the tool could not complete (transport, timeout, input, infra).
+ *   PASSED      — the tool ran to completion; its raw output is durable.
+ *   REJECTED    — the tool could not complete (transport, timeout, input, infra).
+ *   UNAVAILABLE — the tool binary / MCP server was not found. Always blocks gate.
  */
-export type ToolEvidenceRunStatus = 'PASSED' | 'REJECTED';
+export type ToolEvidenceRunStatus = ToolRunStatus;
 
 /**
  * Why a REJECTED tool failed.
@@ -266,7 +268,7 @@ export const TOOL_EVIDENCE_HANDLE_SCHEMA = {
     schemaVersion: { type: 'string', minLength: 1 },
     toolName: { type: 'string', minLength: 1 },
     invocationId: { type: 'string', minLength: 1 },
-    runStatus: { type: 'string', enum: ['PASSED', 'REJECTED'] },
+    runStatus: { type: 'string', enum: ['PASSED', 'REJECTED', 'UNAVAILABLE'] },
     failureCategory: { type: 'string', enum: ['TRANSPORT', 'TIMEOUT', 'INPUT', 'INFRA'] },
     semanticArtifactPath: { type: 'string', minLength: 1 },
     semanticArtifactBytes: { type: 'integer', minimum: 0 },
@@ -369,8 +371,9 @@ export function validateToolEvidenceHandle(
   }
 
   // ---- runStatus ----
-  if (record['runStatus'] !== 'PASSED' && record['runStatus'] !== 'REJECTED') {
-    errors.push(`runStatus: must be 'PASSED' or 'REJECTED', got ${JSON.stringify(record['runStatus'])}`);
+  const validRunStatuses: ToolEvidenceRunStatus[] = ['PASSED', 'REJECTED', 'UNAVAILABLE'];
+  if (!validRunStatuses.includes(record['runStatus'] as ToolEvidenceRunStatus)) {
+    errors.push(`runStatus: must be one of ${validRunStatuses.join('|')}, got ${JSON.stringify(record['runStatus'])}`);
   }
 
   // ---- failureCategory (optional) ----
