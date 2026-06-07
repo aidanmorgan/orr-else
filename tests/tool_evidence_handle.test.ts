@@ -206,15 +206,16 @@ describe('ToolEvidenceHandle — status/verdict separation (AC2)', () => {
     }
   });
 
-  it('rawTransportArchivePaths CANNOT satisfy semantic gates (they are separate from semanticArtifactPath)', () => {
-    // A handle where rawTransportArchivePaths is set but semanticArtifactPath is absent — still valid
-    // (raw archive alone does not satisfy semantic gating)
+  it('rawTransportArchivePaths CANNOT satisfy semantic gates — and PASSED handles without semanticArtifactPath are invalid (zog2.8)', () => {
+    // A handle where rawTransportArchivePaths is set but semanticArtifactPath is absent.
+    // Per zog2.8: PASSED runs MUST have a semanticArtifactPath (even a minimal artifact).
+    // rawTransportArchivePaths are raw-archive paths only and are NOT semantic evidence.
     const handle: ToolEvidenceHandle = {
       schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
       toolName: 'some_tool',
       invocationId: 'inv-raw-001',
       runStatus: 'PASSED',
-      // No semanticArtifactPath — the tool produced raw archives but no semantic artifact
+      // No semanticArtifactPath — invalid per zog2.8 for PASSED runs
       rawTransportArchivePaths: [`${TOOL_OUTPUT_ROOT}/bead1/state1/action1/some_tool/inv-raw-001/stdout.txt`],
       toolOutputRoot: TOOL_OUTPUT_ROOT,
       summaryMode: 'none',
@@ -223,12 +224,11 @@ describe('ToolEvidenceHandle — status/verdict separation (AC2)', () => {
       admittedExecutionBoundary: 'bead:bead1/state:state1/action:action1',
     };
     const result = validateToolEvidenceHandle(handle);
-    // The contract allows no semanticArtifactPath on PASSED — the GATE is the absent artifact
-    expect(result.valid).toBe(true);
-    if (result.valid) {
-      // Confirm: semanticArtifactPath is absent; rawTransportArchivePaths is set separately
-      expect(result.handle.semanticArtifactPath).toBeUndefined();
-      expect(result.handle.rawTransportArchivePaths).toHaveLength(1);
+    // zog2.8: PASSED handles without semanticArtifactPath are INVALID.
+    // rawTransportArchivePaths alone cannot satisfy semantic gates.
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.errors.some(e => e.includes('semanticArtifactPath'))).toBe(true);
     }
   });
 });

@@ -168,8 +168,10 @@ export interface ToolEvidenceRtkSummary {
  * Semantic artifact (the durable output that gates can inspect)
  *   semanticArtifactPath       — absolute path to the primary semantic output file.
  *                                Gate logic uses this path, not rawTransportArchivePaths.
- *                                Optional — a tool may produce raw archives without a
- *                                distinguished semantic artifact (e.g. raw-only tools).
+ *                                REQUIRED for PASSED runs (zog2.8): every tool must persist
+ *                                a schema-owned semantic artifact (even a minimal one for
+ *                                control-plane tools); missing artifact paths are never
+ *                                admissible evidence. May be absent for REJECTED/UNAVAILABLE.
  *   semanticArtifactBytes      — byte count of semanticArtifactPath (for accounting).
  *   semanticArtifactSha256     — hex SHA-256 of semanticArtifactPath (for integrity).
  *
@@ -323,6 +325,9 @@ export interface ValidateToolEvidenceHandleOptions {
  *   - summaryMode='none' requires noSummaryReason to be present.
  *   - rtkSummary.owningFile must end with '.ts' (TypeScript-only, AC3).
  *   - rtkSummary.schemaTypeName must be a non-empty string.
+ *   - semanticArtifactPath is REQUIRED for PASSED runs (zog2.8): every tool must
+ *     persist a schema-owned semantic artifact; missing artifact paths are never
+ *     admissible evidence. REJECTED/UNAVAILABLE runs may omit it.
  *   - semanticArtifactPath (when present) must be inside toolOutputRoot (AC4).
  *   - The handle must NOT contain rawOutput or modelFacingRawOutput keys (AC2).
  *   - verifierVerdict must be one of the allowed enum values when present.
@@ -391,9 +396,18 @@ export function validateToolEvidenceHandle(
     errors.push('toolOutputRoot: must be a non-empty string');
   }
 
-  // ---- semanticArtifactPath (optional, but must be inside toolOutputRoot when present) ----
+  // ---- semanticArtifactPath — REQUIRED for PASSED runs (zog2.8) ----
+  // PASSED tools must persist a minimal schema-owned semantic artifact;
+  // missing artifact paths are NEVER evidence (zog2.8 AC).
+  // REJECTED/UNAVAILABLE tools may omit it (they did not complete).
   const semanticArtifactPath = record['semanticArtifactPath'];
-  if (semanticArtifactPath !== undefined) {
+  const runStatusForArtifactCheck = record['runStatus'];
+  if (runStatusForArtifactCheck === 'PASSED' && (semanticArtifactPath === undefined || semanticArtifactPath === null || semanticArtifactPath === '')) {
+    errors.push(
+      'semanticArtifactPath: required for PASSED runs (zog2.8) — every tool must persist a schema-owned ' +
+      'semantic artifact; missing artifact paths are not admissible evidence'
+    );
+  } else if (semanticArtifactPath !== undefined) {
     if (typeof semanticArtifactPath !== 'string' || semanticArtifactPath.length === 0) {
       errors.push('semanticArtifactPath: must be a non-empty string when present');
     } else if (typeof toolOutputRoot === 'string' && toolOutputRoot.length > 0) {

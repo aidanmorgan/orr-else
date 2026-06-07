@@ -81,7 +81,14 @@ export enum VerifierGateBlockKind {
    */
   TOOL_STATUS_UNRECOGNIZED = 'TOOL_STATUS_UNRECOGNIZED',
   /** The tool's registered verify() callback returned verdict === FAIL. */
-  VERIFY_FAIL = 'VERIFY_FAIL'
+  VERIFY_FAIL = 'VERIFY_FAIL',
+  /**
+   * The required tool ran (PASSED) but recorded no outputFile (no semantic
+   * artifact path). Per zog2.8: missing artifact paths are NEVER evidence.
+   * A tool with no registered verify() AND no outputFile cannot satisfy the
+   * gate — implicit presence-only evidence is removed.
+   */
+  TOOL_MISSING_ARTIFACT = 'TOOL_MISSING_ARTIFACT'
 }
 
 /** One failing required tool, with its verdict (when a verify() ran) + reasons. */
@@ -413,10 +420,22 @@ export async function runVerifierGate(
     // (3) The tool ran — run its registered verify() callback (if any).
     const verify = registry.get(tool);
     if (!verify) {
-      // No registered callback: the tool ran (presence satisfied) and there is
-      // no semantic verifier to consult, so it cannot FAIL. This is a PASS for
-      // the loop's aggregate — the harness applies no tool-specific policy.
-      perTool.push({ tool, verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['no registered verify() callback'], durationMs: 0 });
+      // No registered verify() callback (presence-only tool per zog2.8).
+      // Implicit presence-only evidence is REMOVED: a durable semantic artifact
+      // path (outputFile in toolOutputs) is now REQUIRED. Missing artifact paths
+      // are NEVER evidence — gate fails CLOSED.
+      if (!toolOutputs[tool]) {
+        const reasons = [
+          `Required tool "${tool}" ran (PASSED) but recorded no semantic artifact path (outputFile is absent). ` +
+          `Implicit presence-only evidence is not admissible (zog2.8). ` +
+          `The tool must persist a minimal semantic artifact and record its path in the tool-result event.`
+        ];
+        failures.push({ tool, kind: VerifierGateBlockKind.TOOL_MISSING_ARTIFACT, reasons });
+        perTool.push({ tool, reasons, durationMs: 0 });
+        continue;
+      }
+      // The tool ran and recorded a semantic artifact path — presence satisfied with artifact.
+      perTool.push({ tool, verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['no registered verify() callback; semantic artifact present'], durationMs: 0 });
       continue;
     }
 
