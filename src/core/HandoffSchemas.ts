@@ -1144,7 +1144,6 @@ export interface FanoutValidationError {
   kind:
     | 'INVALID_SCHEMA'
     | 'DUPLICATE_BRANCH_ID'
-    | 'UNKNOWN_OUTCOME'
     | 'MISSING_ARTIFACT'
     | 'HASH_MISMATCH'
     | 'UNVERIFIABLE_PATH';
@@ -1167,7 +1166,6 @@ export type FanoutValidationResult =
  * Rejects:
  *   - Any branch that fails schema validation (INVALID_SCHEMA)
  *   - Duplicate branch IDs (DUPLICATE_BRANCH_ID)
- *   - Outcome values outside the declared vocabulary (UNKNOWN_OUTCOME)
  *   - Branch artifact refs that are missing required fields (MISSING_ARTIFACT)
  *   - Branch artifact sha256 that does not match a provided content map (HASH_MISMATCH)
  *   - Semantic artifact paths that are empty/blank (UNVERIFIABLE_PATH)
@@ -1219,16 +1217,7 @@ export function validateFanoutBranches(
       seenIds.add(b.branchId);
     }
 
-    // 3. Outcome vocabulary check (UNKNOWN_OUTCOME) — redundant with schema enum, but explicit
-    if (!(BRANCH_OUTCOME_VOCAB as readonly string[]).includes(b.outcome)) {
-      errors.push({
-        kind: 'UNKNOWN_OUTCOME',
-        branchId: b.branchId,
-        message: `Branch outcome "${b.outcome}" is outside the declared vocabulary`
-      });
-    }
-
-    // 4. Artifact ref checks
+    // 3. Artifact ref checks
     for (const ref of b.artifactRefs) {
       // UNVERIFIABLE_PATH: empty semantic path
       if (!ref.semanticPath || !ref.semanticPath.trim()) {

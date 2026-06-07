@@ -389,18 +389,17 @@ describe('AC3: validateFanoutBranches — boundary-level rejection', () => {
     expect(result.valid).toBe(true);
   });
 
-  it('rejects an empty semanticPath as unverifiable (UNVERIFIABLE_PATH)', () => {
-    // We must bypass schema validation here since schema requires minLength: 1.
-    // Test this via direct inspection of the function's check.
-    // Create a branch that passes schema but has semanticPath that could be blank
-    // (schema enforces non-empty, so UNVERIFIABLE_PATH is a defense-in-depth check).
-    // We test through a valid-looking branch object passed to the function where
-    // the artifactRef is crafted — but schema would catch empty semanticPath.
-    // Verify the UNVERIFIABLE_PATH error is documented in the error kinds.
-    const errors = [
-      { kind: 'UNVERIFIABLE_PATH' as const, branchId: 'x', message: 'empty' }
-    ];
-    expect(errors[0]!.kind).toBe('UNVERIFIABLE_PATH');
+  it('rejects whitespace-only semanticPath as unverifiable (UNVERIFIABLE_PATH)', () => {
+    // '   ' has length 3, so it passes the schema's minLength:1 constraint.
+    // The validator's .trim() check catches it and emits UNVERIFIABLE_PATH.
+    // This test is load-bearing: removing the .trim() rule would make it fail.
+    const result = validateFanoutBranches([
+      makeBranch({ artifactRefs: [makeArtifactRef({ semanticPath: '   ' })] })
+    ]);
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(result.errors.some(e => e.kind === 'UNVERIFIABLE_PATH')).toBe(true);
+    }
   });
 
   it('collects multiple errors when multiple branches are invalid', () => {
