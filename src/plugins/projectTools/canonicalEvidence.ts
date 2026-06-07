@@ -99,10 +99,13 @@ export type CanonicalEvidenceExtraction =
  * the canonical path (evidenceHandle present) but the handle fails validation.
  * The errors list is deterministic and suitable for a REJECTED tool result.
  *
- * @param rawResult  — the raw object returned by executeCommandTool (before
- *                     persistAndBoundResult strips internal keys).
+ * @param rawResult   — the raw object returned by executeCommandTool (before
+ *                      persistAndBoundResult strips internal keys).
+ * @param projectRoot — absolute path to the project root. When provided, project-tool
+ *                      rtkSummary.owningFile paths (not under src/) are validated to
+ *                      exist on disk (6q0y.12 production threading).
  */
-export function extractCanonicalEvidence(rawResult: unknown): CanonicalEvidenceExtraction {
+export function extractCanonicalEvidence(rawResult: unknown, projectRoot?: string): CanonicalEvidenceExtraction {
   // Detect the opt-in signal: stdout JSON with an evidenceHandle field.
   const evidenceHandle = extractEvidenceHandleFromStdout(rawResult);
   if (evidenceHandle === undefined) {
@@ -148,7 +151,7 @@ export function extractCanonicalEvidence(rawResult: unknown): CanonicalEvidenceE
   }
 
   // ---- Check 3: Full structural validation via validateToolEvidenceHandle ----
-  const validation = validateToolEvidenceHandle(evidenceHandle);
+  const validation = validateToolEvidenceHandle(evidenceHandle, projectRoot !== undefined ? { projectRoot } : undefined);
   if (!validation.valid) {
     const errList = (validation as InvalidToolEvidenceHandle).errors;
     return {

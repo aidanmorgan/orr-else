@@ -403,10 +403,22 @@ export type InvalidToolEvidenceHandle = { valid: false; errors: string[] };
  *
  *   expectedToolName — when provided, the validator fails closed if
  *                      handle.toolName !== expectedToolName (AC4).
+ *   projectRoot      — when provided, rtkSummary.owningFile paths that are
+ *                      project-tool TS files (i.e. NOT under src/) are validated
+ *                      to exist on disk at path.join(projectRoot, owningFile).
+ *                      This enforces the pi-experiment-6q0y.12 contract: a summary's
+ *                      declared owning TS file must correspond to a real project-tool
+ *                      file, not just any arbitrary path string.
  */
 export interface ValidateToolEvidenceHandleOptions {
   /** Fail closed if handle.toolName does not exactly match this string. */
   readonly expectedToolName?: string;
+  /**
+   * Absolute path to the project root. When provided, rtkSummary.owningFile
+   * paths that are project-tool files (do NOT start with 'src/') are validated
+   * to exist on disk at path.join(projectRoot, owningFile) (6q0y.12).
+   */
+  readonly projectRoot?: string;
 }
 
 /**
@@ -426,6 +438,8 @@ export interface ValidateToolEvidenceHandleOptions {
  *   - The handle must NOT contain rawOutput or modelFacingRawOutput keys (AC2).
  *   - verifierVerdict must be one of the allowed enum values when present.
  *   - opts.expectedToolName (when provided): handle.toolName must match exactly (AC4).
+ *   - opts.projectRoot (when provided): project-tool owningFile paths are validated
+ *     to exist on disk at path.join(projectRoot, owningFile) (6q0y.12).
  */
 export function validateToolEvidenceHandle(
   value: unknown,
@@ -558,7 +572,7 @@ export function validateToolEvidenceHandle(
     if (rtkSummary === undefined || rtkSummary === null) {
       errors.push('rtkSummary: required when summaryMode="summary"');
     } else {
-      validateRtkSummary(rtkSummary, errors, opts?.expectedToolName);
+      validateRtkSummary(rtkSummary, errors, opts?.expectedToolName, opts?.projectRoot);
     }
   } else if (summaryMode === 'none') {
     if (typeof noSummaryReason !== 'string' || noSummaryReason.length === 0) {
@@ -677,8 +691,34 @@ function expectedOwningFileForTool(toolName: string): string {
   return `src/tools/${toolName}.ts`;
 }
 
+/**
+ * Return true when `owningFile` is a project-tool TS file rather than a
+ * harness-owned source file. The convention is: harness files start with 'src/';
+ * project-tool files are everything else (e.g. '.pi/project-tools/foo.ts').
+ * Only called after the '.ts' extension check has already passed.
+ *
+ * 6q0y.12: used to decide whether to apply the on-disk existence check.
+ */
+function isProjectToolOwningFile(owningFile: string): boolean {
+  return !owningFile.startsWith('src/');
+}
+
+/**
+ * Return true when `absoluteFilePath` exists on disk as a regular file.
+ * Fail-closed: returns false on any filesystem error.
+ *
+ * 6q0y.12: used to verify that a declared project-tool owningFile actually exists.
+ */
+function projectToolFileExists(absoluteFilePath: string): boolean {
+  try {
+    return fs.statSync(absoluteFilePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** Validate rtkSummary sub-object, pushing errors into the provided array. */
-function validateRtkSummary(rtkSummary: unknown, errors: string[], expectedToolName?: string): void {
+function validateRtkSummary(rtkSummary: unknown, errors: string[], expectedToolName?: string, projectRoot?: string): void {
   if (typeof rtkSummary !== 'object' || rtkSummary === null || Array.isArray(rtkSummary)) {
     errors.push('rtkSummary: must be a non-null object');
     return;
@@ -699,6 +739,8 @@ function validateRtkSummary(rtkSummary: unknown, errors: string[], expectedToolN
   // owningFile: must end with .ts (TypeScript-only — AC3) AND must not be a generic harness file (zog2.7)
   // PRIMARY rule (affirmative): when expectedToolName is known, owningFile MUST be the tool's own module.
   // SECONDARY rule (denylist): owningFile must not be any known generic harness framework file.
+  // TERTIARY rule (6q0y.12): for project-tool TS files (not under src/), when projectRoot is known,
+  //   owningFile MUST exist on disk at path.join(projectRoot, owningFile).
   if (typeof s['owningFile'] !== 'string' || s['owningFile'].length === 0) {
     errors.push('rtkSummary.owningFile: must be a non-empty string');
   } else if (!s['owningFile'].endsWith('.ts')) {
@@ -721,6 +763,20 @@ function validateRtkSummary(rtkSummary: unknown, errors: string[], expectedToolN
         `rtkSummary.owningFile: expected "${expectedFile}" for tool "${expectedToolName}" ` +
         `(affirmative tool-local check, zog2.7); got "${s['owningFile']}". ` +
         'The summary owningFile must be the tool\'s own TypeScript module.'
+      );
+    }
+  } else if (projectRoot !== undefined && isProjectToolOwningFile(s['owningFile'] as string)) {
+    // Project-tool owning file validation (6q0y.12): when projectRoot is provided and the
+    // owningFile is a project-tool TS file (not under src/), verify it exists on disk.
+    // This ensures the summary's declared owning TS file corresponds to a REAL project-tool
+    // file — not an arbitrary invented path string.
+    const absoluteOwningFile = path.join(projectRoot, s['owningFile'] as string);
+    if (!projectToolFileExists(absoluteOwningFile)) {
+      errors.push(
+        `rtkSummary.owningFile: project-tool file "${s['owningFile']}" does not exist at ` +
+        `"${absoluteOwningFile}" (6q0y.12). The declared owning TS file must exist as a real ` +
+        'project-tool TypeScript file under the project root. ' +
+        'Check that the file is committed and the path matches exactly.'
       );
     }
   }

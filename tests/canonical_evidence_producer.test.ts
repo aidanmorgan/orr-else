@@ -522,6 +522,122 @@ process.stdout.write(JSON.stringify({ evidenceHandle: handle }));
     )).toBe(true);
   });
 
+  // ── 10. Production-path: project-tool owningFile on-disk check fires via projectRoot threading ──
+  //
+  // LOAD-BEARING: this test drives the REAL executeConfiguredProjectTool path and
+  // proves the 6q0y.12 on-disk existence check fires in production. It fails if
+  // projectRoot is NOT threaded into extractCanonicalEvidence (i.e. the check
+  // stays dead). Removing the projectRoot argument from the extractCanonicalEvidence
+  // call in projectTools.ts causes this test to emit valid:true instead of REJECTED.
+
+  it('rejects a canonical-path tool whose project-tool rtkSummary.owningFile does not exist on disk (production-path 6q0y.12 threading)', async () => {
+    // Emit a handle with a project-tool owningFile (.pi/project-tools/...) that does NOT
+    // exist on disk under tempRoot (the projectRoot set via process.env).
+    const nonExistentOwningFile = '.pi/project-tools/nonexistent_production_tool.ts';
+    const script = `
+const fs = require('fs');
+const path = require('path');
+const outputDir = process.env['${EnvVars.TOOL_OUTPUT_DIR}'];
+const outputRoot = path.join(process.env['${EnvVars.PROJECT_ROOT}'], '.pi/tool-output');
+const artifactPath = path.join(outputDir, 'result.json');
+fs.writeFileSync(artifactPath, JSON.stringify({ ok: true }));
+const handle = {
+  schemaVersion: '${TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION}',
+  toolName: 'canonical_fixture',
+  invocationId: 'inv-prod-path-disk-check',
+  runStatus: 'PASSED',
+  semanticArtifactPath: artifactPath,
+  toolOutputRoot: outputRoot,
+  summaryMode: 'summary',
+  rtkSummary: {
+    schemaTypeName: 'NonexistentProductionToolRtkSummary',
+    owningFile: '${nonExistentOwningFile}',
+    summarySchemaVersion: '1.0.0',
+    schemaHash: 'sha256:' + 'd'.repeat(64),
+    deterministicSummaryVersion: '1.0.0',
+    inputArtifactSchemaId: 'nonexistent-tool-output',
+    inputArtifactSchemaVersion: '1.0.0',
+    maximumCounts: { results: 10 },
+    omissionSemantics: 'results beyond maximumCounts.results are omitted',
+    summary: { resultCount: 1 },
+  },
+  admittedHarnessFingerprint: 'sha256:test-fingerprint',
+  admittedExecutionBoundary: 'bead:bd-1/state:Planning/action:a1',
+};
+process.stdout.write(JSON.stringify({ evidenceHandle: handle, status: 'PASSED' }));
+`;
+    const tool = canonicalFixtureTool(script);
+
+    // tempRoot is set as process.env[EnvVars.PROJECT_ROOT] in beforeEach.
+    // The file .pi/project-tools/nonexistent_production_tool.ts does NOT exist there.
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory, tool,
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'a1' },
+      {} as any, undefined, new Map()
+    );
+
+    // LOAD-BEARING: the on-disk existence check fires via projectRoot threading.
+    // If projectRoot were NOT threaded, the evidenceHandle would pass (no disk check)
+    // and result.status would be PASSED instead of REJECTED.
+    expect(result.status).toBe(ToolResultStatus.REJECTED);
+    expect((result as any).canonicalEvidenceErrors).toBeDefined();
+    expect((result as any).canonicalEvidenceErrors.some(
+      (e: string) => e.includes('owningFile') && (e.includes('does not exist') || e.includes('6q0y.12'))
+    )).toBe(true);
+  });
+
+  it('accepts a canonical-path tool whose project-tool rtkSummary.owningFile EXISTS on disk (production-path 6q0y.12 threading)', async () => {
+    // Create the owningFile on disk under tempRoot so the on-disk check passes.
+    const existingOwningFile = '.pi/project-tools/real_production_tool.ts';
+    const absOwningFile = `${tempRoot}/${existingOwningFile}`;
+    fs.mkdirSync(`${tempRoot}/.pi/project-tools`, { recursive: true });
+    fs.writeFileSync(absOwningFile, '// real project-tool stub\nexport {};\n', 'utf8');
+
+    const script = `
+const fs = require('fs');
+const path = require('path');
+const outputDir = process.env['${EnvVars.TOOL_OUTPUT_DIR}'];
+const outputRoot = path.join(process.env['${EnvVars.PROJECT_ROOT}'], '.pi/tool-output');
+const artifactPath = path.join(outputDir, 'result.json');
+fs.writeFileSync(artifactPath, JSON.stringify({ ok: true }));
+const handle = {
+  schemaVersion: '${TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION}',
+  toolName: 'canonical_fixture',
+  invocationId: 'inv-prod-path-disk-check-ok',
+  runStatus: 'PASSED',
+  semanticArtifactPath: artifactPath,
+  toolOutputRoot: outputRoot,
+  summaryMode: 'summary',
+  rtkSummary: {
+    schemaTypeName: 'RealProductionToolRtkSummary',
+    owningFile: '${existingOwningFile}',
+    summarySchemaVersion: '1.0.0',
+    schemaHash: 'sha256:' + 'e'.repeat(64),
+    deterministicSummaryVersion: '1.0.0',
+    inputArtifactSchemaId: 'real-tool-output',
+    inputArtifactSchemaVersion: '1.0.0',
+    maximumCounts: { results: 10 },
+    omissionSemantics: 'results beyond maximumCounts.results are omitted',
+    summary: { resultCount: 1 },
+  },
+  admittedHarnessFingerprint: 'sha256:test-fingerprint',
+  admittedExecutionBoundary: 'bead:bd-1/state:Planning/action:a1',
+};
+process.stdout.write(JSON.stringify({ evidenceHandle: handle, status: 'PASSED' }));
+`;
+    const tool = canonicalFixtureTool(script);
+
+    const result = await executeConfiguredProjectTool(
+      eventStore, toolCallPathFactory, tool,
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'a1' },
+      {} as any, undefined, new Map()
+    );
+
+    // owningFile exists on disk — on-disk check passes; result is PASSED.
+    expect(result.status).toBe(ToolResultStatus.PASSED);
+    expect((result as any).canonicalEvidenceErrors).toBeUndefined();
+  });
+
   // ── Legacy (non-canonical) tools are completely unaffected ──
   // A tool that emits a non-JSON stdout (or JSON without evidenceHandle) stays
   // on the legacy path. This is the critical cerdiwen-safety property.

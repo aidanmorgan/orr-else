@@ -244,7 +244,7 @@ export async function executeConfiguredProjectTool(
       // validate it. Reject with a deterministic error for any canonical-path violation.
       // Non-canonical tools (no evidenceHandle) pass through unchanged — cerdiwen/legacy unaffected.
       if (definition.type === ProjectToolType.COMMAND) {
-        const canonicalCheck = extractCanonicalEvidence(rawResult);
+        const canonicalCheck = extractCanonicalEvidence(rawResult, projectRoot);
         if (canonicalCheck.kind === 'rejected') {
           // Tool declared canonical evidence but it failed validation. Short-circuit with REJECTED.
           const rejectionResult = buildCanonicalRejectionResult(
