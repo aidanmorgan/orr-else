@@ -50,6 +50,7 @@ import {
 import { DomainEventName, ToolResultStatus } from '../constants/index.js';
 import { isRecord } from './RecordUtils.js';
 import type { DomainEvent } from './EventStoreTypes.js';
+import { asToolName, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';
 
 /**
  * The narrow EventStore surface the gate reads. Declaring it structurally
@@ -57,7 +58,7 @@ import type { DomainEvent } from './EventStoreTypes.js';
  * import.
  */
 export interface VerifierGateEventStore {
-  latestToolResultEvent(beadId: string, stateId: string, actionId: string, tool: string): Promise<DomainEvent | undefined>;
+  latestToolResultEvent(beadId: BeadId, stateId: StateId, actionId: ActionId, tool: ToolName): Promise<DomainEvent | undefined>;
 }
 
 /** Why a single required tool blocked the transition. */
@@ -125,9 +126,9 @@ export interface VerifierGateResult {
 
 /** The PATHS-ONLY inputs the caller already knows for this transition. */
 export interface VerifierGateContext {
-  beadId: string;
-  stateId: string;
-  actionId: string;
+  beadId: BeadId;
+  stateId: StateId;
+  actionId: ActionId;
   /** The write-set paths for this transition. */
   writeSet: string[];
   /** Declared-artifact name → artifact PATH. */
@@ -345,7 +346,7 @@ export async function runVerifierGate(
   // toolOutputs map exposes ALL produced outputs to every callback.
   const latestByTool = new Map<string, DomainEvent | undefined>();
   for (const tool of tools) {
-    latestByTool.set(tool, await store.latestToolResultEvent(ctx.beadId, ctx.stateId, ctx.actionId, tool));
+    latestByTool.set(tool, await store.latestToolResultEvent(ctx.beadId, ctx.stateId, ctx.actionId, asToolName(tool)));
   }
 
   const toolOutputs: Record<string, string> = {};

@@ -9,6 +9,7 @@
 import type { DomainEventName } from '../constants/index.js';
 import type { HarnessBeadMetadata } from '../types/index.js';
 import type { RestartKind, MergeAndCommitStatus } from '../constants/index.js';
+import type { BeadId, EventId, SessionId, StateId, ActionId, ToolName } from '../types/ids.js';
 
 /**
  * The CANONICAL tool-result base now lives in the harness-owned contract module
@@ -34,10 +35,10 @@ export type { ToolResultBase } from '../contract.js';
 export type EventData = Record<string, unknown>;
 
 export interface DomainEvent {
-  id: string;
+  id: EventId;
   type: DomainEventName | string;
   timestamp: string;
-  sessionId: string;
+  sessionId: SessionId;
   data: EventData;
 }
 
@@ -52,8 +53,8 @@ export interface LatestEventFilterOptions {
 }
 
 export interface ProjectToolFailureLimitFilterOptions {
-  stateId?: string;
-  actionId?: string;
+  stateId?: StateId;
+  actionId?: ActionId;
   terminalOnly?: boolean;
 }
 
@@ -74,19 +75,19 @@ export interface ProjectToolFailureLimitFilterOptions {
 export interface ProjectionCapableStore {
   record(event: DomainEventName | string, data: unknown): Promise<void>;
   readAll(): Promise<DomainEvent[]>;
-  projectBead(beadId: string, options?: EventProjectionOptions): Promise<Partial<HarnessBeadMetadata>>;
-  eventsForBead(beadId: string): Promise<DomainEvent[]>;
-  eventsForBeads(beadIds: Iterable<string>): Promise<Map<string, DomainEvent[]>>;
-  latestEventsForBeads(beadIds: Iterable<string>, options?: LatestEventFilterOptions): Promise<Map<string, DomainEvent>>;
+  projectBead(beadId: BeadId, options?: EventProjectionOptions): Promise<Partial<HarnessBeadMetadata>>;
+  eventsForBead(beadId: BeadId): Promise<DomainEvent[]>;
+  eventsForBeads(beadIds: Iterable<BeadId>): Promise<Map<BeadId, DomainEvent[]>>;
+  latestEventsForBeads(beadIds: Iterable<BeadId>, options?: LatestEventFilterOptions): Promise<Map<BeadId, DomainEvent>>;
   latestEventByType(type: DomainEventName | string): Promise<DomainEvent | undefined>;
-  latestProjectToolFailureLimitEvent(beadId: string, options?: ProjectToolFailureLimitFilterOptions): Promise<DomainEvent | undefined>;
+  latestProjectToolFailureLimitEvent(beadId: BeadId, options?: ProjectToolFailureLimitFilterOptions): Promise<DomainEvent | undefined>;
   /**
    * Latest tool-result event for one (beadId, stateId, actionId, tool) tuple.
    * Reconciles the FLAT (command/MCP) and NESTED (plugin) recorded shapes so
    * the coordinator-side verifier gate can recover a tool's outputFile + run
    * status (pi-experiment-0yt5.5).
    */
-  latestToolResultEvent(beadId: string, stateId: string, actionId: string, tool: string): Promise<DomainEvent | undefined>;
+  latestToolResultEvent(beadId: BeadId, stateId: StateId, actionId: ActionId, tool: ToolName): Promise<DomainEvent | undefined>;
 }
 
 export interface BeadStateTransitionProjection {

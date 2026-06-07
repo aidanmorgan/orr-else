@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { createHash } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { Bead, BeadId, BeadsIssueRecord, HarnessBeadMetadata } from '../types/index.js';
+import { Bead, BeadId, BeadsIssueRecord, HarnessBeadMetadata, asBeadId, asWorkerId, asStateId } from '../types/index.js';
 import { Logger } from '../core/Logger.js';
 import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
@@ -515,7 +515,7 @@ async function normalizeIssue(
   includeDetails = false,
   includeProjection = true
 ): Promise<Bead> {
-  const projectedMetadata = includeProjection ? await eventStore.projectBead(issue.id, { includeDetails }) : {};
+  const projectedMetadata = includeProjection ? await eventStore.projectBead(asBeadId(issue.id), { includeDetails }) : {};
   return normalizeIssueWithProjection(issue, projectedMetadata, includeDetails);
 }
 
@@ -526,8 +526,8 @@ async function normalizeIssues(
   includeProjection = true
 ): Promise<Bead[]> {
   if (!includeProjection) return issues.map(issue => normalizeIssueWithProjection(issue, {}, includeDetails));
-  const projections = await eventStore.projectBeads(issues.map(issue => issue.id), { includeDetails });
-  return issues.map(issue => normalizeIssueWithProjection(issue, projections.get(issue.id) || {}, includeDetails));
+  const projections = await eventStore.projectBeads(issues.map(issue => asBeadId(issue.id)), { includeDetails });
+  return issues.map(issue => normalizeIssueWithProjection(issue, projections.get(asBeadId(issue.id)) || {}, includeDetails));
 }
 
 async function getIssue(client: BeadsClient, eventStore: EventStore, id: string, env: RuntimeEnvironment, root: string): Promise<BeadsIssueRecord> {
@@ -768,7 +768,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
       }),
       execute: async (params: unknown) => {
         const { id, includeDetails } = (params && typeof params === 'object' ? params : {}) as { id: string; includeDetails?: boolean };
-        const projection = await eventStore.projectBeadStateChart(id);
+        const projection = await eventStore.projectBeadStateChart(asBeadId(id));
         return includeDetails ? boundedDetailedStateChartProjection(projection) : compactStateChartProjection(projection);
       }
     },
@@ -937,9 +937,9 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         const event = {
           type: TeammateEventType.HEARTBEAT,
           timestamp: Date.now(),
-          workerId: params.workerId,
+          workerId: asWorkerId(params.workerId),
           beadId: params.beadId as BeadId,
-          stateId: params.stateId,
+          stateId: asStateId(params.stateId),
           ...(params.pid !== undefined ? { pid: params.pid } : {}),
           ...(params.sessionStateId ? { sessionStateId: params.sessionStateId } : {})
         } satisfies Omit<HeartbeatEvent, 'idempotencyKey'>;

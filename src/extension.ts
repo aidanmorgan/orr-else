@@ -44,7 +44,7 @@ import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer, type SignalAck } from './core/SignalingServer.js';
 import { loadCoordinatorWorkerExtensions } from './core/CoordinatorExtensionLoader.js';
 import { evaluateCoordinatorGate, validateRequiredToolVerifiers } from './core/CoordinatorVerifierGate.js';
-import { Bead, BeadId } from './types/index.js';
+import { Bead, BeadId, asBeadId, asStateId, asWorkerId, asActionId } from './types/index.js';
 import {
   TeammateEvent,
   createTeammateEventIdempotencyKey,
@@ -1327,7 +1327,7 @@ async function runParentSequenceActionsBeforeActive(
  * allowed boundary for process.env) and delegates to buildWorkerEventFrom
  * in SignalController.ts which is env-free.
  */
-function buildWorkerEvent(type: TeammateEventType, fields: Partial<TeammateEvent> & Record<string, unknown>): TeammateEvent {
+function buildWorkerEvent(type: TeammateEventType, fields: Record<string, unknown>): TeammateEvent {
   return buildWorkerEventFrom(type, fields, {
     workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
     sessionStateId: process.env[EnvVars.SESSION_STATE_ID],
@@ -1624,7 +1624,7 @@ function coordinatorGateRequiredTools(
  */
 async function latestWorktreePathForBead(services: RuntimeServices, beadId: string): Promise<string | undefined> {
   try {
-    const events = await services.eventStore.eventsForBead(beadId);
+    const events = await services.eventStore.eventsForBead(beadId as import('./types/ids.js').BeadId);
     for (let i = events.length - 1; i >= 0; i -= 1) {
       const event = events[i];
       if (event.type === DomainEventName.WORKTREE_PROVISIONED) {
@@ -3381,11 +3381,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       const env = nodeRuntimeEnvironment;
       const workerContext: WorkerContext = {
         beadId: env.env(EnvVars.BEAD_ID) as BeadId | undefined,
-        stateId: env.env(EnvVars.STATE_ID),
+        stateId: env.env(EnvVars.STATE_ID) ? asStateId(env.env(EnvVars.STATE_ID)!) : undefined,
         projectRoot: env.env(EnvVars.PROJECT_ROOT) || process.cwd(),
         worktreePath: env.env(EnvVars.WORKTREE_PATH) || undefined,
-        workerId: env.env(EnvVars.WORKER_ID) || `worker-${process.pid}`,
-        actionId: env.env(EnvVars.ACTION_ID) || WorkerDefaults.AUTO_CONTEXT_RESTART_ACTION_ID
+        workerId: asWorkerId(env.env(EnvVars.WORKER_ID) || `worker-${process.pid}`),
+        actionId: asActionId(env.env(EnvVars.ACTION_ID) || WorkerDefaults.AUTO_CONTEXT_RESTART_ACTION_ID)
       };
       const teammate = new Teammate(
         pi,

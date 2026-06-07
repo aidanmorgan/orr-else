@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { BeadId } from '../types/ids.js';
+import { BeadId, WorkerId, StateId } from '../types/ids.js';
 import {
   DomainEventName,
   EventName,
@@ -33,9 +33,9 @@ export function isStatusMutatingTeammateEvent(event: TeammateEvent): boolean {
 export interface TeammateEventBase {
   type: TeammateEventType | string;
   beadId: BeadId;
-  workerId: string;
+  workerId: WorkerId;
   sessionStateId?: string;
-  stateId: string;
+  stateId: StateId;
   timestamp: number;
   idempotencyKey: string;
 }

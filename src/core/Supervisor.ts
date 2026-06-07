@@ -1,5 +1,5 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Bead, BeadId } from '../types/index.js';
+import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
@@ -308,7 +308,7 @@ export class Supervisor {
     for (const beadId of beadIds) {
       let stateId = 'unknown';
       try {
-        const projection = await this.eventStore.projectBead(beadId, { includeDetails: false });
+        const projection = await this.eventStore.projectBead(asBeadId(beadId), { includeDetails: false });
         if (projection.status) stateId = String(projection.status);
       } catch {
         // best-effort — keep 'unknown'
@@ -783,7 +783,7 @@ export class Supervisor {
     if (!state) return undefined;
 
     const terminalFailureEvent = await this.eventStore.latestProjectToolFailureLimitEvent(bead.id, {
-      stateId,
+      stateId: asStateId(stateId),
       terminalOnly: true
     }).catch((error: unknown) => {
       Logger.warn(Component.SUPERVISOR, 'Unable to inspect terminal tool failure-limit before spawn', {
@@ -1114,8 +1114,9 @@ export class Supervisor {
   }
 
   private async restartDetailsForMissingStartedBead(beadId: string): Promise<MissingStartedRestartDetails | undefined> {
+    const brandedBeadId = asBeadId(beadId);
     try {
-      const projection = await this.eventStore.projectBead(beadId, { includeDetails: false });
+      const projection = await this.eventStore.projectBead(brandedBeadId, { includeDetails: false });
       if (projection?.restartRequested === true) {
         return {
           restartKind: projection.restartKind,
@@ -1133,7 +1134,7 @@ export class Supervisor {
     }
 
     try {
-      const events = await this.eventStore.eventsForBead(beadId);
+      const events = await this.eventStore.eventsForBead(brandedBeadId);
       for (const event of [...events].reverse()) {
         // Schemaless JSON payload; loose-record view at the consumer boundary (pf7v).
         const data = event.data as Record<string, any>;
@@ -1358,7 +1359,7 @@ export class Supervisor {
 
     let groupedEvents: Map<string, DomainEvent[]>;
     try {
-      groupedEvents = await this.eventStore.eventsForBeads(candidates);
+      groupedEvents = await this.eventStore.eventsForBeads(candidates.map(asBeadId));
     } catch (error) {
       Logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
         beadIds: candidates.sort(),
@@ -1446,7 +1447,7 @@ export class Supervisor {
       heartbeatByBead.set(heartbeat.beadId, Math.max(previous, heartbeat.timestampMs));
     }
     const heartbeatDetails = this.server.getHeartbeatSnapshot();
-    const latestProgressEvents = await this.eventStore.latestEventsForBeads(liveBeadIds, {
+    const latestProgressEvents = await this.eventStore.latestEventsForBeads(liveBeadIds.map(asBeadId), {
       excludeTypes: [DomainEventName.HEARTBEAT_RECORDED, DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED],
       excludeTeammateEventTypes: [TeammateEventType.HEARTBEAT],
       excludeToolNames: [PluginToolName.BD_HEARTBEAT]
@@ -1462,7 +1463,7 @@ export class Supervisor {
       return now - lastHeartbeatMs > SupervisorDefaults.STALE_HEARTBEAT_MS;
     });
     const inactiveBeadIds = liveBeadIds.filter(beadId => {
-      const latestProgress = latestProgressEvents.get(beadId);
+      const latestProgress = latestProgressEvents.get(asBeadId(beadId));
       const latestProgressMs = latestProgress ? Date.parse(latestProgress.timestamp) : this.startedBeadAtMs.get(beadId) || 0;
       return Number.isFinite(latestProgressMs) && latestProgressMs > 0 && now - latestProgressMs > noProgressTimeoutMs;
     });

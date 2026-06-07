@@ -1,5 +1,5 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { BeadId } from '../types/index.js';
+import { BeadId, WorkerId, StateId, ActionId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
@@ -34,11 +34,11 @@ import type { RuntimePlugin } from './RuntimeServices.js';
  */
 export interface WorkerContext {
   beadId: BeadId | undefined;
-  stateId: string | undefined;
+  stateId: StateId | undefined;
   projectRoot: string;
   worktreePath: string | undefined;
-  workerId: string;
-  actionId: string;
+  workerId: WorkerId;
+  actionId: ActionId;
 }
 
 export class Teammate {
@@ -214,7 +214,7 @@ export class Teammate {
       type: TeammateEventType.CONTEXT_RESTART_REQUESTED,
       beadId: beadId as BeadId,
       workerId: this.workerContext.workerId,
-      stateId,
+      stateId: stateId as StateId,
       timestamp: Date.now(),
       actionId: this.workerContext.actionId,
       transitionEvent: config.settings.contextRestartEvent || EventName.CONTEXT_RESTART,

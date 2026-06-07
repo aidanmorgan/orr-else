@@ -95,7 +95,7 @@ export interface AgentLifecycleFailureContext {
    * identity. Provided by the composition root (extension.ts) so this module
    * never reads process.env itself.
    */
-  buildWorkerEvent: (type: TeammateEventType, fields: Partial<TeammateEvent> & Record<string, unknown>) => TeammateEvent;
+  buildWorkerEvent: (type: TeammateEventType, fields: Record<string, unknown>) => TeammateEvent;
 }
 
 // ── agent lifecycle failure handler ──────────────────────────────────────────

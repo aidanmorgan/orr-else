@@ -55,7 +55,7 @@ export function teammateSignalEventData(event: TeammateEvent): Record<string, un
  */
 export function buildWorkerEventFrom(
   type: TeammateEventType,
-  fields: Partial<TeammateEvent> & Record<string, unknown>,
+  fields: Record<string, unknown>,
   env: WorkerEnv,
   unknownStateId: string
 ): TeammateEvent {

@@ -13,6 +13,7 @@ import type { HarnessConfig } from '../core/ConfigLoader.js';
 import type { DomainEvent } from '../core/EventStore.js';
 import type { Observability } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
+import { asStateId, asActionId, asBeadId, asToolName } from '../types/ids.js';
 import { Logger } from '../core/Logger.js';
 import { missingMandatoryChecklistItems } from '../core/ChecklistRequirements.js';
 import { isAdvanceOutcome, assertDeclaredOutcome } from '../core/FlowManager.js';
@@ -69,8 +70,8 @@ export function terminalFailureLimitDataFromResult(result: unknown): Record<stri
 
 export function scanTerminalFailureLimit(run: ActiveRun, services: RuntimeServices): Promise<DomainEvent | undefined> {
   return services.eventStore.latestProjectToolFailureLimitEvent(run.beadId, {
-    stateId: run.stateId,
-    actionId: run.action.id,
+    stateId: asStateId(run.stateId),
+    actionId: asActionId(run.action.id),
     terminalOnly: true
   });
 }
@@ -362,8 +363,8 @@ async function auditRequiredToolsArtifactPresence(
 
   const ctx: VerifierGateContext = {
     beadId: activeRun.beadId,
-    stateId: activeRun.stateId,
-    actionId,
+    stateId: asStateId(activeRun.stateId),
+    actionId: asActionId(actionId),
     writeSet,
     artifacts
   };

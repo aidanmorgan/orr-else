@@ -16,6 +16,7 @@ import {
   EventStoreDefaults,
   TeammateEventType
 } from '../constants/index.js';
+import { asEventId, asSessionId, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';
 import { BeadEventIndex } from './BeadEventIndex.js';
 import { BeadStateProjection } from './BeadStateProjection.js';
 import { DOMAIN_EVENT_SCHEMAS } from './DomainEventSchemas.js';
@@ -314,10 +315,10 @@ export class EventStore implements ProjectionCapableStore {
     const location = await this.init();
 
     const entry: DomainEvent = {
-      id: uuidv7(),
+      id: asEventId(uuidv7()),
       type: event,
       timestamp: new Date(this.clock.now()).toISOString(),
-      sessionId: this.sessionId,
+      sessionId: asSessionId(this.sessionId),
       data: normalized
     };
 
@@ -342,13 +343,13 @@ export class EventStore implements ProjectionCapableStore {
     return events.sort(this.compareEvents.bind(this));
   }
 
-  public async eventsForBead(beadId: string): Promise<DomainEvent[]> {
+  public async eventsForBead(beadId: BeadId): Promise<DomainEvent[]> {
     return (await this.eventsForBeads([beadId])).get(beadId) || [];
   }
 
-  public async eventsForBeads(beadIds: Iterable<string>): Promise<Map<string, DomainEvent[]>> {
+  public async eventsForBeads(beadIds: Iterable<BeadId>): Promise<Map<BeadId, DomainEvent[]>> {
     const requested = new Set([...beadIds].filter(Boolean));
-    const grouped = new Map<string, DomainEvent[]>();
+    const grouped = new Map<BeadId, DomainEvent[]>();
     for (const beadId of requested) grouped.set(beadId, []);
     if (requested.size === 0) return grouped;
 
@@ -383,7 +384,7 @@ export class EventStore implements ProjectionCapableStore {
       await this.eventLog.scan(filePath, value => {
         if (!this.isDomainEvent(value)) return;
         if (this.isSyntheticEvent(value)) return;
-        const beadId = this.beadIdFor(value);
+        const beadId = this.beadIdFor(value) as BeadId | undefined;
         if (!beadId || !missing.has(beadId)) return;
         grouped.get(beadId)!.push(value);
       });
@@ -396,11 +397,11 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   public async latestEventsForBeads(
-    beadIds: Iterable<string>,
+    beadIds: Iterable<BeadId>,
     options: LatestEventFilterOptions = {}
-  ): Promise<Map<string, DomainEvent>> {
+  ): Promise<Map<BeadId, DomainEvent>> {
     const requested = new Set([...beadIds].filter(Boolean));
-    const latest = new Map<string, DomainEvent>();
+    const latest = new Map<BeadId, DomainEvent>();
     if (requested.size === 0) return latest;
 
     const excludedTypes = new Set(options.excludeTypes || []);
@@ -448,10 +449,10 @@ export class EventStore implements ProjectionCapableStore {
    * do NOT satisfy the query — path-layout parsing was removed (u7cl).
    */
   public async latestToolResultEvent(
-    beadId: string,
-    stateId: string,
-    actionId: string,
-    tool: string
+    beadId: BeadId,
+    stateId: StateId,
+    actionId: ActionId,
+    tool: ToolName
   ): Promise<DomainEvent | undefined> {
     if (!beadId || !tool) return undefined;
     let latest: DomainEvent | undefined;
@@ -494,7 +495,7 @@ export class EventStore implements ProjectionCapableStore {
   // ---------------------------------------------------------------------------
 
   public async latestProjectToolFailureLimitEvent(
-    beadId: string,
+    beadId: BeadId,
     options: ProjectToolFailureLimitFilterOptions = {}
   ): Promise<DomainEvent | undefined> {
     if (!beadId) return undefined;
@@ -594,7 +595,7 @@ export class EventStore implements ProjectionCapableStore {
   // Public API – projections
   // ---------------------------------------------------------------------------
 
-  public async projectBeadStateChart(beadId: string): Promise<BeadStateChartProjection> {
+  public async projectBeadStateChart(beadId: BeadId): Promise<BeadStateChartProjection> {
     const config = await this.configLoader.load();
     return this.projection.projectBeadStateChartFromEvents(
       beadId,
@@ -606,7 +607,7 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   public async projectBead(
-    beadId: string,
+    beadId: BeadId,
     options: EventProjectionOptions = {}
   ): Promise<Partial<HarnessBeadMetadata>> {
     const config = await this.configLoader.load();
@@ -620,11 +621,11 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   public async projectBeads(
-    beadIds: Iterable<string>,
+    beadIds: Iterable<BeadId>,
     options: EventProjectionOptions = {}
-  ): Promise<Map<string, Partial<HarnessBeadMetadata>>> {
+  ): Promise<Map<BeadId, Partial<HarnessBeadMetadata>>> {
     const ids = [...new Set([...beadIds].filter(Boolean))];
-    const projections = new Map<string, Partial<HarnessBeadMetadata>>();
+    const projections = new Map<BeadId, Partial<HarnessBeadMetadata>>();
     if (ids.length === 0) return projections;
 
     const config = await this.configLoader.load();

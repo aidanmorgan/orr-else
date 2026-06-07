@@ -45,6 +45,7 @@ import type { RequiredTool } from './domain/StateModels.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Component } from '../constants/index.js';
+import { asBeadId, asStateId, asActionId } from '../types/ids.js';
 
 /** Default per-verify isolation timeout (ms). */
 export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
@@ -246,9 +247,9 @@ export async function evaluateCoordinatorGate(
   ]);
 
   const ctx: VerifierGateContext = {
-    beadId: input.beadId,
-    stateId: input.stateId,
-    actionId: input.actionId,
+    beadId: asBeadId(input.beadId),
+    stateId: asStateId(input.stateId),
+    actionId: asActionId(input.actionId),
     writeSet,
     artifacts
   };

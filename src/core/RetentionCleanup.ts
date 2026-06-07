@@ -1061,7 +1061,7 @@ export class RetentionCleanup {
 
     for (const beadId of liveBeadIds) {
       try {
-        const projection = await this.eventStore.projectBeadStateChart(beadId);
+        const projection = await this.eventStore.projectBeadStateChart(beadId as import('../types/ids.js').BeadId);
         map.set(beadId, {
           currentState: projection.currentState,
           currentActionId: projection.activeActionId

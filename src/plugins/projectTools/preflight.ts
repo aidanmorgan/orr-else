@@ -13,6 +13,7 @@
  * Package-internal — do not import from outside src/plugins/.
  */
 import { EventStore, type DomainEvent } from '../../core/EventStore.js';
+import { asBeadId } from '../../types/ids.js';
 import { isRestartTransition } from '../../core/EventUtils.js';
 import type { ProjectToolConfig } from '../../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
@@ -202,7 +203,7 @@ export async function projectToolFailureLimit(
 
   const stateId = context.templateContext.stateId;
   const actionId = context.templateContext.actionId;
-  const events = await eventStore.eventsForBead(beadId);
+  const events = await eventStore.eventsForBead(asBeadId(beadId));
   const activeRunEvents = eventsForActiveProjectToolRun(events, stateId, actionId);
   const matchingFailures = activeRunEvents.filter(event => {
     const data = event.data;
