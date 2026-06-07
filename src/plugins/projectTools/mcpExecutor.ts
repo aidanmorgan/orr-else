@@ -300,39 +300,97 @@ function unavailable(name: string, message: string) {
   };
 }
 
-// ---- Raw MCP result persistence (s3wp.26 / cosx) ----
+// ---- Raw MCP result persistence (s3wp.26 / cosx / zog2.12) ----
 
 /**
  * Persist the complete raw client.callTool result (or error envelope) to
  * context.outputDir/mcp-raw.json BEFORE the compact model-facing result is
- * built.  This is harness-side evidence only.
+ * built.  This is AUTHORITATIVE harness-side evidence (zog2.12).
  *
  * Returns { rawFile, rawBytes, rawChecksum } for internal/evidence use.
  * These fields are NOT spread into the model-facing result (cosx: removed from
  * model-facing results; raw archives are harness-side evidence only, accessible
  * via the canonical event/evidence path).
  *
- * Errors here are swallowed (logged only) so a persistence failure never
- * prevents the model from receiving its result.
+ * zog2.12: Errors are NO LONGER swallowed. Write failures throw an
+ * McpRawArchiveWriteError so the caller can fail-closed (return REJECTED)
+ * rather than silently producing a PASSED result without durable evidence.
  */
+export type McpArchiveFailureCategory =
+  | 'write_failure'
+  | 'checksum_mismatch'
+  | 'missing_checksum'
+  | 'malformed'
+  | 'backend_unavailable';
+
+export class McpRawArchiveWriteError extends Error {
+  readonly archiveFailureCategory: McpArchiveFailureCategory;
+  readonly outputDir: string;
+  readonly cause: unknown;
+
+  constructor(outputDir: string, cause: unknown, category: McpArchiveFailureCategory = 'write_failure') {
+    super(`MCP raw archive write failed (${category}): ${String(cause)}`);
+    this.name = 'McpRawArchiveWriteError';
+    this.outputDir = outputDir;
+    this.cause = cause;
+    this.archiveFailureCategory = category;
+  }
+}
+
 export async function persistMcpRawResult(
   outputDir: string,
   payload: unknown
-): Promise<{ rawFile: string; rawBytes: number; rawChecksum: string } | undefined> {
+): Promise<{ rawFile: string; rawBytes: number; rawChecksum: string }> {
+  const rawFile = path.join(outputDir, MCP_RAW_FILE_NAME);
+
+  // zog2.12 review fix: classify malformed payloads that cannot be serialized.
+  let serialized: string;
   try {
-    const rawFile = path.join(outputDir, MCP_RAW_FILE_NAME);
-    const serialized = JSON.stringify(payload);
-    await writeFile(rawFile, serialized);
-    const rawBytes = Buffer.byteLength(serialized, 'utf8');
-    const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
-    return { rawFile, rawBytes, rawChecksum };
+    serialized = JSON.stringify(payload);
   } catch (error) {
-    Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist raw MCP result', {
-      outputDir,
-      error: String(error)
-    });
-    return undefined;
+    throw new McpRawArchiveWriteError(outputDir, error, 'malformed');
   }
+
+  const expectedBytes = Buffer.byteLength(serialized, 'utf8');
+  const expectedChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
+
+  try {
+    await writeFile(rawFile, serialized);
+  } catch (error) {
+    // zog2.12: propagate as McpRawArchiveWriteError so executeMcpToolUnlocked
+    // can fail-closed (REJECTED) instead of silently producing PASSED evidence.
+    throw new McpRawArchiveWriteError(outputDir, error);
+  }
+
+  // zog2.12 review fix: read the file back to cross-check that the persisted bytes
+  // match what was written. This makes the "durably written and cross-checked" AC real:
+  // a successful write followed by a divergent readback is a checksum_mismatch; an
+  // absent/empty readback is a missing_checksum.
+  let readback: string;
+  try {
+    readback = await readFile(rawFile, 'utf-8');
+  } catch (error) {
+    throw new McpRawArchiveWriteError(outputDir, error, 'missing_checksum');
+  }
+
+  if (!readback) {
+    throw new McpRawArchiveWriteError(
+      outputDir,
+      new Error('readback returned empty content'),
+      'missing_checksum'
+    );
+  }
+
+  const readbackChecksum = createHash('sha256').update(readback).digest('hex').slice(0, 16);
+  if (readbackChecksum !== expectedChecksum) {
+    throw new McpRawArchiveWriteError(
+      outputDir,
+      new Error(`checksum mismatch: wrote ${expectedChecksum}, read back ${readbackChecksum} (${expectedBytes}B written, ${Buffer.byteLength(readback, 'utf8')}B read)`),
+      'checksum_mismatch'
+    );
+  }
+
+  return { rawFile, rawBytes: expectedBytes, rawChecksum: expectedChecksum };
 }
 
 // ---- executeMcpTool ----
@@ -406,8 +464,10 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
         arguments: normalizedArguments.arguments
       }, undefined, mcpToolRequestOptions(definition, signal));
 
-      // cosx: persist the COMPLETE raw client.callTool payload to mcp-raw.json as
-      // harness-side evidence BEFORE building the compact model-facing result.
+      // zog2.12: persist the COMPLETE raw client.callTool payload to mcp-raw.json as
+      // AUTHORITATIVE harness-side evidence BEFORE building the compact model-facing result.
+      // Write failures throw McpRawArchiveWriteError; the catch block below converts
+      // that to a fail-closed REJECTED result (not a silent PASSED without evidence).
       // The model-facing result does NOT include rawFile/rawBytes/rawChecksum;
       // those are harness-internal evidence fields accessible via the canonical
       // event/evidence path (context.outputDir/mcp-raw.json).
@@ -441,12 +501,37 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
       });
     }
   } catch (error) {
+    // zog2.12: fail-closed for authoritative archive write failures.
+    // McpRawArchiveWriteError means persistMcpRawResult threw — the raw evidence
+    // is not durably written, so the invocation cannot be PASSED. Return REJECTED
+    // with write_failure classification so operators can triage the root cause.
+    if (error instanceof McpRawArchiveWriteError) {
+      Logger.warn(Component.PROJECT_TOOLS, 'MCP raw archive write failed (fail-closed: REJECTED)', {
+        tool: definition.name,
+        server: definition.server,
+        operation,
+        outputDir: error.outputDir,
+        error: String(error.cause)
+      });
+      return {
+        tool: definition.name,
+        status: ToolResultStatus.REJECTED,
+        server: definition.server,
+        operation,
+        archiveFailureCategory: error.archiveFailureCategory,
+        failureCategory: error.archiveFailureCategory,
+        message: `REJECTED: MCP raw archive persistence failed (${error.archiveFailureCategory}) — raw evidence not durably written. ${String(error.cause)}`,
+      };
+    }
+
     const message = String(error);
     if (definition.optional) return unavailable(definition.name, message);
     // cosx: persist a raw error envelope on transport/connection failures so
     // the complete error metadata is archived as harness-side evidence even when
     // client.callTool never ran. The model-facing result does NOT include
     // rawFile/rawBytes/rawChecksum; evidence is accessible via the canonical path.
+    // zog2.12: error-envelope persistence is best-effort (the primary failure is
+    // already the backend/transport error, not an archive write error).
     const errorEnvelope = {
       tool: definition.name,
       server: definition.server,
@@ -455,12 +540,24 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
       errorType: error instanceof Error ? error.constructor.name : typeof error,
       errorStack: error instanceof Error ? error.stack : undefined
     };
-    await persistMcpRawResult(context.outputDir, errorEnvelope).catch(() => undefined);
+    await persistMcpRawResult(context.outputDir, errorEnvelope).catch((archiveError: unknown) => {
+      Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist raw MCP error envelope', {
+        tool: definition.name,
+        server: definition.server,
+        outputDir: context.outputDir,
+        error: String(archiveError)
+      });
+    });
+    // zog2.12 review fix: classify transport/connect failures as backend_unavailable
+    // so operators can distinguish backend connectivity issues from archive write errors,
+    // semantic rejections (isError), or other failure categories.
     return {
       tool: definition.name,
       status: ToolResultStatus.REJECTED,
       server: definition.server,
       operation,
+      failureCategory: 'backend_unavailable' as const,
+      archiveFailureCategory: 'backend_unavailable' as const,
       message,
     };
   }
