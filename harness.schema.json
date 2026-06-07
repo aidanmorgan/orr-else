@@ -176,6 +176,11 @@
     }
   },
   "properties": {
+    "version": {
+      "type": "integer",
+      "const": 2,
+      "description": "pi-experiment-202g: Config schema version. When present, must be 2. Absent = v1 (backward-compatible). Triggers v2 admission: rejects removed v1 fields with path-specific diagnostics."
+    },
     "settings": {
       "type": "object",
       "description": "All settings fields have ConfigLoader defaults; none are strictly required in the YAML file. Omitted fields are filled from harness defaults before validation.",
@@ -1338,15 +1343,12 @@
     },
     "statechart": {
       "type": "object",
-      "required": [
-        "terminalStates"
-      ],
       "additionalProperties": false,
       "description": "Statechart vocabulary configuration. All fields except terminalStates have defaults that reproduce the original SUCCESS/FAILURE/BLOCKED/completed literals.",
       "properties": {
         "initialState": {
           "type": "string",
-          "description": "Override for the initial state (mirrors settings.startState; settings wins)."
+          "description": "v1: Override for the initial state (mirrors settings.startState; settings wins). Rejected in version:2 configs — use statechart.initial instead."
         },
         "terminalStates": {
           "type": "array",
@@ -1354,7 +1356,19 @@
             "type": "string"
           },
           "minItems": 1,
-          "description": "State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent."
+          "description": "v1: State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent. Rejected in version:2 configs — use statechart.terminal instead."
+        },
+        "initial": {
+          "type": "string",
+          "description": "v2 (pi-experiment-202g): Names the single runnable start state. Used in version:2 configs instead of v1 initialState."
+        },
+        "terminal": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "v2 (pi-experiment-202g): Lists terminal sink names that must not also be runnable states. Used in version:2 configs instead of v1 terminalStates."
         },
         "advanceOutcomes": {
           "type": "array",

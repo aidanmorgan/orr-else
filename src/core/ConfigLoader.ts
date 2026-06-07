@@ -167,6 +167,10 @@ export class ConfigLoader {
 
       const fileContent = fs.readFileSync(configPath, 'utf8');
       const parsed = yaml.parse(fileContent) || {};
+      // pi-experiment-202g: v2 admission check runs on the raw parsed document
+      // BEFORE defaults are merged, so DEFAULTS-injected fields (startState:undefined,
+      // teamLeadSystemPrompt, projectObjective) do not cause false rejections.
+      this.preValidateV2Admission(parsed);
       // s3wp.10: expand tsProjectTool shorthand before merging with defaults
       // so that the merged+validated config only ever sees type: command tools.
       this.expandTsProjectToolsInRaw(parsed);
@@ -364,6 +368,142 @@ export class ConfigLoader {
           `Tool "${name}" declares stale deprecated-lifecycle field(s): ${staleFields.join(', ')}. ` +
           `Deprecated/replaced tools must be removed from config entirely — they cannot satisfy gates or appear in requiredTools.` +
           replacementHint
+        );
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-202g: v2 schema root admission boundary.
+   *
+   * Runs BEFORE AJV schema validation, on the raw parsed document.
+   *
+   * Version routing:
+   *   - Absent version → v1 behavior (no-op here; existing schema + semantics apply).
+   *   - version: 2 → v2 admission: reject removed v1 fields with path-specific diagnostics.
+   *   - Any other value → fail closed (unknown version, startup-fatal).
+   *
+   * Removed v1 fields rejected in v2 configs (AC2 — full 8-category set):
+   *   settings.startState           — replaced by statechart.initial in v2.
+   *   settings.teamLeadSystemPrompt — removed in v2 config surface.
+   *   settings.projectObjective     — removed in v2 config surface.
+   *   settings.worktreePolicy       — replaced by per-state provisionWorktree in v2.
+   *   statechart.initialState       — replaced by statechart.initial in v2.
+   *   statechart.terminalStates     — replaced by statechart.terminal in v2.
+   *   states.*.on                   — v1 transition map; v2 uses states.*.transitions only.
+   *   include / extends             — v2 is a single file; no external config composition.
+   *
+   * Also enforces AC5: terminal sink not runnable (statechart.terminal names must
+   * not also appear as runnable states with actions).
+   */
+  private preValidateV2Admission(config: unknown): void {
+    if (!isRecord(config)) return;
+    const versionRaw = config['version'];
+
+    // Absent version → v1 path; skip v2 checks.
+    if (versionRaw === undefined || versionRaw === null) return;
+
+    // Unknown version → fail closed.
+    if (versionRaw !== 2) {
+      throw new Error(
+        `Unknown harness config version: ${JSON.stringify(versionRaw)}. ` +
+        `The only supported version values are: 2 (v2 schema) or absent (v1, backward-compatible). ` +
+        `Check your harness.yaml version field and correct it to a supported value.`
+      );
+    }
+
+    // version: 2 — reject removed v1 fields with path-specific diagnostics.
+    const staleV1Fields: Array<{ path: string; hint: string }> = [];
+
+    // Category 1–4: removed settings fields.
+    const settings = isRecord(config['settings']) ? config['settings'] as Record<string, unknown> : {};
+
+    if ('startState' in settings) {
+      staleV1Fields.push({
+        path: 'settings.startState',
+        hint: 'Use statechart.initial instead to declare the starting state in a v2 config.'
+      });
+    }
+    if ('teamLeadSystemPrompt' in settings) {
+      staleV1Fields.push({
+        path: 'settings.teamLeadSystemPrompt',
+        hint: 'settings.teamLeadSystemPrompt has been removed from the v2 config surface. Remove this field from your harness.yaml.'
+      });
+    }
+    if ('projectObjective' in settings) {
+      staleV1Fields.push({
+        path: 'settings.projectObjective',
+        hint: 'settings.projectObjective has been removed from the v2 config surface. Remove this field from your harness.yaml.'
+      });
+    }
+    if ('worktreePolicy' in settings) {
+      staleV1Fields.push({
+        path: 'settings.worktreePolicy',
+        hint: 'settings.worktreePolicy has been removed from the v2 config surface. Use per-state provisionWorktree declarations instead.'
+      });
+    }
+
+    // Category 5–6: stale statechart fields replaced by v2 counterparts.
+    const statechart = isRecord(config['statechart']) ? config['statechart'] as Record<string, unknown> : {};
+
+    if ('initialState' in statechart) {
+      staleV1Fields.push({
+        path: 'statechart.initialState',
+        hint: 'Use statechart.initial instead — v2 names the start state with statechart.initial.'
+      });
+    }
+    if ('terminalStates' in statechart) {
+      staleV1Fields.push({
+        path: 'statechart.terminalStates',
+        hint: 'Use statechart.terminal instead — v2 lists terminal sink names with statechart.terminal.'
+      });
+    }
+
+    // Category 7: states.*.on — v1 transition map not used in v2.
+    const states = isRecord(config['states']) ? config['states'] as Record<string, unknown> : {};
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (isRecord(stateRaw) && 'on' in stateRaw) {
+        staleV1Fields.push({
+          path: `states.${stateId}.on`,
+          hint: `Use states.${stateId}.transitions instead — v2 uses states.<state>.transitions only; the v1 "on" transition map is not supported.`
+        });
+      }
+    }
+
+    // Category 8: external config-composition fields.
+    if ('include' in config) {
+      staleV1Fields.push({
+        path: 'include',
+        hint: 'v2 harness configs are single YAML files. File references are only allowed for prompt/checklist/artifact content paths, not config fragments. Remove the include field.'
+      });
+    }
+    if ('extends' in config) {
+      staleV1Fields.push({
+        path: 'extends',
+        hint: 'v2 harness configs are single YAML files. File references are only allowed for prompt/checklist/artifact content paths, not config fragments. Remove the extends field.'
+      });
+    }
+
+    if (staleV1Fields.length > 0) {
+      const details = staleV1Fields.map(f => `  ${f.path}: ${f.hint}`).join('\n');
+      throw new Error(
+        `v2 harness config (version: 2) contains ${staleV1Fields.length} removed v1 field(s):\n` +
+        details + '\n' +
+        `Remove the stale fields to comply with the v2 schema. ` +
+        `These fields are no longer part of the v2 config contract and will not be read by the runtime.`
+      );
+    }
+
+    // AC5: terminal sink not runnable.
+    // A name in statechart.terminal must not also be a runnable state (a state with actions).
+    const terminalV2 = Array.isArray(statechart['terminal']) ? statechart['terminal'] as string[] : [];
+    for (const sinkName of terminalV2) {
+      const stateRaw = states[sinkName];
+      if (isRecord(stateRaw) && Array.isArray(stateRaw['actions']) && (stateRaw['actions'] as unknown[]).length > 0) {
+        throw new Error(
+          `v2 statechart.terminal lists "${sinkName}" as a terminal sink, but "${sinkName}" is also declared as a runnable state with actions. ` +
+          `Terminal sinks must not be runnable states. ` +
+          `Either remove "${sinkName}" from statechart.terminal, or remove its actions block to make it a true sink state.`
         );
       }
     }
@@ -977,7 +1117,11 @@ export class ConfigLoader {
     this.validateNoDeprecatedTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);
-    this.validateWorktreePolicy(config);
+    // pi-experiment-202g: worktreePolicy is a removed v1 field in v2 configs.
+    // v2 configs (version: 2) do not declare worktreePolicy; skip this check.
+    if (config.version !== 2) {
+      this.validateWorktreePolicy(config);
+    }
     this.validateSerializeRequiresSerializationKey(config);
     this.validateNoDuplicateStableArrays(config);
     this.validateToolPromptProfiles(config);
@@ -1018,18 +1162,25 @@ export class ConfigLoader {
       );
     }
 
-    const terminalStates = new Set<string>(sc.terminalStates ?? [BeadStatus.COMPLETED]);
+    // pi-experiment-202g: v2 configs use statechart.terminal (v2 field) instead of
+    // statechart.terminalStates (v1 field). Resolve the correct terminal list by version.
+    const terminalStates = new Set<string>(
+      config.version === 2
+        ? (sc.terminal ?? [BeadStatus.COMPLETED])
+        : (sc.terminalStates ?? [BeadStatus.COMPLETED])
+    );
     // knownTargets = defined states ∪ declared terminal states ∪ recognized
     // coarse sink statuses (completed / blocked / deferred).  A transition
     // whose target is a coarse sink status is valid: the bead leaves the active
     // statechart flow rather than being spawned into a new worker state.
     const knownTargets = new Set([...stateIds, ...terminalStates, ...RECOGNIZED_COARSE_SINK_STATUSES]);
 
-    // startState / statechart.initialState existence check.
+    // startState / statechart initial-state existence check.
+    // pi-experiment-202g: v2 uses statechart.initial; v1 uses settings.startState / statechart.initialState.
     // Only enforced when there are defined states (avoids false positives in
     // test configs with empty states maps that only care about other features).
     const settingsStartState = config.settings.startState;
-    const scInitialState = sc.initialState;
+    const scInitialState = config.version === 2 ? sc.initial : sc.initialState;
     const startState = settingsStartState || scInitialState;
     if (startState && stateIds.size > 0 && !stateIds.has(startState) && !terminalStates.has(startState)) {
       throw new Error(
@@ -1038,18 +1189,19 @@ export class ConfigLoader {
       );
     }
 
-    // ── AC1 (1elr.2): startState / statechart.initialState must agree ─────────
+    // ── AC1 (1elr.2): startState / statechart initial-state must agree ─────────
     // If both are present they must name the same state.  Disagreement means
     // FlowManager.initialState (reads settings.startState) and any loader that
-    // reads sc.initialState would pick different starting states — runtime split.
+    // reads sc.initialState/sc.initial would pick different starting states — runtime split.
     if (
       settingsStartState && scInitialState &&
       settingsStartState !== scInitialState
     ) {
+      const scField = config.version === 2 ? 'statechart.initial' : 'statechart.initialState';
       throw new Error(
-        `settings.startState "${settingsStartState}" and statechart.initialState "${scInitialState}" disagree. ` +
+        `settings.startState "${settingsStartState}" and ${scField} "${scInitialState}" disagree. ` +
         `They must name the same state so the runtime resolves a single canonical start state. ` +
-        `Either remove statechart.initialState (settings.startState is authoritative) or set them to the same value.`
+        `Either remove ${scField} (settings.startState is authoritative) or set them to the same value.`
       );
     }
 

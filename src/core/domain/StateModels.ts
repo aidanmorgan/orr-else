@@ -531,6 +531,14 @@ export interface SDLCState {
 }
 
 export interface HarnessConfig {
+  /**
+   * pi-experiment-202g: Config schema version.
+   * When set to 2, the loader validates the document against v2 admission rules
+   * and rejects removed v1 fields with path-specific diagnostics.
+   * Absent → v1 behavior (backward-compatible).
+   * Any value other than 2 → fail closed (unknown version).
+   */
+  version?: 2;
   settings: {
     maxConcurrentSlots: number;
     handoverTemplate: string;
@@ -699,15 +707,33 @@ export interface HarnessConfig {
  *
  * `customEvents` is a placeholder field whose behaviour is provided by a
  * parallel bead; it is declared here so the interface is stable.
+ *
+ * v1 fields (used when version is absent):
+ *   initialState   — override for the initial state.
+ *   terminalStates — list of terminal state IDs.
+ *
+ * v2 fields (used when version: 2 — v1 fields are rejected in v2 configs):
+ *   initial  — names the single runnable start state.
+ *   terminal — lists terminal sink names that must not also be runnable states.
  */
 export interface StatechartConfig {
-  /** Override for the initial state (mirrors settings.startState; settings wins). */
+  /** v1: Override for the initial state (mirrors settings.startState; settings wins). */
   initialState?: string;
   /**
-   * State IDs that are considered terminal (workflow is done when reached).
+   * v1: State IDs that are considered terminal (workflow is done when reached).
    * Required when the block is present; defaults to ['completed'] when absent.
    */
   terminalStates: string[];
+  /**
+   * v2: Names the single runnable start state.
+   * pi-experiment-202g: Used in version:2 configs instead of v1 initialState.
+   */
+  initial?: string;
+  /**
+   * v2: Lists terminal sink names that must not also be runnable states.
+   * pi-experiment-202g: Used in version:2 configs instead of v1 terminalStates.
+   */
+  terminal?: string[];
   /**
    * Outcome strings that trigger forward state advancement.
    * Defaults to ['SUCCESS'].
