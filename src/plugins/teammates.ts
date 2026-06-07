@@ -639,14 +639,14 @@ export class TeammateFactory {
     return this.agentsWindowSetupFailed;
   }
 
-  public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {
+  public async spawnTeammateInTmux(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown, spawnOptions?: import('../core/OrchestrationPorts.js').SpawnOptions): Promise<{ success: boolean; paneId?: string; error?: string; piSessionPath?: string }> {
     return this.observability.tracedAsync('spawn_teammate', {
       [OtelAttr.AGENT_BEAD_ID]: beadId,
       [OtelAttr.AGENT_STATE_ID]: stateId
-    }, async () => this.spawnTeammateInTmuxInner(beadId, stateId, worktreePath, ctx))();
+    }, async () => this.spawnTeammateInTmuxInner(beadId, stateId, worktreePath, ctx, spawnOptions))();
   }
 
-  private async spawnTeammateInTmuxInner(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown): Promise<{ success: boolean; paneId?: string; error?: string }> {
+  private async spawnTeammateInTmuxInner(beadId: BeadId, stateId: string, worktreePath: string, ctx?: unknown, spawnOptions?: import('../core/OrchestrationPorts.js').SpawnOptions): Promise<{ success: boolean; paneId?: string; error?: string; piSessionPath?: string }> {
     const ui = ctx && typeof ctx === 'object' ? ctx as { hasUI?: boolean; ui?: { setWorkingMessage(m: string | undefined): void; notify(m: string, t: string): void } } : undefined;
     try {
       assertSafeBeadId(beadId);
@@ -726,6 +726,33 @@ export class TeammateFactory {
         [EnvVars.ENABLE_PROMPT_CACHING_1H, ProcessFlag.TRUE]
       ].map(([key, value]) => `${key}=${shellQuoteValue(value)}`);
 
+      // pi-experiment-6q0y.44: session flag resolution.
+      // - namedContinuation (spawnOptions.contextKey): use --session <piSessionPath> to resume.
+      // - producesContextKey (spawnOptions.persistSessionForKey): use a deterministic session
+      //   path so the session is persistently stored and later resumable.
+      // - default (freshSubagent): use --no-session for an ephemeral isolated context.
+      let piSessionPath: string | undefined;
+      let sessionFlags: string[];
+
+      if (spawnOptions?.contextKey) {
+        // Named continuation: resume an existing Pi session by full path.
+        sessionFlags = [PiCliFlag.SESSION, spawnOptions.contextKey];
+        piSessionPath = spawnOptions.contextKey;
+      } else if (spawnOptions?.persistSessionForKey) {
+        // Write side: create a persistent session at a deterministic path so it can
+        // be found later by a namedContinuation consumer.
+        const safeKey = spawnOptions.persistSessionForKey.replace(/[^A-Za-z0-9_-]/g, '-');
+        const sessionDir = path.join(projectRoot, OperationalArtifactPath.PI_ARTIFACTS_DIR, 'sessions', safeKey);
+        fs.mkdirSync(sessionDir, { recursive: true });
+        // Use a deterministic session file path: Pi creates the file here when given
+        // a full path argument containing a '/'.
+        piSessionPath = path.join(sessionDir, `session-${beadId}-${stateId}.jsonl`);
+        sessionFlags = [PiCliFlag.SESSION, piSessionPath];
+      } else {
+        // freshSubagent default: ephemeral isolated context.
+        sessionFlags = [PiCliFlag.NO_SESSION];
+      }
+
       const args = [
         PiCliCommand.PI,
         PiCliFlag.NO_EXTENSIONS,
@@ -734,7 +761,7 @@ export class TeammateFactory {
         PiCliFlag.PROVIDER, llm.provider,
         PiCliFlag.MODEL, llm.model,
         PiCliFlag.THINKING, llm.thinking || ThinkingLevel.HIGH,
-        PiCliFlag.NO_SESSION,
+        ...sessionFlags,
         ...workerArgs,
         `Orr Else teammate bootstrap for ${beadId}/${stateId}.`
       ];
@@ -821,7 +848,9 @@ export class TeammateFactory {
         // Lightweight identity digest for audit — derived from canonical identity
         // inputs only (no text rendering).  The full digest (identity + rendered
         // stable block text) is recorded by the worker on STATE_PROMPT_ASSEMBLED.
-        bootstrapDigestId: spawnDigestId
+        bootstrapDigestId: spawnDigestId,
+        // pi-experiment-6q0y.44: context continuation audit fields.
+        ...(piSessionPath ? { piSessionPath, isResumption: !!spawnOptions?.contextKey } : {})
       });
 
       const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
@@ -866,7 +895,9 @@ export class TeammateFactory {
         ui.ui?.notify(`Teammate spawned for ${beadId} (${stateId})`, 'info');
         ui.ui?.setWorkingMessage(undefined);
       }
-      return { success: true, paneId };
+      const result: { success: boolean; paneId?: string; piSessionPath?: string } = { success: true, paneId };
+      if (piSessionPath) result.piSessionPath = piSessionPath;
+      return result;
     } catch (error) {
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWN_FAILED, {
         beadId,

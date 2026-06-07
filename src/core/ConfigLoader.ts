@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'yaml';
@@ -22,6 +23,7 @@ import {
   ModelProviderKey,
   RECOGNIZED_COARSE_SINK_STATUSES,
   SchedulerDefaults,
+  StateContextPolicy,
   SubscriptionProviderToken,
   ThinkingLevel
 } from '../constants/index.js';
@@ -794,6 +796,159 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.44: Validate state context policy declarations.
+   *
+   * Rules (startup-fatal):
+   *   1. When a state declares contextPolicy as a string, it must be a known
+   *      StateContextPolicy value (freshSubagent or namedContinuation).
+   *   2. When mode = namedContinuation, contextKey must be a non-empty string
+   *      containing only alphanumeric, dash, and underscore characters.
+   *   3. Invalid structured forms (missing mode) are rejected.
+   *
+   * Default (absent contextPolicy) is freshSubagent — no error, no action.
+   * This keeps cerdiwen (which does not declare contextPolicy) loading cleanly.
+   */
+  private validateStateContextPolicies(config: HarnessConfig): void {
+    const VALID_CONTEXT_KEY_RE = /^[A-Za-z0-9_-]+$/;
+    const VALID_MODES = new Set<string>([
+      StateContextPolicy.FRESH_SUBAGENT,
+      StateContextPolicy.NAMED_CONTINUATION
+    ]);
+
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      const raw = state?.contextPolicy;
+      if (raw === undefined || raw === null) continue;
+
+      if (typeof raw === 'string') {
+        if (!VALID_MODES.has(raw)) {
+          throw new Error(
+            `State "${stateId}" declares contextPolicy: "${raw}" which is not a recognised mode. ` +
+            `Valid values are: freshSubagent, namedContinuation. ` +
+            `Use contextPolicy: freshSubagent (default) or contextPolicy: { mode: namedContinuation, contextKey: "yourKey" }.`
+          );
+        }
+        // String shorthand for namedContinuation without contextKey — reject.
+        if (raw === StateContextPolicy.NAMED_CONTINUATION) {
+          throw new Error(
+            `State "${stateId}" declares contextPolicy: namedContinuation without a contextKey. ` +
+            `Named continuation requires a stable context key. ` +
+            `Use the structured form: contextPolicy: { mode: namedContinuation, contextKey: "yourKey" }.`
+          );
+        }
+        continue;
+      }
+
+      if (typeof raw === 'object') {
+        const structured = raw as { mode?: unknown; contextKey?: unknown };
+        if (!structured.mode || typeof structured.mode !== 'string') {
+          throw new Error(
+            `State "${stateId}" declares a contextPolicy object but is missing the required "mode" field. ` +
+            `Declare contextPolicy: { mode: freshSubagent } or contextPolicy: { mode: namedContinuation, contextKey: "yourKey" }.`
+          );
+        }
+        if (!VALID_MODES.has(structured.mode)) {
+          throw new Error(
+            `State "${stateId}" declares contextPolicy.mode: "${structured.mode}" which is not a recognised mode. ` +
+            `Valid values are: freshSubagent, namedContinuation.`
+          );
+        }
+        if (structured.mode === StateContextPolicy.NAMED_CONTINUATION) {
+          if (!structured.contextKey || typeof structured.contextKey !== 'string' || structured.contextKey.trim().length === 0) {
+            throw new Error(
+              `State "${stateId}" declares contextPolicy.mode: namedContinuation but contextKey is missing or empty. ` +
+              `Named continuation requires a stable non-empty context key. ` +
+              `Add contextKey: "yourKey" to the contextPolicy object.`
+            );
+          }
+          if (!VALID_CONTEXT_KEY_RE.test(structured.contextKey)) {
+            throw new Error(
+              `State "${stateId}" declares contextPolicy.contextKey: "${structured.contextKey}" which contains invalid characters. ` +
+              `Context keys must contain only alphanumeric characters, dashes, and underscores.`
+            );
+          }
+        }
+        continue;
+      }
+
+      throw new Error(
+        `State "${stateId}" declares a contextPolicy with an unrecognised type (${typeof raw}). ` +
+        `Use a string shorthand (freshSubagent) or a structured object { mode, contextKey }.`
+      );
+    }
+  }
+
+  /**
+   * pi-experiment-6q0y.44 AC3: Reject legacy `same` contextMode declarations.
+   *
+   * `same` meant "continue the same session" — that semantics is now expressed
+   * explicitly via contextPolicy: { mode: namedContinuation, contextKey }.
+   * There is NO compatibility shim; `same` must be removed from all configs.
+   */
+  private validateNoLegacySameContextMode(config: HarnessConfig): void {
+    const LEGACY_SAME = 'same';
+
+    const checkMode = (location: string, mode: string | undefined) => {
+      if (mode === LEGACY_SAME) {
+        throw new Error(
+          `${location} declares contextMode: "same" which is a legacy no-compat mode. ` +
+          `"same" has been removed. Convert to an explicit named continuation: ` +
+          `contextPolicy: { mode: namedContinuation, contextKey: "yourKey" } on the state ` +
+          `and remove the per-action contextMode.`
+        );
+      }
+    };
+
+    checkMode('settings', config.settings?.defaultActionContextMode);
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      checkMode(`State "${stateId}"`, state?.defaultActionContextMode);
+      for (const action of state?.actions || []) {
+        checkMode(`State "${stateId}" action "${action.id}"`, action.contextMode);
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-6q0y.44 AC5: compute and log the deterministic context-policy
+   * fingerprint at config load time.
+   *
+   * Computes a SHA-256 digest of the sorted state-policy table (mode + contextKey
+   * + producesContextKey per state) so that every config load leaves a deterministic
+   * audit record.  The full table is logged at info level; the coordinator startup
+   * also records this as a CONTEXT_POLICY_FINGERPRINT_RECORDED domain event.
+   *
+   * Uses inline hashing to avoid importing from the extension layer (circular import).
+   */
+  private logContextPolicyFingerprint(config: HarnessConfig): void {
+    try {
+      const stateIds = Object.keys(config.states || {}).sort();
+      const rows = stateIds.map(stateId => {
+        const raw = config.states?.[stateId]?.contextPolicy;
+        let mode = StateContextPolicy.FRESH_SUBAGENT;
+        let contextKey: string | undefined;
+        let producesContextKey: string | undefined;
+        if (typeof raw === 'string' && raw === StateContextPolicy.NAMED_CONTINUATION) {
+          mode = StateContextPolicy.NAMED_CONTINUATION;
+        } else if (raw && typeof raw === 'object') {
+          const s = raw as { mode?: string; contextKey?: string; producesContextKey?: string };
+          if (s.mode === StateContextPolicy.NAMED_CONTINUATION) {
+            mode = StateContextPolicy.NAMED_CONTINUATION;
+            contextKey = s.contextKey;
+          }
+          producesContextKey = s.producesContextKey;
+        }
+        return { stateId, mode, contextKey, producesContextKey };
+      });
+      const digest = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
+      Logger.info(Component.CONFIG, 'Context-policy fingerprint computed at config load (AC5)', {
+        digest,
+        stateCount: stateIds.length
+      });
+    } catch {
+      // Best-effort: fingerprint computation must never block config load.
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
     this.validateNoDeprecatedTools(config);
@@ -803,7 +958,10 @@ export class ConfigLoader {
     this.validateSerializeRequiresSerializationKey(config);
     this.validateNoDuplicateStableArrays(config);
     this.validateToolPromptProfiles(config);
+    this.validateStateContextPolicies(config);
+    this.validateNoLegacySameContextMode(config);
     lintActiveToolSets(config);
+    this.logContextPolicyFingerprint(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;

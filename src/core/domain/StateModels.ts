@@ -5,6 +5,7 @@ import {
   ActionType,
   ProjectToolType,
   CwdMode,
+  StateContextPolicy,
   ThinkingLevel,
   ToolValidationCondition
 } from '../../constants/index.js';
@@ -380,6 +381,54 @@ export interface TeammateAction {
 export type ActionDefinition = TeammateAction;
 
 /**
+ * State-level context policy declaration (pi-experiment-6q0y.44).
+ *
+ * Inline form: `contextPolicy: freshSubagent`  (string shorthand for the enum value).
+ * Structured form: `contextPolicy: { mode: namedContinuation, contextKey: "planContext" }`.
+ *
+ * The default for any state that omits this field is `freshSubagent` — a new
+ * isolated sub-agent context.  Named continuation states must supply a
+ * `contextKey` so the coordinator can resolve and thread the continuation
+ * anchor into the spawn.
+ */
+export type StateContextPolicyMode = StateContextPolicy | string;
+
+export interface StateContextPolicyConfig {
+  /**
+   * The context mode for this state.
+   * 'freshSubagent'     — fresh isolated sub-agent (default when absent).
+   * 'namedContinuation' — continue a named prior-state context.
+   */
+  mode: StateContextPolicyMode;
+  /**
+   * Stable key naming the context to continue.
+   * Required when mode = 'namedContinuation'; ignored for freshSubagent.
+   * Must be a non-empty string containing only alphanumeric, dash, and underscore characters.
+   */
+  contextKey?: string;
+  /**
+   * Stable key under which this state's Pi session is stored so a subsequent
+   * namedContinuation state can resume it (pi-experiment-6q0y.44 write-side).
+   *
+   * When set the coordinator spawns this state's worker with a persistent Pi
+   * session (omitting --no-session) and stores the resolved session path in
+   * contextKeyStore under this key.  A later state declaring
+   * contextPolicy: { mode: namedContinuation, contextKey: <same key> } then
+   * receives --session <path> at spawn time.
+   *
+   * Must satisfy the same character constraints as contextKey.
+   * Ignored when mode = 'namedContinuation' (consumers don't produce).
+   */
+  producesContextKey?: string;
+}
+
+/**
+ * The contextPolicy field on a state may be the string shorthand (mode only)
+ * or the structured form with mode + contextKey.
+ */
+export type StateContextPolicyDeclaration = StateContextPolicyMode | StateContextPolicyConfig;
+
+/**
  * Worktree provisioning mode for harness.settings.worktreePolicy.default.
  *
  * 'always'  — every state receives an isolated git worktree (current default).
@@ -462,6 +511,23 @@ export interface SDLCState {
    * Must reference a key in settings.toolPromptProfiles.
    */
   toolPromptProfile?: string;
+  /**
+   * State-level context policy (pi-experiment-6q0y.44).
+   *
+   * Declares how this state's worker context is handled at spawn time.
+   *
+   * Shorthand (mode only): `contextPolicy: freshSubagent`
+   * Structured (mode + key): `contextPolicy: { mode: namedContinuation, contextKey: "planCtx" }`
+   *
+   * Default when absent: freshSubagent — a fresh isolated sub-agent context is spawned.
+   * This default ensures cerdiwen and other consumers that do not declare a
+   * contextPolicy are unaffected by the policy machinery.
+   *
+   * When mode = namedContinuation, contextKey is required: it names the stable
+   * context anchor the coordinator threads into the spawn.  ConfigLoader rejects
+   * namedContinuation without a contextKey at startup.
+   */
+  contextPolicy?: StateContextPolicyDeclaration;
 }
 
 export interface HarnessConfig {

@@ -291,6 +291,26 @@ export enum DomainEventName {
    */
   HEARTBEAT_ONLY_GAP_ORPHANED = 'HEARTBEAT_ONLY_GAP_ORPHANED',
   /**
+   * Recorded once per teammate spawn to capture context-instance identity
+   * (pi-experiment-6q0y.44 AC6): mode, beadId, stateId, promptDigest, active
+   * tools, skill profile, and whether this is a resumption of a prior session.
+   * Enables replay reconstruction without raw conversation history.
+   */
+  CONTEXT_INSTANCE_RECORDED = 'CONTEXT_INSTANCE_RECORDED',
+  /**
+   * Recorded when a namedContinuation spawn is DENIED by the admission gate
+   * (pi-experiment-6q0y.44 AC7).  Carries reason + bead/state/contextKey.
+   * The spawn falls back to freshSubagent when admission fails.
+   */
+  CONTEXT_CONTINUATION_DENIED = 'CONTEXT_CONTINUATION_DENIED',
+  /**
+   * Emitted once at coordinator startup after config is loaded (pi-experiment-6q0y.44 AC5).
+   * Carries the deterministic SHA-256 fingerprint of the resolved context-policy table
+   * (all states' modes, contextKeys, producesContextKeys, active tools, skill profiles).
+   * Enables drift detection: a fingerprint change between runs indicates a policy change.
+   */
+  CONTEXT_POLICY_FINGERPRINT_RECORDED = 'CONTEXT_POLICY_FINGERPRINT_RECORDED',
+  /**
    * Emitted when a deprecated project tool is invoked by the model. Carries:
    * { tool, beadId?, stateId?, actionId?, replacedBy?, reason? }.
    * Always accompanies the REJECTED result returned to the model — the two
@@ -434,6 +454,13 @@ export enum PiCliFlag {
   NO_EXTENSIONS = '--no-extensions',
   NO_SESSION = '--no-session',
   PROVIDER = '--provider',
+  /**
+   * Resume a specific Pi session by file path or partial UUID.
+   * Used for named-continuation spawns (pi-experiment-6q0y.44).
+   * When the value is a full file path, Pi opens that session directly.
+   * When the value is a partial UUID, Pi searches for a matching session.
+   */
+  SESSION = '--session',
   SKILL = '--skill',
   THINKING = '--thinking'
 }
@@ -563,6 +590,27 @@ export enum ActionContextMode {
 export enum ActionRunContext {
   PARENT = 'parent',
   FRESH = 'fresh'
+}
+
+/**
+ * State-level context policy (pi-experiment-6q0y.44).
+ *
+ * Declares how a state's worker context is handled at spawn time:
+ *
+ *   freshSubagent      — spawn a new isolated sub-agent context for this state
+ *                        (default; matches historical --no-session behaviour).
+ *   namedContinuation  — continue a named prior-state context identified by
+ *                        contextKey; the coordinator resolves the continuation
+ *                        key and passes it to the spawn so the worker can
+ *                        resume from a stable context anchor rather than
+ *                        starting from scratch.
+ *
+ * The default when a state omits contextPolicy is freshSubagent.
+ * Cerdiwen states that do not declare contextPolicy are unaffected.
+ */
+export enum StateContextPolicy {
+  FRESH_SUBAGENT = 'freshSubagent',
+  NAMED_CONTINUATION = 'namedContinuation'
 }
 
 export enum ChecklistItemType {

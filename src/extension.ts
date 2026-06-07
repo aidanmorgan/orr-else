@@ -209,7 +209,8 @@ import {
   appendCompletedActionId,
   dynamicChecklistItemsForRun,
   teammateEventTypeForOutcome,
-  shouldPersistBlockedBeadStatus as shouldPersistBlockedBeadStatusInternal
+  shouldPersistBlockedBeadStatus as shouldPersistBlockedBeadStatusInternal,
+  computeContextPolicyFingerprint
 } from './extension/CoordinatorController.js';
 import { SignalNoiseCoalescer } from './core/SignalNoiseCoalescer.js';
 
@@ -2424,6 +2425,25 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   });
 
   const startupConfig = await services.configLoader.load();
+
+  // ── AC5 (pi-experiment-6q0y.44): emit deterministic context-policy fingerprint ──
+  // Compute and record the SHA-256 fingerprint of the resolved context-policy table
+  // immediately after config is loaded so every startup leaves a durable audit
+  // record.  A fingerprint change between runs means the policy table changed.
+  try {
+    const { digest: contextPolicyDigest, table: contextPolicyTable } = computeContextPolicyFingerprint(startupConfig);
+    await services.eventStore.record(DomainEventName.CONTEXT_POLICY_FINGERPRINT_RECORDED, {
+      digest: contextPolicyDigest,
+      table: contextPolicyTable,
+      stateCount: contextPolicyTable.length
+    }).catch(() => {});
+    Logger.info(Component.ORR_ELSE, 'Context-policy fingerprint recorded at startup (AC5)', {
+      digest: contextPolicyDigest,
+      stateCount: contextPolicyTable.length
+    });
+  } catch (error) {
+    Logger.warn(Component.ORR_ELSE, 'Context-policy fingerprint computation failed at startup', { error: String(error) });
+  }
 
   // ── COORDINATOR-side verifier gate bootstrap (pi-experiment-0yt5.20) ──────────
   // Decision A (AC2): load the consumer pi.workerExtensions in THIS (coordinator)

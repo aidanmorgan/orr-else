@@ -188,7 +188,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     await (supervisor as any).scanAndSpawn();
 
     expect(createWorktree).toHaveBeenCalledTimes(1);
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-impl', 'Implementation', '/tmp/worktree', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-impl', 'Implementation', '/tmp/worktree', expect.anything(), undefined);
   });
 
   it('skips worktree creation when policy.default = "never" and no per-state override', async () => {
@@ -206,7 +206,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     // No worktree should be created
     expect(createWorktree).not.toHaveBeenCalled();
     // Teammate spawned at project root
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-plan', 'Planning', '/project/root', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-plan', 'Planning', '/project/root', expect.anything(), undefined);
     // No WORKTREE_PROVISIONED event
     expect(records.some(r => r.event === DomainEventName.WORKTREE_PROVISIONED)).toBe(false);
   });
@@ -228,13 +228,13 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     const { supervisor: supervisor1, createWorktree: cw1, spawnTeammateInTmux: spawn1 } = buildSupervisor(config);
     await (supervisor1 as any).scanAndSpawn();
     expect(cw1).not.toHaveBeenCalled();
-    expect(spawn1).toHaveBeenCalledWith('bead-plan', 'Planning', '/project/root', expect.anything());
+    expect(spawn1).toHaveBeenCalledWith('bead-plan', 'Planning', '/project/root', expect.anything(), undefined);
 
     // Second scan: Implementation — worktree provisioned
     const { supervisor: supervisor2, createWorktree: cw2, spawnTeammateInTmux: spawn2 } = buildSupervisor(config);
     await (supervisor2 as any).scanAndSpawn();
     expect(cw2).toHaveBeenCalledTimes(1);
-    expect(spawn2).toHaveBeenCalledWith('bead-impl', 'Implementation', '/tmp/worktree', expect.anything());
+    expect(spawn2).toHaveBeenCalledWith('bead-impl', 'Implementation', '/tmp/worktree', expect.anything(), undefined);
   });
 
   it('skips worktree for state with provisionWorktree: false even when policy.default = "always"', async () => {
@@ -251,7 +251,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
 
     expect(createWorktree).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).toHaveBeenCalledWith(
-      'bead-review', 'AdversarialPreReview', '/project/root', expect.anything()
+      'bead-review', 'AdversarialPreReview', '/project/root', expect.anything(), undefined
     );
     expect(records.some(r => r.event === DomainEventName.WORKTREE_PROVISIONED)).toBe(false);
   });
@@ -304,7 +304,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     await (supervisor as any).scanAndSpawn();
 
     expect(failingCreateWorktree).not.toHaveBeenCalled();
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-nr', 'Planning', '/project/root', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-nr', 'Planning', '/project/root', expect.anything(), undefined);
     expect((supervisor as any).quarantine.size).toBe(0);
     expect(records.some(r => r.event === DomainEventName.BEAD_QUARANTINED)).toBe(false);
   });

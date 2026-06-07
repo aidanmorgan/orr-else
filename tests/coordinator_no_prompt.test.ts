@@ -358,7 +358,9 @@ describe('Coordinator TEAMMATE_SPAWNED event (behavioral guard)', () => {
     const unexpectedEvents = records.filter(r =>
       r.event !== DomainEventName.TEAMMATE_SPAWNED &&
       r.event !== DomainEventName.BEAD_CLAIMED &&
-      r.event !== DomainEventName.WORKTREE_PROVISIONED
+      r.event !== DomainEventName.WORKTREE_PROVISIONED &&
+      // pi-experiment-6q0y.44 AC6: CONTEXT_INSTANCE_RECORDED is expected on every spawn.
+      r.event !== DomainEventName.CONTEXT_INSTANCE_RECORDED
     );
     // There should be no unexpected events beyond the standard spawn sequence.
     // Any metadata-write event would indicate the coordinator is duplicating data.

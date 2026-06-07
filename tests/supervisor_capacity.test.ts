@@ -255,7 +255,7 @@ describe('Supervisor capacity pause handling', () => {
     );
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-restarted' }), expect.anything());
     expect(createWorktree).toHaveBeenCalledWith('bead-restarted', expect.anything());
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restarted', 'Planning', '/tmp/worktree', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restarted', 'Planning', '/tmp/worktree', expect.anything(), undefined);
     expect(release).not.toHaveBeenCalled();
   });
 
@@ -332,7 +332,7 @@ describe('Supervisor capacity pause handling', () => {
     );
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-restart' }), expect.anything());
     expect(createWorktree).toHaveBeenCalledWith('bead-restart', expect.anything());
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restart', 'Planning', '/tmp/worktree', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-restart', 'Planning', '/tmp/worktree', expect.anything(), undefined);
     expect(records.find(record => record.event === DomainEventName.TEAMMATE_PROCESS_EXITED)?.data).toMatchObject({
       beadId: 'bead-restart',
       reason: 'restart_requested_missing_pane',
@@ -551,7 +551,7 @@ describe('Supervisor capacity pause handling', () => {
 
     expect(claim).toHaveBeenCalledWith(expect.objectContaining({ id: 'bead-routable' }), expect.anything());
     expect(createWorktree).toHaveBeenCalledWith('bead-routable', expect.anything());
-    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-routable', 'Planning', '/tmp/worktree', expect.anything());
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-routable', 'Planning', '/tmp/worktree', expect.anything(), undefined);
     expect(nextState).toHaveBeenCalledWith(expect.anything(), EventName.FAILURE, 'Planning');
   });
 

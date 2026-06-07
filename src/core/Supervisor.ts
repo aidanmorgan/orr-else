@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import * as fs from 'node:fs';
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.js';
 import { Logger } from './Logger.js';
@@ -14,6 +16,14 @@ import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import type { WorktreeProvisioningMode } from './domain/StateModels.js';
+import {
+  resolveStateContextPolicy,
+  type ResolvedStateContextPolicy,
+  evaluateContinuationAdmission,
+  buildContextInstanceRecord,
+  type ContextKeyRecord
+} from '../extension/CoordinatorController.js';
+import { StateContextPolicy } from '../constants/index.js';
 import { RetentionCleanup } from './RetentionCleanup.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 import { projectToolFailureLimitSuggestedOutcome } from './ProjectToolFailureLimit.js';
@@ -150,6 +160,15 @@ export class Supervisor {
    * Reset when a bead is fully exited (markBeadExited without preserveInactiveRestartBackoff).
    */
   private readonly inactiveRestartCountByBead = new Map<string, number>();
+  /**
+   * Context key store for named-continuation spawns (pi-experiment-6q0y.44 AC7).
+   *
+   * Maps a contextKey → a ContextKeyRecord capturing ALL admission-constraint
+   * fields: session path, producing bead/state/action, config digest, and
+   * lineage-terminal flag.  The full record is used by evaluateContinuationAdmission
+   * to enforce all five AC7 constraints before any model spend.
+   */
+  private readonly contextKeyStore = new Map<string, ContextKeyRecord>();
   private processedSignals = new Set<string>();
   private stepInProgress = false;
   private stopping = false;
@@ -732,6 +751,24 @@ export class Supervisor {
       : RetryBudget.AVAILABLE;
   }
 
+  /**
+   * Compute the SHA-256 hex digest of the current harness config file.
+   *
+   * Used as the `configDigest` field in ContextKeyRecord so that the AC7
+   * admission gate can detect incompatible config changes between a producing
+   * spawn and a consuming spawn.  Best-effort: returns 'unknown' if the file
+   * cannot be read (startup validation would have already failed for hard errors).
+   */
+  private computeConfigDigest(): string {
+    try {
+      const configPath = this.services.configLoader.getConfigPath();
+      const contents = fs.readFileSync(configPath);
+      return createHash('sha256').update(contents).digest('hex');
+    } catch {
+      return 'unknown';
+    }
+  }
+
   private configuredOutcomesForState(stateId: string, config: HarnessConfig): string[] {
     const state = config.states?.[stateId];
     if (!state) return [];
@@ -1034,8 +1071,65 @@ export class Supervisor {
 
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
 
+    // pi-experiment-6q0y.44: resolve and apply the state's context policy.
+    // freshSubagent (default): each spawn gets an independent Pi context.
+    // namedContinuation: the coordinator looks up the stored Pi session path and
+    //   passes it to the spawner so the worker can resume (--session <path>).
+    //   AC7: admission gate runs before model spend; fails closed on any mismatch.
+    // producesContextKey: this spawn creates a persistent Pi session whose path
+    //   is stored in contextKeyStore so a later namedContinuation state can resume it.
+    const contextPolicy = resolveStateContextPolicy(bead.stateId, config);
+    let spawnContextKey: string | undefined;
+    let isResumption = false;
+
+    if (contextPolicy.mode === StateContextPolicy.NAMED_CONTINUATION && contextPolicy.contextKey) {
+      // AC7: admission gate — fail closed before model spend.
+      // Pass the full stored record (not just the path) and the consuming run's
+      // config digest so ALL five constraints are evaluated.
+      const storedRecord = this.contextKeyStore.get(contextPolicy.contextKey);
+      const consumingConfigDigest = this.computeConfigDigest();
+      const admission = evaluateContinuationAdmission({
+        contextKey: contextPolicy.contextKey,
+        storedRecord,
+        beadId: claimed.id,
+        consumingStateId: bead.stateId,
+        consumingConfigDigest
+      });
+
+      if (!admission.admitted) {
+        // Admission denied: record the denial event, log, and fall back to fresh spawn.
+        await this.eventStore.record(DomainEventName.CONTEXT_CONTINUATION_DENIED, {
+          beadId: claimed.id,
+          stateId: bead.stateId,
+          contextKey: contextPolicy.contextKey,
+          reason: admission.reason
+        }).catch(() => {});
+        Logger.warn(Component.SUPERVISOR, 'Named-continuation admission denied — spawning fresh', {
+          beadId: claimed.id,
+          stateId: bead.stateId,
+          contextKey: contextPolicy.contextKey,
+          reason: admission.reason
+        });
+      } else {
+        spawnContextKey = admission.sessionPath;
+        isResumption = true;
+        Logger.info(Component.SUPERVISOR, 'Named-continuation admission granted — resuming session', {
+          beadId: claimed.id,
+          stateId: bead.stateId,
+          contextKey: contextPolicy.contextKey,
+          sessionPath: admission.sessionPath
+        });
+      }
+    }
+    const spawnOptions: import('./OrchestrationPorts.js').SpawnOptions | undefined =
+      spawnContextKey !== undefined
+        ? { contextKey: spawnContextKey }
+        : contextPolicy.producesContextKey !== undefined
+          ? { persistSessionForKey: contextPolicy.producesContextKey }
+          : undefined;
+
     const spawnStartMs = Date.now();
-    const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx);
+    const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx, spawnOptions);
     const spawnEndMs = Date.now();
 
     // Emit a teammate_spawn span covering the tmux pane creation duration.
@@ -1053,6 +1147,46 @@ export class Supervisor {
       await beadsPort.release(claimed.id).catch(() => {});
       throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
     }
+
+    // pi-experiment-6q0y.44 AC6: record context-instance identity for this spawn.
+    // Nit B: include the PRODUCED session path (spawned.piSessionPath) so the
+    // record captures both the consumed and produced session paths for audit/replay.
+    const contextInstanceId = spawned.paneId
+      ? `ctx-${claimed.id}-${bead.stateId}-${spawnStartMs}`
+      : `ctx-${claimed.id}-${bead.stateId}`;
+    const instanceRecord = buildContextInstanceRecord({
+      contextInstanceId,
+      beadId: claimed.id,
+      stateId: bead.stateId,
+      config,
+      piSessionPath: spawnContextKey ?? spawned.piSessionPath,
+      isResumption
+    });
+    await this.eventStore.record(DomainEventName.CONTEXT_INSTANCE_RECORDED, instanceRecord).catch(() => {});
+
+    // pi-experiment-6q0y.44 write side (AC7): if this state produces a context key, store
+    // the full ContextKeyRecord (not just the session path) so the AC7 admission gate
+    // can enforce all five constraints on the consuming spawn.
+    if (contextPolicy.producesContextKey && spawned.piSessionPath) {
+      const configDigest = this.computeConfigDigest();
+      const record: ContextKeyRecord = {
+        piSessionPath: spawned.piSessionPath,
+        beadId: claimed.id,
+        sourceStateId: bead.stateId,
+        sourceActionId: '',  // action is not tracked at coordinator spawn time
+        configDigest,
+        terminal: false
+      };
+      this.contextKeyStore.set(contextPolicy.producesContextKey, record);
+      Logger.info(Component.SUPERVISOR, 'Stored Pi session path for named continuation (AC7 record)', {
+        beadId: claimed.id,
+        stateId: bead.stateId,
+        producesContextKey: contextPolicy.producesContextKey,
+        piSessionPath: spawned.piSessionPath,
+        configDigest
+      });
+    }
+
     Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
     return 'spawned';
   }

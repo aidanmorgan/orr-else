@@ -99,14 +99,37 @@ export interface WorktreePort {
 // TeammateSpawner — matches the public surface of TeammateFactory used by core
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional spawn options supplied by the coordinator to the spawner.
+ *
+ * contextKey — present when the state's context policy is namedContinuation;
+ *              the Pi session path/ID to resume via --session.
+ *              Absent for freshSubagent (the default).
+ *
+ * persistSessionForKey — when set, the spawner creates a PERSISTENT Pi session
+ *              (not --no-session) in a deterministic session directory derived
+ *              from this key.  The returned piSessionPath carries the path so
+ *              the coordinator can store it in contextKeyStore.
+ */
+export interface SpawnOptions {
+  /** Pi session path for named-continuation spawns (pi-experiment-6q0y.44). */
+  contextKey?: string;
+  /**
+   * When set, the spawner creates a persistent Pi session keyed to this value.
+   * The returned piSessionPath carries the created session file path.
+   */
+  persistSessionForKey?: string;
+}
+
 export interface TeammateSpawner {
   /** Spawn a teammate in a tmux pane for the given bead + state + worktree. */
   spawnTeammateInTmux(
     beadId: string,
     stateId: string,
     worktreePath: string,
-    ctx?: unknown
-  ): Promise<{ success: boolean; paneId?: string; error?: string }>;
+    ctx?: unknown,
+    spawnOptions?: SpawnOptions
+  ): Promise<{ success: boolean; paneId?: string; error?: string; piSessionPath?: string }>;
   /** Return the live set of bead IDs that have an active teammate pane. */
   getLiveTeammateBeadIds(): Promise<Set<string>>;
   /** Return the count of currently active teammate panes. */

@@ -1617,6 +1617,36 @@
             "type": "string",
             "description": "pi-experiment-6q0y.4: State-level tool prompt profile. Overrides settings.toolPromptProfile for this state and all its actions (unless an action declares its own toolPromptProfile). Must reference a key in settings.toolPromptProfiles."
           },
+          "contextPolicy": {
+            "description": "pi-experiment-6q0y.44: State-level context policy. Declares how this state's worker context is handled at spawn time. Default when absent: freshSubagent (new isolated sub-agent context). String shorthand: freshSubagent or namedContinuation (namedContinuation requires structured form with contextKey). Structured form: { mode, contextKey }.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": ["freshSubagent", "namedContinuation"],
+                "description": "String shorthand for the context policy mode. Use 'freshSubagent' for the default or 'namedContinuation' requires the structured form with a contextKey."
+              },
+              {
+                "type": "object",
+                "required": ["mode"],
+                "additionalProperties": false,
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": ["freshSubagent", "namedContinuation"],
+                    "description": "Context mode: freshSubagent (default) or namedContinuation."
+                  },
+                  "contextKey": {
+                    "type": "string",
+                    "description": "Stable key naming the context to continue. Required when mode=namedContinuation. Must contain only alphanumeric characters, dashes, and underscores."
+                  },
+                  "producesContextKey": {
+                    "type": "string",
+                    "description": "Stable key under which this state's Pi session is stored for a subsequent namedContinuation state to resume. When set the coordinator spawns this state with a persistent Pi session and records the path in the contextKeyStore. Must contain only alphanumeric characters, dashes, and underscores."
+                  }
+                }
+              }
+            ]
+          },
           "handoverTemplate": {
             "type": "string"
           },
