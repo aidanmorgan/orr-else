@@ -30,7 +30,9 @@ import {
   gitHistoryVerify,
   runGitHistory,
   archiveOutput,
-  parseArgs
+  parseArgs,
+  GIT_HISTORY_INTERFACE_FIELDS,
+  GIT_HISTORY_SCHEMA_DESCRIPTOR,
 } from '../src/tools/git_history.js';
 import {
   validateToolEvidenceHandle,
@@ -588,5 +590,55 @@ describe('AC7: import hygiene: src/ imports NO cerdiwen consumer code', () => {
     };
     walk(path.join(PROJECT_ROOT, 'src'));
     expect(offenders, `src/ must not import cerdiwen project-tools; found: ${offenders.join(', ')}`).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// pi-experiment-64i8: descriptor/interface cross-check
+// Cross-check GIT_HISTORY_SCHEMA_DESCRIPTOR keys against GitHistoryRtkSummary
+// interface fields (via GIT_HISTORY_INTERFACE_FIELDS).
+//
+// LOAD-BEARING: GIT_HISTORY_INTERFACE_FIELDS is typed as
+// Record<keyof GitHistoryRtkSummary, true>, so a TypeScript compile error occurs
+// if its keys drift from the interface. At runtime, the test compares the sorted
+// key sets of the descriptor and interface record — a mismatch fails the test.
+// ---------------------------------------------------------------------------
+
+describe('pi-experiment-64i8: GIT_HISTORY_SCHEMA_DESCRIPTOR keys match GitHistoryRtkSummary interface', () => {
+  it('descriptor and interface have the same field set (fails on drift)', () => {
+    // Derive both key sets at runtime from the REAL exports — not hand-copied lists.
+    const descriptorKeys = Object.keys(GIT_HISTORY_SCHEMA_DESCRIPTOR).sort();
+    const interfaceKeys = Object.keys(GIT_HISTORY_INTERFACE_FIELDS).sort();
+
+    // LOAD-BEARING: if a field is added to GitHistoryRtkSummary but not to
+    // GIT_HISTORY_SCHEMA_DESCRIPTOR (or vice versa), the sets diverge and this
+    // assertion fails. GIT_HISTORY_INTERFACE_FIELDS is typed Record<keyof
+    // GitHistoryRtkSummary, true> so it also produces a TS compile error on drift.
+    expect(descriptorKeys).toEqual(interfaceKeys);
+  });
+
+  it('descriptor contains every required interface field', () => {
+    // Every required field of GitHistoryRtkSummary must appear in the descriptor.
+    const requiredFields: Array<keyof typeof GIT_HISTORY_INTERFACE_FIELDS> = [
+      'operation', 'repo', 'root', 'outputLines', 'outputFileBytes',
+    ];
+    for (const field of requiredFields) {
+      expect(
+        Object.prototype.hasOwnProperty.call(GIT_HISTORY_SCHEMA_DESCRIPTOR, field),
+        `descriptor missing required field: ${field}`
+      ).toBe(true);
+    }
+  });
+
+  it('descriptor contains every optional interface field', () => {
+    const optionalFields: Array<keyof typeof GIT_HISTORY_INTERFACE_FIELDS> = [
+      'objectFound', 'lockfileReason', 'stderr', 'outputText',
+    ];
+    for (const field of optionalFields) {
+      expect(
+        Object.prototype.hasOwnProperty.call(GIT_HISTORY_SCHEMA_DESCRIPTOR, field),
+        `descriptor missing optional field: ${field}`
+      ).toBe(true);
+    }
   });
 });

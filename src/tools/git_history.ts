@@ -160,6 +160,29 @@ export const GIT_HISTORY_SCHEMA_DESCRIPTOR = {
 } as const;
 
 /**
+ * Exhaustive keyof-driven record enumerating every field of GitHistoryRtkSummary.
+ *
+ * pi-experiment-64i8: this const is a compile-time cross-check between the
+ * GitHistoryRtkSummary interface and GIT_HISTORY_SCHEMA_DESCRIPTOR. The type
+ * annotation `Record<keyof GitHistoryRtkSummary, true>` causes a TypeScript
+ * error if a field is added to the interface but not to this record, or if this
+ * record contains a key that the interface doesn't have. At runtime,
+ * Object.keys(GIT_HISTORY_INTERFACE_FIELDS) produces the canonical interface
+ * field list that tests compare against Object.keys(GIT_HISTORY_SCHEMA_DESCRIPTOR).
+ */
+export const GIT_HISTORY_INTERFACE_FIELDS: Record<keyof GitHistoryRtkSummary, true> = {
+  operation: true,
+  repo: true,
+  root: true,
+  outputLines: true,
+  outputFileBytes: true,
+  objectFound: true,
+  lockfileReason: true,
+  stderr: true,
+  outputText: true,
+};
+
+/**
  * Compute the schemaHash for GIT_HISTORY_SCHEMA_DESCRIPTOR.
  * Returns 'sha256:<hex>' — the canonical format required by the contract.
  *
