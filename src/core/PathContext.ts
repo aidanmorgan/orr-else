@@ -53,9 +53,10 @@ export const SKELETON_MAX_BYTES = 32_000;
  * string `''`.
  *
  * Returns:
- *   - null   → NO extractor is registered for this extension. The caller treats
- *              this as a safe no-op and returns the RAW file content (no
- *              skeleton, no error).
+ *   - null   → NO extractor is registered for this extension. The caller FAILS
+ *              CLOSED: skeletonContent remains null and skeletonFallback is set
+ *              to true to signal the missing-extractor condition. Raw content
+ *              is never returned via skeleton mode.
  *   - string → the registered extractor's skeleton output (byte-capped at
  *              SKELETON_MAX_BYTES).
  */
@@ -319,9 +320,10 @@ export interface PathContextInput {
    * via `skeletons.register(ext, (source) => string)` at load.
    *   - An extractor IS registered for the extension → its skeleton output is
    *     returned in `skeletonContent` (capped at SKELETON_MAX_BYTES).
-   *   - NO extractor is registered for the extension → safe NO-OP: the RAW file
-   *     content is returned in `skeletonContent` with `skeletonFallback:true`.
-   *     No error, no body stripping.
+   *   - NO extractor is registered for the extension → FAIL CLOSED: the
+   *     request does not return raw content. `skeletonContent` is null and
+   *     `skeletonFallback:true` signals the missing-extractor condition. Use
+   *     explicit offset+limit for raw reads instead.
    *
    * Output is capped at SKELETON_MAX_BYTES.
    * Mutually exclusive with `offset`/`limit` (skeleton ignores them when set).
@@ -370,18 +372,18 @@ export interface PathContextFound {
   slice: string | null;
   nearestMatches: string[];
   /**
-   * When `skeleton:true` was requested, contains either the registered
-   * extractor's skeleton output (when an extractor is registered for the file's
-   * extension) OR the RAW file content (when none is registered — the safe
-   * no-op, also flagged via `skeletonFallback:true`). Null when skeleton mode
-   * was not requested or the file is not readable.
+   * When `skeleton:true` was requested AND an extractor is registered for the
+   * file's extension, contains the extractor's skeleton output (capped at
+   * SKELETON_MAX_BYTES). Null when skeleton mode was not requested, no extractor
+   * is registered (fail-closed — see skeletonFallback), or the file is not
+   * readable.
    */
   skeletonContent: string | null;
   /**
    * True when `skeleton:true` was requested but NO extractor is registered for
-   * the file's extension. In that case `skeletonContent` holds the RAW file
-   * content (safe no-op — no body stripping occurs) and `slice` may also be
-   * populated if offset+limit were provided.
+   * the file's extension. In that case `skeletonContent` is null (fail-closed:
+   * no raw content is returned). Use explicit offset+limit for raw reads.
+   * False when skeleton mode was not requested or an extractor is available.
    */
   skeletonFallback: boolean;
 }
@@ -498,9 +500,9 @@ export class PathContext {
         const source = fs.readFileSync(resolved, 'utf8');
         const result = extractSkeleton(resolved, source);
         if (result === null) {
-          // No extractor registered for this extension — safe no-op: return the
-          // RAW file content (no skeleton, no error).
-          skeletonContent = source;
+          // No extractor registered for this extension — FAIL CLOSED: do not
+          // return raw content. skeletonFallback signals the missing-extractor
+          // condition; skeletonContent remains null. Use offset+limit for raw reads.
           skeletonFallback = true;
         } else {
           skeletonContent = result;

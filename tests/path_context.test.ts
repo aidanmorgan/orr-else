@@ -394,9 +394,14 @@ describe('PathContext', () => {
     }
   });
 
-  // ── (h) NEGATIVE: no extractor registered → RAW content, no crash ─────────
+  // ── (h) NEGATIVE: no extractor registered → FAIL CLOSED (no raw fallback) ──
+  //
+  // Per pi-experiment-6q0y.31: skeleton:true with no registered extractor must
+  // FAIL CLOSED — skeletonContent is null and skeletonFallback is true (signals
+  // "no extractor"). The harness must NOT silently return raw file content.
+  // Use explicit offset+limit for raw reads.
 
-  it('(h3) skeleton:true with NO registered extractor returns the RAW file content (no crash)', () => {
+  it('(h3) skeleton:true with NO registered extractor fails closed — skeletonContent null, no raw fallback', () => {
     // A unique extension that NO extractor is registered for.
     const rawBody = [
       `func main() {`,
@@ -412,13 +417,13 @@ describe('PathContext', () => {
     expect(result.status).toBe('found');
     if (result.status !== 'found') throw new Error('unexpected status');
 
-    // No extractor → safe no-op fallback, RAW content returned (no body stripping).
+    // No extractor → FAIL CLOSED: skeletonContent is null, skeletonFallback signals no extractor.
     expect(result.skeletonFallback).toBe(true);
-    expect(result.skeletonContent).toBe(rawBody);
-    expect(result.skeletonContent).toContain('kept-verbatim');
+    expect(result.skeletonContent).toBeNull();
+    // Raw content must NOT be returned via skeleton mode (null confirms no raw fallback).
   });
 
-  it('(h4) skeleton:true on a no-extension file with no extractor returns RAW content', () => {
+  it('(h4) skeleton:true on a no-extension file with no extractor fails closed — skeletonContent null', () => {
     const rawBody = [
       `FROM node:20`,
       `ENV SECRET_KEY=kept-verbatim`,
@@ -431,8 +436,9 @@ describe('PathContext', () => {
 
     expect(result.status).toBe('found');
     if (result.status !== 'found') throw new Error('unexpected status');
+    // No extractor for '' extension → fail closed.
     expect(result.skeletonFallback).toBe(true);
-    expect(result.skeletonContent).toBe(rawBody);
+    expect(result.skeletonContent).toBeNull();
   });
 
   // ── (h) Skeleton mode — scope check still enforced ───────────────────────

@@ -139,7 +139,9 @@ states:
     }
   });
 
-  it('(b) NEGATIVE: no extractor → RAW file content + skeletonFallback true (no crash)', async () => {
+  it('(b) NEGATIVE: no extractor → FAIL CLOSED — skeletonContent null, skeletonFallback true, no raw content', async () => {
+    // pi-experiment-6q0y.31: skeleton:true with no registered extractor must fail
+    // closed. Raw content must NOT be returned via skeleton mode.
     const rawBody = ['func main() {', '\tvar secret = "kept-verbatim"', '}'].join('\n');
     const filePath = path.join(tempRoot, 'main.fdlsb');
     fs.writeFileSync(filePath, rawBody);
@@ -149,10 +151,9 @@ states:
     const result = wrapped.details;
 
     expect(result.status).toBe('found');
+    // No extractor → skeletonFallback signals the missing-extractor condition.
     expect(result.skeletonFallback).toBe(true);
-    expect(result.skeletonContent).toBe(rawBody);
-    expect(result.skeletonContent).toContain('kept-verbatim');
-    // Branch (b) genuinely returns raw — distinct from a registry-produced skeleton.
-    expect(result.skeletonContent).not.toContain('SKELETON-OF:');
+    // Fail closed: no raw content returned (null confirms no raw fallback).
+    expect(result.skeletonContent).toBeNull();
   });
 });
