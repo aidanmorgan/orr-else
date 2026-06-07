@@ -25,6 +25,7 @@ import {
   SubscriptionProviderToken,
   ThinkingLevel
 } from '../constants/index.js';
+import { lintActiveToolSets } from './ActiveToolSetResolver.js';
 
 const Ajv = AjvModule.default || AjvModule;
 const addFormats = addFormatsModule.default || addFormatsModule;
@@ -634,6 +635,7 @@ export class ConfigLoader {
     this.validateTraceabilityOwner(config);
     this.validateWorktreePolicy(config);
     this.validateSerializeRequiresSerializationKey(config);
+    lintActiveToolSets(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;

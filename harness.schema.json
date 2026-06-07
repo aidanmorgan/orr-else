@@ -1573,6 +1573,11 @@
             "type": "boolean",
             "description": "Whether to provision an isolated git worktree for this state. When true, the Supervisor creates a per-bead worktree before spawning the teammate. When false, the teammate runs at the project root. When absent, falls back to settings.worktreePolicy.default ('always' if not set)."
           },
+          "activeTools": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Explicit set of tool names active for this state. When absent, all tools in config.tools are active (default: full exposure). Action-level activeTools further narrows this set. Unknown names fail startup lint."
+          },
           "handoverTemplate": {
             "type": "string"
           },

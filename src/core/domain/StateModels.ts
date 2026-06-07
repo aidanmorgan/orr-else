@@ -331,6 +331,13 @@ export interface TeammateAction {
    *  If neither the inline result nor the outputFile contains valid toolCalls,
    *  the sequenced action FAILS CLOSED instead of silently completing. */
   generatesFrameworkToolCalls?: boolean;
+  /**
+   * Explicit set of tool names active for this action.
+   * When absent, the active set is inherited from the parent state's activeTools.
+   * When present, overrides the state-level set for this action only.
+   * Resolved by ActiveToolSetResolver — unknown names fail startup lint.
+   */
+  activeTools?: string[];
 }
 
 export type ActionDefinition = TeammateAction;
@@ -400,6 +407,15 @@ export interface SDLCState {
    * code; set to true (or omit) for Implementation states.
    */
   provisionWorktree?: boolean;
+  /**
+   * Explicit set of tool names active for this state.
+   * When absent, all tools in config.tools are considered active (default behavior,
+   * identical to today's full exposure).
+   * When present, only the named tools are exposed to the teammate for this state.
+   * Action-level activeTools further narrows this set for individual actions.
+   * Resolved by ActiveToolSetResolver — unknown names fail startup lint.
+   */
+  activeTools?: string[];
 }
 
 export interface HarnessConfig {
