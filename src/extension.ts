@@ -31,7 +31,8 @@ import {
   getHarnessRegisteredProjectToolNames,
   getNativePiExtensionProjectToolNames,
   projectToolFailureLimitSuggestedOutcome,
-  registerConfiguredProjectTools
+  registerConfiguredProjectTools,
+  resolveToolPromptProfileId
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import type { ToolResultBase } from './contract.js';
@@ -1543,7 +1544,8 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   const stateInstructions = services.instructionLoader.assemble(activeRun.state, config);
   const protocol = services.protocolInjector.inject(activeRun.state, config);
   const checklistProtocol = services.protocolParser.generatePrompt(activeRun.requiredItems);
-  const projectTools = describeConfiguredProjectTools(config);
+  const profileId = resolveToolPromptProfileId(config, activeRun.state, activeRun.action);
+  const projectTools = describeConfiguredProjectTools(config, profileId);
   const actionPrompt = activeRun.action.prompt || '';
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
@@ -1558,6 +1560,8 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
 
   // Build the stable identity for digest computation.  Arrays are sorted inside
   // digestStableBlock / canonicalise so insertion order is irrelevant.
+  // The protocolLabel folds in the resolved profile ID so different profiles produce
+  // different digest/cache-keys (AC3) while identical runs remain deterministic.
   const identity: StableBootstrapInputs = {
     projectRoot,
     configIdentity: configPath,
@@ -1565,7 +1569,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
     toolNames: getConfiguredPiToolNames(config),
     skillNames,
     ruleCategories: [],
-    protocolLabel: 'ORR_ELSE_PROTOCOL_v1'
+    protocolLabel: profileId ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}` : 'ORR_ELSE_PROTOCOL_v1'
   };
 
   const injected = services.contextInjector.injectWithDigest(

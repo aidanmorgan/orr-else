@@ -18,6 +18,7 @@ import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/Runtime
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
+import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
 import {
   Component,
@@ -741,6 +742,15 @@ export class TeammateFactory {
       const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
       const skillNames = resolvedSkills.map(s => s.name);
 
+      // Resolve the effective tool prompt profile for this state at spawn time.
+      // At spawn, there is no specific action in scope — only state + settings levels apply.
+      // This ensures the spawn-time digest label stays consistent with the worker-side
+      // buildStateSystemPrompt digest once the worker selects an action.
+      const spawnProfileId = resolveToolPromptProfileId(config, config.states?.[stateId]);
+      const spawnProtocolLabel = spawnProfileId
+        ? `ORR_ELSE_PROTOCOL_v1|profile:${spawnProfileId}`
+        : 'ORR_ELSE_PROTOCOL_v1';
+
       // Compute a lightweight identity digest for spawn-time audit.  This is
       // derived ONLY from the canonical stable identity (no text rendering) so
       // it is deterministic and cache-eligible across beads in the same state.
@@ -754,7 +764,7 @@ export class TeammateFactory {
         toolNames: [...workerExtensions].sort(),
         skillNames: [...skillNames].sort(),
         ruleCategories: [],
-        protocolLabel: 'ORR_ELSE_PROTOCOL_v1'
+        protocolLabel: spawnProtocolLabel
       });
 
       Logger.info(Component.FACTORY, 'Spawning Orr Else teammate in tmux', {

@@ -21,7 +21,7 @@ import { EventStore } from '../core/EventStore.js';
 import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../constants/index.js';
-import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig } from '../core/domain/StateModels.js';
+import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, SDLCState, TeammateAction } from '../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../core/RuntimeServices.js';
 import { ToolResultRecorder } from '../core/ToolResultRecorder.js';
 import { v7 as uuidv7 } from 'uuid';
@@ -407,15 +407,48 @@ function usageNotesSummary(tool: ProjectToolConfig): string {
   return tool.usageNotes?.length ? ` Usage notes: ${tool.usageNotes.join(' ')}` : '';
 }
 
+/**
+ * Resolves the effective tool prompt profile ID for a given state/action pair.
+ *
+ * Precedence (highest → lowest):
+ *   action.toolPromptProfile → state.toolPromptProfile → settings.toolPromptProfile → undefined
+ *
+ * Returns undefined when no profile is selected at any scope (= default: use tool.description).
+ * Pure helper — no side effects; unit-testable and reusable.
+ */
+export function resolveToolPromptProfileId(
+  config: HarnessConfig,
+  state?: Pick<SDLCState, 'toolPromptProfile'>,
+  action?: Pick<TeammateAction, 'toolPromptProfile'>
+): string | undefined {
+  return action?.toolPromptProfile ?? state?.toolPromptProfile ?? config.settings?.toolPromptProfile;
+}
+
 export function describeConfiguredProjectTools(
-  config: HarnessConfig
+  config: HarnessConfig,
+  profileId?: string
 ): string {
   const tools = config.tools || [];
   if (tools.length === 0) return '';
 
+  // Build a lookup map from tool name → profile text override when a profile is selected.
+  // Precedence: profileId → no override (use tool.description).
+  const profileOverrides = new Map<string, string>();
+  if (profileId) {
+    const profileEntries = config.settings.toolPromptProfiles?.[profileId] ?? [];
+    for (const entry of profileEntries) {
+      profileOverrides.set(entry.tool, entry.text);
+    }
+  }
+
   // Sort by name so prompt text is canonical regardless of YAML declaration order.
   const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
   const descriptions = sortedTools.map(tool => {
+    // Profile text overrides tool.description; all other summary fields are preserved
+    // (transport, mcpDetails, commandDetails, usageNotes are structural — not overridden).
+    const effectiveDescription = profileOverrides.has(tool.name)
+      ? profileOverrides.get(tool.name)!
+      : (tool.description || 'No description provided.');
     const transport = tool.type === ProjectToolType.MCP
       ? ` MCP server \`${(tool as ProjectMcpToolConfig).server}\`.`
       : tool.type === ProjectToolType.EXTENSION
@@ -432,7 +465,7 @@ export function describeConfiguredProjectTools(
     const commandDetails = tool.type === ProjectToolType.COMMAND
       ? commandPathScopeSummary(tool as ProjectCommandToolConfig)
       : '';
-    return `- \`${tool.name}\`: ${tool.description || 'No description provided.'}${transport}${mcpDetails}${commandDetails}${usageNotesSummary(tool)}`;
+    return `- \`${tool.name}\`: ${effectiveDescription}${transport}${mcpDetails}${commandDetails}${usageNotesSummary(tool)}`;
   }).join('\n');
 
   return `\n### PROJECT-SPECIFIC TOOLS\nThe following project-specific tools are available to you:\n\n${PROJECT_TOOL_MODEL_CONTRACT.map(note => `- ${note}`).join('\n')}\n\n${descriptions}\n`;

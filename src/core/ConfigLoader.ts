@@ -629,6 +629,111 @@ export class ConfigLoader {
   }
 
   /**
+   * pi-experiment-6q0y.4: Validate tool prompt profile declarations.
+   *
+   * Checks (all startup-fatal):
+   *   1. Each profile entry references a known tool name (in config.tools).
+   *   2. No duplicate tool entries within a single profile (same tool referenced twice).
+   *   3. Profile text must not contain volatile template placeholders (e.g. {{beadId}},
+   *      {{worktreePath}}). Profile text is placed in the stable cache prefix; volatile
+   *      templates would make it non-cacheable.
+   *   4. Profile text must not exceed 700 characters.
+   *   5. Every toolPromptProfile reference at settings, state, or action scope must
+   *      resolve to a declared key in settings.toolPromptProfiles.
+   */
+  private validateToolPromptProfiles(config: HarnessConfig): void {
+    const profiles = config.settings.toolPromptProfiles;
+    if (!profiles || Object.keys(profiles).length === 0) {
+      // No profiles declared — still check that no references exist.
+      this.validateToolPromptProfileReferences(config, new Set<string>());
+      return;
+    }
+
+    const knownToolNames = new Set((config.tools ?? []).map(t => t.name));
+    const declaredProfileIds = new Set(Object.keys(profiles));
+
+    // Volatile template placeholder pattern — any {{word}} in profile text.
+    // These would be placed verbatim in the stable cache prefix and must be absent.
+    const VOLATILE_PATTERN = /\{\{[^}]+\}\}/;
+
+    for (const [profileId, entries] of Object.entries(profiles)) {
+      const seenTools = new Set<string>();
+
+      for (const entry of entries) {
+        // 1. Unknown tool name.
+        if (!knownToolNames.has(entry.tool)) {
+          const knownList = [...knownToolNames].sort().join(', ') || '(none declared)';
+          throw new Error(
+            `settings.toolPromptProfiles["${profileId}"] references unknown tool "${entry.tool}". ` +
+            `Tool prompt profile entries must reference declared config.tools names. ` +
+            `Known tools: ${knownList}. ` +
+            `Declare the tool in config.tools or correct the name.`
+          );
+        }
+
+        // 2. Duplicate tool entry within this profile.
+        if (seenTools.has(entry.tool)) {
+          throw new Error(
+            `settings.toolPromptProfiles["${profileId}"] has a duplicate tool entry for "${entry.tool}". ` +
+            `Each tool may appear at most once within a single profile. ` +
+            `Remove the duplicate tool profile entry.`
+          );
+        }
+        seenTools.add(entry.tool);
+
+        // 3. Volatile template placeholders.
+        if (VOLATILE_PATTERN.test(entry.text)) {
+          const match = entry.text.match(VOLATILE_PATTERN)?.[0] ?? '';
+          throw new Error(
+            `settings.toolPromptProfiles["${profileId}"] tool "${entry.tool}" text contains volatile template placeholder ${match}. ` +
+            `Tool prompt profile text is placed in the stable cache prefix and must not contain runtime-specific templates. ` +
+            `Remove all {{...}} placeholders from the profile text.`
+          );
+        }
+
+        // 4. Text length.
+        if (entry.text.length > 700) {
+          throw new Error(
+            `settings.toolPromptProfiles["${profileId}"] tool "${entry.tool}" text exceeds 700 characters ` +
+            `(actual: ${entry.text.length} chars). ` +
+            `Shorten the profile text to at most 700 characters.`
+          );
+        }
+      }
+    }
+
+    // 5. All profile references must resolve.
+    this.validateToolPromptProfileReferences(config, declaredProfileIds);
+  }
+
+  /**
+   * Check that every toolPromptProfile reference (at settings, state, and action
+   * scope) resolves to a declared profile ID.
+   */
+  private validateToolPromptProfileReferences(config: HarnessConfig, declaredProfileIds: Set<string>): void {
+    const check = (ref: string | undefined, location: string): void => {
+      if (ref === undefined) return;
+      if (!declaredProfileIds.has(ref)) {
+        const known = [...declaredProfileIds].sort().join(', ') || '(none declared)';
+        throw new Error(
+          `${location} references unknown tool prompt profile "${ref}". ` +
+          `Declared profiles: ${known}. ` +
+          `Define the profile in settings.toolPromptProfiles or correct the profile name.`
+        );
+      }
+    };
+
+    check(config.settings.toolPromptProfile, 'settings.toolPromptProfile');
+
+    for (const [stateId, state] of Object.entries(config.states ?? {})) {
+      check(state.toolPromptProfile, `State "${stateId}" toolPromptProfile`);
+      for (const action of state.actions ?? []) {
+        check(action.toolPromptProfile, `State "${stateId}" action "${action.id}" toolPromptProfile`);
+      }
+    }
+  }
+
+  /**
    * pi-experiment-6q0y.6: Reject configs with duplicate project tool names,
    * duplicate skill paths, or duplicate worker extension paths.
    *
@@ -697,6 +802,7 @@ export class ConfigLoader {
     this.validateWorktreePolicy(config);
     this.validateSerializeRequiresSerializationKey(config);
     this.validateNoDuplicateStableArrays(config);
+    this.validateToolPromptProfiles(config);
     lintActiveToolSets(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));

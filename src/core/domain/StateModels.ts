@@ -105,6 +105,34 @@ export interface BaseProjectToolConfig {
 }
 
 /**
+ * A single per-tool prompt text override within a named tool prompt profile
+ * (pi-experiment-6q0y.4).
+ *
+ * `tool`  — name of the configured project tool this override applies to.
+ * `id`    — must match the enclosing profile map key; used for lint cross-checks.
+ * `text`  — replacement description injected into the assembled prompt for this
+ *           tool when the profile is selected. Max 700 characters; must not
+ *           contain volatile template placeholders (e.g. {{beadId}}).
+ */
+export interface ToolPromptProfileEntry {
+  tool: string;
+  id: string;
+  text: string;
+}
+
+/**
+ * Named map of per-tool prompt profile overrides (pi-experiment-6q0y.4).
+ *
+ * Lives under settings.toolPromptProfiles in harness.yaml.
+ * Keys are arbitrary project-defined profile names (e.g. "compact", "detailed").
+ * Each value is an array of per-tool text overrides for that profile.
+ *
+ * Selection precedence (highest first): action > state > settings > default.
+ * The "default" profile means no override — the tool's own `description` is used.
+ */
+export type ToolPromptProfilesConfig = Record<string, ToolPromptProfileEntry[]>;
+
+/**
  * Partial command-tool configuration that can be shared across multiple tools
  * via settings.toolProfiles (named profile) or settings.toolDefaults (global).
  * These fields are merged: toolDefaults → named profile → per-tool fields (per-tool wins).
@@ -338,6 +366,15 @@ export interface TeammateAction {
    * Resolved by ActiveToolSetResolver — unknown names fail startup lint.
    */
   activeTools?: string[];
+  /**
+   * Action-level tool prompt profile selection (pi-experiment-6q0y.4).
+   *
+   * Highest-priority profile selection — overrides state.toolPromptProfile and
+   * settings.toolPromptProfile for this specific action. When set, the named
+   * profile specializes tool descriptions in the assembled prompt for this action.
+   * Must reference a key in settings.toolPromptProfiles.
+   */
+  toolPromptProfile?: string;
 }
 
 export type ActionDefinition = TeammateAction;
@@ -416,6 +453,15 @@ export interface SDLCState {
    * Resolved by ActiveToolSetResolver — unknown names fail startup lint.
    */
   activeTools?: string[];
+  /**
+   * State-level tool prompt profile selection (pi-experiment-6q0y.4).
+   *
+   * When set, this profile specializes tool descriptions in the assembled prompt
+   * for all actions in this state (unless an action overrides with its own
+   * toolPromptProfile). Overrides settings.toolPromptProfile.
+   * Must reference a key in settings.toolPromptProfiles.
+   */
+  toolPromptProfile?: string;
 }
 
 export interface HarnessConfig {
@@ -500,6 +546,24 @@ export interface HarnessConfig {
      * Keys are arbitrary project-defined profile names.
      */
     toolProfiles?: Record<string, ToolProfileConfig>;
+    /**
+     * Named per-tool prompt profile declarations (pi-experiment-6q0y.4).
+     *
+     * Each entry maps a profile name to an array of per-tool text overrides.
+     * The selected profile replaces individual tool descriptions in the assembled
+     * prompt; tools with no override in the selected profile retain their default
+     * `description`. Startup lint enforces unknown-tool, unknown-profile-ID,
+     * duplicate-entry, volatile-template, and 700-char constraints.
+     */
+    toolPromptProfiles?: ToolPromptProfilesConfig;
+    /**
+     * Settings-level default tool prompt profile selection (pi-experiment-6q0y.4).
+     *
+     * When set, this profile is applied to all states/actions that do not
+     * declare their own toolPromptProfile. State and action-level declarations
+     * override this default. Must reference a key in settings.toolPromptProfiles.
+     */
+    toolPromptProfile?: string;
     /**
      * Harness-wide defaults for tsProjectTool shorthand tools (s3wp.10).
      * scriptDir sets the base directory for default script paths.

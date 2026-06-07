@@ -8,6 +8,27 @@
   ],
   "additionalProperties": false,
   "definitions": {
+    "toolPromptProfileEntry": {
+      "type": "object",
+      "description": "pi-experiment-6q0y.4: A single per-tool prompt text override within a named tool prompt profile.",
+      "required": ["tool", "id", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": {
+          "type": "string",
+          "description": "Name of the configured project tool this override applies to. Must match a name in config.tools."
+        },
+        "id": {
+          "type": "string",
+          "description": "Profile ID — must match the enclosing profile map key."
+        },
+        "text": {
+          "type": "string",
+          "description": "Replacement description injected into the assembled prompt for this tool when the profile is selected. Max 700 characters. Must not contain volatile template placeholders (e.g. {{beadId}}).",
+          "maxLength": 700
+        }
+      }
+    },
     "sideEffectContract": {
       "type": "object",
       "description": "zog2.9: Deterministic side-effect/resource contract. Required for tools with serialize:true (serializationKey must be non-empty).",
@@ -439,6 +460,20 @@
           "additionalProperties": {
             "$ref": "#/definitions/toolProfileShape"
           }
+        },
+        "toolPromptProfiles": {
+          "type": "object",
+          "description": "pi-experiment-6q0y.4: Named per-tool prompt profile declarations. Each entry maps a profile name to an array of per-tool text overrides. Profile entries replace individual tool descriptions in the assembled prompt. Startup lint enforces: unknown tool names, unknown profile IDs, duplicate entries, volatile templates, and 700-char text limit.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "$ref": "#/definitions/toolPromptProfileEntry"
+            }
+          }
+        },
+        "toolPromptProfile": {
+          "type": "string",
+          "description": "pi-experiment-6q0y.4: Settings-level default tool prompt profile. Applied to all states/actions that do not declare their own toolPromptProfile. Must reference a key in settings.toolPromptProfiles. Overridden by state and action-level toolPromptProfile declarations."
         },
         "tsProjectToolDefaults": {
           "type": "object",
@@ -1578,6 +1613,10 @@
             "items": { "type": "string" },
             "description": "Explicit set of tool names active for this state. When absent, all tools in config.tools are active (default: full exposure). Action-level activeTools further narrows this set. Unknown names fail startup lint."
           },
+          "toolPromptProfile": {
+            "type": "string",
+            "description": "pi-experiment-6q0y.4: State-level tool prompt profile. Overrides settings.toolPromptProfile for this state and all its actions (unless an action declares its own toolPromptProfile). Must reference a key in settings.toolPromptProfiles."
+          },
           "handoverTemplate": {
             "type": "string"
           },
@@ -1722,6 +1761,10 @@
                       }
                     }
                   ]
+                },
+                "toolPromptProfile": {
+                  "type": "string",
+                  "description": "pi-experiment-6q0y.4: Action-level tool prompt profile (highest precedence). Overrides state.toolPromptProfile and settings.toolPromptProfile for this action. Must reference a key in settings.toolPromptProfiles."
                 }
               }
             }
