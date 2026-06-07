@@ -293,6 +293,35 @@ export class EventStore implements ProjectionCapableStore {
     }
   }
 
+  /**
+   * Scan all event files, yielding valid non-synthetic DomainEvents AND
+   * counting records that are present on disk as JSON objects but fail the
+   * domain-event shape check (missing type/timestamp strings).
+   *
+   * Used by HarnessEventQuery to surface a real skippedCount (AC5: malformed
+   * records are reported as counts, never hidden or inlined).
+   */
+  private async scanEventsWithCount(
+    visitor: (event: DomainEvent) => void
+  ): Promise<number> {
+    const location = await this.resolveLocation();
+    if (!location || !existsSync(location.dir)) return 0;
+
+    let skippedCount = 0;
+    for (const filePath of await this.eventLog.eventFilePaths(location.dir)) {
+      await this.eventLog.scan(filePath, value => {
+        if (!isRecord(value)) return; // not a JSON object — unparseable by ndjson already filtered
+        if (!this.isDomainEvent(value)) {
+          skippedCount++;
+          return;
+        }
+        if (this.isSyntheticEvent(value)) return; // synthetic: filtered, not counted as malformed
+        visitor(value);
+      });
+    }
+    return skippedCount;
+  }
+
   // ---------------------------------------------------------------------------
   // Public API – record
   // ---------------------------------------------------------------------------
@@ -341,6 +370,19 @@ export class EventStore implements ProjectionCapableStore {
     const events: DomainEvent[] = [];
     await this.scanEvents(event => events.push(event));
     return events.sort(this.compareEvents.bind(this));
+  }
+
+  /**
+   * Read all valid non-synthetic domain events, also returning the count of
+   * records that were present on disk as JSON objects but failed the
+   * domain-event shape check.
+   *
+   * Used by HarnessEventQuery to surface a real skippedCount (AC5).
+   */
+  public async readAllRaw(): Promise<{ events: DomainEvent[]; skippedCount: number }> {
+    const events: DomainEvent[] = [];
+    const skippedCount = await this.scanEventsWithCount(event => events.push(event));
+    return { events: events.sort(this.compareEvents.bind(this)), skippedCount };
   }
 
   public async eventsForBead(beadId: BeadId): Promise<DomainEvent[]> {

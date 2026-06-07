@@ -387,6 +387,22 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     safeForReadinessProbe: true
   },
 
+  {
+    toolName: BuiltInToolName.QUERY_HARNESS_EVENTS,
+    toolClass: 'built_in',
+    owningFile: 'src/core/HarnessEventQuery.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
+  },
+
   // =========================================================================
   // PLUGIN tools — bundled runtime plugins
   // =========================================================================

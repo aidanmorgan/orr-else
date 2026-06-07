@@ -126,6 +126,7 @@ import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmi
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
+import { HarnessEventQuery } from './core/HarnessEventQuery.js';
 import { PathContext } from './core/PathContext.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
 import {
@@ -309,6 +310,7 @@ interface ExtensionSession {
   // ── registration guards (reset each invocation so a second call re-registers) ──
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
+  queryHarnessEventsToolRegistered: boolean;
   readPathContextToolRegistered: boolean;
   preSignalAuditToolRegistered: boolean;
   piToolObserverRegistered: boolean;
@@ -344,6 +346,7 @@ function createExtensionSession(): ExtensionSession {
     observedPiToolInvocationIds: new Map(),
     artifactPathsToolRegistered: false,
     queryArtifactToolRegistered: false,
+    queryHarnessEventsToolRegistered: false,
     readPathContextToolRegistered: false,
     preSignalAuditToolRegistered: false,
     piToolObserverRegistered: false,
@@ -2808,6 +2811,35 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           schema: Type.Optional(Type.Boolean({ description: 'When true, return the recursive SHAPE of the artifact (object keys + value types + array lengths) with values dropped. Use this to navigate an unfamiliar large JSON before choosing a projection or selector. Mutually exclusive with projection, selector, and summary.' }))
         }),
         execute: async (params: any) => artifactQuery.query(params)
+      }) as any);
+    }
+
+    if (!session.queryHarnessEventsToolRegistered) {
+      session.queryHarnessEventsToolRegistered = true;
+      const harnessEventQuery = new HarnessEventQuery(services.eventStore);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_HARNESS_EVENTS,
+        description:
+          'Query harness domain events in a bounded, schema-shaped, progressive-disclosure way. ' +
+          'DEFAULT mode (detail:false) returns event counts + latest event metadata WITHOUT full payloads — token-efficient for overview queries. ' +
+          'DETAIL mode (detail:true) returns up to 100 events with string fields truncated to 300 characters. ' +
+          'FILTERS: beadId (scope to one bead), eventTypes (array of type strings), stateId (data.stateId/fromState/nextState), actionId (data.actionId), fromTime/toTime (ISO 8601), limit (detail mode cap ≤ 100), cursor (pagination by event ID). ' +
+          'WORKFLOW: (1) Call without detail:true to get counts + countByType + latestEvent metadata. ' +
+          '(2) Call with detail:true + beadId/eventTypes to fetch bounded records. ' +
+          '(3) Use nextCursor to page forward. ' +
+          'Malformed records are reported as skippedCount — never inlined.',
+        parameters: Type.Object({
+          beadId: Type.Optional(Type.String({ description: 'Scope query to a single bead. When absent, all events are scanned.' })),
+          eventTypes: Type.Optional(Type.Array(Type.String(), { description: 'Array of event type strings to include. When absent or empty, all types are returned.' })),
+          stateId: Type.Optional(Type.String({ description: 'Filter by state ID (matches data.stateId, data.fromState, or data.nextState).' })),
+          actionId: Type.Optional(Type.String({ description: 'Filter by action ID (data.actionId).' })),
+          fromTime: Type.Optional(Type.String({ description: 'ISO 8601 lower bound — events at or after this time.' })),
+          toTime: Type.Optional(Type.String({ description: 'ISO 8601 upper bound — events at or before this time.' })),
+          limit: Type.Optional(Type.Number({ description: 'Max events in detail mode (capped at 100).' })),
+          cursor: Type.Optional(Type.String({ description: 'Pagination cursor (event ID from previous nextCursor). Only events after this ID are returned.' })),
+          detail: Type.Optional(Type.Boolean({ description: 'When true, return bounded event records (strings truncated to 300 chars, cap 100 events). Default false: return counts + metadata only.' }))
+        }),
+        execute: async (params: any) => harnessEventQuery.query(params)
       }) as any);
     }
 
