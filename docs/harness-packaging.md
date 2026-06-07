@@ -196,11 +196,13 @@ A consumer project that is *not* developing the harness has NO use for these too
 
 ### 5.2 What to do about `ORR_ELSE_FRAMEWORK_ROOT` in the harness core
 
-`frameworkRootFromConfig()` in `contextHelpers.ts` already handles the case gracefully: when `ORR_ELSE_FRAMEWORK_ROOT` is unset and `artifacts.templates.orrElseFrameworkRoot` is absent from `harness.yaml`, the function returns `undefined`. The harness does not fail — it simply has no framework root, which is the correct behaviour for a normal consumer project.
+`frameworkRootFromConfig()` in `contextHelpers.ts` handles the case gracefully: when `ORR_ELSE_FRAMEWORK_ROOT` is unset and no framework root is configured in `harness.yaml`, the function returns `undefined`. The harness does not fail — it simply has no framework root, which is the correct behaviour for a normal consumer project.
 
-The `{{orrElseFrameworkRoot}}` template token in `TemplateToken` likewise resolves to an empty string when `frameworkRoot` is undefined (see `PiIntegration.ts` line 74: `[TemplateToken.ORR_ELSE_FRAMEWORK_ROOT, context.frameworkRoot]`). Tool env-var injection at line 235 already guards with `context.templateContext.frameworkRoot ?`. No harness core changes are needed.
+The `{{frameworkRoot}}` template token in `TemplateToken` resolves to an empty string when `frameworkRoot` is undefined. Tool env-var injection already guards with `context.templateContext.frameworkRoot ?`. No harness core changes are needed.
 
-**Conclusion**: `ORR_ELSE_FRAMEWORK_ROOT` can remain in the harness core as-is. A normal consumer simply does not set it and does not configure tools that require it. The `orr-else init` starter harness.yaml does not reference `{{orrElseFrameworkRoot}}`.
+Note: the retired `{{orrElseFrameworkRoot}}` alias and the `settings.artifacts.templates.orrElseFrameworkRoot` config key were removed in pi-experiment-5lbg. `ConfigLoader` rejects any harness.yaml that still references `orrElseFrameworkRoot` with a deterministic startup error.
+
+**Conclusion**: `ORR_ELSE_FRAMEWORK_ROOT` can remain in the harness core as-is. A normal consumer simply does not set it and does not configure tools that require it. The `orr-else init` starter harness.yaml does not reference `{{frameworkRoot}}`.
 
 ---
 

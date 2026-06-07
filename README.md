@@ -344,7 +344,6 @@ State, action, and validation-gate checklists can be inline arrays or YAML/JSON 
 - Base instructions.
 - `.pi/harness_rules.md` when present.
 - Rule category files under `.pi/rules/<category>`.
-- Compatibility-mode rule files.
 
 ### Protocol Injection
 
@@ -372,18 +371,6 @@ State, action, and validation-gate checklists can be inline arrays or YAML/JSON 
 ### Skills
 
 The repository includes local skill sheets under `.pi/skills` as generic examples. Project-specific role prompts or specialist instructions should live in the consuming project configuration.
-
-### Compatibility Mode
-
-The schema supports compatibility discovery fields for external project conventions:
-
-- `masterRules`
-- `ruleDirs`
-- `hookDirs`
-- `docsDirs`
-- `agentDirs`
-
-The current instruction assembly injects discovered master rules and rule directory markdown files.
 
 ## Checklists, Gates, And Completion
 
@@ -668,7 +655,7 @@ The harness ships plugin tools for its own control plane:
 - Git worktrees and merge.
 - tmux teammate spawning.
 - Mailbox communication.
-- Signaling compatibility.
+- Signaling.
 - Plugin creation.
 
 ### Common Tools The Harness Owns
