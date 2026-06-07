@@ -54,6 +54,7 @@ import type { ValidateFunction } from 'ajv';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { BACKEND_READINESS_MANIFEST_SCHEMA } from './BackendReadiness.js';
 
 const Ajv = AjvModule.default ?? AjvModule;
 const addFormats = addFormatsModule.default ?? addFormatsModule;
@@ -714,6 +715,66 @@ schemaRegistry.register(requiredToolSchema);
 })();
 
 // ---------------------------------------------------------------------------
+// harness.config.backendReadinessManifest — Cerdiwen backend readiness schema
+//
+// Registered at module init time. The canonical JSON Schema object is defined
+// in BackendReadiness.ts (the module that owns the probe logic) to keep the
+// schema co-located with its TypeScript types and validation logic.
+// ---------------------------------------------------------------------------
+
+(function registerBackendReadinessSchema(): void {
+  const backendReadinessManifestSchema: SchemaRegistryEntry = {
+    id: 'harness.config.backendReadinessManifest',
+    version: '1.0.0',
+    owner: 'src/core/BackendReadiness.ts',
+    replayPolicy: 'NONE',
+    compatibilityPolicy: 'ADDITIVE_ONLY',
+    jsonSchema: BACKEND_READINESS_MANIFEST_SCHEMA as unknown as Record<string, unknown>,
+    positiveFixtures: [
+      {
+        label: 'minimal manifest with one required backend',
+        value: {
+          backends: [
+            { name: 'python_lsp', port: 8799, required: true, remediation: 'start lsp' }
+          ]
+        }
+      },
+      {
+        label: 'full cerdiwen manifest with host + description + optional backend',
+        value: {
+          backends: [
+            { name: 'python_lsp', host: 'localhost', port: 8799, required: true, remediation: 'start lsp', description: 'LSP server' },
+            { name: 'sonarqube',  host: 'localhost', port: 9199, required: true, remediation: 'docker compose up -d sonarqube' },
+            { name: 'codemap',    host: 'localhost', port: 8798, required: true, remediation: 'start codemap' },
+            { name: 'reference_docs', host: 'localhost', port: 8000, required: false, remediation: 'start chroma' }
+          ]
+        }
+      }
+    ],
+    negativeFixtures: [
+      {
+        label: 'missing required backends array',
+        value: {}
+      },
+      {
+        label: 'backend entry missing required port',
+        value: { backends: [{ name: 'python_lsp', required: true, remediation: 'start lsp' }] }
+      },
+      {
+        label: 'backend entry missing required remediation',
+        value: { backends: [{ name: 'python_lsp', port: 8799, required: true }] }
+      },
+      {
+        label: 'port out of range',
+        value: { backends: [{ name: 'python_lsp', port: 99999, required: true, remediation: 'start lsp' }] }
+      }
+    ]
+  };
+
+  schemaRegistry.register(backendReadinessManifestSchema);
+})();
+
+// ---------------------------------------------------------------------------
 // pi-experiment-6q0y.15: token accounting boundary schemas
 //
 // Two distinct, schema-validated event payload shapes:
@@ -951,6 +1012,8 @@ export const SchemaId = {
   REQUIRED_TOOL:     'harness.tool.requiredTool',
   /** Authoritative full harness YAML schema (published from harness.schema.json). */
   HARNESS_YAML:      'harness.config.harnessYaml',
+  /** pi-experiment-6q0y.33: Cerdiwen backend readiness manifest schema. */
+  BACKEND_READINESS_MANIFEST: 'harness.config.backendReadinessManifest',
   /** pi-experiment-6q0y.15: model-turn token/cost accounting event payload. */
   MODEL_TURN_USAGE:  'harness.accounting.modelTurnUsage',
   /** pi-experiment-6q0y.15: tool-payload byte/token accounting event payload. */
@@ -991,6 +1054,7 @@ export const REQUIRED_BOUNDARY_IDS: ReadonlySet<string> = new Set<string>([
   SchemaId.COMMAND_TOOL,
   SchemaId.REQUIRED_TOOL,
   SchemaId.HARNESS_YAML,
+  SchemaId.BACKEND_READINESS_MANIFEST,
   SchemaId.MODEL_TURN_USAGE,
   SchemaId.TOOL_PAYLOAD,
 ]);
