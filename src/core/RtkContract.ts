@@ -646,6 +646,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
 // Index helpers
 // ---------------------------------------------------------------------------
 
+
 /**
  * Map from toolName -> RtkContractEntry for O(1) lookup.
  * Built once at module load; safe to reuse across calls.
@@ -697,3 +698,328 @@ export function checkRtkInventoryCoverage(registeredToolNames: readonly string[]
   }
   return violations;
 }
+
+// ---------------------------------------------------------------------------
+// Cerdiwen required-tool evidence-class classification (pi-experiment-zog2.19)
+// ---------------------------------------------------------------------------
+
+/**
+ * The three evidence classes a required tool can produce.
+ *
+ * VERIFIER_BACKED_SEMANTIC_ARTIFACT
+ *   A registered verify() callback reads the tool's durable output artifact and
+ *   returns a non-trivial PASS / FAIL verdict. The gate enforces both artifact
+ *   presence AND the verifier's semantic judgment. Absence always blocks; a FAIL
+ *   verdict blocks even when the tool ran.
+ *
+ *   In Cerdiwen: requirements_schema, plan_contract, run_quality_checks,
+ *   sonarqube, git_history (harness-owned).
+ *
+ * CONTROL_PLANE_ACK
+ *   A registered verify() callback confirms the tool produced a parseable output,
+ *   but the verdict is always PASS when the tool ran (control-plane confirmation,
+ *   not a semantic gate). The gate enforces artifact presence + parse success;
+ *   the CONTENT of the output does not determine pass/fail.
+ *
+ *   In Cerdiwen: codemap, python_lsp, reference_docs, ast_grep, smt_lib.
+ *   (smt_lib can return NOT_APPLICABLE for non-formalizable beads — treated as
+ *   non-blocking control-plane confirmation in those cases.)
+ *
+ * PRESENCE_ONLY
+ *   No verify() callback is registered. The gate enforces only that the tool was
+ *   called and produced a non-empty result in the current bead/state/action.
+ *   Model prose, OTel traces, tmux text, and implicit log records cannot satisfy
+ *   this gate — a durable tool-call event in the EventStore is required — but
+ *   the gate does NOT inspect or validate the output content.
+ *
+ *   In Cerdiwen: coding_standards, add_checklist_item, submit_review_artifact,
+ *   pytest, semgrep.
+ */
+export type EvidenceClass =
+  | 'VERIFIER_BACKED_SEMANTIC_ARTIFACT'
+  | 'CONTROL_PLANE_ACK'
+  | 'PRESENCE_ONLY';
+
+/**
+ * Per-tool evidence-class classification entry for a Cerdiwen required tool.
+ *
+ * Fields
+ * ------
+ *   toolName       — the tool name as declared in cerdiwen harness.yaml requiredTools.
+ *   evidenceClass  — which class of evidence this tool produces (see EvidenceClass).
+ *   expectsVerify  — mirrors the `expectsVerify` field in harness.yaml (true = gate
+ *                    enforces a registered verify() callback; false/absent = presence-only).
+ *   hasVerifyCallback — whether a verify() is registered in the harness verifier registry
+ *                    for this tool at runtime. Tools with CONTROL_PLANE_ACK have a verify()
+ *                    but are NOT declared expectsVerify:true in requiredTools; the verify()
+ *                    still runs when the gate sees a tool-call record. PRESENCE_ONLY tools
+ *                    have no verify() callback registered.
+ *   verifyOwner    — which file owns the verify() callback ('harness' = src/tools/;
+ *                    'cerdiwen-extension' = cerdiwen .pi/extensions/cerdiwen.ts;
+ *                    'none' = no verify() registered).
+ *   notes          — brief rationale for the classification.
+ */
+export interface CerdiwenToolClassificationEntry {
+  readonly toolName: string;
+  readonly evidenceClass: EvidenceClass;
+  readonly expectsVerify: boolean;
+  readonly hasVerifyCallback: boolean;
+  readonly verifyOwner: 'harness' | 'cerdiwen-extension' | 'none';
+  readonly notes: string;
+}
+
+/**
+ * Authoritative evidence-class classification for every required tool declared
+ * in Cerdiwen's harness.yaml requiredTools (pi-experiment-zog2.19).
+ *
+ * This fixture is the CLASSIFICATION CONTRACT that makes the subsequent removal
+ * of presence-only implicit evidence (zog2.8) safe and intentional. Any tool
+ * not listed here, or any tool listed as PRESENCE_ONLY that subsequently gains
+ * a verify() without updating this inventory, constitutes a classification drift.
+ *
+ * Source: /bankwest/cerdiwen/harness.yaml (states.*.requiredTools) +
+ *         /bankwest/cerdiwen/.pi/extensions/cerdiwen.ts (verifier.register calls) +
+ *         /pi-experiment/src/tools/index.ts (harness-owned verify registrations).
+ *
+ * NOTE: auto_fix and codemod are tsProjectTool definitions in cerdiwen harness.yaml
+ * but do NOT appear in any state's requiredTools block. They are NOT included here.
+ * This inventory covers only the 15 tools that appear in at least one
+ * states.*.requiredTools entry.
+ *
+ * Ordered: verifier-backed → control-plane-ack → presence-only.
+ */
+export const CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS: readonly CerdiwenToolClassificationEntry[] = [
+
+  // =========================================================================
+  // VERIFIER_BACKED_SEMANTIC_ARTIFACT
+  // verify() reads artifact content and returns a non-trivial PASS/FAIL verdict.
+  // =========================================================================
+
+  {
+    toolName: 'requirements_schema',
+    evidenceClass: 'VERIFIER_BACKED_SEMANTIC_ARTIFACT',
+    expectsVerify: true,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() validates the requirementsAnalysis JSON artifact schema ' +
+      '(EARS structure, no legacy vocabulary, reference-docs evidence). ' +
+      'Any REJECTED check returns FAIL; absent artifact returns NOT_APPLICABLE.',
+  },
+
+  {
+    toolName: 'plan_contract',
+    evidenceClass: 'VERIFIER_BACKED_SEMANTIC_ARTIFACT',
+    expectsVerify: true,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() validates the planContract JSON artifact structure ' +
+      '(implementationSteps/writeSet linkage, traceability, zero compiler-lowering). ' +
+      'Any REJECTED check returns FAIL; absent artifact returns NOT_APPLICABLE.',
+  },
+
+  {
+    toolName: 'run_quality_checks',
+    evidenceClass: 'VERIFIER_BACKED_SEMANTIC_ARTIFACT',
+    expectsVerify: true,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() reads the structuredResult and returns FAIL when blocking_count > 0. ' +
+      'Gates the Implementation→AdversarialPostReview transition (pi-experiment-ij1f).',
+  },
+
+  {
+    toolName: 'sonarqube',
+    evidenceClass: 'VERIFIER_BACKED_SEMANTIC_ARTIFACT',
+    expectsVerify: true,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() reads the persisted SonarQube API response and returns FAIL when ' +
+      'qualityGateStatus === "ERROR". Gates AdversarialPostReview (pi-experiment-s3ss).',
+  },
+
+  {
+    toolName: 'git_history',
+    evidenceClass: 'VERIFIER_BACKED_SEMANTIC_ARTIFACT',
+    expectsVerify: false,   // declared as plain string in harness.yaml (no expectsVerify:true)
+    hasVerifyCallback: true,
+    verifyOwner: 'harness',
+    notes:
+      'Harness-owned (pi-experiment-srpk AC2): the harness self-registers ' +
+      'gitHistoryVerify() from src/tools/git_history.ts. verify() validates that ' +
+      'a canonical ToolEvidenceHandle exists with runStatus=PASSED; REJECTED runs ' +
+      'return FAIL; absent artifact returns NOT_APPLICABLE. NOT declared expectsVerify ' +
+      'in harness.yaml (plain string form), so the config fail-fast does not require ' +
+      'the extension — the harness registers it unconditionally.',
+  },
+
+  // =========================================================================
+  // CONTROL_PLANE_ACK
+  // verify() confirms tool ran + output is parseable; verdict is always PASS
+  // when the tool ran (content does not drive FAIL). NOT declared expectsVerify.
+  // =========================================================================
+
+  {
+    toolName: 'codemap',
+    evidenceClass: 'CONTROL_PLANE_ACK',
+    expectsVerify: false,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() returns PASS when a parseable output exists for this run, ' +
+      'NOT_APPLICABLE when absent. The codemap query content does not drive FAIL; ' +
+      'the gate confirms the tool was called, not that any specific claim was found.',
+  },
+
+  {
+    toolName: 'python_lsp',
+    evidenceClass: 'CONTROL_PLANE_ACK',
+    expectsVerify: false,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() returns PASS for a clean MCP response, FAIL for MCP-level errors, ' +
+      'NOT_APPLICABLE when absent. The diagnostic count does not drive FAIL ' +
+      '(the python_lsp tool owns the blocking gate, not verify()).',
+  },
+
+  {
+    toolName: 'reference_docs',
+    evidenceClass: 'CONTROL_PLANE_ACK',
+    expectsVerify: false,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() returns PASS for a clean MCP response (query ran and returned ' +
+      'evidence), FAIL for MCP-level errors, NOT_APPLICABLE when absent. ' +
+      'Semantic claim quality is not gated by verify().',
+  },
+
+  {
+    toolName: 'ast_grep',
+    evidenceClass: 'CONTROL_PLANE_ACK',
+    expectsVerify: false,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() returns PASS when parseable output exists (match count is irrelevant; ' +
+      'zero matches is still a valid query result). NOT_APPLICABLE when absent.',
+  },
+
+  {
+    toolName: 'smt_lib',
+    evidenceClass: 'CONTROL_PLANE_ACK',
+    expectsVerify: false,
+    hasVerifyCallback: true,
+    verifyOwner: 'cerdiwen-extension',
+    notes:
+      'verify() returns NOT_APPLICABLE for non-formalizable beads (formalizable:false), ' +
+      'PASS when all check-sat results are unsat, FAIL when any sat/unknown appears. ' +
+      'Classified CONTROL_PLANE_ACK because the gate verdict is driven by the ' +
+      'harness-injected formalizable flag, not by independent semantic audit of model output.',
+  },
+
+  // =========================================================================
+  // PRESENCE_ONLY
+  // No verify() registered. Gate enforces a durable tool-call EventStore record
+  // only. Model prose, OTel traces, tmux text, and implicit log records cannot
+  // satisfy this gate — only a PASSED PROJECT_TOOL event can.
+  // =========================================================================
+
+  {
+    toolName: 'coding_standards',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'No verify() registered. Gate confirms the tool was called and returned a ' +
+      'PASSED status; rule document selection is model-guidance, not a semantic gate.',
+  },
+
+  {
+    toolName: 'add_checklist_item',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'Built-in control-plane tool (BuiltInToolName.ADD_CHECKLIST_ITEM). No verify() ' +
+      'registered. Gate confirms the tool was invoked; the content of checklist items ' +
+      'is not subject to a verifier verdict.',
+  },
+
+  {
+    toolName: 'submit_review_artifact',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'Built-in control-plane tool (BuiltInToolName.SUBMIT_REVIEW_ARTIFACT). No verify() ' +
+      'registered. Gate confirms the artifact was submitted; the review content is not ' +
+      'subject to a verifier verdict (review quality is enforced upstream by the reviewer).',
+  },
+
+  {
+    toolName: 'pytest',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'No verify() registered. Tool execution outcome (exit code) is surfaced via ' +
+      'runStatus (PASSED/REJECTED); a non-zero exit code produces REJECTED which blocks ' +
+      'the gate via artifact-presence failure. No separate semantic verifier.',
+  },
+
+  {
+    toolName: 'semgrep',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'No verify() registered despite semgrep having a failureLimit in harness.yaml. ' +
+      'Gate confirms the tool was called; finding interpretation is model-responsibility. ' +
+      'A verify() is NOT registered in cerdiwen.ts — presence-only before zog2.8.',
+  },
+
+] as const;
+
+/**
+ * Map from toolName → CerdiwenToolClassificationEntry for O(1) lookup.
+ */
+export const CERDIWEN_CLASSIFICATION_BY_NAME: ReadonlyMap<string, CerdiwenToolClassificationEntry> =
+  new Map(CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS.map(e => [e.toolName, e]));
+
+/**
+ * The complete set of Cerdiwen required tool names (from harness.yaml),
+ * used as the authoritative enumeration for classification coverage tests.
+ *
+ * This list is derived from all state.requiredTools entries across all states
+ * in /bankwest/cerdiwen/harness.yaml. Only tools that appear in at least one
+ * state's requiredTools block are listed here. auto_fix and codemod are
+ * tsProjectTool definitions in harness.yaml but are NOT in any requiredTools
+ * block and therefore are NOT listed here.
+ */
+export const CERDIWEN_REQUIRED_TOOL_NAMES: readonly string[] = [
+  'semgrep',
+  'pytest',
+  'coding_standards',
+  'add_checklist_item',
+  'submit_review_artifact',
+  'requirements_schema',
+  'plan_contract',
+  'run_quality_checks',
+  'sonarqube',
+  'reference_docs',
+  'git_history',
+  'smt_lib',
+  'codemap',
+  'python_lsp',
+  'ast_grep',
+] as const;
