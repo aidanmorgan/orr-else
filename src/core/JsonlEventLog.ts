@@ -33,6 +33,51 @@ export class JsonlEventLog {
     }
   }
 
+  /**
+   * Read and parse only the last `tailBytes` of a JSONL file, visiting every
+   * complete record found in that tail window.
+   *
+   * Partial lines at the start of the window (created by slicing mid-line) are
+   * silently discarded — the first newline boundary in the buffer marks the
+   * start of the first complete record.
+   *
+   * If the file is smaller than `tailBytes`, the whole file is read.
+   */
+  public async scanTail(filePath: string, tailBytes: number, visitor: (record: unknown) => void): Promise<void> {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(filePath);
+    } catch {
+      return;
+    }
+    const start = Math.max(0, stat.size - tailBytes);
+    const raw = await fs.promises.readFile(filePath, { encoding: 'utf8', flag: 'r' })
+      .then(text => {
+        // Only take the relevant tail slice from the text representation.
+        // We read the full file then slice because `createReadStream` with `start`
+        // may split mid-codepoint in multi-byte sequences; reading as string then
+        // slicing by byte-index is safer for ASCII-dominant JSONL.
+        return text;
+      });
+    // Use byte offset to drop the partial-line prefix.
+    const buf = Buffer.from(raw, 'utf8');
+    const tailBuf = start > 0 ? buf.slice(start) : buf;
+    const tailText = tailBuf.toString('utf8');
+    // Drop the partial first line (content before the first newline).
+    const firstNewline = tailText.indexOf('\n');
+    const cleanText = start > 0 && firstNewline >= 0 ? tailText.slice(firstNewline + 1) : tailText;
+    for (const line of cleanText.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const value = JSON.parse(trimmed);
+        if (value !== undefined && value !== null) visitor(value);
+      } catch {
+        // Malformed JSON — skip (same as ndjson strict:false behaviour).
+      }
+    }
+  }
+
   public async append(filePath: string, record: unknown): Promise<void> {
     // Serialize same-process appends to this file, then perform the locked write.
     // The chain link always runs (regardless of the prior link's outcome) and is

@@ -2351,8 +2351,7 @@ async function flowStatusDetails(services: RuntimeServices, session: ExtensionSe
     const signaling = supervisor.getSignalingHealth();
     let latestEvent: { type: string; timestamp: string } | undefined;
     try {
-      const allEvents = await services.eventStore.readAll();
-      const last = allEvents.at(-1);
+      const last = await services.eventStore.latestEvent();
       if (last) latestEvent = { type: last.type, timestamp: last.timestamp };
     } catch {
       // best-effort

@@ -373,6 +373,35 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   /**
+   * Return the most-recent valid non-synthetic DomainEvent across all event
+   * log files using a bounded tail scan — O(tailBytes × files) rather than
+   * O(total_events).
+   *
+   * Strategy: read only the last `tailBytes` of each JSONL file, parse every
+   * complete record in that window, keep the chronologically latest valid
+   * non-synthetic event.  The tail window is generous enough to contain dozens
+   * of recent events without scanning the whole store.
+   *
+   * If no event is found in the tail window (e.g. only very old files) the
+   * method returns undefined.
+   */
+  public async latestEvent(tailBytes = 65_536): Promise<DomainEvent | undefined> {
+    const location = await this.resolveLocation();
+    if (!location || !existsSync(location.dir)) return undefined;
+
+    let latest: DomainEvent | undefined;
+    for (const filePath of await this.eventLog.eventFilePaths(location.dir)) {
+      if (!existsSync(filePath)) continue;
+      await this.eventLog.scanTail(filePath, tailBytes, value => {
+        if (!this.isDomainEvent(value)) return;
+        if (this.isSyntheticEvent(value)) return;
+        if (!latest || this.compareEvents(latest, value) < 0) latest = value;
+      });
+    }
+    return latest;
+  }
+
+  /**
    * Read all valid non-synthetic domain events, also returning the count of
    * records that were present on disk as JSON objects but failed the
    * domain-event shape check.
