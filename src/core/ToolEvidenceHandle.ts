@@ -118,32 +118,115 @@ export type ToolEvidenceSummaryMode = 'summary' | 'none';
 /**
  * A tool-local, deterministic RTK summary attached to a ToolEvidenceHandle.
  *
- * RULES (AC3, enforced by validator):
+ * RULES (AC3 + zog2.7, enforced by validator):
  *   - schemaTypeName: the TypeScript interface/type name declared in owningFile.
- *     Must be a non-empty string.
+ *     Must be a non-empty string. MUST NOT be 'untyped_record' — that is the
+ *     generic migration placeholder; admitted summaries require a concrete schema.
  *   - owningFile: the repo-relative .ts file that declares the summary type and
  *     produces this value. MUST end with .ts — this enforces TypeScript-only
- *     summarizers and forbids JS, Python, shell, or any non-TS path.
+ *     summarizers and forbids JS, Python, shell, or any non-TS path. MUST NOT be
+ *     a generic harness framework file (e.g. src/core/ToolEvidenceHandle.ts).
+ *     When the validator knows the expected tool name (opts.expectedToolName),
+ *     owningFile MUST correspond to the tool's own module via the path convention
+ *     src/tools/<toolName>.ts — affirmative check, not just a denylist.
+ *   - summarySchemaVersion: a semver-style version string for the summary schema.
+ *     Bump when the schema shape changes in a backwards-incompatible way.
+ *   - schemaHash: a deterministic, stable hash of the summary schema definition
+ *     (e.g. SHA-256 of the TypeScript interface text). Detects schema drift.
+ *     Must be a non-empty string. Use 'sha256:<hex>' format.
+ *   - deterministicSummaryVersion: version string of the summarization logic
+ *     (not the schema — the algorithm version). Bump when summarizer behaviour
+ *     changes for the same schema version. Format: semver or monotonic integer.
+ *   - inputArtifactSchemaId: identifier for the input artifact schema this
+ *     summary was produced from (e.g. the semantic artifact schema id).
+ *   - inputArtifactSchemaVersion: version of the input artifact schema.
+ *   - maximumCounts: the maximum item counts / truncation bounds this summary
+ *     applies (e.g. max commit entries, max file paths). Documents the cap.
+ *   - omissionSemantics: describes what the summary omits and how (e.g.
+ *     'commits beyond limit are omitted; total count reported').
  *   - summary: the deterministic compact object returned by the tool's own
- *     TypeScript summarizer. The harness validates structure only (schemaTypeName
- *     + owningFile); it does NOT inspect or constrain the summary payload.
+ *     TypeScript summarizer. The harness validates structure (all fields above);
+ *     it does NOT inspect or constrain the summary payload content.
  *
- * FORBIDDEN (AC3):
+ * FORBIDDEN (AC3 + zog2.7):
+ *   - schemaTypeName === 'untyped_record' (generic fallback; not a real schema).
  *   - owningFile ending with .js, .py, .sh, .rb, or anything other than .ts.
+ *   - owningFile pointing to a generic harness framework file.
+ *   - owningFile belonging to a different tool's module (when expectedToolName known).
  *   - LLM-generated or prompt-based summary values.
  *   - Generic extraction frameworks or shared summarizer registries.
+ *   - Omitting summarySchemaVersion, schemaHash, deterministicSummaryVersion,
+ *     inputArtifactSchemaId, inputArtifactSchemaVersion, maximumCounts, or
+ *     omissionSemantics.
  */
 export interface ToolEvidenceRtkSummary {
-  /** TypeScript type/interface name of the summary schema (non-empty). */
+  /**
+   * TypeScript type/interface name of the summary schema (non-empty).
+   * MUST NOT be 'untyped_record' — use a concrete schema type name.
+   */
   readonly schemaTypeName: string;
   /**
    * Repo-relative path to the .ts file that declares the schema and produces
-   * this summary. MUST end with .ts (enforced by validator).
+   * this summary. MUST end with .ts (enforced by validator). MUST NOT be a
+   * generic harness framework file. When expectedToolName is known, MUST
+   * correspond to the tool's own module (src/tools/<toolName>.ts convention).
    */
   readonly owningFile: string;
+  /**
+   * Semver-style version of the summary schema definition (e.g. '1.0.0').
+   * Bump when the schema shape changes in a backwards-incompatible way.
+   */
+  readonly summarySchemaVersion: string;
+  /**
+   * Deterministic hash of the summary schema definition. Detects schema drift.
+   * Format: 'sha256:<hex>' (64 hex digits). Use a stable hash of the TypeScript
+   * interface text for the summary type declared in owningFile.
+   */
+  readonly schemaHash: string;
+  /**
+   * Version of the summarization algorithm/logic (not the schema).
+   * Bump when summarizer behaviour changes for the same schema version.
+   * Format: semver (e.g. '1.0.0') or monotonic integer string (e.g. '1').
+   */
+  readonly deterministicSummaryVersion: string;
+  /**
+   * Identifier for the input artifact schema this summary was produced from.
+   * E.g. the schema id of the semantic artifact that was summarized.
+   */
+  readonly inputArtifactSchemaId: string;
+  /**
+   * Version of the input artifact schema (e.g. '1.0.0').
+   * Bump when the input artifact schema changes in a backwards-incompatible way.
+   */
+  readonly inputArtifactSchemaVersion: string;
+  /**
+   * Maximum item counts / truncation bounds applied by this summary.
+   * Documents the caps so consumers know what may be omitted.
+   * E.g. { commits: 12, paths: 30 }
+   */
+  readonly maximumCounts: Record<string, number>;
+  /**
+   * Describes what the summary omits and how omissions are reported.
+   * E.g. 'commits beyond maximumCounts.commits are omitted; outputLines reports total'
+   */
+  readonly omissionSemantics: string;
   /** The deterministic compact summary object. Content is tool-owned. */
   readonly summary: Record<string, unknown>;
 }
+
+/**
+ * Generic harness framework files that are forbidden as rtkSummary.owningFile.
+ * A tool-local summary must be owned by the tool's own TS module, not by any
+ * shared harness framework file.
+ *
+ * zog2.7: this set is the explicit ban list for the generic-fallback prohibition.
+ */
+export const FORBIDDEN_GENERIC_SUMMARY_OWNER_FILES: ReadonlySet<string> = new Set([
+  'src/core/ToolEvidenceHandle.ts',
+  'src/core/RtkContract.ts',
+  'src/core/VerifierGate.ts',
+  'src/contract.ts',
+]);
 
 // ---------------------------------------------------------------------------
 // ToolEvidenceHandle — the canonical contract
@@ -280,11 +363,22 @@ export const TOOL_EVIDENCE_HANDLE_SCHEMA = {
     summaryMode: { type: 'string', enum: ['summary', 'none'] },
     rtkSummary: {
       type: 'object',
-      required: ['schemaTypeName', 'owningFile', 'summary'],
+      required: [
+        'schemaTypeName', 'owningFile', 'summarySchemaVersion', 'schemaHash',
+        'deterministicSummaryVersion', 'inputArtifactSchemaId', 'inputArtifactSchemaVersion',
+        'maximumCounts', 'omissionSemantics', 'summary'
+      ],
       additionalProperties: false,
       properties: {
         schemaTypeName: { type: 'string', minLength: 1 },
         owningFile: { type: 'string', minLength: 1 },
+        summarySchemaVersion: { type: 'string', minLength: 1 },
+        schemaHash: { type: 'string', minLength: 1 },
+        deterministicSummaryVersion: { type: 'string', minLength: 1 },
+        inputArtifactSchemaId: { type: 'string', minLength: 1 },
+        inputArtifactSchemaVersion: { type: 'string', minLength: 1 },
+        maximumCounts: { type: 'object' },
+        omissionSemantics: { type: 'string', minLength: 1 },
         summary: { type: 'object' }
       }
     },
@@ -464,7 +558,7 @@ export function validateToolEvidenceHandle(
     if (rtkSummary === undefined || rtkSummary === null) {
       errors.push('rtkSummary: required when summaryMode="summary"');
     } else {
-      validateRtkSummary(rtkSummary, errors);
+      validateRtkSummary(rtkSummary, errors, opts?.expectedToolName);
     }
   } else if (summaryMode === 'none') {
     if (typeof noSummaryReason !== 'string' || noSummaryReason.length === 0) {
@@ -573,20 +667,38 @@ function isInsideRoot(root: string, candidate: string): boolean {
   return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(resolvedRoot + '/');
 }
 
+/**
+ * Derive the expected owning file path for a tool from its name.
+ * Convention: src/tools/<toolName>.ts
+ * This is the affirmative tool-local check: when expectedToolName is known,
+ * the owningFile must correspond to the tool's own module.
+ */
+function expectedOwningFileForTool(toolName: string): string {
+  return `src/tools/${toolName}.ts`;
+}
+
 /** Validate rtkSummary sub-object, pushing errors into the provided array. */
-function validateRtkSummary(rtkSummary: unknown, errors: string[]): void {
+function validateRtkSummary(rtkSummary: unknown, errors: string[], expectedToolName?: string): void {
   if (typeof rtkSummary !== 'object' || rtkSummary === null || Array.isArray(rtkSummary)) {
     errors.push('rtkSummary: must be a non-null object');
     return;
   }
   const s = rtkSummary as Record<string, unknown>;
 
-  // schemaTypeName
+  // schemaTypeName: must be non-empty AND must not be the generic 'untyped_record' (zog2.7)
   if (typeof s['schemaTypeName'] !== 'string' || s['schemaTypeName'].length === 0) {
     errors.push('rtkSummary.schemaTypeName: must be a non-empty string');
+  } else if (s['schemaTypeName'] === 'untyped_record') {
+    errors.push(
+      'rtkSummary.schemaTypeName: "untyped_record" is the generic migration placeholder and is ' +
+      'forbidden in admitted RTK summaries (zog2.7). Declare a concrete tool-local TypeScript ' +
+      'schema type name (e.g. "GitHistoryRtkSummary").'
+    );
   }
 
-  // owningFile: must end with .ts (TypeScript-only — AC3)
+  // owningFile: must end with .ts (TypeScript-only — AC3) AND must not be a generic harness file (zog2.7)
+  // PRIMARY rule (affirmative): when expectedToolName is known, owningFile MUST be the tool's own module.
+  // SECONDARY rule (denylist): owningFile must not be any known generic harness framework file.
   if (typeof s['owningFile'] !== 'string' || s['owningFile'].length === 0) {
     errors.push('rtkSummary.owningFile: must be a non-empty string');
   } else if (!s['owningFile'].endsWith('.ts')) {
@@ -594,6 +706,63 @@ function validateRtkSummary(rtkSummary: unknown, errors: string[]): void {
       `rtkSummary.owningFile: must end with .ts (TypeScript-only summarizers required); ` +
       `got "${s['owningFile']}". Non-TypeScript summarizers are forbidden.`
     );
+  } else if (FORBIDDEN_GENERIC_SUMMARY_OWNER_FILES.has(s['owningFile'] as string)) {
+    errors.push(
+      `rtkSummary.owningFile: "${s['owningFile']}" is a generic harness framework file and is ` +
+      'forbidden as a summary owner (zog2.7). The owning file must be the tool\'s own TypeScript ' +
+      'module, not a shared harness file.'
+    );
+  } else if (expectedToolName !== undefined) {
+    // Affirmative tool-local check (zog2.7): owningFile must be the tool's own module.
+    // Convention: src/tools/<toolName>.ts
+    const expectedFile = expectedOwningFileForTool(expectedToolName);
+    if (s['owningFile'] !== expectedFile) {
+      errors.push(
+        `rtkSummary.owningFile: expected "${expectedFile}" for tool "${expectedToolName}" ` +
+        `(affirmative tool-local check, zog2.7); got "${s['owningFile']}". ` +
+        'The summary owningFile must be the tool\'s own TypeScript module.'
+      );
+    }
+  }
+
+  // summarySchemaVersion: required (zog2.7)
+  if (typeof s['summarySchemaVersion'] !== 'string' || s['summarySchemaVersion'].length === 0) {
+    errors.push('rtkSummary.summarySchemaVersion: must be a non-empty string (e.g. "1.0.0") — required by zog2.7');
+  }
+
+  // schemaHash: required, must start with 'sha256:' or be non-empty (zog2.7)
+  if (typeof s['schemaHash'] !== 'string' || s['schemaHash'].length === 0) {
+    errors.push('rtkSummary.schemaHash: must be a non-empty string (format: "sha256:<hex>") — required by zog2.7');
+  } else if (!s['schemaHash'].startsWith('sha256:') && !s['schemaHash'].startsWith('hash:')) {
+    errors.push(
+      `rtkSummary.schemaHash: must start with "sha256:" (got "${s['schemaHash']}"). ` +
+      'Use a deterministic hash of the TypeScript summary interface text (e.g. "sha256:abcdef...").'
+    );
+  }
+
+  // deterministicSummaryVersion: required (zog2.7)
+  if (typeof s['deterministicSummaryVersion'] !== 'string' || s['deterministicSummaryVersion'].length === 0) {
+    errors.push('rtkSummary.deterministicSummaryVersion: must be a non-empty string (e.g. "1.0.0" or "1") — required by zog2.7');
+  }
+
+  // inputArtifactSchemaId: required (zog2.7 — AC metadata)
+  if (typeof s['inputArtifactSchemaId'] !== 'string' || s['inputArtifactSchemaId'].length === 0) {
+    errors.push('rtkSummary.inputArtifactSchemaId: must be a non-empty string — required by zog2.7');
+  }
+
+  // inputArtifactSchemaVersion: required (zog2.7 — AC metadata)
+  if (typeof s['inputArtifactSchemaVersion'] !== 'string' || s['inputArtifactSchemaVersion'].length === 0) {
+    errors.push('rtkSummary.inputArtifactSchemaVersion: must be a non-empty string — required by zog2.7');
+  }
+
+  // maximumCounts: required, must be a non-null object (zog2.7 — AC metadata)
+  if (typeof s['maximumCounts'] !== 'object' || s['maximumCounts'] === null || Array.isArray(s['maximumCounts'])) {
+    errors.push('rtkSummary.maximumCounts: must be a non-null object (e.g. { commits: 12, paths: 30 }) — required by zog2.7');
+  }
+
+  // omissionSemantics: required, non-empty string (zog2.7 — AC metadata)
+  if (typeof s['omissionSemantics'] !== 'string' || s['omissionSemantics'].length === 0) {
+    errors.push('rtkSummary.omissionSemantics: must be a non-empty string describing omission behaviour — required by zog2.7');
   }
 
   // summary: must be a non-null object

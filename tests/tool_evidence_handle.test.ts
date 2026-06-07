@@ -69,6 +69,13 @@ function validHandleWithSummary(overrides: Partial<ToolEvidenceHandle> = {}): un
     rtkSummary: {
       schemaTypeName: 'GitHistoryRtkSummary',
       owningFile: 'src/tools/git_history.ts',
+      summarySchemaVersion: '1.0.0',
+      schemaHash: 'sha256:' + 'a'.repeat(64),
+      deterministicSummaryVersion: '1.0.0',
+      inputArtifactSchemaId: 'git-stdout-log',
+      inputArtifactSchemaVersion: '1.0.0',
+      maximumCounts: { commits: 50, paths: 30 },
+      omissionSemantics: 'commits beyond maximumCounts.commits are omitted; outputLines reports total',
       summary: { commitCount: 5, authors: ['alice', 'bob'] }
     },
     admittedHarnessFingerprint: 'sha256:abcdef1234567890',
@@ -277,6 +284,13 @@ describe('ToolEvidenceHandle — summaryMode + RTK summary contract (AC3)', () =
       rtkSummary: {
         schemaTypeName: 'ValidResult',
         owningFile: 'src/tools/git_history.ts',
+        summarySchemaVersion: '1.0.0',
+        schemaHash: 'sha256:' + 'a'.repeat(64),
+        deterministicSummaryVersion: '1.0.0',
+        inputArtifactSchemaId: 'git-stdout-log',
+        inputArtifactSchemaVersion: '1.0.0',
+        maximumCounts: { commits: 50 },
+        omissionSemantics: 'commits beyond maximumCounts.commits are omitted',
         summary: { commitCount: 3 }
       }
     });

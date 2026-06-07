@@ -120,6 +120,9 @@ export type ParsedArgs = {
  * outputText: the raw git stdout (embedded in the handle artifact so that
  * readFileSync(semanticArtifactPath) contains real git evidence and the handle
  * JSON IS the canonical on-disk artifact).
+ *
+ * zog2.7: schemaHash is DERIVED from GIT_HISTORY_SCHEMA_DESCRIPTOR at module load,
+ * not pasted. Editing the descriptor changes the hash automatically.
  */
 export interface GitHistoryRtkSummary {
   operation: string;
@@ -133,6 +136,46 @@ export interface GitHistoryRtkSummary {
   /** The raw git stdout, embedded so the handle artifact IS the evidence. */
   outputText?: string;
 }
+
+/**
+ * Stable, canonicalizable descriptor of the GitHistoryRtkSummary schema fields
+ * and their types (zog2.7 — real drift detection).
+ *
+ * This object IS the schema source of truth. The schemaHash is DERIVED from
+ * JSON.stringify(GIT_HISTORY_SCHEMA_DESCRIPTOR) at module load. Adding or
+ * removing a field here changes the hash, and the conformance test detects it.
+ *
+ * Ordering is canonical (alphabetical) so the stringification is stable.
+ */
+export const GIT_HISTORY_SCHEMA_DESCRIPTOR = {
+  lockfileReason: 'string|undefined',
+  objectFound: 'boolean|undefined',
+  operation: 'string',
+  outputFileBytes: 'number',
+  outputLines: 'number',
+  outputText: 'string|undefined',
+  repo: 'string',
+  root: 'string',
+  stderr: 'string|undefined',
+} as const;
+
+/**
+ * Compute the schemaHash for GIT_HISTORY_SCHEMA_DESCRIPTOR.
+ * Returns 'sha256:<hex>' — the canonical format required by the contract.
+ *
+ * Exported so conformance tests can independently recompute and compare.
+ */
+export function computeGitHistorySchemaHash(): string {
+  const canonical = JSON.stringify(GIT_HISTORY_SCHEMA_DESCRIPTOR);
+  return 'sha256:' + createHash('sha256').update(canonical).digest('hex');
+}
+
+/**
+ * The derived schemaHash for the git_history summary schema.
+ * Computed once at module load from GIT_HISTORY_SCHEMA_DESCRIPTOR.
+ * Never pasted — always derived so it tracks the descriptor.
+ */
+export const GIT_HISTORY_SCHEMA_HASH: string = computeGitHistorySchemaHash();
 
 /**
  * The git_history tool result. Extends the harness ToolResultBase for backward
@@ -517,6 +560,23 @@ function buildPassedHandle(params: {
     rtkSummary: {
       schemaTypeName: 'GitHistoryRtkSummary',
       owningFile: 'src/tools/git_history.ts',
+      summarySchemaVersion: '1.0.0',
+      // Derived from GIT_HISTORY_SCHEMA_DESCRIPTOR via computeGitHistorySchemaHash() (zog2.7).
+      // Never pasted — changing the descriptor changes this hash automatically.
+      schemaHash: GIT_HISTORY_SCHEMA_HASH,
+      deterministicSummaryVersion: '1.0.0',
+      // Input artifact: the raw git stdout log archived by archiveOutput().
+      // The log file is git output text; schema is the git stdout format for the operation.
+      inputArtifactSchemaId: 'git-stdout-log',
+      inputArtifactSchemaVersion: '1.0.0',
+      // Maximum counts applied by this summary (zog2.7 AC metadata).
+      maximumCounts: { commits: MAX_LIMIT, paths: MAX_PATHS },
+      // Omission semantics: items beyond the limits are omitted; outputLines
+      // in the summary payload reports the total line count of the raw output.
+      omissionSemantics:
+        'commits beyond maximumCounts.commits and paths beyond maximumCounts.paths are not ' +
+        'included in the request; outputLines in the summary payload reports the actual line ' +
+        'count of the raw git stdout archived in rawTransportArchivePaths',
       summary: rtkSummary as unknown as Record<string, unknown>,
     },
     admittedHarnessFingerprint,

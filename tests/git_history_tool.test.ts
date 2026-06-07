@@ -444,6 +444,13 @@ describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/F
         rtkSummary: {
           schemaTypeName: 'GitHistoryRtkSummary',
           owningFile: 'src/tools/git_history.ts',
+          summarySchemaVersion: '1.0.0',
+          schemaHash: 'sha256:' + 'a'.repeat(64),
+          deterministicSummaryVersion: '1.0.0',
+          inputArtifactSchemaId: 'git-stdout-log',
+          inputArtifactSchemaVersion: '1.0.0',
+          maximumCounts: { commits: 50, paths: 30 },
+          omissionSemantics: 'commits beyond maximumCounts.commits are omitted; outputLines reports total',
           summary: { operation: 'log', repo: 'worktree', root: dir, outputLines: 2, outputFileBytes: 40, outputText: '4c241a5 some commit\n180355f another commit' },
         },
         admittedHarnessFingerprint: 'sha256:test',
