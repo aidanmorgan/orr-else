@@ -61,7 +61,11 @@ export const HandoffSchemaId = {
   CHECKPOINT_ACCEPTED_EVENT: 'harness.handoff.checkpointAcceptedEvent',
   TERMINAL_TRANSITION:       'harness.handoff.terminalTransition',
   WORKER_COMMAND:            'harness.handoff.workerCommand',
-  WORKER_COMPLETION:         'harness.handoff.workerCompletion'
+  WORKER_COMPLETION:         'harness.handoff.workerCompletion',
+  /** pi-experiment-6q0y.40: fan-out branch result payload (per-branch outcome + evidence). */
+  FANOUT_BRANCH_RESULT:      'harness.fanout.branchResult',
+  /** pi-experiment-6q0y.40: joined outcome after all fan-out branches complete. */
+  FANOUT_JOINED_OUTCOME:     'harness.fanout.joinedOutcome'
 } as const;
 
 export type HandoffSchemaId = typeof HandoffSchemaId[keyof typeof HandoffSchemaId];
@@ -586,6 +590,448 @@ const workerCompletionEntry: AnnotatedHandoffEntry = {
 };
 
 // ---------------------------------------------------------------------------
+// pi-experiment-6q0y.40: Fan-out branch schemas
+//
+// These schemas define the data contracts for parallel (fan-out) branch
+// execution in the harness statechart:
+//
+//   harness.fanout.branchResult   — per-branch outcome record produced when a
+//                                   fan-out branch completes (AC1).
+//   harness.fanout.joinedOutcome  — the joined outcome payload assembled after
+//                                   all branches complete (AC2).
+//
+// PRODUCER SCOPE (6q0y.40)
+// -------------------------
+// This bead defines + registers the schemas and the deterministic `collect`
+// reducer.  The verifier-verdict-consumption join (AC1 "join rejects branches
+// whose verifier verdict ...") is DEFERRED to the amq0 consumer chain
+// (yhec/zog2.4/zog2.11) and MUST NOT be faked here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Declared vocabulary for branch status in a fan-out branch result.
+ * A BranchStatus outside this set is rejected by the join validator (AC3).
+ */
+export const BRANCH_STATUS_VOCAB = ['succeeded', 'failed', 'blocked', 'cancelled'] as const;
+export type BranchStatus = typeof BRANCH_STATUS_VOCAB[number];
+
+/**
+ * Declared vocabulary for branch outcomes in a fan-out branch result.
+ * 'SUCCESS' and 'FAILURE' are the canonical statechart transition events;
+ * 'BLOCKED' and 'CANCELLED' are additional terminal conditions.
+ */
+export const BRANCH_OUTCOME_VOCAB = ['SUCCESS', 'FAILURE', 'BLOCKED', 'CANCELLED'] as const;
+export type BranchOutcome = typeof BRANCH_OUTCOME_VOCAB[number];
+
+/** Outcome-precedence table: when multiple branches end in different outcomes,
+ *  the joined route is selected by the highest-precedence outcome present.
+ *  Lower index = higher precedence (BLOCKED > FAILURE > CANCELLED > SUCCESS). */
+export const OUTCOME_PRECEDENCE: readonly BranchOutcome[] = ['BLOCKED', 'FAILURE', 'CANCELLED', 'SUCCESS'];
+
+/**
+ * A typed reference to an artifact produced by a fan-out branch.
+ * This is the evidence contract: branches MUST NOT rely on summary prose.
+ */
+export interface BranchArtifactRef {
+  /** Semantic path declared in the harness plan (e.g. "implementation/src/foo.ts"). */
+  semanticPath: string;
+  /** Size of the artifact in bytes (required for evidence accounting). */
+  bytes: number;
+  /** SHA-256 hex digest of the artifact content (required for integrity checks). */
+  sha256: string;
+}
+
+/**
+ * A per-branch result produced when a fan-out branch completes.
+ * All fields are deterministic (set by branch machinery); the optional `summary`
+ * field is explicitly non-authoritative — the join reads typed fields only (AC4).
+ */
+export interface FanoutBranchResult {
+  /** Stable identifier for this branch within the fan-out set (e.g. "branch-tests"). */
+  branchId: string;
+  /** The statechart state ID this branch was executing. */
+  stateId: string;
+  /** The action ID within the state. */
+  actionId: string;
+  /** Context instance ID (worker/session scope, for replay deduplication). */
+  contextInstanceId: string;
+  /** Outcome from the declared vocabulary (SUCCESS/FAILURE/BLOCKED/CANCELLED). */
+  outcome: BranchOutcome;
+  /** Branch completion status from the declared vocabulary. */
+  branchStatus: BranchStatus;
+  /** Artifact evidence references produced by this branch. */
+  artifactRefs: BranchArtifactRef[];
+  /**
+   * Non-authoritative narrative summary (LLM-authored).
+   * The join MUST NOT use this to make routing decisions; it reads
+   * typed outcome/evidence fields only (AC4).
+   */
+  summary?: string;
+  /** Optional: error details if the branch failed/was blocked. */
+  errorDetail?: string;
+}
+
+/**
+ * The joined outcome payload assembled after all fan-out branches complete.
+ * Produced by the deterministic `collect` reducer (AC5).
+ */
+export interface FanoutJoinedOutcome {
+  /** All branch results, in sorted branch order. */
+  branches: FanoutBranchResult[];
+  /** The selected transition event (from OUTCOME_PRECEDENCE table) (AC6). */
+  selectedRoute: BranchOutcome;
+  /** All branch errors collected in sorted branch order (AC6). */
+  collectedErrors: Array<{ branchId: string; outcome: BranchOutcome; errorDetail?: string }>;
+  /** Number of branches that succeeded. */
+  succeededCount: number;
+  /** Number of branches that failed or were blocked or cancelled. */
+  failedCount: number;
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out branch result schema entry (harness.fanout.branchResult)
+// ---------------------------------------------------------------------------
+
+const fanoutBranchResultEntry: AnnotatedHandoffEntry = {
+  id: HandoffSchemaId.FANOUT_BRANCH_RESULT,
+  version: '1.0.0',
+  owner: 'src/core/HandoffSchemas.ts',
+  replayPolicy: 'CRITICAL',
+  compatibilityPolicy: 'ADDITIVE_ONLY',
+  llmAuthoredFields: ['summary'],
+  deterministicEvidenceFields: [
+    'branchId', 'stateId', 'actionId', 'contextInstanceId',
+    'outcome', 'branchStatus', 'artifactRefs'
+  ],
+  jsonSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    required: ['branchId', 'stateId', 'actionId', 'contextInstanceId', 'outcome', 'branchStatus', 'artifactRefs'],
+    additionalProperties: true,
+    properties: {
+      branchId:          { type: 'string', minLength: 1 },
+      stateId:           { type: 'string', minLength: 1 },
+      actionId:          { type: 'string', minLength: 1 },
+      contextInstanceId: { type: 'string', minLength: 1 },
+      outcome: {
+        type: 'string',
+        enum: [...BRANCH_OUTCOME_VOCAB]
+      },
+      branchStatus: {
+        type: 'string',
+        enum: [...BRANCH_STATUS_VOCAB]
+      },
+      artifactRefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['semanticPath', 'bytes', 'sha256'],
+          additionalProperties: false,
+          properties: {
+            semanticPath: { type: 'string', minLength: 1 },
+            bytes:        { type: 'integer', minimum: 0 },
+            sha256:       { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' }
+          }
+        }
+      },
+      // Non-authoritative narrative (AC4): structural string check only.
+      summary:     { type: 'string' },
+      errorDetail: { type: 'string' }
+    }
+  },
+  positiveFixtures: [
+    {
+      label: 'successful branch with one artifact',
+      value: {
+        branchId: 'branch-tests',
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'SUCCESS',
+        branchStatus: 'succeeded',
+        artifactRefs: [
+          {
+            semanticPath: 'implementation/src/foo.ts',
+            bytes: 1024,
+            sha256: 'a'.repeat(64)
+          }
+        ]
+      }
+    },
+    {
+      label: 'failed branch with error detail and no artifacts',
+      value: {
+        branchId: 'branch-review',
+        stateId: 'PostImplementation',
+        actionId: 'code-review',
+        contextInstanceId: 'ctx-2',
+        outcome: 'FAILURE',
+        branchStatus: 'failed',
+        artifactRefs: [],
+        errorDetail: 'Review found blocking issues'
+      }
+    },
+    {
+      label: 'blocked branch with non-authoritative summary',
+      value: {
+        branchId: 'branch-audit',
+        stateId: 'PostImplementation',
+        actionId: 'test-audit',
+        contextInstanceId: 'ctx-3',
+        outcome: 'BLOCKED',
+        branchStatus: 'blocked',
+        artifactRefs: [],
+        summary: 'Audit could not proceed due to missing dependency'
+      }
+    }
+  ],
+  negativeFixtures: [
+    {
+      label: 'missing required branchId',
+      value: {
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'SUCCESS',
+        branchStatus: 'succeeded',
+        artifactRefs: []
+      }
+    },
+    {
+      label: 'outcome outside declared vocabulary',
+      value: {
+        branchId: 'branch-tests',
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'DONE',
+        branchStatus: 'succeeded',
+        artifactRefs: []
+      }
+    },
+    {
+      label: 'branchStatus outside declared vocabulary',
+      value: {
+        branchId: 'branch-tests',
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'SUCCESS',
+        branchStatus: 'completed',
+        artifactRefs: []
+      }
+    },
+    {
+      label: 'artifactRef missing sha256',
+      value: {
+        branchId: 'branch-tests',
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'SUCCESS',
+        branchStatus: 'succeeded',
+        artifactRefs: [
+          { semanticPath: 'src/foo.ts', bytes: 100 }
+        ]
+      }
+    },
+    {
+      label: 'artifactRef sha256 wrong length (not 64 hex chars)',
+      value: {
+        branchId: 'branch-tests',
+        stateId: 'PostImplementation',
+        actionId: 'run-tests',
+        contextInstanceId: 'ctx-1',
+        outcome: 'SUCCESS',
+        branchStatus: 'succeeded',
+        artifactRefs: [
+          { semanticPath: 'src/foo.ts', bytes: 100, sha256: 'abc123' }
+        ]
+      }
+    }
+  ]
+};
+
+// ---------------------------------------------------------------------------
+// Fan-out joined outcome schema entry (harness.fanout.joinedOutcome)
+// ---------------------------------------------------------------------------
+
+const fanoutJoinedOutcomeEntry: AnnotatedHandoffEntry = {
+  id: HandoffSchemaId.FANOUT_JOINED_OUTCOME,
+  version: '1.0.0',
+  owner: 'src/core/HandoffSchemas.ts',
+  replayPolicy: 'CRITICAL',
+  compatibilityPolicy: 'ADDITIVE_ONLY',
+  llmAuthoredFields: [],
+  deterministicEvidenceFields: [
+    'branches', 'selectedRoute', 'collectedErrors',
+    'succeededCount', 'failedCount'
+  ],
+  jsonSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    required: ['branches', 'selectedRoute', 'collectedErrors', 'succeededCount', 'failedCount'],
+    additionalProperties: true,
+    properties: {
+      branches: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['branchId', 'stateId', 'actionId', 'contextInstanceId', 'outcome', 'branchStatus', 'artifactRefs'],
+          additionalProperties: true,
+          properties: {
+            branchId:          { type: 'string', minLength: 1 },
+            stateId:           { type: 'string', minLength: 1 },
+            actionId:          { type: 'string', minLength: 1 },
+            contextInstanceId: { type: 'string', minLength: 1 },
+            outcome:           { type: 'string', enum: [...BRANCH_OUTCOME_VOCAB] },
+            branchStatus:      { type: 'string', enum: [...BRANCH_STATUS_VOCAB] },
+            artifactRefs: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['semanticPath', 'bytes', 'sha256'],
+                additionalProperties: false,
+                properties: {
+                  semanticPath: { type: 'string', minLength: 1 },
+                  bytes:        { type: 'integer', minimum: 0 },
+                  sha256:       { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' }
+                }
+              }
+            },
+            summary:     { type: 'string' },
+            errorDetail: { type: 'string' }
+          }
+        }
+      },
+      selectedRoute: {
+        type: 'string',
+        enum: [...BRANCH_OUTCOME_VOCAB]
+      },
+      collectedErrors: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['branchId', 'outcome'],
+          additionalProperties: false,
+          properties: {
+            branchId:    { type: 'string', minLength: 1 },
+            outcome:     { type: 'string', enum: [...BRANCH_OUTCOME_VOCAB] },
+            errorDetail: { type: 'string' }
+          }
+        }
+      },
+      succeededCount: { type: 'integer', minimum: 0 },
+      failedCount:    { type: 'integer', minimum: 0 }
+    }
+  },
+  positiveFixtures: [
+    {
+      label: 'all-success join (two branches, zero errors)',
+      value: {
+        branches: [
+          {
+            branchId: 'branch-tests',
+            stateId: 'PostImplementation',
+            actionId: 'run-tests',
+            contextInstanceId: 'ctx-1',
+            outcome: 'SUCCESS',
+            branchStatus: 'succeeded',
+            artifactRefs: []
+          },
+          {
+            branchId: 'branch-review',
+            stateId: 'PostImplementation',
+            actionId: 'code-review',
+            contextInstanceId: 'ctx-2',
+            outcome: 'SUCCESS',
+            branchStatus: 'succeeded',
+            artifactRefs: []
+          }
+        ],
+        selectedRoute: 'SUCCESS',
+        collectedErrors: [],
+        succeededCount: 2,
+        failedCount: 0
+      }
+    },
+    {
+      label: 'multi-error join (one success, one failure)',
+      value: {
+        branches: [
+          {
+            branchId: 'branch-tests',
+            stateId: 'PostImplementation',
+            actionId: 'run-tests',
+            contextInstanceId: 'ctx-1',
+            outcome: 'SUCCESS',
+            branchStatus: 'succeeded',
+            artifactRefs: []
+          },
+          {
+            branchId: 'branch-review',
+            stateId: 'PostImplementation',
+            actionId: 'code-review',
+            contextInstanceId: 'ctx-2',
+            outcome: 'FAILURE',
+            branchStatus: 'failed',
+            artifactRefs: [],
+            errorDetail: 'Blocking review findings'
+          }
+        ],
+        selectedRoute: 'FAILURE',
+        collectedErrors: [
+          { branchId: 'branch-review', outcome: 'FAILURE', errorDetail: 'Blocking review findings' }
+        ],
+        succeededCount: 1,
+        failedCount: 1
+      }
+    }
+  ],
+  negativeFixtures: [
+    {
+      label: 'missing required branches array',
+      value: {
+        selectedRoute: 'SUCCESS',
+        collectedErrors: [],
+        succeededCount: 0,
+        failedCount: 0
+      }
+    },
+    {
+      label: 'selectedRoute outside declared vocabulary',
+      value: {
+        branches: [],
+        selectedRoute: 'DONE',
+        collectedErrors: [],
+        succeededCount: 0,
+        failedCount: 0
+      }
+    },
+    {
+      label: 'negative succeededCount',
+      value: {
+        branches: [],
+        selectedRoute: 'SUCCESS',
+        collectedErrors: [],
+        succeededCount: -1,
+        failedCount: 0
+      }
+    },
+    {
+      label: 'collectedErrors entry missing required branchId',
+      value: {
+        branches: [],
+        selectedRoute: 'FAILURE',
+        collectedErrors: [{ outcome: 'FAILURE' }],
+        succeededCount: 0,
+        failedCount: 1
+      }
+    }
+  ]
+};
+
+// ---------------------------------------------------------------------------
 // Anti-drift boundary inventory for handoff schemas (dsm2.3)
 //
 // Every HandoffSchemaId value MUST be in HANDOFF_BOUNDARY_IDS and registered.
@@ -611,6 +1057,8 @@ schemaRegistry.register(checkpointAcceptedEventEntry);
 schemaRegistry.register(terminalTransitionEntry);
 schemaRegistry.register(workerCommandEntry);
 schemaRegistry.register(workerCompletionEntry);
+schemaRegistry.register(fanoutBranchResultEntry);
+schemaRegistry.register(fanoutJoinedOutcomeEntry);
 
 // ---------------------------------------------------------------------------
 // validateHandoffPayload — the shared boundary validator
@@ -681,5 +1129,224 @@ export function validateHandoffPayload(
       schemaId,
       failurePath: failurePath.length > 0 ? failurePath : ['validation failed (no AJV error details)']
     }
+  };
+}
+
+// ---------------------------------------------------------------------------
+// pi-experiment-6q0y.40: Fan-out branch validation and deterministic reducer
+// ---------------------------------------------------------------------------
+
+/**
+ * Structured validation error for fan-out branch validation (AC3).
+ */
+export interface FanoutValidationError {
+  /** Category of the validation failure. */
+  kind:
+    | 'INVALID_SCHEMA'
+    | 'DUPLICATE_BRANCH_ID'
+    | 'UNKNOWN_OUTCOME'
+    | 'MISSING_ARTIFACT'
+    | 'HASH_MISMATCH'
+    | 'UNVERIFIABLE_PATH';
+  /** Branch ID that caused the error (if applicable). */
+  branchId?: string;
+  /** Human-readable description. */
+  message: string;
+}
+
+/**
+ * Result of validateFanoutBranches.
+ */
+export type FanoutValidationResult =
+  | { valid: true }
+  | { valid: false; errors: FanoutValidationError[] };
+
+/**
+ * Validate a set of fan-out branch results before joining (AC3).
+ *
+ * Rejects:
+ *   - Any branch that fails schema validation (INVALID_SCHEMA)
+ *   - Duplicate branch IDs (DUPLICATE_BRANCH_ID)
+ *   - Outcome values outside the declared vocabulary (UNKNOWN_OUTCOME)
+ *   - Branch artifact refs that are missing required fields (MISSING_ARTIFACT)
+ *   - Branch artifact sha256 that does not match a provided content map (HASH_MISMATCH)
+ *   - Semantic artifact paths that are empty/blank (UNVERIFIABLE_PATH)
+ *
+ * DEFERRED (amq0 consumer): verifier-verdict-based rejection is NOT implemented
+ * here — that requires the amq0 consumer chain (yhec/zog2.4/zog2.11) which is
+ * blocked. The schema validates structural shape only; verifier-verdict consumption
+ * must be added by the amq0 consumer bead.
+ *
+ * @param branches   Array of unknown payloads to validate as FanoutBranchResult.
+ * @param sha256Map  Optional map from semanticPath → expected sha256. When
+ *                   provided, artifact sha256 values are cross-checked against
+ *                   the map and HASH_MISMATCH is raised on discrepancy.
+ */
+export function validateFanoutBranches(
+  branches: unknown[],
+  sha256Map?: ReadonlyMap<string, string>
+): FanoutValidationResult {
+  const errors: FanoutValidationError[] = [];
+  const seenIds = new Set<string>();
+  const branchValidator = schemaRegistry.getValidator(HandoffSchemaId.FANOUT_BRANCH_RESULT);
+
+  for (let i = 0; i < branches.length; i++) {
+    const branch = branches[i];
+
+    // 1. Schema validation (INVALID_SCHEMA)
+    const schemaValid = branchValidator(branch);
+    if (!schemaValid) {
+      const branchId = branch && typeof branch === 'object'
+        ? String((branch as Record<string, unknown>).branchId ?? `branch[${i}]`)
+        : `branch[${i}]`;
+      const errPaths = (branchValidator.errors || [])
+        .map(e => e.instancePath ? `${e.instancePath}: ${e.message}` : (e.message ?? 'validation failed'))
+        .join('; ');
+      errors.push({ kind: 'INVALID_SCHEMA', branchId, message: `Schema validation failed: ${errPaths}` });
+      continue; // skip further checks for this branch — schema is not trustworthy
+    }
+
+    const b = branch as FanoutBranchResult;
+
+    // 2. Duplicate branch IDs (DUPLICATE_BRANCH_ID)
+    if (seenIds.has(b.branchId)) {
+      errors.push({
+        kind: 'DUPLICATE_BRANCH_ID',
+        branchId: b.branchId,
+        message: `Duplicate branch ID "${b.branchId}"`
+      });
+    } else {
+      seenIds.add(b.branchId);
+    }
+
+    // 3. Outcome vocabulary check (UNKNOWN_OUTCOME) — redundant with schema enum, but explicit
+    if (!(BRANCH_OUTCOME_VOCAB as readonly string[]).includes(b.outcome)) {
+      errors.push({
+        kind: 'UNKNOWN_OUTCOME',
+        branchId: b.branchId,
+        message: `Branch outcome "${b.outcome}" is outside the declared vocabulary`
+      });
+    }
+
+    // 4. Artifact ref checks
+    for (const ref of b.artifactRefs) {
+      // UNVERIFIABLE_PATH: empty semantic path
+      if (!ref.semanticPath || !ref.semanticPath.trim()) {
+        errors.push({
+          kind: 'UNVERIFIABLE_PATH',
+          branchId: b.branchId,
+          message: 'Artifact ref has empty/blank semanticPath (unverifiable)'
+        });
+      }
+
+      // MISSING_ARTIFACT: zero bytes with a path (artifact declared but absent)
+      if (ref.bytes === 0 && ref.semanticPath) {
+        errors.push({
+          kind: 'MISSING_ARTIFACT',
+          branchId: b.branchId,
+          message: `Artifact "${ref.semanticPath}" declares 0 bytes — artifact appears missing`
+        });
+      }
+
+      // HASH_MISMATCH: sha256 does not match provided content map
+      if (sha256Map && ref.semanticPath) {
+        const expected = sha256Map.get(ref.semanticPath);
+        if (expected !== undefined && expected !== ref.sha256) {
+          errors.push({
+            kind: 'HASH_MISMATCH',
+            branchId: b.branchId,
+            message: `Artifact "${ref.semanticPath}" sha256 mismatch: expected ${expected}, got ${ref.sha256}`
+          });
+        }
+      }
+    }
+  }
+
+  if (errors.length > 0) return { valid: false, errors };
+  return { valid: true };
+}
+
+/**
+ * Configuration for the deterministic fan-out reducer.
+ * Only `collect` mode is supported in the initial implementation (AC5).
+ * Agent/LLM summarization reducers are explicitly rejected (AC5).
+ */
+export interface FanoutReducerConfig {
+  /**
+   * The reduction mode.  Only 'collect' is permitted in this implementation.
+   * Passing any other value throws FanoutReducerError at runtime.
+   */
+  mode: 'collect';
+}
+
+/** Thrown when reduceFanoutBranches is called with an unsupported mode. */
+export class FanoutReducerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FanoutReducerError';
+  }
+}
+
+/**
+ * Deterministically reduce a set of validated fan-out branch results into a
+ * FanoutJoinedOutcome (AC5, AC6).
+ *
+ * Mode: `collect` only (AC5).
+ *   - Preserves all branch results in sorted branch order (by branchId).
+ *   - Collects all non-SUCCESS outcomes in sorted branch order (AC6).
+ *   - Selects the joined route via the OUTCOME_PRECEDENCE table (AC6).
+ *   - This is a pure function — no I/O, no randomness, fully replay-equivalent (AC7).
+ *
+ * DEFERRED: verifier-verdict-based route overrides are NOT implemented here.
+ * The amq0 consumer bead must add that gate after the yhec/zog2.4/zog2.11 chain.
+ *
+ * @param branches  Validated FanoutBranchResult records (must all have passed
+ *                  validateFanoutBranches first; this function does NOT re-validate).
+ * @param config    Reducer configuration (mode must be 'collect').
+ */
+export function reduceFanoutBranches(
+  branches: readonly FanoutBranchResult[],
+  config: FanoutReducerConfig
+): FanoutJoinedOutcome {
+  if (config.mode !== 'collect') {
+    throw new FanoutReducerError(
+      `Unsupported reducer mode "${String(config.mode)}". ` +
+      `Only "collect" is supported in this implementation. ` +
+      `Agent/LLM summarization reducers are explicitly rejected for statechart progress decisions.`
+    );
+  }
+
+  // Sort branches deterministically by branchId for replay equivalence (AC7).
+  const sorted = [...branches].sort((a, b) => a.branchId.localeCompare(b.branchId));
+
+  // Collect all non-SUCCESS branch errors in sorted order (AC6).
+  const collectedErrors: FanoutJoinedOutcome['collectedErrors'] = sorted
+    .filter(b => b.outcome !== 'SUCCESS')
+    .map(b => ({
+      branchId: b.branchId,
+      outcome: b.outcome,
+      ...(b.errorDetail !== undefined ? { errorDetail: b.errorDetail } : {})
+    }));
+
+  // Select the joined route via precedence table (AC6).
+  // Find the highest-precedence outcome present among all branches.
+  const outcomeSet = new Set(sorted.map(b => b.outcome));
+  let selectedRoute: BranchOutcome = 'SUCCESS';
+  for (const candidate of OUTCOME_PRECEDENCE) {
+    if (outcomeSet.has(candidate)) {
+      selectedRoute = candidate;
+      break;
+    }
+  }
+
+  const succeededCount = sorted.filter(b => b.outcome === 'SUCCESS').length;
+  const failedCount = sorted.length - succeededCount;
+
+  return {
+    branches: sorted,
+    selectedRoute,
+    collectedErrors,
+    succeededCount,
+    failedCount
   };
 }
