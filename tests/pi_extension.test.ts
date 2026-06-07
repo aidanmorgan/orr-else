@@ -11,6 +11,7 @@ import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 import { BuiltInToolName, DomainEventName, EnvVars, NativePiToolName, PiEventName, PluginToolName, ProcessFlag } from '../src/constants/index.js';
 import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
+import { ContextInjector } from '../src/core/ContextInjector.js';
 
 function fakePi() {
   const tools: any[] = [];
@@ -4468,3 +4469,235 @@ states:
   });
 });
 
+// ── fwai: buildStateSystemPrompt tool prompt profile wiring ──────────────────
+//
+// Guards the production wiring in buildStateSystemPrompt:
+//   resolveToolPromptProfileId → describeConfiguredProjectTools(config, profileId)
+//   → protocolLabel suffixed with |profile:<id>
+//
+// The test drives the REAL entry (worker SESSION_START → BEFORE_AGENT_START)
+// and asserts on the assembled systemPrompt returned by BEFORE_AGENT_START.
+// Removing any of the three wiring steps from buildStateSystemPrompt makes
+// this test fail — it is NOT a re-implementation of the wiring.
+//
+// LOAD-BEARING assertions:
+//   (a) prompt contains profile-specialized tool description (not default) — fails
+//       if resolveToolPromptProfileId or the describeConfiguredProjectTools(profileId)
+//       call is removed from buildStateSystemPrompt.
+//   (b) protocolLabel passed to injectWithDigest CONTAINS 'profile:compact' for the
+//       profile run and does NOT contain 'profile:' for the no-profile run — fails
+//       if the `|profile:${profileId}` suffix is removed from protocolLabel in
+//       buildStateSystemPrompt.  Asserts the raw label string, not a recomputed digest.
+
+describe('fwai: buildStateSystemPrompt tool prompt profile wiring (real worker entry)', () => {
+  it('state-level toolPromptProfile specializes the assembled systemPrompt and uses a profile-suffixed protocolLabel (load-bearing)', async () => {
+    // This test drives the real buildStateSystemPrompt path via the worker
+    // SESSION_START → BEFORE_AGENT_START entry, NOT via a helper that re-implements
+    // the wiring. Removing any of these from buildStateSystemPrompt causes it to fail:
+    //   - resolveToolPromptProfileId call
+    //   - describeConfiguredProjectTools(config, profileId) call (passing profileId)
+    //   - protocolLabel |profile:<id> suffix
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-fwai-profile-wiring-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+
+    // Harness config with:
+    //   - one project tool with a verbose default description
+    //   - a compact profile overriding that description with a short, unique phrase
+    //   - the state selects the compact profile
+    // If buildStateSystemPrompt ignores the profile, the default description appears → assertion (a) fails.
+    const profileText = 'fwai-profile-specialized-unique-marker';
+    const defaultDescription = 'fwai-default-broad-description-that-must-not-appear-when-profile-active';
+
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+  toolPromptProfiles:
+    compact:
+      - tool: profile_tool
+        id: compact
+        text: "${profileText}"
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: profile_tool
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+    description: "${defaultDescription}"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    toolPromptProfile: compact
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+    let harness: ReturnType<typeof fakePi> | undefined;
+    let tempRoot2: string | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-fwai-profile-run';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'formulate-plan';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+
+      // ── Assertion (b) spy: intercept the identity passed to injectWithDigest ──
+      // FAILS if the protocolLabel |profile:<id> suffix is removed from
+      // buildStateSystemPrompt: the captured label will then lack 'profile:compact'
+      // and the assertion below fails.  The spy wraps the real method so the
+      // prompt assembly and digest computation still run normally.
+      const originalInjectWithDigest = ContextInjector.prototype.injectWithDigest;
+      const capturedProfileIdentity: { protocolLabel?: string }[] = [];
+      const profileSpy = vi.spyOn(ContextInjector.prototype, 'injectWithDigest').mockImplementation(
+        function (this: ContextInjector, ...args: Parameters<ContextInjector['injectWithDigest']>) {
+          capturedProfileIdentity.push(args[2] ?? {});
+          return originalInjectWithDigest.apply(this, args);
+        }
+      );
+
+      // Capture the return value — buildStateSystemPrompt assembles the prompt here.
+      // The return value is { systemPrompt: stableBlock + "\n\n" + volatileSuffix }.
+      const result = await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.(
+        { systemPrompt: '' },
+        { hasUI: false, cwd: worktreePath }
+      );
+
+      profileSpy.mockRestore();
+
+      // Wait for the STATE_PROMPT_ASSEMBLED event to be written to disk.
+      await new Promise(resolve => setTimeout(resolve, 60));
+
+      // ── Assertion (a): prompt is specialized by the profile ──────────────────
+      // FAILS if resolveToolPromptProfileId or the describeConfiguredProjectTools(profileId)
+      // call is removed from buildStateSystemPrompt (reverts to default description).
+      expect(result?.systemPrompt).toBeDefined();
+      expect(result.systemPrompt).toContain(profileText);
+      expect(result.systemPrompt).not.toContain(defaultDescription);
+
+      // ── Assertion (b): protocolLabel is profile-suffixed ──────────────────────
+      // The spy captured the identity object passed to ContextInjector.injectWithDigest.
+      // LOAD-BEARING: FAILS if the `|profile:${profileId}` suffix is removed from
+      // protocolLabel in buildStateSystemPrompt — the captured label then lacks
+      // 'profile:compact' and the expectation below fails.
+      // This does NOT recompute or mirror the digest: it asserts the raw label string
+      // that production builds before hashing.
+      expect(capturedProfileIdentity.length).toBeGreaterThan(0);
+      const profileLabel = capturedProfileIdentity[0].protocolLabel ?? '';
+      expect(profileLabel).toContain('profile:compact');
+
+      await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      harness = undefined;
+      await new Promise(resolve => setTimeout(resolve, 25));
+
+      // Run a second worker WITHOUT a profile selected to confirm the suffix is
+      // absent when no profile is active (negative guard).
+      tempRoot2 = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-fwai-noprofile-')));
+      const worktreePath2 = path.join(tempRoot2, 'worktree');
+      fs.mkdirSync(worktreePath2);
+      fs.writeFileSync(path.join(tempRoot2, 'harness.yaml'), `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: profile_tool
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+    description: "${defaultDescription}"
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: formulate-plan
+        type: prompt
+        prompt: "Plan the work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+
+      process.chdir(tempRoot2);
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot2;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath2;
+      process.env[EnvVars.BEAD_ID] = 'bd-fwai-noprofile-run';
+
+      const capturedNoprofileIdentity: { protocolLabel?: string }[] = [];
+      const noprofileSpy = vi.spyOn(ContextInjector.prototype, 'injectWithDigest').mockImplementation(
+        function (this: ContextInjector, ...args: Parameters<ContextInjector['injectWithDigest']>) {
+          capturedNoprofileIdentity.push(args[2] ?? {});
+          return originalInjectWithDigest.apply(this, args);
+        }
+      );
+
+      const harness2 = fakePi();
+      await orrElseExtension(harness2.pi);
+      await harness2.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot2 });
+      await harness2.callbacks[PiEventName.BEFORE_AGENT_START]?.(
+        { systemPrompt: '' },
+        { hasUI: false, cwd: worktreePath2 }
+      );
+      noprofileSpy.mockRestore();
+      await new Promise(resolve => setTimeout(resolve, 60));
+
+      // Negative guard: no-profile run must NOT have the suffix.
+      expect(capturedNoprofileIdentity.length).toBeGreaterThan(0);
+      const noprofileLabel = capturedNoprofileIdentity[0].protocolLabel ?? '';
+      expect(noprofileLabel).not.toContain('profile:');
+
+      await harness2.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      if (tempRoot2) fs.rmSync(tempRoot2, { recursive: true, force: true });
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
