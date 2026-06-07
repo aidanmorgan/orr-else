@@ -77,9 +77,74 @@ export interface PiToolObserverSession {
 
 /**
  * Subset of ExtensionSession needed by registerProviderRequestCap.
+ *
+ * recordedPromptDigestIds is populated by BEFORE_AGENT_START (in extension.ts)
+ * before any BEFORE_PROVIDER_REQUEST fires.  The set is cleared at each
+ * initializeWorkerRun so it holds exactly the digest IDs seen in the current
+ * run.  The hook reads the most-recently-added entry (last in insertion order)
+ * as the current stable-block digest ID.
  */
 export interface ProviderRequestCapSession {
   providerRequestCapRegistered: boolean;
+  /** Stable-block digest IDs recorded in the current worker run (insertion-ordered Set). */
+  recordedPromptDigestIds: Set<string>;
+}
+
+// ---------------------------------------------------------------------------
+// Provider prompt cache key constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Prefix for the deterministic prompt cache key injected into OpenAI Responses
+ * and OpenAI-Codex provider payloads.  The full key is
+ * `${PROVIDER_CACHE_KEY_PREFIX}:<stableBlockDigestId>`.
+ */
+export const PROVIDER_CACHE_KEY_PREFIX = 'orr-else';
+
+// ---------------------------------------------------------------------------
+// OpenAI Responses / Codex cache-key injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when `payload` is shaped like an OpenAI Responses or
+ * OpenAI-Codex request: it is a non-null object that carries an `input` field
+ * (the Responses-API messages array) instead of the Anthropic `messages` field,
+ * and does NOT carry a numeric `max_tokens` (the Anthropic-specific field that
+ * the existing max-token cap already guards).
+ *
+ * This is the minimal structural discriminator that avoids mutating Anthropic
+ * or unknown payloads while targeting both OpenAI provider shapes.
+ */
+export function isOpenAIResponsesPayload(payload: unknown): payload is Record<string, unknown> {
+  if (!payload || typeof payload !== 'object') return false;
+  const p = payload as Record<string, unknown>;
+  // Must have `input` (the Responses-API message list).
+  if (!('input' in p)) return false;
+  // Must NOT have a numeric `max_tokens` (Anthropic-exclusive field).
+  if (typeof p['max_tokens'] === 'number') return false;
+  return true;
+}
+
+/**
+ * Inject `prompt_cache_key` into an OpenAI Responses or Codex payload so the
+ * provider uses a deterministic, stable-block-derived cache key instead of a
+ * volatile session ID.
+ *
+ * The injected value is `orr-else:<digestId>`.  When `digestId` is undefined
+ * (BEFORE_AGENT_START has not yet fired — should not happen in practice) the
+ * payload is left unchanged.
+ *
+ * @returns The mutated payload, or `undefined` when no mutation was needed.
+ */
+export function injectOpenAIPromptCacheKey(
+  payload: Record<string, unknown>,
+  digestId: string | undefined
+): Record<string, unknown> | undefined {
+  if (!digestId) return undefined;
+  const cacheKey = `${PROVIDER_CACHE_KEY_PREFIX}:${digestId}`;
+  if (payload['prompt_cache_key'] === cacheKey) return undefined;
+  payload['prompt_cache_key'] = cacheKey;
+  return payload;
 }
 
 /**
@@ -126,13 +191,32 @@ export function registerProviderRequestCap(pi: ExtensionAPI, session: ProviderRe
       payload && typeof payload === 'object' ? (payload as { max_tokens?: unknown }).max_tokens : undefined;
     // capAnthropicMaxTokens guards payload shape internally (non-object → null).
     const capped = capAnthropicMaxTokens(payload as CappableAnthropicPayload, cap);
-    if (!capped) return undefined;
-    Logger.info(Component.ORR_ELSE, 'Capped Anthropic max_tokens to fit subscription included quota', {
-      originalMaxTokens,
-      cappedMaxTokens: cap,
-      thinkingBudget: capped.thinking?.budget_tokens
-    });
-    return capped;
+    if (capped) {
+      Logger.info(Component.ORR_ELSE, 'Capped Anthropic max_tokens to fit subscription included quota', {
+        originalMaxTokens,
+        cappedMaxTokens: cap,
+        thinkingBudget: capped.thinking?.budget_tokens
+      });
+      return capped;
+    }
+
+    // Inject a deterministic prompt_cache_key into OpenAI Responses / Codex payloads.
+    // The key is `orr-else:<stableBlockDigestId>` — stable across any two runs that
+    // share the same (project, config, state, model, tools, skills, rules, stable text)
+    // but differ in beadId, worktreePath, or date.  This lets the provider reuse its
+    // prompt cache across workers without relying on a volatile session ID.
+    if (isOpenAIResponsesPayload(payload)) {
+      // The most-recently-added entry in insertion-ordered recordedPromptDigestIds is
+      // the current run's digest (the set is cleared at initializeWorkerRun and
+      // populated by BEFORE_AGENT_START before any provider request fires).
+      const digestIds = session.recordedPromptDigestIds;
+      const digestId = digestIds.size > 0
+        ? [...digestIds].at(-1)
+        : undefined;
+      return injectOpenAIPromptCacheKey(payload, digestId) ?? undefined;
+    }
+
+    return undefined;
   });
 }
 
