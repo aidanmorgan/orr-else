@@ -35,6 +35,7 @@ import {
   resolveToolPromptProfileId
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
+import { runStartupProbeAdmission } from './plugins/projectTools/readinessProbe.js';
 import type { ToolResultBase } from './contract.js';
 import { ToolResultRecorder } from './core/ToolResultRecorder.js';
 import { registerBuiltInVerifiers } from './tools/index.js';
@@ -2508,6 +2509,17 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     return undefined;
   });
   validateRequiredToolVerifiers(startupConfig);
+
+  // ── AC5 (pi-experiment-8ieq): startup readiness-probe admission ───────────
+  // Run all probeContext:true tools before model/pi spawn. A required-tool probe
+  // that returns gateDec:'DENY' causes runStartupProbeAdmission to throw, which
+  // aborts startup here — before SignalingServer, Supervisor, and any pi spawn.
+  // Configs with no probeContext:true tools (e.g. cerdiwen) return immediately.
+  await runStartupProbeAdmission(
+    startupConfig.tools ?? [],
+    services.configLoader.getConfigPath(),
+    services.eventStore
+  );
 
   const server = new SignalingServer((event, ack) => handleTeammateEvent(pi, ctx, event, services, session, ack), runtimeObservability, services.eventStore, {
     allowedCustomEvents: startupConfig.statechart?.customEvents

@@ -391,6 +391,16 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['beadId', 'requestedBeadId', 'reason', 'exitCode']
   },
+
+  // ── Readiness probe (pi-experiment-8ieq) ──────────────────────────────────
+  // Required: tool, configPath, probeStatus, elapsedMs, gateDec.
+  // Optional: bytes, sha256, semanticArtifactPath (absent when probe did not
+  //   produce an output artifact — e.g. UNSAFE / TIMEOUT / OVERSIZE probes).
+  [DomainEventName.PROJECT_TOOL_PROBE_COMPLETED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['bytes', 'sha256', 'semanticArtifactPath']
+  },
 };
 
 /**
@@ -544,4 +554,11 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   [DomainEventName.BEAD_CREATED]: ['beadId'],
   [DomainEventName.HARNESS_STARTED]: [],
   [DomainEventName.HARNESS_STOPPED]: [],
+
+  // ── Readiness probe (pi-experiment-8ieq) ──────────────────────────────────
+  // All five fields are required: tool + configPath identify the probe;
+  // probeStatus + elapsedMs + gateDec are the deterministic outcome evidence.
+  [DomainEventName.PROJECT_TOOL_PROBE_COMPLETED]: [
+    'tool', 'configPath', 'probeStatus', 'elapsedMs', 'gateDec'
+  ],
 };

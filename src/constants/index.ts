@@ -332,7 +332,20 @@ export enum DomainEventName {
    * remains paused. Carries: { reason, pauseUntil }.  Bounds operator-visible
    * log volume during long capacity pauses.
    */
-  SCHEDULING_PAUSE_HEARTBEAT = 'SCHEDULING_PAUSE_HEARTBEAT'
+  SCHEDULING_PAUSE_HEARTBEAT = 'SCHEDULING_PAUSE_HEARTBEAT',
+  /**
+   * Emitted once per readiness-probe invocation (pi-experiment-8ieq).
+   *
+   * Carries: { tool, configPath, probeStatus, elapsedMs, gateDec,
+   *   bytes?, sha256?, semanticArtifactPath? }.
+   *
+   * probeStatus — 'PASSED' | 'REJECTED' | 'UNSAFE' | 'TIMEOUT' | 'OVERSIZE'
+   * gateDec     — 'ADMIT' | 'DENY'  (startup admission outcome for this probe)
+   *
+   * NO raw output bodies are logged — only byte count and sha256 digest.
+   * elapsedMs is provided by the injected Clock (deterministic in tests).
+   */
+  PROJECT_TOOL_PROBE_COMPLETED = 'PROJECT_TOOL_PROBE_COMPLETED'
 }
 
 export enum BeadsCliCommand {

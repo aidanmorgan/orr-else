@@ -843,6 +843,10 @@
               "optional": {
                 "type": "boolean"
               },
+              "probeContext": {
+                "type": "boolean",
+                "description": "When true, this tool is executed as a readiness probe at startup before model spend. Requires sideEffectContract.safeForReadinessProbe: true (pi-experiment-8ieq)."
+              },
               "validationRules": {
                 "type": "array",
                 "items": {
@@ -950,6 +954,10 @@
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
+              },
+              "probeContext": {
+                "type": "boolean",
+                "description": "When true, this tool is executed as a readiness probe at startup before model spend. Requires sideEffectContract.safeForReadinessProbe: true (pi-experiment-8ieq)."
               },
               "timeoutMs": {
                 "type": "integer",
@@ -1259,6 +1267,10 @@
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
+              },
+              "probeContext": {
+                "type": "boolean",
+                "description": "When true, this tool is executed as a readiness probe at startup before model spend. Requires sideEffectContract.safeForReadinessProbe: true (pi-experiment-8ieq)."
               },
               "successExitCodes": {
                 "type": "array",

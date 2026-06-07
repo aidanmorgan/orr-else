@@ -775,6 +775,32 @@ export class ConfigLoader {
    * A tool that omits serializationKey but declares serialize:true has an
    * inconsistent contract and is rejected at startup.
    */
+  /**
+   * pi-experiment-8ieq: Reject tools that declare probeContext:true without also
+   * declaring sideEffectContract.safeForReadinessProbe: true.
+   *
+   * A tool marked probeContext:true will be executed at startup before model
+   * spend. Executing it without the safe-for-probe declaration is unsafe. The
+   * harness rejects this combination at config-load time so operators get a
+   * deterministic startup error rather than a runtime probe failure.
+   */
+  private validateProbeContextDeclarations(config: HarnessConfig): void {
+    for (const tool of config.tools || []) {
+      const t = tool as { probeContext?: boolean; sideEffectContract?: { safeForReadinessProbe?: boolean } };
+      if (t.probeContext === true) {
+        if (t.sideEffectContract?.safeForReadinessProbe !== true) {
+          const configPath = this.getConfigPath();
+          throw new Error(
+            `Tool "${tool.name}" (${configPath}) declares probeContext: true but ` +
+            `its sideEffectContract.safeForReadinessProbe is not true. ` +
+            `Readiness probes must only run tools declared safe for probing. ` +
+            `Add sideEffectContract: { safeForReadinessProbe: true, ... } to the tool declaration.`
+          );
+        }
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1123,6 +1149,7 @@ export class ConfigLoader {
       this.validateWorktreePolicy(config);
     }
     this.validateSerializeRequiresSerializationKey(config);
+    this.validateProbeContextDeclarations(config);
     this.validateNoDuplicateStableArrays(config);
     this.validateToolPromptProfiles(config);
     this.validateStateContextPolicies(config);

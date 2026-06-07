@@ -1,0 +1,317 @@
+/**
+ * readinessProbe — pi-experiment-8ieq
+ *
+ * Startup/readiness executor for project-tool probes.
+ *
+ * DESIGN CONSTRAINTS:
+ *   - Only tools that declare sideEffectContract.safeForReadinessProbe: true
+ *     may be executed. Tools without the declaration (no contract) are blocked
+ *     fail-closed: they CANNOT be probed. Tools with safeForReadinessProbe:
+ *     false are also blocked.
+ *   - No model/provider calls are made. The executor shells out to the tool's
+ *     command only (COMMAND-type tools). MCP tools are not supported as probes.
+ *   - Execution is bounded by PROBE_TIMEOUT_MS and PROBE_MAX_OUTPUT_BYTES.
+ *     A probe that exceeds either limit is terminated and reported as TIMEOUT
+ *     or OVERSIZE.
+ *   - No raw output bodies are logged. Only byte count and SHA-256 of the
+ *     output are recorded in the emitted event.
+ *   - elapsedMs is measured using the injected Clock (deterministic in tests).
+ */
+import { createHash } from 'node:crypto';
+import { execa } from 'execa';
+import type { ProjectToolConfig, ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
+import type { Clock } from '../../core/Clock.js';
+import { systemClock } from '../../core/Clock.js';
+import type { EventStore } from '../../core/EventStore.js';
+import { DomainEventName, ProjectToolType } from '../../constants/index.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/** Default per-probe execution timeout (ms). */
+export const PROBE_TIMEOUT_MS = 30_000;
+
+/** Maximum raw output size accepted from a probe command (bytes). */
+export const PROBE_MAX_OUTPUT_BYTES = 512 * 1024; // 512 KiB
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a single readiness-probe execution attempt.
+ *
+ * PASSED   — tool ran, output within bounds.
+ * REJECTED — tool ran but exited with a non-zero code.
+ * UNSAFE   — tool lacks the safe-for-probe declaration; body never executed.
+ * TIMEOUT  — tool exceeded PROBE_TIMEOUT_MS; process was terminated.
+ * OVERSIZE — tool output exceeded PROBE_MAX_OUTPUT_BYTES; output rejected.
+ */
+export type ProbeStatus = 'PASSED' | 'REJECTED' | 'UNSAFE' | 'TIMEOUT' | 'OVERSIZE';
+
+/**
+ * Startup admission gate decision for this probe.
+ *
+ * ADMIT — probe passed (or is not required); harness may start.
+ * DENY  — probe failed and the tool is required; harness must NOT start.
+ */
+export type GateDecision = 'ADMIT' | 'DENY';
+
+export interface ProbeResult {
+  tool: string;
+  configPath: string;
+  probeStatus: ProbeStatus;
+  elapsedMs: number;
+  gateDec: GateDecision;
+  /** Raw output byte count (absent when probe did not run). */
+  bytes?: number;
+  /** SHA-256 hex digest of the raw output (absent when probe did not run). */
+  sha256?: string | undefined;
+  /** Semantic artifact path returned by the tool (absent when not applicable). */
+  semanticArtifactPath?: string;
+  /** Human-readable diagnostic for UNSAFE/TIMEOUT/OVERSIZE/REJECTED outcomes. */
+  diagnostic?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Safe-for-probe gate
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when a tool is declared safe for readiness probing.
+ *
+ * A tool is probe-safe only when its sideEffectContract explicitly declares
+ * safeForReadinessProbe: true. Missing contract or safeForReadinessProbe:
+ * false both fail-closed (gate blocks execution).
+ */
+export function isProbeDeclarationSafe(definition: ProjectToolConfig): boolean {
+  const contract = definition.sideEffectContract;
+  return contract !== undefined && contract.safeForReadinessProbe === true;
+}
+
+// ---------------------------------------------------------------------------
+// Core probe executor
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a single declared-safe project-tool probe.
+ *
+ * SAFETY INVARIANTS (load-bearing — tests prove each):
+ *   1. UNSAFE gate: when isProbeDeclarationSafe returns false, the tool body
+ *      is NEVER executed. The function returns immediately with probeStatus
+ *      UNSAFE and gateDec DENY. A spy/flag on the command proves the body
+ *      never ran.
+ *   2. TIMEOUT: the AbortController fires after PROBE_TIMEOUT_MS; execa
+ *      receives the cancelSignal and terminates the subprocess.
+ *   3. OVERSIZE: execa is given maxBuffer:maxOutputBytes so excess output
+ *      causes execa to set result.isMaxBuffer; the probe is reported as
+ *      OVERSIZE (the subprocess is not separately aborted — execa handles it).
+ *   4. No provider calls: the executor ONLY runs the tool's declared command
+ *      (execa). No model SDK, no HTTP to any LLM endpoint.
+ *
+ * @param definition  The configured project tool to probe.
+ * @param configPath  Path to the harness.yaml that declared this tool.
+ * @param required    Whether this tool's probe is required for startup admission.
+ * @param eventStore  EventStore to record the PROJECT_TOOL_PROBE_COMPLETED event.
+ * @param clock       Injected clock for deterministic elapsedMs.
+ * @param overrides   Optional overrides for test injection (timeout, maxBytes).
+ */
+export async function runReadinessProbe(
+  definition: ProjectToolConfig,
+  configPath: string,
+  required: boolean,
+  eventStore: EventStore,
+  clock: Clock = systemClock,
+  overrides?: { timeoutMs?: number; maxOutputBytes?: number }
+): Promise<ProbeResult> {
+  const timeoutMs = overrides?.timeoutMs ?? PROBE_TIMEOUT_MS;
+  const maxOutputBytes = overrides?.maxOutputBytes ?? PROBE_MAX_OUTPUT_BYTES;
+
+  const startMs = clock.now();
+
+  // ── Gate 1: safe-for-probe declaration ────────────────────────────────────
+  if (!isProbeDeclarationSafe(definition)) {
+    const elapsedMs = clock.now() - startMs;
+    const diagnostic = definition.sideEffectContract === undefined
+      ? `Tool "${definition.name}" (${configPath}) has no sideEffectContract — missing declaration blocks readiness probing fail-closed.`
+      : `Tool "${definition.name}" (${configPath}) declares sideEffectContract.safeForReadinessProbe: false — blocked from readiness probing.`;
+    const result: ProbeResult = {
+      tool: definition.name,
+      configPath,
+      probeStatus: 'UNSAFE',
+      elapsedMs,
+      gateDec: required ? 'DENY' : 'ADMIT',
+      diagnostic
+    };
+    await emitProbeEvent(eventStore, result);
+    return result;
+  }
+
+  // ── Gate 2: only COMMAND-type tools are executable as probes ──────────────
+  if (definition.type !== ProjectToolType.COMMAND) {
+    const elapsedMs = clock.now() - startMs;
+    const diagnostic = `Tool "${definition.name}" (${configPath}) is type "${definition.type}" — only COMMAND tools can be executed as readiness probes.`;
+    const result: ProbeResult = {
+      tool: definition.name,
+      configPath,
+      probeStatus: 'UNSAFE',
+      elapsedMs,
+      gateDec: required ? 'DENY' : 'ADMIT',
+      diagnostic
+    };
+    await emitProbeEvent(eventStore, result);
+    return result;
+  }
+
+  const commandDef = definition as ProjectCommandToolConfig;
+  const command = commandDef.command;
+  const defaultArgs: string[] = Array.isArray(commandDef.defaultArgs)
+    ? commandDef.defaultArgs.map(String)
+    : [];
+
+  // ── Bounded execution ─────────────────────────────────────────────────────
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+
+  let probeStatus: ProbeStatus = 'PASSED';
+  let rawOutput = '';
+  let timedOut = false;
+
+  try {
+    const result = await execa(command, defaultArgs, {
+      cancelSignal: ac.signal,
+      reject: false,
+      encoding: 'utf8',
+      maxBuffer: maxOutputBytes,
+      timeout: timeoutMs + 1000 // belt-and-suspenders; ac.abort fires first
+    });
+
+    if (result.isCanceled) {
+      timedOut = true;
+    } else if (result.isMaxBuffer) {
+      probeStatus = 'OVERSIZE';
+    } else {
+      rawOutput = (result.stdout ?? '') + (result.stderr ?? '');
+      if (result.exitCode !== 0) {
+        probeStatus = 'REJECTED';
+      }
+    }
+  } catch {
+    timedOut = true;
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (timedOut) {
+    probeStatus = 'TIMEOUT';
+  }
+
+  const elapsedMs = clock.now() - startMs;
+  const passed = probeStatus === 'PASSED';
+
+  // ── Compute evidence (only when probe ran and output is within bounds) ─────
+  let bytes: number | undefined;
+  let sha256: string | undefined;
+  if (passed || probeStatus === 'REJECTED') {
+    bytes = Buffer.byteLength(rawOutput, 'utf8');
+    sha256 = createHash('sha256').update(rawOutput).digest('hex');
+  }
+
+  const gateDec: GateDecision = (!passed && required) ? 'DENY' : 'ADMIT';
+
+  const diagnostic = passed ? undefined : buildDiagnostic(definition.name, configPath, probeStatus, timeoutMs, maxOutputBytes);
+
+  const probeResult: ProbeResult = {
+    tool: definition.name,
+    configPath,
+    probeStatus,
+    elapsedMs,
+    gateDec,
+    ...(bytes !== undefined ? { bytes } : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
+    ...(diagnostic !== undefined ? { diagnostic } : {})
+  };
+
+  await emitProbeEvent(eventStore, probeResult);
+  return probeResult;
+}
+
+// ---------------------------------------------------------------------------
+// Startup admission
+// ---------------------------------------------------------------------------
+
+/**
+ * Run all configured probeContext:true tools and gate harness startup.
+ *
+ * Any REQUIRED tool whose probe returns gateDec:'DENY' prevents startup.
+ * Returns a summary of all probe results and a top-level admission decision.
+ *
+ * This is the AC5 entry point: call before model spend. If admission is
+ * denied, throw with a deterministic message naming the failing tools.
+ */
+export async function runStartupProbeAdmission(
+  tools: ProjectToolConfig[],
+  configPath: string,
+  eventStore: EventStore,
+  clock: Clock = systemClock,
+  overrides?: { timeoutMs?: number; maxOutputBytes?: number }
+): Promise<{ admitted: boolean; results: ProbeResult[] }> {
+  const probeTools = tools.filter(t => (t as { probeContext?: boolean }).probeContext === true);
+  if (probeTools.length === 0) return { admitted: true, results: [] };
+
+  const results: ProbeResult[] = [];
+  for (const tool of probeTools) {
+    const required = (tool as { required?: boolean }).required !== false;
+    const r = await runReadinessProbe(tool, configPath, required, eventStore, clock, overrides);
+    results.push(r);
+  }
+
+  const denied = results.filter(r => r.gateDec === 'DENY');
+  if (denied.length === 0) return { admitted: true, results };
+
+  const names = denied.map(r => `"${r.tool}" (${r.probeStatus})`).join(', ');
+  throw new Error(
+    `Harness startup blocked by failed readiness probe(s) at "${configPath}": ${names}. ` +
+    `Fix the failing tool(s) before starting the harness (model spend is prevented until probes pass).`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+async function emitProbeEvent(eventStore: EventStore, result: ProbeResult): Promise<void> {
+  const payload: Record<string, unknown> = {
+    tool: result.tool,
+    configPath: result.configPath,
+    probeStatus: result.probeStatus,
+    elapsedMs: result.elapsedMs,
+    gateDec: result.gateDec
+  };
+  if (result.bytes !== undefined) payload.bytes = result.bytes;
+  if (result.sha256 !== undefined) payload.sha256 = result.sha256;
+  if (result.semanticArtifactPath !== undefined) payload.semanticArtifactPath = result.semanticArtifactPath;
+  await eventStore.record(DomainEventName.PROJECT_TOOL_PROBE_COMPLETED, payload).catch(() => {});
+}
+
+function buildDiagnostic(
+  toolName: string,
+  configPath: string,
+  probeStatus: ProbeStatus,
+  timeoutMs: number,
+  maxOutputBytes: number
+): string {
+  switch (probeStatus) {
+    case 'TIMEOUT':
+      return `Tool "${toolName}" (${configPath}) probe timed out after ${timeoutMs}ms.`;
+    case 'OVERSIZE':
+      return `Tool "${toolName}" (${configPath}) probe output exceeded ${maxOutputBytes} bytes limit.`;
+    case 'REJECTED':
+      return `Tool "${toolName}" (${configPath}) probe exited with a non-zero exit code.`;
+    case 'UNSAFE':
+      return `Tool "${toolName}" (${configPath}) is not declared safe for readiness probing.`;
+    default:
+      return `Tool "${toolName}" (${configPath}) probe failed with status "${probeStatus}".`;
+  }
+}
