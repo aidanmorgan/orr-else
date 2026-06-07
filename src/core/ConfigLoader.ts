@@ -628,6 +628,67 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.6: Reject configs with duplicate project tool names,
+   * duplicate skill paths, or duplicate worker extension paths.
+   *
+   * Duplicates produce non-deterministic prompt text and break cache-key stability.
+   * Rejecting them at startup catches config bugs early and ensures the stable
+   * block ordering canonicalisation (sort-before-render) remains sound.
+   */
+  private validateNoDuplicateStableArrays(config: HarnessConfig): void {
+    // Duplicate project tool names (config.tools[].name).
+    const toolNamesSeen = new Set<string>();
+    const dupToolNames: string[] = [];
+    for (const tool of config.tools || []) {
+      if (toolNamesSeen.has(tool.name)) {
+        dupToolNames.push(tool.name);
+      }
+      toolNamesSeen.add(tool.name);
+    }
+    if (dupToolNames.length > 0) {
+      throw new Error(
+        `config.tools declares duplicate project tool name(s): ${dupToolNames.map(n => `"${n}"`).join(', ')}. ` +
+        `Each tool name must appear at most once. ` +
+        `Remove or rename the duplicate tool declaration(s).`
+      );
+    }
+
+    // Duplicate skill paths (settings.pi.skillPaths).
+    const skillPathsSeen = new Set<string>();
+    const dupSkillPaths: string[] = [];
+    for (const sp of config.settings.pi?.skillPaths || []) {
+      if (skillPathsSeen.has(sp)) {
+        dupSkillPaths.push(sp);
+      }
+      skillPathsSeen.add(sp);
+    }
+    if (dupSkillPaths.length > 0) {
+      throw new Error(
+        `settings.pi.skillPaths declares duplicate skill path(s): ${dupSkillPaths.map(p => `"${p}"`).join(', ')}. ` +
+        `Each skill path must appear at most once. ` +
+        `Remove the duplicate path(s).`
+      );
+    }
+
+    // Duplicate worker extension paths (settings.pi.workerExtensions).
+    const extSeen = new Set<string>();
+    const dupExts: string[] = [];
+    for (const ext of config.settings.pi?.workerExtensions || []) {
+      if (extSeen.has(ext)) {
+        dupExts.push(ext);
+      }
+      extSeen.add(ext);
+    }
+    if (dupExts.length > 0) {
+      throw new Error(
+        `settings.pi.workerExtensions declares duplicate worker extension path(s): ${dupExts.map(p => `"${p}"`).join(', ')}. ` +
+        `Each worker extension path must appear at most once. ` +
+        `Remove the duplicate path(s).`
+      );
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
     this.validateNoDeprecatedTools(config);
@@ -635,6 +696,7 @@ export class ConfigLoader {
     this.validateTraceabilityOwner(config);
     this.validateWorktreePolicy(config);
     this.validateSerializeRequiresSerializationKey(config);
+    this.validateNoDuplicateStableArrays(config);
     lintActiveToolSets(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));

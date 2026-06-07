@@ -127,10 +127,12 @@ export class ContextInjector {
   // ---------------------------------------------------------------------------
 
   private assembleParts(prompt: string, context: PromptContext): { stableBlock: string; volatileSuffix: string } {
-    const docs = (context.documentationPaths || []).map(p => `- ${path.basename(p)}: ${p}`).join('\n');
-    const rules = (context.rulePaths || []).map(p => `- ${path.basename(p)}: ${p}`).join('\n');
+    // Sort paths before rendering so the stable block is canonical regardless
+    // of YAML/source declaration order (cache key stability).
+    const docs = [...(context.documentationPaths || [])].sort().map(p => `- ${path.basename(p)}: ${p}`).join('\n');
+    const rules = [...(context.rulePaths || [])].sort().map(p => `- ${path.basename(p)}: ${p}`).join('\n');
     const harnessConfigPath = context.configPath || 'N/A';
-    const skills = (context.skillPaths || []).map(p => `- ${path.basename(path.dirname(p))}`).join('\n') || 'None provided.';
+    const skills = [...(context.skillPaths || [])].sort().map(p => `- ${path.basename(path.dirname(p))}`).join('\n') || 'None provided.';
 
     // -------------------------------------------------------------------------
     // STABLE BLOCK — everything that depends ONLY on project/config/state/toolset.

@@ -413,7 +413,9 @@ export function describeConfiguredProjectTools(
   const tools = config.tools || [];
   if (tools.length === 0) return '';
 
-  const descriptions = tools.map(tool => {
+  // Sort by name so prompt text is canonical regardless of YAML declaration order.
+  const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  const descriptions = sortedTools.map(tool => {
     const transport = tool.type === ProjectToolType.MCP
       ? ` MCP server \`${(tool as ProjectMcpToolConfig).server}\`.`
       : tool.type === ProjectToolType.EXTENSION
