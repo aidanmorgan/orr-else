@@ -4,15 +4,6 @@ import { BeadStatus, EventName, RestartKind } from "../constants/index.js";
 import { HarnessConfig } from "./ConfigLoader.js";
 import { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// ── Statechart outcome-vocabulary defaults ───────────────────────────────────
-// These reproduce today's hard-coded literals when no statechart block is
-// present in the config.  All helpers below are pure, config-reads only.
-
-const DEFAULT_TERMINAL_STATES: readonly string[] = [BeadStatus.COMPLETED];
-const DEFAULT_ADVANCE_OUTCOMES: readonly string[] = [EventName.SUCCESS];
-const DEFAULT_FAILED_OUTCOMES: readonly string[] = [EventName.FAILURE];
-const DEFAULT_BLOCKED_OUTCOMES: readonly string[] = [EventName.BLOCKED];
-
 // ── Typed fail-closed outcome model (1elr.2) ─────────────────────────────────
 
 /**
@@ -67,57 +58,69 @@ export function classifyOutcome(
 /**
  * Returns true iff `stateId` is a configured terminal state.
  *
- * Default (no statechart block): ['completed'].
+ * Requires a statechart block with terminalStates — configs without one are
+ * rejected at startup by ConfigLoader.
  */
 export function isTerminalState(stateId: string, config: HarnessConfig): boolean {
-  const terminals = config.statechart?.terminalStates ?? DEFAULT_TERMINAL_STATES;
-  return terminals.includes(stateId);
+  const sc = config.statechart;
+  if (!sc) {
+    throw new Error(
+      'isTerminalState: config has no statechart block. ' +
+      'All configs must declare a statechart — rejected at ConfigLoader.load().'
+    );
+  }
+  return sc.terminalStates.includes(stateId);
 }
 
 /**
  * Classifies an outcome string against the configured vocabulary.
  *
  * Returns:
- *  - 'advance'  — outcome is in advanceOutcomes (default ['SUCCESS'])
- *  - 'failed'   — outcome is in failedOutcomes  (default ['FAILURE'])
- *  - 'blocked'  — outcome is in blockedOutcomes (default ['BLOCKED'])
+ *  - 'advance'  — outcome is in advanceOutcomes
+ *  - 'failed'   — outcome is in failedOutcomes
+ *  - 'blocked'  — outcome is in blockedOutcomes
  *  - 'custom'   — outcome is in customOutcomes
  *  - 'failed'   — fallback for all missing, falsy, or undeclared outcomes (fail-closed)
  *
- * With no explicit outcome vocabulary the defaults (SUCCESS/FAILURE/BLOCKED)
- * are used. Missing/falsy/unknown outcomes always return 'failed' — there is
- * no legacy advance fallback.
+ * Requires a statechart block — configs without one are rejected at startup by
+ * ConfigLoader. Missing/falsy/unknown outcomes always return 'failed' — there
+ * is no default vocabulary fallback.
  */
 export function outcomeCategory(
   outcome: string | null | undefined,
   config: HarnessConfig
 ): 'advance' | 'failed' | 'blocked' | 'custom' {
-  // Missing/falsy outcomes always fail closed — no legacy advance fallback.
+  // Missing/falsy outcomes always fail closed — no advance fallback.
   if (!outcome || typeof outcome !== 'string') {
     return 'failed';
   }
 
   const sc = config.statechart;
-  const advance = sc?.advanceOutcomes ?? DEFAULT_ADVANCE_OUTCOMES;
-  const failed = sc?.failedOutcomes ?? DEFAULT_FAILED_OUTCOMES;
-  const blocked = sc?.blockedOutcomes ?? DEFAULT_BLOCKED_OUTCOMES;
-  const custom = sc?.customOutcomes ?? [];
+  if (!sc) {
+    // No statechart block: all outcomes fail closed. Configs without a statechart
+    // are rejected at load time; this path is only reachable from in-memory test fixtures.
+    return 'failed';
+  }
+
+  const advance = sc.advanceOutcomes ?? [];
+  const failed = sc.failedOutcomes ?? [];
+  const blocked = sc.blockedOutcomes ?? [];
+  const custom = sc.customOutcomes ?? [];
 
   const normalized = outcome.toUpperCase();
   if (advance.map(o => o.toUpperCase()).includes(normalized)) return 'advance';
   if (failed.map(o => o.toUpperCase()).includes(normalized)) return 'failed';
   if (blocked.map(o => o.toUpperCase()).includes(normalized)) return 'blocked';
   if (custom.map(o => o.toUpperCase()).includes(normalized)) return 'custom';
-  // Unknown outcome: always fail closed — no legacy advance fallback.
+  // Unknown outcome: always fail closed — no default vocabulary fallback.
   return 'failed';
 }
 
 /**
  * Returns true iff `outcome` is in the configured advance-outcomes set.
  *
- * Default (no statechart block): equivalent to `outcome === 'SUCCESS'`.
- * A falsy/missing outcome returns false — matching the old literal-comparison
- * semantics where `undefined === 'SUCCESS'` was false.
+ * A falsy/missing outcome returns false. Requires a statechart block — configs
+ * without one are rejected at startup by ConfigLoader.
  */
 export function isAdvanceOutcome(outcome: string | null | undefined, config: HarnessConfig): boolean {
   if (!outcome || typeof outcome !== 'string') return false;
@@ -127,34 +130,28 @@ export function isAdvanceOutcome(outcome: string | null | undefined, config: Har
 /**
  * Builds the set of declared outcome keys for a config.
  *
- * Returns the full declared outcome vocabulary (always non-null). When the
- * statechart block has no explicit outcome lists, the default vocabulary
- * (SUCCESS/FAILURE/BLOCKED) is used so that unknown outcomes still fail
- * closed rather than defaulting to advance.
+ * Returns null for a statechart block that declares ONLY terminalStates/initialState —
+ * this signals "no explicit vocab" and the caller treats all outcomes as permissive.
+ * Such configs are rejected at ConfigLoader.load() time; the null return here exists
+ * only for in-memory test fixtures that construct a statechart with only terminalStates.
  *
- * Returns null only for a statechart block that declares ONLY
- * terminalStates/initialState — this signals "no explicit vocab, use
- * defaults" and is distinct from a missing statechart block.
+ * Returns a Set of the full declared vocabulary when at least one outcome list is
+ * declared. Each outcome is stored upper-cased for case-insensitive matching.
  *
- * Note: a missing statechart block is rejected at ConfigLoader.load() time;
- * this function is a runtime helper and must behave correctly regardless.
+ * Note: configs without a statechart block are rejected at ConfigLoader.load() time.
+ * Passing such a config at runtime returns null (treated as permissive by the caller).
  */
 export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | null {
   const sc = config.statechart;
   if (!sc) {
-    // No statechart block: use the default vocabulary so unknown outcomes
-    // do not silently advance. Configs without a statechart are rejected at
-    // load time; this handles in-memory configs used in tests.
-    return new Set([
-      ...DEFAULT_ADVANCE_OUTCOMES,
-      ...DEFAULT_FAILED_OUTCOMES,
-      ...DEFAULT_BLOCKED_OUTCOMES,
-    ].map(o => o.toUpperCase()));
+    // No statechart block: no declared vocabulary. Configs without a statechart are
+    // rejected at load time; return null so in-memory test fixtures behave permissively.
+    return null;
   }
   // Only activate strict mode when the author explicitly declared at least one
   // outcome list.  A block with only terminalStates/initialState is still
   // considered "no explicit vocab" and returns null so the caller can apply
-  // default vocabulary behaviour.
+  // permissive behaviour.
   const hasExplicitVocab =
     sc.advanceOutcomes !== undefined ||
     sc.failedOutcomes !== undefined ||
@@ -162,9 +159,9 @@ export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | 
     sc.customOutcomes !== undefined;
   if (!hasExplicitVocab) return null;
   return new Set([
-    ...(sc.advanceOutcomes ?? DEFAULT_ADVANCE_OUTCOMES),
-    ...(sc.failedOutcomes ?? DEFAULT_FAILED_OUTCOMES),
-    ...(sc.blockedOutcomes ?? DEFAULT_BLOCKED_OUTCOMES),
+    ...(sc.advanceOutcomes ?? []),
+    ...(sc.failedOutcomes ?? []),
+    ...(sc.blockedOutcomes ?? []),
     ...(sc.customOutcomes ?? []),
   ].map(o => o.toUpperCase()));
 }
@@ -172,8 +169,9 @@ export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | 
 /**
  * Returns true iff `outcome` is in the declared vocabulary for this config.
  *
- * Always strict: only declared outcomes are valid. A config without an
- * explicit outcome vocabulary uses the default set (SUCCESS/FAILURE/BLOCKED).
+ * Always strict: only declared outcomes are valid. A statechart block with only
+ * terminalStates/initialState (no outcome lists) returns null from
+ * declaredOutcomeVocabulary and is treated as permissive (all outcomes declared).
  *
  * Restart events (HARNESS_RESTART / CONTEXT_RESTART) are harness-internal and
  * are always considered declared regardless of mode.

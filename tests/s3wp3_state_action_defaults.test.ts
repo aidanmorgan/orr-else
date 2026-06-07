@@ -71,6 +71,13 @@ function makeConfig(overrides: Partial<HarnessConfig['settings']> = {}): Harness
       ...overrides
     },
     scheduler: { weights: { waitTime: 1, executionTime: 0.5, progress: 2, penalty: 1 } },
+    statechart: {
+      terminalStates: ['completed'],
+      advanceOutcomes: ['SUCCESS'],
+      failedOutcomes: ['FAILURE'],
+      blockedOutcomes: ['BLOCKED'],
+      customOutcomes: []
+    },
     states: {}
   } as unknown as HarnessConfig;
 }

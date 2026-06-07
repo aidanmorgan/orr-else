@@ -16,7 +16,7 @@
  * AC6  validationGates selectors reference valid states; exactly one selector mode
  *       (states / beforeStates / afterStates) per gate.
  * AC7  Exported OutcomeCategory enum + branded OutcomeName; missing/falsy/unknown
- *       outcomes fail closed in strict mode; legacy mode is permissive.
+ *       outcomes fail closed; outcomes absent from admitted vocabulary cannot advance.
  * AC8  All failures occur via ConfigLoader.load() → BEFORE Supervisor.start.
  */
 
@@ -630,19 +630,73 @@ describe('AC7: OutcomeCategory enum + branded OutcomeName', () => {
     expect(classifyOutcome('missing_typo', strictCfg)).toBe(OutcomeCategory.FAILED);
   });
 
-  it('AC7: classifyOutcome for missing/falsy outcome always returns FAILED (fail-closed, no legacy advance fallback)', () => {
+  it('AC7: classifyOutcome for missing/falsy outcome always returns FAILED (fail-closed, no default advance fallback)', () => {
     const strictCfg = makeStrictConfig();
-    const legacyCfg = makeLegacyConfig();
 
-    // In strict mode (explicit vocab), null/undefined/empty are unknown → FAILED
+    // null/undefined/empty are always fail-closed → FAILED regardless of vocab
     expect(classifyOutcome(null as any, strictCfg)).toBe(OutcomeCategory.FAILED);
     expect(classifyOutcome(undefined as any, strictCfg)).toBe(OutcomeCategory.FAILED);
     expect(classifyOutcome('', strictCfg)).toBe(OutcomeCategory.FAILED);
+  });
 
-    // In legacy/no-vocab config, missing/falsy also → FAILED (fail-closed; no legacy advance fallback)
-    expect(classifyOutcome(null as any, legacyCfg)).toBe(OutcomeCategory.FAILED);
-    expect(classifyOutcome(undefined as any, legacyCfg)).toBe(OutcomeCategory.FAILED);
-    expect(classifyOutcome('', legacyCfg)).toBe(OutcomeCategory.FAILED);
+  it('AC7 (load-bearing): outcome absent from admitted statechart vocabulary cannot advance — no default fallback', () => {
+    // This test is LOAD-BEARING against the fallback removal in 80z6.
+    //
+    // Part A — explicit vocab (proves "absent outcome cannot advance" for a declared vocab,
+    // but does NOT distinguish master-vs-branch because both return FAILED here):
+    const strictCfg = makeStrictConfig(); // advanceOutcomes:[ADVANCE], failedOutcomes:[REWORK], blockedOutcomes:[HALT]
+
+    // 'SUCCESS' is NOT in this config's advanceOutcomes → must NOT classify as advance
+    expect(classifyOutcome('SUCCESS', strictCfg)).toBe(OutcomeCategory.FAILED);
+    expect(classifyOutcome('SUCCESS', strictCfg)).not.toBe(OutcomeCategory.ADVANCE);
+
+    // 'FAILURE' is NOT declared either → FAILED (fail-closed, not via default vocab)
+    expect(classifyOutcome('FAILURE', strictCfg)).toBe(OutcomeCategory.FAILED);
+
+    // Only the admitted advance outcome can actually advance
+    expect(classifyOutcome('ADVANCE', strictCfg)).toBe(OutcomeCategory.ADVANCE);
+
+    // Part B — NO outcome vocabulary (terminalStates only, no advanceOutcomes/failedOutcomes/
+    // blockedOutcomes declared). This is the DISTINGUISHING assertion:
+    //   • On master (before 80z6): classifyOutcome('SUCCESS', noVocabCfg) returned ADVANCE
+    //     because outcomeCategory used `sc?.advanceOutcomes ?? DEFAULT_ADVANCE_OUTCOMES`
+    //     where DEFAULT_ADVANCE_OUTCOMES = ['SUCCESS'].
+    //   • On the branch (after 80z6): the default constants were deleted; outcomeCategory
+    //     uses `sc.advanceOutcomes ?? []` so the advance list is empty and SUCCESS → FAILED.
+    //
+    // ConfigLoader.load() rejects such configs at load time (statechart must have outcome
+    // lists), so we construct this in-memory to unit-test FlowManager in isolation.
+    const noVocabCfg: HarnessConfig = {
+      settings: {
+        maxConcurrentSlots: 2,
+        handoverTemplate: 'test',
+        agentTurnTimeoutMs: 3600000,
+        processReapIntervalMs: 60000,
+        startState: 'Alpha',
+        harnessRestartEvent: 'HARNESS_RESTART',
+        contextRestartEvent: 'CONTEXT_RESTART',
+        defaultModel: 'gpt-4',
+        defaultProvider: 'openai',
+        modelProviders: {},
+        stateContextRotThreshold: 10,
+        harnessContextRotThreshold: 5
+      },
+      scheduler: { weights: { waitTime: 1, executionTime: 0.5, progress: 2, penalty: 1 } },
+      statechart: {
+        terminalStates: ['done']
+        // No advanceOutcomes, failedOutcomes, blockedOutcomes, customOutcomes declared.
+        // Before 80z6: DEFAULT_ADVANCE_OUTCOMES=['SUCCESS'] meant classifyOutcome('SUCCESS',…) → ADVANCE.
+        // After 80z6: no fallback → classifyOutcome('SUCCESS',…) → FAILED.
+      },
+      states: {}
+    } as unknown as HarnessConfig;
+
+    // MUST return FAILED: no advance vocabulary → no outcome can advance.
+    // If DEFAULT_ADVANCE_OUTCOMES fallback were re-introduced, this would return ADVANCE and FAIL.
+    expect(classifyOutcome('SUCCESS', noVocabCfg)).toBe(OutcomeCategory.FAILED);
+    expect(classifyOutcome('SUCCESS', noVocabCfg)).not.toBe(OutcomeCategory.ADVANCE);
+    expect(classifyOutcome('FAILURE', noVocabCfg)).toBe(OutcomeCategory.FAILED);
+    expect(classifyOutcome('BLOCKED', noVocabCfg)).toBe(OutcomeCategory.FAILED);
   });
 
   it('AC7: OutcomeName brand is a type-level string', () => {
@@ -898,26 +952,3 @@ function makeStrictConfig(): HarnessConfig {
   } as unknown as HarnessConfig;
 }
 
-function makeLegacyConfig(): HarnessConfig {
-  return {
-    settings: {
-      maxConcurrentSlots: 2,
-      handoverTemplate: 'test',
-      agentTurnTimeoutMs: 3600000,
-      processReapIntervalMs: 60000,
-      startState: 'Alpha',
-      harnessRestartEvent: 'HARNESS_RESTART',
-      contextRestartEvent: 'CONTEXT_RESTART',
-      defaultModel: 'gpt-4',
-      defaultProvider: 'openai',
-      modelProviders: {},
-      stateContextRotThreshold: 10,
-      harnessContextRotThreshold: 5
-    },
-    scheduler: { weights: { waitTime: 1, executionTime: 0.5, progress: 2, penalty: 1 } },
-    // NO statechart block → legacy mode
-    states: {
-      Alpha: { transitions: { SUCCESS: 'done' }, on: {} } as any
-    }
-  } as unknown as HarnessConfig;
-}
