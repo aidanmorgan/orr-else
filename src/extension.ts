@@ -25,7 +25,6 @@ import escapeStringRegexp from 'escape-string-regexp';
 import { teammatePlugin, TeammateFactory } from './plugins/teammates.js';
 import type { MergeResult } from './core/RuntimeServices.js';
 import {
-  allowedDeprecatedToolNames,
   describeConfiguredProjectTools,
   executeConfiguredProjectTool,
   getConfiguredProjectToolNames,
@@ -1542,10 +1541,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   const stateInstructions = services.instructionLoader.assemble(activeRun.state, config);
   const protocol = services.protocolInjector.inject(activeRun.state, config);
   const checklistProtocol = services.protocolParser.generatePrompt(activeRun.requiredItems);
-  const projectTools = describeConfiguredProjectTools(
-    config,
-    allowedDeprecatedToolNames(activeRun.state.requiredTools, activeRun.action.requiredTools)
-  );
+  const projectTools = describeConfiguredProjectTools(config);
   const actionPrompt = activeRun.action.prompt || '';
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;

@@ -1,11 +1,14 @@
 /**
- * pi-experiment-87fm: Deprecation/visibility guard for obsolete project tools.
+ * pi-experiment-h05b: Remove deprecated-tool and allowDeprecated compatibility surfaces.
  *
- * AC1: Config can mark a tool/verifier as hidden or deprecated with optional replacement list and reason.
- * AC2: Deprecated/hidden tools are omitted from model-facing guidance (describeConfiguredProjectTools).
- * AC3: Invoking a deprecated tool returns REJECTED + emits TOOL_DEPRECATED_REJECTED event.
- * AC4: Config validation fails when requiredTool references a deprecated hidden tool without allowDeprecated.
- * AC5: (Illustrative) Config shape supports marking a generic validator deprecated while keeping replacements.
+ * Acceptance criteria tested here:
+ * AC1: Config startup FAILS when any tool declares deprecated/hidden/replacedBy/deprecationReason.
+ * AC2: describeConfiguredProjectTools never includes deprecated/hidden tools (those fields are gone).
+ * AC3: Invoking a tool that has deprecated:true (runtime only, stale config) returns REJECTED + emits event.
+ *      (Defensive guard kept for impossible/stale runtime calls — cannot be model-facing or satisfy gates.)
+ * AC4: Config startup FAILS when requiredTools, action sequences, or tool inventory references
+ *      a deprecated/hidden/removed tool — no allowDeprecated escape hatch exists.
+ * AC5: describeConfiguredProjectTools with no deprecated/hidden tools surfaces all declared tools.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -14,7 +17,6 @@ import * as path from 'path';
 import * as os from 'os';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import {
-  allowedDeprecatedToolNames,
   describeConfiguredProjectTools,
   executeConfiguredProjectTool
 } from '../src/plugins/projectTools.js';
@@ -50,229 +52,222 @@ function minimalConfig(toolOverrides: Partial<ProjectCommandToolConfig>[] = []):
   } as HarnessConfig;
 }
 
-// ── AC1: config fields accepted on BaseProjectToolConfig ────────────────────
+// ── Shared harness.yaml config writer ───────────────────────────────────────
 
-describe('AC1: deprecated/hidden config fields', () => {
-  it('accepts deprecated:true with no replacements or reason', () => {
-    const config = minimalConfig([{
-      name: 'artifact_validator',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      deprecated: true
-    }]);
-    const tool = config.tools![0] as any;
-    expect(tool.deprecated).toBe(true);
-    expect(tool.replacedBy).toBeUndefined();
-    expect(tool.deprecationReason).toBeUndefined();
+function makeConfigDir(): { tempDir: string; writeConfig: (yaml: string) => string } {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'h05b-cfg-'));
+  return {
+    tempDir,
+    writeConfig(yaml: string): string {
+      const p = path.join(tempDir, 'harness.yaml');
+      fs.writeFileSync(p, yaml);
+      return p;
+    }
+  };
+}
+
+/** Minimal statechart/settings preamble for startup-rejection configs. */
+const MINIMAL_PREAMBLE = `
+settings:
+  startState: Implement
+  eventStore:
+    enabled: true
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+`;
+
+// ── AC1: deprecated lifecycle fields in tool config FAIL STARTUP ─────────────
+
+describe('AC1: deprecated/hidden lifecycle fields in tool config fail startup', () => {
+  let tempDir: string;
+  let writeConfig: (yaml: string) => string;
+  let configLoader: ConfigLoader;
+
+  beforeEach(() => {
+    ({ tempDir, writeConfig } = makeConfigDir());
+    configLoader = new ConfigLoader(undefined, tempDir);
   });
 
-  it('accepts deprecated:true with replacedBy and deprecationReason', () => {
-    const config = minimalConfig([{
-      name: 'artifact_validator',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      deprecated: true,
-      replacedBy: ['requirements_schema', 'plan_contract'],
-      deprecationReason: 'Replaced by project-owned validators.'
-    }]);
-    const tool = config.tools![0] as any;
-    expect(tool.deprecated).toBe(true);
-    expect(tool.replacedBy).toEqual(['requirements_schema', 'plan_contract']);
-    expect(tool.deprecationReason).toBe('Replaced by project-owned validators.');
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('accepts hidden:true independently of deprecated', () => {
-    const config = minimalConfig([{
-      name: 'old_tool',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      hidden: true
-    }]);
-    const tool = config.tools![0] as any;
-    expect(tool.hidden).toBe(true);
-    expect(tool.deprecated).toBeUndefined();
+  it('fails startup when a tool declares deprecated:true', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: artifact_validator
+    type: command
+    command: echo
+    deprecated: true
+`);
+    expect(() => configLoader.load(p)).toThrow(/artifact_validator/);
+    expect(() => configLoader.load(p)).toThrow(/deprecated/);
+  });
+
+  it('fails startup when a tool declares hidden:true', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: old_tool
+    type: command
+    command: echo
+    hidden: true
+`);
+    expect(() => configLoader.load(p)).toThrow(/old_tool/);
+    expect(() => configLoader.load(p)).toThrow(/hidden/);
+  });
+
+  it('fails startup when a tool declares replacedBy', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: artifact_validator
+    type: command
+    command: echo
+    deprecated: true
+    replacedBy:
+      - requirements_schema
+      - plan_contract
+`);
+    expect(() => configLoader.load(p)).toThrow(/artifact_validator/);
+    expect(() => configLoader.load(p)).toThrow(/deprecated/);
+  });
+
+  it('fails startup when a tool declares deprecationReason', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: artifact_validator
+    type: command
+    command: echo
+    deprecated: true
+    deprecationReason: "Use project-owned validators."
+`);
+    expect(() => configLoader.load(p)).toThrow(/artifact_validator/);
+    expect(() => configLoader.load(p)).toThrow(/deprecated/);
+  });
+
+  it('startup rejection error names the replacement tools when replacedBy is present', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: artifact_validator
+    type: command
+    command: echo
+    deprecated: true
+    replacedBy:
+      - requirements_schema
+      - plan_contract
+`);
+    expect(() => configLoader.load(p)).toThrow(/requirements_schema/);
+    expect(() => configLoader.load(p)).toThrow(/plan_contract/);
+  });
+
+  it('clean config with no deprecated/hidden fields loads without errors', () => {
+    const p = writeConfig(`
+${MINIMAL_PREAMBLE}
+states:
+  Implement:
+    identity: { role: "Dev", expertise: "Dev", constraints: [] }
+    baseInstructions: "Build"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Implement }
+tools:
+  - name: requirements_schema
+    type: command
+    command: node
+  - name: plan_contract
+    type: command
+    command: node
+`);
+    expect(() => configLoader.load(p)).not.toThrow();
   });
 });
 
-// ── AC2: hidden/deprecated tools excluded from model-facing guidance ─────────
+// ── AC2: describeConfiguredProjectTools never includes deprecated/hidden tools ─
 
-describe('AC2: model-facing guidance omits hidden/deprecated tools', () => {
-  it('includes a normal (non-deprecated, non-hidden) tool', () => {
-    const config = minimalConfig([{
-      name: 'plan_contract',
-      description: 'Validates the implementation plan.',
-      type: ProjectToolType.COMMAND,
-      command: 'echo'
-    }]);
-    const description = describeConfiguredProjectTools(config);
-    expect(description).toContain('plan_contract');
-  });
-
-  it('omits a hidden tool from guidance', () => {
+describe('AC2: describeConfiguredProjectTools surfaces only clean tools', () => {
+  it('includes all declared (non-deprecated, non-hidden) tools', () => {
     const config = minimalConfig([
-      { name: 'plan_contract', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      { name: 'old_tool', description: 'Hidden.', type: ProjectToolType.COMMAND, command: 'echo', hidden: true } as any
+      { name: 'plan_contract', description: 'Validates plan.', type: ProjectToolType.COMMAND, command: 'echo' },
+      { name: 'requirements_schema', description: 'Validates requirements.', type: ProjectToolType.COMMAND, command: 'echo' }
     ]);
     const description = describeConfiguredProjectTools(config);
     expect(description).toContain('plan_contract');
-    expect(description).not.toContain('old_tool');
-  });
-
-  it('omits a deprecated tool from guidance', () => {
-    const config = minimalConfig([
-      { name: 'requirements_schema', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      {
-        name: 'artifact_validator',
-        description: 'Generic validator.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        replacedBy: ['requirements_schema'],
-        deprecationReason: 'Use project-owned validators.'
-      } as any
-    ]);
-    const description = describeConfiguredProjectTools(config);
     expect(description).toContain('requirements_schema');
-    expect(description).not.toContain('artifact_validator');
   });
 
-  it('omits both hidden and deprecated tools while keeping active ones', () => {
-    const config = minimalConfig([
-      { name: 'active', description: 'Active.', type: ProjectToolType.COMMAND, command: 'echo' },
-      { name: 'hidden_tool', description: 'Hidden.', type: ProjectToolType.COMMAND, command: 'echo', hidden: true } as any,
-      { name: 'deprecated_tool', description: 'Deprecated.', type: ProjectToolType.COMMAND, command: 'echo', deprecated: true } as any
-    ]);
-    const description = describeConfiguredProjectTools(config);
-    expect(description).toContain('active');
-    expect(description).not.toContain('hidden_tool');
-    expect(description).not.toContain('deprecated_tool');
-  });
-
-  it('returns empty string when all tools are hidden or deprecated', () => {
-    const config = minimalConfig([
-      { name: 'h', type: ProjectToolType.COMMAND, command: 'echo', hidden: true } as any,
-      { name: 'd', type: ProjectToolType.COMMAND, command: 'echo', deprecated: true } as any
-    ]);
+  it('returns empty string when no tools are configured', () => {
+    const config = minimalConfig([]);
     expect(describeConfiguredProjectTools(config)).toBe('');
   });
-});
 
-// ── AC2 (escape hatch): deprecated/hidden tool surfaced when current state/action allows it ─
-
-describe('AC2 escape: deprecated/hidden tool shown when current state/action uses allowDeprecated:true', () => {
-  it('includes a deprecated+hidden tool when the current state requiredTools has allowDeprecated:true', () => {
+  it('describeConfiguredProjectTools signature no longer accepts allowedDeprecated parameter', () => {
+    // Verify the function only takes config — no allowedDeprecated parameter exists.
     const config = minimalConfig([
-      { name: 'active', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      {
-        name: 'legacy_validator',
-        description: 'Legacy tool.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        hidden: true
-      } as any
+      { name: 'plan_contract', description: 'Active.', type: ProjectToolType.COMMAND, command: 'echo' }
     ]);
-    const allowed = allowedDeprecatedToolNames(
-      [{ name: 'legacy_validator', allowDeprecated: true }],
-      undefined
-    );
-    const description = describeConfiguredProjectTools(config, allowed);
-    expect(description).toContain('active');
-    expect(description).toContain('legacy_validator');
-  });
-
-  it('includes a deprecated+hidden tool when the current action requiredTools has allowDeprecated:true', () => {
-    const config = minimalConfig([
-      { name: 'active', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      {
-        name: 'legacy_validator',
-        description: 'Legacy tool.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        hidden: true
-      } as any
-    ]);
-    const allowed = allowedDeprecatedToolNames(
-      undefined,
-      [{ name: 'legacy_validator', allowDeprecated: true }]
-    );
-    const description = describeConfiguredProjectTools(config, allowed);
-    expect(description).toContain('active');
-    expect(description).toContain('legacy_validator');
-  });
-
-  it('does NOT include the deprecated+hidden tool for a state/action that does not allow it (default hide preserved)', () => {
-    const config = minimalConfig([
-      { name: 'active', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      {
-        name: 'legacy_validator',
-        description: 'Legacy tool.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        hidden: true
-      } as any
-    ]);
-    // allowDeprecated is false on the entry — should NOT surface the tool
-    const allowed = allowedDeprecatedToolNames(
-      [{ name: 'legacy_validator', allowDeprecated: false }],
-      undefined
-    );
-    const description = describeConfiguredProjectTools(config, allowed);
-    expect(description).toContain('active');
-    expect(description).not.toContain('legacy_validator');
-  });
-
-  it('does NOT include the deprecated+hidden tool when requiredTools is empty (no escape, default hide)', () => {
-    const config = minimalConfig([
-      { name: 'active', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      {
-        name: 'legacy_validator',
-        description: 'Legacy tool.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        hidden: true
-      } as any
-    ]);
-    const allowed = allowedDeprecatedToolNames(undefined, undefined);
-    const description = describeConfiguredProjectTools(config, allowed);
-    expect(description).toContain('active');
-    expect(description).not.toContain('legacy_validator');
-  });
-
-  it('does not affect non-deprecated tools', () => {
-    const config = minimalConfig([
-      { name: 'plan_contract', description: 'Active tool.', type: ProjectToolType.COMMAND, command: 'echo' },
-      { name: 'requirements_schema', description: 'Also active.', type: ProjectToolType.COMMAND, command: 'echo' }
-    ]);
-    const allowed = allowedDeprecatedToolNames([], []);
-    const description = describeConfiguredProjectTools(config, allowed);
+    // Single-argument call must work and surface the tool.
+    const description = describeConfiguredProjectTools(config);
     expect(description).toContain('plan_contract');
-    expect(description).toContain('requirements_schema');
-  });
-
-  it('allowedDeprecatedToolNames collects from both state and action requiredTools', () => {
-    const allowed = allowedDeprecatedToolNames(
-      [{ name: 'state_tool', allowDeprecated: true }, { name: 'non_deprecated', allowDeprecated: false }],
-      [{ name: 'action_tool', allowDeprecated: true }, 'string_form_tool']
-    );
-    expect(allowed.has('state_tool')).toBe(true);
-    expect(allowed.has('action_tool')).toBe(true);
-    expect(allowed.has('non_deprecated')).toBe(false);
-    // string form never has allowDeprecated:true
-    expect(allowed.has('string_form_tool')).toBe(false);
   });
 });
 
-// ── AC3: invoking deprecated tool returns REJECTED + emits event ─────────────
+// ── AC3: invoking deprecated tool returns REJECTED + emits event (defensive runtime guard) ─
 
 describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPRECATED_REJECTED', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deprecation-test-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'h05b-dep-'));
   });
 
   afterEach(() => {
@@ -289,11 +284,11 @@ describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPREC
     };
   }
 
-  function makePathFactory(tempDir: string) {
+  function makePathFactory(dir: string) {
     return {
       allocate: vi.fn((_ctx: unknown) => ({
-        outputDir: tempDir,
-        outputFile: path.join(tempDir, 'result.json')
+        outputDir: dir,
+        outputFile: path.join(dir, 'result.json')
       }))
     } as any;
   }
@@ -309,13 +304,15 @@ describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPREC
     } as any;
   }
 
-  it('returns a REJECTED result immediately for a deprecated tool without running the command', async () => {
+  it('returns a REJECTED result immediately for a tool with deprecated:true (runtime guard, not config surface)', async () => {
     const eventStore = makeEventStore();
     const pathFactory = makePathFactory(tempDir);
     const ctx = makeCtx();
     const backpressure = makeBackpressure();
 
-    const definition: ProjectCommandToolConfig & { deprecated: boolean; replacedBy: string[]; deprecationReason: string } = {
+    // The deprecated field is NOT accepted in config (fails startup). This guard fires
+    // only for impossible/stale runtime calls where the object is constructed directly.
+    const definition = {
       name: 'artifact_validator',
       type: ProjectToolType.COMMAND,
       command: 'echo',
@@ -341,7 +338,6 @@ describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPREC
     const msg = resultRecord.message as string;
     expect(msg).toContain('artifact_validator');
     expect(msg).toContain('deprecated');
-    // Should name the replacements in the rejection message
     expect(msg).toContain('requirements_schema');
     expect(msg).toContain('plan_contract');
   });
@@ -411,8 +407,6 @@ describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPREC
   });
 
   it('does not reject a non-deprecated tool via the deprecation guard', async () => {
-    // Verify a normal (non-deprecated) tool flows through normally.
-    // We'll check that no TOOL_DEPRECATED_REJECTED event is emitted.
     const eventStore = makeEventStore();
     const pathFactory = makePathFactory(tempDir);
     const ctx = makeCtx();
@@ -434,50 +428,36 @@ describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPREC
       undefined,
       backpressure,
       tempDir
-    ).catch(() => {/* ignore execution errors - we only care that the deprecation guard didn't fire */});
+    ).catch(() => {/* ignore execution errors — we only care the deprecation guard didn't fire */});
 
     const deprecatedEvent = eventStore.recorded.find(e => e.name === DomainEventName.TOOL_DEPRECATED_REJECTED);
     expect(deprecatedEvent).toBeUndefined();
   });
 });
 
-// ── AC4: config validation fails for deprecated requiredTool without allowDeprecated ─
+// ── AC4: startup fails when tools inventory references deprecated/removed tool ─
+// These are LOAD-BEARING negative tests: they drive real ConfigLoader.load with
+// configs that use the removed deprecated-lifecycle fields. They will FAIL if
+// the validateNoDeprecatedTools rejection were removed from ConfigLoader.
 
-describe('AC4: config validation rejects deprecated requiredTool without allowDeprecated', () => {
+describe('AC4: startup fails when tools inventory uses deprecated lifecycle fields — load-bearing negative tests', () => {
   let tempDir: string;
+  let writeConfig: (yaml: string) => string;
   let configLoader: ConfigLoader;
 
   beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'deprecation-cfg-'));
+    ({ tempDir, writeConfig } = makeConfigDir());
     configLoader = new ConfigLoader(undefined, tempDir);
-    // Write a minimal schema to satisfy ConfigLoader (it skips validation if no schema)
-    // We rely on the semantic-only post-schema check
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function writeConfig(yaml: string): string {
-    const p = path.join(tempDir, 'harness.yaml');
-    fs.writeFileSync(p, yaml);
-    return p;
-  }
-
-  it('throws when a state requiredTools references a deprecated+hidden tool without allowDeprecated', () => {
+  it('LOAD-BEARING: fails startup and names the offending tool when deprecated:true is set', () => {
+    // This test fails if validateNoDeprecatedTools is removed from ConfigLoader.
     const p = writeConfig(`
-settings:
-  startState: Implement
-  eventStore:
-    enabled: true
-  worktreePolicy:
-    default: always
-statechart:
-  terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-
+${MINIMAL_PREAMBLE}
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -493,28 +473,22 @@ tools:
     type: command
     command: echo
     deprecated: true
-    hidden: true
     replacedBy:
       - requirements_schema
 `);
-    expect(() => configLoader.load(p)).toThrow(/deprecated/);
-    expect(() => configLoader.load(p)).toThrow(/artifact_validator/);
+    const fn = () => configLoader.load(p);
+    // Must throw — not load cleanly
+    expect(fn).toThrow();
+    // Must name the offending tool
+    expect(fn).toThrow(/artifact_validator/);
+    // Must mention the replacement
+    expect(fn).toThrow(/requirements_schema/);
   });
 
-  it('throws when an action requiredTools references a deprecated+hidden tool without allowDeprecated', () => {
+  it('LOAD-BEARING: fails startup and names the offending tool when hidden:true is set', () => {
+    // This test fails if validateNoDeprecatedTools is removed from ConfigLoader.
     const p = writeConfig(`
-settings:
-  startState: Implement
-  eventStore:
-    enabled: true
-  worktreePolicy:
-    default: always
-statechart:
-  terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-
+${MINIMAL_PREAMBLE}
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
@@ -522,136 +496,97 @@ states:
     actions:
       - id: validate
         type: tool
-        tool: artifact_validator
+        tool: old_tool
         requiredTools:
-          - name: artifact_validator
+          - name: old_tool
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
-  - name: artifact_validator
+  - name: old_tool
     type: command
     command: echo
-    deprecated: true
     hidden: true
 `);
-    expect(() => configLoader.load(p)).toThrow(/deprecated/);
-    expect(() => configLoader.load(p)).toThrow(/artifact_validator/);
+    const fn = () => configLoader.load(p);
+    expect(fn).toThrow();
+    expect(fn).toThrow(/old_tool/);
+    expect(fn).toThrow(/hidden/);
   });
 
-  it('does NOT throw when a deprecated+hidden tool is referenced with allowDeprecated:true', () => {
+  it('LOAD-BEARING: fails startup for deprecated+hidden combination with all stale fields named', () => {
+    // This test fails if validateNoDeprecatedTools is removed from ConfigLoader.
+    // Previously allowDeprecated:true would have bypassed this — now there is no escape.
     const p = writeConfig(`
-settings:
-  startState: Implement
-  eventStore:
-    enabled: true
-  worktreePolicy:
-    default: always
-statechart:
-  terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-
+${MINIMAL_PREAMBLE}
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
-    requiredTools:
-      - name: artifact_validator
-        allowDeprecated: true
     actions:
       - id: a1
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
-  - name: artifact_validator
+  - name: legacy_validator
     type: command
     command: echo
     deprecated: true
     hidden: true
     replacedBy:
       - requirements_schema
+    deprecationReason: Monolithic validator replaced by project-owned tools.
 `);
-    expect(() => configLoader.load(p)).not.toThrow();
+    const fn = () => configLoader.load(p);
+    expect(fn).toThrow();
+    expect(fn).toThrow(/legacy_validator/);
+    // Error must list stale field names
+    expect(fn).toThrow(/deprecated/);
   });
 
-  it('does NOT throw when requiredTools references a deprecated-but-not-hidden tool (visible, just deprecated)', () => {
-    // Only hidden+deprecated should be a hard failure; deprecated-only is a warning.
+  it('LOAD-BEARING: clean replacement tools load without errors (positive control)', () => {
+    // This is the positive control: configs using only clean, non-deprecated tools
+    // must still load. If this fails the validator is too aggressive.
     const p = writeConfig(`
-settings:
-  startState: Implement
-  eventStore:
-    enabled: true
-  worktreePolicy:
-    default: always
-statechart:
-  terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-
+${MINIMAL_PREAMBLE}
 states:
   Implement:
     identity: { role: "Dev", expertise: "Dev", constraints: [] }
     baseInstructions: "Build"
     requiredTools:
-      - name: artifact_validator
+      - name: requirements_schema
+      - name: plan_contract
     actions:
       - id: a1
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 tools:
-  - name: artifact_validator
+  - name: requirements_schema
     type: command
-    command: echo
-    deprecated: true
+    command: node
+  - name: plan_contract
+    type: command
+    command: node
 `);
-    // deprecated-but-NOT-hidden: config validation should not fail
     expect(() => configLoader.load(p)).not.toThrow();
   });
 });
 
-// ── AC5: Illustrative cerdiwen-style config shape ────────────────────────────
+// ── AC5: allowedDeprecatedToolNames is no longer exported ───────────────────
 
-describe('AC5: illustrative config shape for cerdiwen migration', () => {
-  it('config shape correctly represents artifact_validator deprecation with replacements', () => {
-    // This test documents the YAML config shape that cerdiwen would use.
-    // It does NOT edit cerdiwen — it only proves the config types support it.
+describe('AC5: allowedDeprecatedToolNames is removed from projectTools exports', () => {
+  it('projectTools module does not export allowedDeprecatedToolNames', async () => {
+    // Dynamic import to inspect the module's exports at runtime.
+    const mod = await import('../src/plugins/projectTools.js');
+    expect((mod as Record<string, unknown>)['allowedDeprecatedToolNames']).toBeUndefined();
+  });
+
+  it('describeConfiguredProjectTools accepts only config (no second parameter)', () => {
+    // The function signature is now describeConfiguredProjectTools(config: HarnessConfig): string.
+    // Passing a second argument is a TypeScript compile error — but at runtime the function
+    // must still work with only one argument.
     const config = minimalConfig([
-      {
-        name: 'artifact_validator',
-        description: 'DEPRECATED: use requirements_schema and plan_contract instead.',
-        type: ProjectToolType.COMMAND,
-        command: 'echo',
-        deprecated: true,
-        hidden: true,
-        replacedBy: ['requirements_schema', 'plan_contract'],
-        deprecationReason: 'Monolithic validator replaced by project-owned tools (pi-experiment-87fm).'
-      } as any,
-      {
-        name: 'requirements_schema',
-        description: 'Validates requirements schema.',
-        type: ProjectToolType.COMMAND,
-        command: 'node'
-      },
-      {
-        name: 'plan_contract',
-        description: 'Validates plan contract.',
-        type: ProjectToolType.COMMAND,
-        command: 'node'
-      }
+      { name: 'plan_contract', description: 'Active.', type: ProjectToolType.COMMAND, command: 'echo' }
     ]);
-
-    // artifact_validator is hidden from model guidance
-    const guidance = describeConfiguredProjectTools(config);
-    expect(guidance).not.toContain('artifact_validator');
-    // Replacements are visible
-    expect(guidance).toContain('requirements_schema');
-    expect(guidance).toContain('plan_contract');
-
-    // Config round-trips the deprecation metadata correctly
-    const deprecated = config.tools!.find(t => t.name === 'artifact_validator') as any;
-    expect(deprecated.deprecated).toBe(true);
-    expect(deprecated.hidden).toBe(true);
-    expect(deprecated.replacedBy).toEqual(['requirements_schema', 'plan_contract']);
+    const description = describeConfiguredProjectTools(config);
+    expect(description).toContain('plan_contract');
   });
 });

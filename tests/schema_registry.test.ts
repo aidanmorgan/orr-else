@@ -370,9 +370,17 @@ describe('AC4: validators are AJV-compiled — deterministic structural enforcem
     expect(validate({
       name: 'plan_contract',
       expectsVerify: true,
-      allowDeprecated: false,
       when: { writeSetIncludesAny: ['src/'] }
     })).toBe(true);
+  });
+
+  it('validator for requiredTool rejects allowDeprecated (removed in h05b)', () => {
+    const validate = schemaRegistry.getValidator(SchemaId.REQUIRED_TOOL);
+    expect(validate({
+      name: 'plan_contract',
+      allowDeprecated: false
+    })).toBe(false);
+    expect(validate.errors).toBeTruthy();
   });
 
   it('validator for requiredTool rejects empty string', () => {

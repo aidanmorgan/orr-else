@@ -535,7 +535,6 @@ const requiredToolSchema: SchemaRegistryEntry = {
         properties: {
           name:           { type: 'string', minLength: 1 },
           expectsVerify:  { type: 'boolean' },
-          allowDeprecated: { type: 'boolean' },
           when: {
             type: 'object',
             additionalProperties: false,
@@ -558,8 +557,8 @@ const requiredToolSchema: SchemaRegistryEntry = {
       value: { name: 'plan_contract' }
     },
     {
-      label: 'object form — with expectsVerify and allowDeprecated',
-      value: { name: 'plan_contract', expectsVerify: true, allowDeprecated: false }
+      label: 'object form — with expectsVerify',
+      value: { name: 'plan_contract', expectsVerify: true }
     },
     {
       label: 'object form — with conditional when clause',

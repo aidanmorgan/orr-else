@@ -334,7 +334,43 @@ export class ConfigLoader {
     return getPackagedSchemaPath();
   }
 
+  /**
+   * Pre-schema raw check for deprecated lifecycle fields.
+   *
+   * Runs before AJV so the error names the offending tool + replacement rather
+   * than surfacing a generic "additionalProperties" schema violation.
+   */
+  private preValidateNoDeprecatedToolFields(config: unknown): void {
+    if (!isRecord(config)) return;
+    const tools = config['tools'];
+    if (!Array.isArray(tools)) return;
+    for (const tool of tools) {
+      if (!isRecord(tool)) continue;
+      const name = typeof tool['name'] === 'string' ? tool['name'] : '(unknown)';
+      const staleFields: string[] = [];
+      if ('deprecated' in tool) staleFields.push('deprecated');
+      if ('hidden' in tool) staleFields.push('hidden');
+      if ('replacedBy' in tool) staleFields.push('replacedBy');
+      if ('deprecationReason' in tool) staleFields.push('deprecationReason');
+      if (staleFields.length > 0) {
+        const replacedBy = Array.isArray(tool['replacedBy']) ? tool['replacedBy'] as string[] : undefined;
+        const replacementHint = replacedBy?.length
+          ? ` Replace all references with: ${replacedBy.map(r => `"${r}"`).join(', ')}.`
+          : ' Remove the tool from config and update all references to use its replacement.';
+        throw new Error(
+          `Tool "${name}" declares stale deprecated-lifecycle field(s): ${staleFields.join(', ')}. ` +
+          `Deprecated/replaced tools must be removed from config entirely — they cannot satisfy gates or appear in requiredTools.` +
+          replacementHint
+        );
+      }
+    }
+  }
+
   private validate(config: unknown): asserts config is HarnessConfig {
+    // Pre-schema check: deprecated lifecycle fields must not appear in any tool.
+    // Runs before AJV so the diagnostic names the offending tool + replacement.
+    this.preValidateNoDeprecatedToolFields(config);
+
     const ajv = new Ajv({ allErrors: true, useDefaults: true });
     addFormats(ajv);
 
@@ -406,46 +442,32 @@ export class ConfigLoader {
    *     Coarse sink targets exit the active statechart flow without spawning a worker.
    *   - All transition outcome keys must be in the declared vocabulary.
    */
-  private validateDeprecatedRequiredTools(config: HarnessConfig): void {
-    // Build a set of tool names that are both deprecated AND hidden.
-    // Only the combination of deprecated+hidden triggers the hard validation failure:
-    // - deprecated-only: tool still appears in guidance (just prints a REJECTED on invocation).
-    // - hidden-only: tool is invisible to the model but can still be used programmatically.
-    // - deprecated+hidden: tool is gone from guidance AND will reject on invocation;
-    //   a requiredTools reference here is almost certainly a stale config bug.
-    const deprecatedHiddenTools = new Set<string>();
+  /**
+   * pi-experiment-h05b: Fail startup if any tool in the config is declared with
+   * deprecated/hidden/replacedBy/deprecationReason fields.
+   *
+   * Deprecated/replaced tools must be REMOVED from config entirely. Stale
+   * references to removed tools are caught by validateNoStaleToolReferences.
+   * The invocation-time REJECTED guard in executeConfiguredProjectTool remains
+   * as a defensive runtime guard for impossible/stale calls only.
+   */
+  private validateNoDeprecatedTools(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
-      const t = tool as { deprecated?: boolean; hidden?: boolean };
-      if (t.deprecated && t.hidden) {
-        deprecatedHiddenTools.add(tool.name);
-      }
-    }
-    if (deprecatedHiddenTools.size === 0) return;
-
-    const checkRequiredTools = (requiredTools: import('./domain/StateModels.js').RequiredTool[] | undefined, location: string): void => {
-      for (const rt of requiredTools || []) {
-        if (typeof rt === 'string') {
-          if (deprecatedHiddenTools.has(rt)) {
-            throw new Error(
-              `${location} references requiredTool "${rt}" which is deprecated and hidden. ` +
-              `Either remove the reference, use a replacement tool, or add allowDeprecated:true to the object form to explicitly opt in.`
-            );
-          }
-        } else {
-          if (deprecatedHiddenTools.has(rt.name) && !rt.allowDeprecated) {
-            throw new Error(
-              `${location} references requiredTool "${rt.name}" which is deprecated and hidden. ` +
-              `Either remove the reference, use a replacement tool, or set allowDeprecated:true on the entry to explicitly opt in.`
-            );
-          }
-        }
-      }
-    };
-
-    for (const [stateId, state] of Object.entries(config.states || {})) {
-      checkRequiredTools(state.requiredTools, `State "${stateId}"`);
-      for (const action of state.actions || []) {
-        checkRequiredTools(action.requiredTools, `State "${stateId}" action "${action.id}"`);
+      const t = tool as { deprecated?: boolean; hidden?: boolean; replacedBy?: string[]; deprecationReason?: string };
+      const staleFields: string[] = [];
+      if (t.deprecated !== undefined) staleFields.push('deprecated');
+      if (t.hidden !== undefined) staleFields.push('hidden');
+      if (t.replacedBy !== undefined) staleFields.push('replacedBy');
+      if (t.deprecationReason !== undefined) staleFields.push('deprecationReason');
+      if (staleFields.length > 0) {
+        const replacementHint = t.replacedBy?.length
+          ? ` Replace all references with: ${t.replacedBy.map(r => `"${r}"`).join(', ')}.`
+          : ' Remove the tool from config and update all references to use its replacement.';
+        throw new Error(
+          `Tool "${tool.name}" declares stale deprecated-lifecycle field(s): ${staleFields.join(', ')}. ` +
+          `Deprecated/replaced tools must be removed from config entirely — they cannot satisfy gates or appear in requiredTools.` +
+          replacementHint
+        );
       }
     }
   }
@@ -581,7 +603,7 @@ export class ConfigLoader {
 
   private validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
-    this.validateDeprecatedRequiredTools(config);
+    this.validateNoDeprecatedTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);
     this.validateWorktreePolicy(config);

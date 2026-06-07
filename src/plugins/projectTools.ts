@@ -21,7 +21,7 @@ import { EventStore } from '../core/EventStore.js';
 import { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import { DomainEventName, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../constants/index.js';
-import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, RequiredTool } from '../core/domain/StateModels.js';
+import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig } from '../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../core/RuntimeServices.js';
 import { ToolResultRecorder } from '../core/ToolResultRecorder.js';
 import { v7 as uuidv7 } from 'uuid';
@@ -370,33 +370,10 @@ function usageNotesSummary(tool: ProjectToolConfig): string {
   return tool.usageNotes?.length ? ` Usage notes: ${tool.usageNotes.join(' ')}` : '';
 }
 
-/**
- * Returns the set of tool names that are explicitly allowed despite being deprecated/hidden,
- * based on the current state's and action's requiredTools entries that carry allowDeprecated:true.
- * Reuses the same string-form / object-form parsing as validateDeprecatedRequiredTools.
- */
-export function allowedDeprecatedToolNames(
-  stateRequiredTools: RequiredTool[] | undefined,
-  actionRequiredTools: RequiredTool[] | undefined
-): Set<string> {
-  const allowed = new Set<string>();
-  for (const rt of [...(stateRequiredTools || []), ...(actionRequiredTools || [])]) {
-    if (typeof rt !== 'string' && rt.allowDeprecated) {
-      allowed.add(rt.name);
-    }
-  }
-  return allowed;
-}
-
 export function describeConfiguredProjectTools(
-  config: HarnessConfig,
-  allowedDeprecated: Set<string> = new Set()
+  config: HarnessConfig
 ): string {
-  const tools = (config.tools || []).filter(tool => {
-    const t = tool as { hidden?: boolean; deprecated?: boolean };
-    if (!t.hidden && !t.deprecated) return true;
-    return allowedDeprecated.has(tool.name);
-  });
+  const tools = config.tools || [];
   if (tools.length === 0) return '';
 
   const descriptions = tools.map(tool => {
