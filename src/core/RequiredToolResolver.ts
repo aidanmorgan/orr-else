@@ -23,6 +23,7 @@ const TEMPLATE_PATTERN = /\{\{\s*([^}]+?)\s*\}\}/g;
 const PATH_SEPARATOR = '/';
 const ARTIFACT_TEMPLATE_PREFIX = 'artifacts.templates.';
 const SETTINGS_ARTIFACT_TEMPLATE_PREFIX = 'settings.artifacts.templates.';
+const ROOTS_PREFIX = 'roots.';
 const TEMPLATE_EXPANSION_PASSES = 4;
 const CONDITION_REASON = {
   WRITE_SET_DOES_NOT_INCLUDE_ANY: 'approved write set does not include any configured path prefix',
@@ -160,6 +161,12 @@ export class RequiredToolResolver {
 
     if (trimmedKey.startsWith(SETTINGS_ARTIFACT_TEMPLATE_PREFIX)) {
       return templates[trimmedKey.slice(SETTINGS_ARTIFACT_TEMPLATE_PREFIX.length)];
+    }
+
+    if (trimmedKey.startsWith(ROOTS_PREFIX)) {
+      const rootName = trimmedKey.slice(ROOTS_PREFIX.length);
+      const roots = context.config.settings.roots;
+      return roots?.[rootName];
     }
 
     return undefined;

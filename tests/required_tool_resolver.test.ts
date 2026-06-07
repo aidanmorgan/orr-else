@@ -24,9 +24,10 @@ describe('RequiredToolResolver', () => {
     fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
 settings:
   startState: Implementation
+  roots:
+    piExperiment: ${JSON.stringify(frameworkRoot)}
   artifacts:
     templates:
-      orrElseFrameworkRoot: ${JSON.stringify(frameworkRoot)}
       planContract: .pi/artifacts/{{beadId}}/plan-contract.json
   transactionalState:
     enabled: true
@@ -48,7 +49,7 @@ states:
       - name: framework_build
         when:
           writeSetIncludesAny:
-            - "{{orrElseFrameworkRoot}}"
+            - "{{roots.piExperiment}}"
     actions:
       - id: a1
         type: prompt

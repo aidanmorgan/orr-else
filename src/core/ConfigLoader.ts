@@ -605,6 +605,28 @@ export class ConfigLoader {
   }
 
   /**
+   * pi-experiment-5lbg: Reject configs that still reference the retired
+   * orrElseFrameworkRoot template alias.
+   *
+   * The alias (settings.artifacts.templates.orrElseFrameworkRoot) has been
+   * removed with no back-compat.  Configs must use settings.roots plus
+   * {{roots.NAME}} or the canonical {{frameworkRoot}} token.  Failing fast
+   * here surfaces the config bug deterministically at startup rather than
+   * silently producing wrong paths.
+   */
+  private validateNoLegacyOrrElseFrameworkRoot(config: HarnessConfig): void {
+    const templates = config.settings.artifacts?.templates as Record<string, unknown> | undefined;
+    if (templates && 'orrElseFrameworkRoot' in templates) {
+      throw new Error(
+        'settings.artifacts.templates.orrElseFrameworkRoot has been retired (pi-experiment-5lbg). ' +
+        'Use settings.roots to declare named roots and reference them with {{roots.NAME}} ' +
+        'or use the {{frameworkRoot}} token. ' +
+        'Remove orrElseFrameworkRoot from your harness.yaml to start.'
+      );
+    }
+  }
+
+  /**
    * zog2.9: Reject project-configured tools that declare serialize: true without a
    * non-empty serializationKey in their sideEffectContract.
    *
@@ -951,6 +973,7 @@ export class ConfigLoader {
 
   private validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
+    this.validateNoLegacyOrrElseFrameworkRoot(config);
     this.validateNoDeprecatedTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);

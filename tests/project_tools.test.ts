@@ -2433,59 +2433,78 @@ describe('structured-invocation registry integration (5fij)', () => {
   });
 });
 
-// s3wp.8: frameworkRootFromConfig env-driven fallback
+// s3wp.8 / pi-experiment-5lbg: frameworkRootFromConfig env-driven fallback
+// The orrElseFrameworkRoot config alias has been retired. frameworkRootFromConfig
+// now reads only from the FRAMEWORK_ROOT environment variable.
 describe('frameworkRootFromConfig — env-driven root resolution (s3wp.8)', () => {
-  const ENV_VAR = EnvVars.FRAMEWORK_ROOT; // 'ORR_ELSE_FRAMEWORK_ROOT'
+  const ENV_VAR = EnvVars.FRAMEWORK_ROOT;
 
   function makeEnv(vars: Record<string, string | undefined>): import('../src/core/RuntimeEnvironment.js').RuntimeEnvironment {
     return { env: (key: string) => vars[key] };
   }
 
-  function minimalConfig(orrElseFrameworkRoot?: string): import('../src/core/domain/StateModels.js').HarnessConfig {
+  function minimalConfig(): import('../src/core/domain/StateModels.js').HarnessConfig {
     return {
-      settings: {
-        artifacts: orrElseFrameworkRoot !== undefined
-          ? { templates: { orrElseFrameworkRoot } }
-          : undefined
-      } as any,
+      settings: {} as any,
       tools: [],
       states: {},
     } as any;
   }
 
-  it('returns the config literal when it is set to an absolute path', () => {
-    const config = minimalConfig('/abs/framework');
-    const env = makeEnv({});
-    const result = frameworkRootFromConfig(config, env, '/project');
-    expect(result).toBe('/abs/framework');
-  });
-
-  it('falls back to the ORR_ELSE_FRAMEWORK_ROOT env var when config literal is absent', () => {
-    const config = minimalConfig(); // no orrElseFrameworkRoot in config
+  it('returns the FRAMEWORK_ROOT env var when set', () => {
+    const config = minimalConfig();
     const env = makeEnv({ [ENV_VAR]: '/env/framework' });
     const result = frameworkRootFromConfig(config, env, '/project');
     expect(result).toBe('/env/framework');
   });
 
-  it('falls back to the ORR_ELSE_FRAMEWORK_ROOT env var when config literal is empty string', () => {
-    const config = minimalConfig('');
-    const env = makeEnv({ [ENV_VAR]: '/env/framework' });
-    const result = frameworkRootFromConfig(config, env, '/project');
-    expect(result).toBe('/env/framework');
-  });
-
-  it('returns undefined when both config literal and env var are absent', () => {
+  it('returns undefined when the FRAMEWORK_ROOT env var is absent', () => {
     const config = minimalConfig();
     const env = makeEnv({});
     const result = frameworkRootFromConfig(config, env, '/project');
     expect(result).toBeUndefined();
   });
+});
 
-  it('prefers the config literal over the env var when both are present', () => {
-    const config = minimalConfig('/config/framework');
-    const env = makeEnv({ [ENV_VAR]: '/env/framework' });
-    const result = frameworkRootFromConfig(config, env, '/project');
-    expect(result).toBe('/config/framework');
+// pi-experiment-5lbg: configs with the retired orrElseFrameworkRoot alias are rejected at startup
+describe('pi-experiment-5lbg: orrElseFrameworkRoot alias rejected at startup', () => {
+  let tempRoot: string;
+  let configLoader: ConfigLoader;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-5lbg-'));
+  });
+
+  afterEach(() => {
+    configLoader?.reset?.();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('throws a deterministic startup error naming the replacement when orrElseFrameworkRoot is present', () => {
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: s1
+  artifacts:
+    templates:
+      orrElseFrameworkRoot: /some/path
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  s1:
+    identity: { role: "r", expertise: "e", constraints: [] }
+    baseInstructions: "b"
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: "completed", FAILURE: "s1" }
+`);
+    configLoader = new ConfigLoader(undefined, tempRoot);
+    expect(() => configLoader.load()).toThrow(/orrElseFrameworkRoot.*retired.*5lbg/i);
   });
 });
 

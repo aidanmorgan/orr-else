@@ -10,13 +10,6 @@ const TemplateToken = {
   PROJECT_ROOT: '{{projectRoot}}',
   WORKTREE_PATH: '{{worktreePath}}',
   FRAMEWORK_ROOT: '{{frameworkRoot}}',
-  /**
-   * @deprecated Use `settings.roots` + `{{roots.NAME}}` instead.
-   * Resolves to the same value as `{{frameworkRoot}}` when a named root is
-   * configured as the framework root.  Kept for back-compat with project
-   * configs that still use this token; new configs should use {{roots.NAME}}.
-   */
-  ORR_ELSE_FRAMEWORK_ROOT: '{{orrElseFrameworkRoot}}',
   BEAD_ID: '{{beadId}}',
   STATE_ID: '{{stateId}}',
   ACTION_ID: '{{actionId}}',
@@ -70,7 +63,6 @@ export function resolveTemplateString(value: string, context: TemplateContext): 
     [TemplateToken.PROJECT_ROOT, context.projectRoot],
     [TemplateToken.WORKTREE_PATH, context.worktreePath],
     [TemplateToken.FRAMEWORK_ROOT, context.frameworkRoot],
-    [TemplateToken.ORR_ELSE_FRAMEWORK_ROOT, context.frameworkRoot],
     [TemplateToken.CONFIG_PATH, context.configPath],
     [TemplateToken.BEAD_ID, context.beadId],
     [TemplateToken.STATE_ID, context.stateId],
