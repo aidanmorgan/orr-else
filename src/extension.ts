@@ -38,6 +38,11 @@ import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import type { ToolResultBase } from './contract.js';
 import { ToolResultRecorder } from './core/ToolResultRecorder.js';
 import { registerBuiltInVerifiers } from './tools/index.js';
+import {
+  assembleAndWriteBuiltInHandle,
+  buildRejectedBuiltInHandle,
+} from './tools/builtin_handles.js';
+import { getBuiltInRtkSummaryFactory } from './tools/builtin_rtk_registry.js';
 import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
@@ -912,6 +917,50 @@ function wrapPluginTool(
             tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
             ToolResultStatus.PASSED, undefined, toolInvocationId
           );
+
+          // zog2.2 (producer-side): look up this tool's RTK summary factory in the
+          // registry. If registered, call the factory with the result + params to get
+          // the tool-local summary, assemble the canonical ToolEvidenceHandle, write
+          // the semantic artifact to disk, and attach the handle to the event-store
+          // record. The model-facing result is never modified — the handle is coordinator/
+          // event-store only (AC: MODEL-FACING responses contain NO raw artifact paths
+          // or the full canonical handle).
+          //
+          // runStatus correctness (AC5 / zog2.2): two distinct paths:
+          //   SUCCEEDED — assembleAndWriteBuiltInHandle with runStatus='PASSED' (tool ran, result is good).
+          //   FAILED    — buildRejectedBuiltInHandle with runStatus='REJECTED' (tool ran but returned
+          //               failure; replay/verifier must see REJECTED, not a PASSED summary handle).
+          let succeededEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
+          let failedEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
+          const rtkFactory = getBuiltInRtkSummaryFactory(tool.name);
+          if (rtkFactory) {
+            try {
+              const outputDir = toolResultHandle.outputFile
+                ? path.dirname(toolResultHandle.outputFile)
+                : undefined;
+              if (!failed && outputDir) {
+                // SUCCEEDED path: assemble a full PASSED handle with the RTK summary.
+                const rtkSummary = rtkFactory(result, params);
+                succeededEvidenceHandle = assembleAndWriteBuiltInHandle({
+                  toolName: tool.name,
+                  invocationId: toolInvocationId,
+                  outputDir,
+                  rtkSummary,
+                });
+              } else if (failed) {
+                // FAILED path: the tool ran but returned failure — record a REJECTED handle
+                // so replay/verifiers see the correct runStatus, not a misleading PASSED summary.
+                failedEvidenceHandle = buildRejectedBuiltInHandle({
+                  toolName: tool.name,
+                  invocationId: toolInvocationId,
+                  noSummaryReason: 'tool ran to completion but returned a failure result',
+                });
+              }
+            } catch {
+              // RTK handle build failure is swallowed — the tool result is never blocked.
+            }
+          }
+
           if (failed) {
             if (breakerEnabled) {
               session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
@@ -924,7 +973,8 @@ function wrapPluginTool(
               stateId: stateIdForPersist,
               actionId: actionIdForPersist,
               result: summarizeForEvent(result),
-              toolResult: toolResultHandle
+              toolResult: toolResultHandle,
+              ...(failedEvidenceHandle ? { evidenceHandle: failedEvidenceHandle } : {}),
             });
             if (typeof result === 'string') {
               if (c.hasUI) c.ui.notify(result, 'error');
@@ -944,7 +994,8 @@ function wrapPluginTool(
               stateId: stateIdForPersist,
               actionId: actionIdForPersist,
               result: summarizeForEvent(result),
-              toolResult: toolResultHandle
+              toolResult: toolResultHandle,
+              ...(succeededEvidenceHandle ? { evidenceHandle: succeededEvidenceHandle } : {}),
             });
           }
           return result;
@@ -3428,11 +3479,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         }
 
         await postWorkerSignal(services, event);
-        
+
         if (ctx.hasUI) {
           ctx.ui.notify(`Turn completed with ${outcome}`, 'info');
         }
-        
+
         setTimeout(() => {
           if (ctx.hasUI) ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), 'Shutting down...');
           ctx.shutdown();

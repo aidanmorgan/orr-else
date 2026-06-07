@@ -68,6 +68,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     file: 'src/plugins/projectTools.ts',
     reason: 'Uses { ...process.env, ...env } spread to forward the full host environment to child command processes — this is a child-process boundary operation, not a static read of a named key. No DI equivalent exists for full env forwarding.',
     deferredWI: undefined
+  },
+  {
+    file: 'src/tools/builtin_handles.ts',
+    reason: 'resolveBuiltInExecutionIdentity() reads PI_PROJECT_ROOT, PI_BEAD_ID, PI_STATE_ID, PI_ACTION_ID, and PI_HARNESS_FINGERPRINT at tool invocation time to assemble canonical ToolEvidenceHandle provenance fields. This is a best-effort, late-binding identity read — the same pattern as git_history.ts uses via RuntimeEnvironment. The tool module cannot inject RuntimeEnvironment without breaking the self-contained tool module pattern (zog2.2). Defer RuntimeEnvironment injection to a follow-up bead.',
+    deferredWI: undefined
   }
 ];
 
