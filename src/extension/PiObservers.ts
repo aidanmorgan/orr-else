@@ -102,6 +102,23 @@ export interface ProviderRequestCapSession {
 export const PROVIDER_CACHE_KEY_PREFIX = 'orr-else';
 
 // ---------------------------------------------------------------------------
+// Anthropic system cache-block split
+// ---------------------------------------------------------------------------
+
+/**
+ * The separator that marks the boundary between the stable Orr Else block and
+ * the volatile suffix in the fully assembled system prompt.
+ *
+ * ContextInjector constructs the prompt as:
+ *   stableBlock + "\n\n" + [piBase + "\n\n"] + volatileSuffix
+ * where volatileSuffix always starts with "### RUN CONTEXT".
+ *
+ * Splitting at this boundary lets the Anthropic provider cache the stable
+ * prefix without the volatile bead ID, worktree path, or checklist.
+ */
+export const ANTHROPIC_VOLATILE_BOUNDARY = '\n\n### RUN CONTEXT';
+
+// ---------------------------------------------------------------------------
 // OpenAI Responses / Codex cache-key injection
 // ---------------------------------------------------------------------------
 
@@ -145,6 +162,102 @@ export function injectOpenAIPromptCacheKey(
   if (payload['prompt_cache_key'] === cacheKey) return undefined;
   payload['prompt_cache_key'] = cacheKey;
   return payload;
+}
+
+/**
+ * An Anthropic system text block as it appears in `payload.system`.
+ * `cache_control` is present when the provider has already marked the block
+ * for caching (e.g. Anthropic's `{ type: 'ephemeral' }`).
+ */
+interface AnthropicSystemTextBlock {
+  type: 'text';
+  text: string;
+  cache_control?: Record<string, unknown>;
+}
+
+/**
+ * Narrow `payload` to an Anthropic request whose `system` field is an array
+ * containing exactly one text block.  Returns the block, or `null` if the
+ * payload does not match that shape.
+ *
+ * Detection heuristic: Anthropic requests carry a numeric `max_tokens` field;
+ * OpenAI Responses/Codex requests carry `input` instead.  This discriminator
+ * matches the one used by `capAnthropicMaxTokens` and `isOpenAIResponsesPayload`.
+ */
+export function extractSingleAnthropicSystemBlock(
+  payload: unknown
+): AnthropicSystemTextBlock | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p['max_tokens'] !== 'number') return null;
+  const system = p['system'];
+  if (!Array.isArray(system) || system.length !== 1) return null;
+  const block = system[0] as Record<string, unknown>;
+  if (block['type'] !== 'text' || typeof block['text'] !== 'string') return null;
+  return block as unknown as AnthropicSystemTextBlock;
+}
+
+/**
+ * Split the Anthropic system block that contains the Orr Else stable/volatile
+ * boundary so only the stable prefix is cache-controlled.
+ *
+ * Handles both provider shapes:
+ *   - API-key shape: system = [{harness systemPrompt, cache_control}]  (length 1)
+ *   - OAuth shape:   system = [{Claude Code identity, cache_control}, {harness systemPrompt, cache_control}]  (length 2)
+ *
+ * The first block whose `text` contains `ANTHROPIC_VOLATILE_BOUNDARY`
+ * (`\n\n### RUN CONTEXT`) is split in place into two consecutive blocks:
+ *   [i]   `{ type: 'text', text: stableText, cache_control: <original block's> }`
+ *   [i+1] `{ type: 'text', text: volatileText }` — no cache_control
+ *
+ * All other blocks are preserved unchanged (e.g. the Claude Code identity block
+ * under OAuth keeps its own cache_control).
+ *
+ * The original separator (`\n\n`) is consumed; concatenating the two new block
+ * texts with that separator reproduces the original block text byte-for-byte:
+ *   `blocks[i].text + '\n\n' + blocks[i+1].text === originalText`
+ *
+ * @returns The mutated payload when a split was applied, or `null` when:
+ *   - The payload is not an Anthropic request (no numeric `max_tokens`).
+ *   - `system` is not an array or is empty.
+ *   - No block's text contains the volatile boundary marker.
+ *   - The split point falls at position 0 (no stable content before the boundary).
+ */
+export function splitAnthropicSystemCacheBlock(
+  payload: unknown
+): Record<string, unknown> | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p['max_tokens'] !== 'number') return null;
+  const system = p['system'];
+  if (!Array.isArray(system) || system.length === 0) return null;
+
+  // Find the first block containing the volatile boundary.
+  for (let i = 0; i < system.length; i++) {
+    const block = system[i] as Record<string, unknown>;
+    if (block['type'] !== 'text' || typeof block['text'] !== 'string') continue;
+    const text = block['text'] as string;
+    const boundaryIdx = text.indexOf(ANTHROPIC_VOLATILE_BOUNDARY);
+    // No boundary in this block, or boundary at position 0 (no stable content before it).
+    if (boundaryIdx <= 0) continue;
+
+    const stableText = text.slice(0, boundaryIdx);
+    // Skip the '\n\n' separator (2 chars) to get the volatile text starting with '### RUN CONTEXT'.
+    const volatileText = text.slice(boundaryIdx + 2);
+    const cacheControl = block['cache_control'] as Record<string, unknown> | undefined;
+
+    // Replace the boundary block with stable + volatile; preserve all other blocks.
+    const newSystem = [
+      ...system.slice(0, i),
+      { type: 'text', text: stableText, ...(cacheControl ? { cache_control: cacheControl } : {}) },
+      { type: 'text', text: volatileText },
+      ...system.slice(i + 1)
+    ];
+    p['system'] = newSystem;
+    return p;
+  }
+
+  return null;
 }
 
 /**
@@ -197,8 +310,20 @@ export function registerProviderRequestCap(pi: ExtensionAPI, session: ProviderRe
         cappedMaxTokens: cap,
         thinkingBudget: capped.thinking?.budget_tokens
       });
+      // Also split the system cache block on the same (already mutated) payload.
+      splitAnthropicSystemCacheBlock(capped);
       return capped;
     }
+
+    // Split the Anthropic system cache block at the Orr Else stable/volatile boundary.
+    // When the payload is Anthropic (has max_tokens) and its system field is a single
+    // text block containing the volatile-suffix marker, the block is replaced by two:
+    //   [0] stable prefix — carries cache_control (deterministic across bead IDs).
+    //   [1] volatile suffix — no cache_control (contains beadId, worktreePath, checklist).
+    // This maximises prompt cache hits by keeping the volatile content out of the cached
+    // prefix while preserving the original text byte-for-byte across the two blocks.
+    const split = splitAnthropicSystemCacheBlock(payload);
+    if (split !== null) return split;
 
     // Inject a deterministic prompt_cache_key into OpenAI Responses / Codex payloads.
     // The key is `orr-else:<stableBlockDigestId>` — stable across any two runs that
