@@ -248,12 +248,20 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     // beadId/stateId/actionId: optional — beadIdFromArgs() returns undefined
     // when called without bead context; stateId/actionId omitted in some tests.
     // toolInvocationId: always written by extension.ts path; absent in direct writes.
-    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result']
+    // outputFile: harness wrapper archive (0yt5.27); absent on short-circuit exits.
+    // semanticArtifactPath: canonical child output path (6q0y.11); absent for legacy tools.
+    // rawTransportArchivePaths: raw stdout/stderr archive paths (6q0y.11); absent for legacy tools.
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result',
+      'outputFile', 'semanticArtifactPath', 'rawTransportArchivePaths']
   },
   [DomainEventName.PROJECT_TOOL_SUCCEEDED]: {
     version: 1,
     replayImpact: 'INFORMATIONAL',
-    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result']
+    // outputFile: harness wrapper archive (0yt5.27).
+    // semanticArtifactPath: canonical child output path (6q0y.11); absent for legacy tools.
+    // rawTransportArchivePaths: raw stdout/stderr archive paths (6q0y.11); absent for legacy tools.
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'status', 'result',
+      'outputFile', 'semanticArtifactPath', 'rawTransportArchivePaths']
   },
   [DomainEventName.PROJECT_TOOL_STARTED]: {
     version: 1,

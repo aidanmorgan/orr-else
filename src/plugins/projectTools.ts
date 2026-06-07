@@ -243,6 +243,15 @@ export async function executeConfiguredProjectTool(
       // If the raw result carries an evidenceHandle in its stdout JSON (the opt-in signal),
       // validate it. Reject with a deterministic error for any canonical-path violation.
       // Non-canonical tools (no evidenceHandle) pass through unchanged — cerdiwen/legacy unaffected.
+      //
+      // 6q0y.11 (producer scope): when the handle is valid, capture semanticArtifactPath and
+      // rawTransportArchivePaths so the domain event records both the semantic child artifact
+      // path and the raw transport archive metadata (AC1, AC2, AC3). The raw transport archives
+      // (stdoutFile/stderrFile) remain available as explicit raw archive fields and are NOT
+      // promoted to semantic artifact status — the handle's semanticArtifactPath is the gate target.
+      let canonicalSemanticArtifactPath: string | undefined;
+      let canonicalRawTransportArchivePaths: string[] | undefined;
+
       if (definition.type === ProjectToolType.COMMAND) {
         const canonicalCheck = extractCanonicalEvidence(rawResult, projectRoot);
         if (canonicalCheck.kind === 'rejected') {
@@ -267,8 +276,13 @@ export async function executeConfiguredProjectTool(
           }).catch(() => {});
           return rejectionPersisted;
         }
-        // kind === 'valid': handle recorded; continue with normal result processing.
-        // kind === 'non-canonical': legacy tool; continue unchanged.
+        // 6q0y.11: capture the semantic artifact path and raw transport archive paths from the
+        // validated handle so they can be threaded into the domain event below (AC1, AC3).
+        if (canonicalCheck.kind === 'valid') {
+          canonicalSemanticArtifactPath = canonicalCheck.handle.semanticArtifactPath;
+          canonicalRawTransportArchivePaths = canonicalCheck.handle.rawTransportArchivePaths;
+        }
+        // kind === 'non-canonical': legacy tool; continue unchanged (no capture).
       }
 
       const result = await persistAndBoundResult(definition, rawResult, context);
@@ -308,6 +322,16 @@ export async function executeConfiguredProjectTool(
           // => outputFile + status. The file lives under {PROJECT_ROOT}/.pi/tool-output/…
           // and persistAndBoundResult wrote the full result to it.
           outputFile: context.outputFile,
+          // 6q0y.11: thread semantic artifact path and raw transport archive paths from the
+          // canonical evidence handle into the domain event (AC3). Present only for canonical-path
+          // tools (tsProjectTool / command tools that opt in via evidenceHandle). Legacy tools
+          // (cerdiwen etc.) leave these undefined and are unaffected.
+          ...(canonicalSemanticArtifactPath !== undefined
+            ? { semanticArtifactPath: canonicalSemanticArtifactPath }
+            : {}),
+          ...(canonicalRawTransportArchivePaths !== undefined
+            ? { rawTransportArchivePaths: canonicalRawTransportArchivePaths }
+            : {}),
           result: summarizeToolResult(finalResult)
         }
       );
