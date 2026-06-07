@@ -127,6 +127,7 @@ import { createRuntimeServices, type RuntimeServices } from './composition/creat
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { HarnessEventQuery } from './core/HarnessEventQuery.js';
+import { ToolOutputQuery } from './core/ToolOutputQuery.js';
 import { PathContext } from './core/PathContext.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
 import {
@@ -311,6 +312,7 @@ interface ExtensionSession {
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
   queryHarnessEventsToolRegistered: boolean;
+  queryToolOutputToolRegistered: boolean;
   readPathContextToolRegistered: boolean;
   preSignalAuditToolRegistered: boolean;
   piToolObserverRegistered: boolean;
@@ -347,6 +349,7 @@ function createExtensionSession(): ExtensionSession {
     artifactPathsToolRegistered: false,
     queryArtifactToolRegistered: false,
     queryHarnessEventsToolRegistered: false,
+    queryToolOutputToolRegistered: false,
     readPathContextToolRegistered: false,
     preSignalAuditToolRegistered: false,
     piToolObserverRegistered: false,
@@ -2840,6 +2843,35 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           detail: Type.Optional(Type.Boolean({ description: 'When true, return bounded event records (strings truncated to 300 chars, cap 100 events). Default false: return counts + metadata only.' }))
         }),
         execute: async (params: any) => harnessEventQuery.query(params)
+      }) as any);
+    }
+
+    if (!session.queryToolOutputToolRegistered) {
+      session.queryToolOutputToolRegistered = true;
+      const toolOutputQuery = new ToolOutputQuery(services.eventStore);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_TOOL_OUTPUT,
+        description:
+          'Query a tool\'s persisted output/evidence artifact in a bounded, progressive-disclosure way. ' +
+          'Identity is resolved from recorded domain events — arbitrary filesystem paths are REJECTED (security). ' +
+          'DEFAULT mode returns metadata only: outputFile path, size, sha256, isJson flag, and available projection modes. ' +
+          'DETAIL modes: (1) selector — dot-path into a JSON artifact (e.g. "status", "result.0"); ' +
+          '(2) schema — recursive type-shape of a JSON artifact (keys + types + array lengths, values dropped); ' +
+          '(3) textTail — last N characters of any file (capped at 24,000 chars). ' +
+          'All modes are capped below 24 KB. Raw archives remain complete on disk. ' +
+          'WORKFLOW: (1) Call with beadId + stateId + actionId + toolName to get summary metadata. ' +
+          '(2) Use selector or textTail to read specific content. ' +
+          'Missing artifacts and mismatched identities return structured rejections.',
+        parameters: Type.Object({
+          beadId: Type.String({ description: 'Bead ID — combined with stateId + actionId + toolName to look up the latest tool result event.' }),
+          stateId: Type.String({ description: 'State ID component of the tool invocation identity.' }),
+          actionId: Type.String({ description: 'Action ID component of the tool invocation identity.' }),
+          toolName: Type.String({ description: 'Tool name component of the tool invocation identity (e.g. "tsc", "git_commit").' }),
+          selector: Type.Optional(Type.String({ description: 'Dot-path selector into a JSON artifact (e.g. "status", "result.0"). Empty string returns root (capped at 24 KB). Mutually exclusive with schema and textTail.' })),
+          schema: Type.Optional(Type.Boolean({ description: 'When true, return the recursive type-shape of a JSON artifact (keys + types + array lengths, values dropped). Mutually exclusive with selector and textTail.' })),
+          textTail: Type.Optional(Type.Number({ description: 'Return the last N characters of the artifact file (capped at 24,000). Mutually exclusive with selector and schema.' }))
+        }),
+        execute: async (params: any) => toolOutputQuery.query(params)
       }) as any);
     }
 

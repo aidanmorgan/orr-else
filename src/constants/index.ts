@@ -741,7 +741,8 @@ export enum BuiltInToolName {
   READ_PATH_CONTEXT = 'read_path_context',
   HARNESS_STATUS = 'harness_status',
   PRE_SIGNAL_AUDIT = 'pre_signal_audit',
-  QUERY_HARNESS_EVENTS = 'query_harness_events'
+  QUERY_HARNESS_EVENTS = 'query_harness_events',
+  QUERY_TOOL_OUTPUT = 'query_tool_output'
 }
 
 /**
