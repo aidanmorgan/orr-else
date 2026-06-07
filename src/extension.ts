@@ -132,6 +132,7 @@ import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';
+import { computePromptSizing, evaluatePromptBudgetAdmission } from './core/PromptBudgetAdmission.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -2889,6 +2890,113 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           ruleCode: PiBasePromptRuleCode.OVER_BUDGET,
         });
       }
+    }
+
+    // ── Prompt-budget admission (pi-experiment-6q0y.17) ─────────────────────
+    //
+    // AC4: evaluate hard prompt-budget limits BEFORE the first model request.
+    // Returning early here (throwing) prevents the provider from ever receiving
+    // the prompt when a configured limit is exceeded. With no budget configured,
+    // resolvePromptBudgetPolicy returns undefined → evaluatePromptBudgetAdmission
+    // returns exceeded:false → this block is a complete no-op (AC1).
+    //
+    // We reuse the sizes already computed by admitPiBasePrompt to avoid re-hashing.
+    const sizing = computePromptSizing({
+      stableBlock: promptResult.stableBlock,
+      piBasePrompt: piBase || undefined,
+      volatileSuffix: promptResult.volatileSuffix,
+    });
+    const budgetResult = evaluatePromptBudgetAdmission(
+      sizing,
+      config,
+      session.activeRun?.stateId,
+      session.activeRun?.action?.id
+    );
+
+    if (budgetResult.exceeded) {
+      const policy = budgetResult.resolvedPolicy!;
+      const configPath = services.configLoader.getConfigPath();
+      // AC5: emit the deterministic admission event — hashes/counts/route only,
+      // NO prompt body.
+      await services.eventStore.record(DomainEventName.PROMPT_BUDGET_ADMISSION, {
+        beadId: session.activeRun?.beadId,
+        stateId: session.activeRun?.stateId,
+        actionId: session.activeRun?.action?.id,
+        configPath,
+        limitScope: budgetResult.limitScope,
+        exceeded: true,
+        route: budgetResult.route,
+        ...(policy.maxBytes !== undefined ? { limitBytes: policy.maxBytes } : {}),
+        ...(policy.maxTokens !== undefined ? { limitTokens: policy.maxTokens } : {}),
+        stableBlockBytes: sizing.stableBlockBytes,
+        stableBlockTokens: sizing.stableBlockTokens,
+        stableBlockHash: sizing.stableBlockHash,
+        piBasePromptBytes: sizing.piBasePromptBytes,
+        piBasePromptTokens: sizing.piBasePromptTokens,
+        piBasePromptHash: sizing.piBasePromptHash,
+        volatileSuffixBytes: sizing.volatileSuffixBytes,
+        volatileSuffixTokens: sizing.volatileSuffixTokens,
+        volatileSuffixHash: sizing.volatileSuffixHash,
+        finalPromptBytes: sizing.finalPromptBytes,
+        finalPromptTokens: sizing.finalPromptTokens,
+        finalPromptHash: sizing.finalPromptHash,
+      }).catch(() => {});
+      Logger.warn(Component.ORR_ELSE, 'Prompt budget exceeded — failing worker before model request', {
+        beadId: session.activeRun?.beadId,
+        stateId: session.activeRun?.stateId,
+        actionId: session.activeRun?.action?.id,
+        finalPromptBytes: sizing.finalPromptBytes,
+        finalPromptTokens: sizing.finalPromptTokens,
+        limitScope: budgetResult.limitScope,
+        route: budgetResult.route,
+      });
+      // AC4: Route the bead through the configured deterministic outcome BEFORE
+      // any provider request.
+      //
+      // HOW route→transition works (consumption mechanism):
+      //   postWorkerSignal builds a TeammateEvent with transitionEvent = budgetResult.route
+      //   (e.g. "FAILURE") and POSTs it to the harness coordinator via postHarnessSignal.
+      //   The coordinator's handleTeammateEvent (extension.ts) calls
+      //   services.flowManager.nextState(state, event.transitionEvent, ...) to resolve
+      //   the next state, then records STATE_TRANSITION_APPLIED — exactly the same path
+      //   as a normal worker outcome signal.  The route is NOT a dead string: it becomes
+      //   the `transitionEvent` field that drives the actual bead state transition.
+      //
+      //   The throw that follows aborts the Pi BEFORE_AGENT_START handler so no model
+      //   request is issued.  postWorkerSignal is best-effort (transport failures are
+      //   caught and recorded); the throw is always issued regardless of signal success.
+      const activeRun = session.activeRun;
+      if (activeRun && budgetResult.route) {
+        const summary =
+          `Prompt budget exceeded at "${configPath}" (scope: ${budgetResult.limitScope}, ` +
+          `final prompt: ${sizing.finalPromptBytes} bytes / ${sizing.finalPromptTokens} tokens). ` +
+          `Routing through configured outcome: ${budgetResult.route}`;
+        const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(budgetResult.route, config), {
+          beadId: activeRun.beadId,
+          stateId: activeRun.stateId,
+          actionId: activeRun.action.id,
+          transitionEvent: budgetResult.route,
+          summary,
+          evidence: summary,
+          handover: summary,
+        });
+        await postWorkerSignal(services, routeEvent).catch(signalError => {
+          Logger.warn(Component.ORR_ELSE, 'Failed to post budget-exceeded route signal — bead will be recovered by supervisor', {
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            route: budgetResult.route,
+            error: String(signalError),
+          });
+        });
+      }
+      // Throw AFTER signaling — aborts the turn before the provider receives the prompt.
+      throw new Error(
+        `Prompt budget exceeded at "${configPath}" (scope: ${budgetResult.limitScope}, ` +
+        `final prompt: ${sizing.finalPromptBytes} bytes / ${sizing.finalPromptTokens} tokens, ` +
+        `${policy.maxBytes !== undefined ? `maxBytes: ${policy.maxBytes}` : ''}` +
+        `${policy.maxTokens !== undefined ? `${policy.maxBytes !== undefined ? ', ' : ''}maxTokens: ${policy.maxTokens}` : ''}). ` +
+        `Route: ${budgetResult.route}`
+      );
     }
 
     // Compose the final worker prompt so stableBlock is the CONTIGUOUS LEADING prefix.

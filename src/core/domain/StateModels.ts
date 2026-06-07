@@ -16,6 +16,32 @@ import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.
  */
 
 /**
+ * Optional hard prompt-budget policy (pi-experiment-6q0y.17).
+ *
+ * Opt-in: absent = no rejection (true no-op when unconfigured, AC1).
+ * When declared:
+ *   - maxBytes: hard upper limit for the final assembled prompt in UTF-8 bytes.
+ *   - maxTokens: hard upper limit for the final assembled prompt in estimated tokens
+ *     (token estimate = ceil(byteLength / TOKEN_ESTIMATE_DIVISOR = 4)).
+ *   - route: deterministic outcome route when the limit is exceeded. Must be a
+ *     declared outcome in the statechart vocabulary (AC7 startup lint).
+ *
+ * Precedence (highest first): action > state > settings (AC3).
+ * Only the innermost configured policy takes effect — there is no merging.
+ */
+export interface PromptBudgetPolicy {
+  /** Maximum UTF-8 byte length for the final assembled prompt. Optional. */
+  maxBytes?: number;
+  /** Maximum estimated token count for the final assembled prompt. Optional. */
+  maxTokens?: number;
+  /**
+   * Deterministic outcome route emitted when the limit is exceeded.
+   * Must reference a declared outcome in the statechart vocabulary (AC7 lint).
+   */
+  route: string;
+}
+
+/**
  * Retry policy for project-configured tools (pi-experiment-t6gw).
  *
  * Opt-in: absent retryPolicy means ZERO automatic retries (default).
@@ -406,6 +432,14 @@ export interface TeammateAction {
    * Must reference a key in settings.toolPromptProfiles.
    */
   toolPromptProfile?: string;
+  /**
+   * Action-level prompt-budget policy (pi-experiment-6q0y.17).
+   *
+   * Highest-precedence budget limit — overrides state.promptBudget and
+   * settings.promptBudget for this action. When absent, the state-level
+   * policy applies (action > state > settings precedence, AC3).
+   */
+  promptBudget?: PromptBudgetPolicy;
 }
 
 export type ActionDefinition = TeammateAction;
@@ -558,6 +592,14 @@ export interface SDLCState {
    * namedContinuation without a contextKey at startup.
    */
   contextPolicy?: StateContextPolicyDeclaration;
+  /**
+   * State-level prompt-budget policy (pi-experiment-6q0y.17).
+   *
+   * When present, all actions in this state inherit this budget unless the
+   * action declares its own promptBudget (action > state > settings, AC3).
+   * Absent means no per-state limit — falls back to settings.promptBudget.
+   */
+  promptBudget?: PromptBudgetPolicy;
 }
 
 export interface HarnessConfig {
@@ -708,6 +750,30 @@ export interface HarnessConfig {
         timeoutMs?: number;
       };
     };
+    /**
+     * Settings-level (global) prompt-budget policy (pi-experiment-6q0y.17).
+     *
+     * Lowest-precedence budget limit — applies to all states/actions that do not
+     * declare their own promptBudget. When absent, no limit is enforced anywhere
+     * (full no-op, AC1). State and action-level declarations override this.
+     */
+    promptBudget?: PromptBudgetPolicy;
+    /**
+     * pi-experiment-6q0y.17 AC7(b): Named per-state budget overrides keyed by
+     * state ID. Startup lint rejects any key that does not match a declared state.
+     * Precedence: lower than state.promptBudget (direct declaration wins), higher
+     * than settings.promptBudget (global). Enables AC7(b): a budget that REFERENCES
+     * a state by name, so an unknown reference is a detectable, rejectable error.
+     */
+    promptBudgetStateOverrides?: Record<string, PromptBudgetPolicy>;
+    /**
+     * pi-experiment-6q0y.17 AC7(b): Named per-action budget overrides keyed by
+     * "stateId/actionId". Startup lint rejects any key whose state segment is not a
+     * declared state, or whose action segment is not a declared action in that state.
+     * Precedence: lower than action.promptBudget (direct declaration wins), higher
+     * than settings.promptBudgetStateOverrides and settings.promptBudget.
+     */
+    promptBudgetActionOverrides?: Record<string, PromptBudgetPolicy>;
   };
   scheduler: {
     weights: {

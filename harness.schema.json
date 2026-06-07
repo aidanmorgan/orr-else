@@ -8,6 +8,28 @@
   ],
   "additionalProperties": false,
   "definitions": {
+    "promptBudgetPolicy": {
+      "type": "object",
+      "description": "pi-experiment-6q0y.17: Optional hard prompt-budget policy. Absent = no rejection (true no-op). When declared, the final assembled prompt is checked against maxBytes and/or maxTokens before the first model request. Precedence: action > state > settings.",
+      "additionalProperties": false,
+      "required": ["route"],
+      "properties": {
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum UTF-8 byte length for the final assembled prompt. When exceeded, the worker fails before the model request."
+        },
+        "maxTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum estimated token count for the final assembled prompt (estimate = ceil(byteLength / 4)). When exceeded, the worker fails before the model request."
+        },
+        "route": {
+          "type": "string",
+          "description": "Deterministic outcome route emitted when the limit is exceeded. Must be a declared outcome in the statechart vocabulary (startup lint rejects unknown routes)."
+        }
+      }
+    },
     "toolPromptProfileEntry": {
       "type": "object",
       "description": "pi-experiment-6q0y.4: A single per-tool prompt text override within a named tool prompt profile.",
@@ -501,6 +523,24 @@
         "toolPromptProfile": {
           "type": "string",
           "description": "pi-experiment-6q0y.4: Settings-level default tool prompt profile. Applied to all states/actions that do not declare their own toolPromptProfile. Must reference a key in settings.toolPromptProfiles. Overridden by state and action-level toolPromptProfile declarations."
+        },
+        "promptBudget": {
+          "$ref": "#/definitions/promptBudgetPolicy",
+          "description": "pi-experiment-6q0y.17: Settings-level (global) prompt-budget policy. Lowest precedence — applies to all states/actions that do not declare their own promptBudget. Absent = no limit enforced anywhere (true no-op). State and action-level declarations override this."
+        },
+        "promptBudgetStateOverrides": {
+          "type": "object",
+          "description": "pi-experiment-6q0y.17 AC7(b): Named per-state budget overrides keyed by state ID. Startup lint rejects keys that do not match a declared state (AC7(b) unknown-state-reference check). Precedence: lower than state.promptBudget, higher than settings.promptBudget.",
+          "additionalProperties": {
+            "$ref": "#/definitions/promptBudgetPolicy"
+          }
+        },
+        "promptBudgetActionOverrides": {
+          "type": "object",
+          "description": "pi-experiment-6q0y.17 AC7(b): Named per-action budget overrides keyed by 'stateId/actionId'. Startup lint rejects keys whose state segment is not a declared state, or whose action segment is not a declared action of that state (AC7(b) unknown-action-reference check). Precedence: lower than action.promptBudget, higher than settings.promptBudgetStateOverrides.",
+          "additionalProperties": {
+            "$ref": "#/definitions/promptBudgetPolicy"
+          }
         },
         "tsProjectToolDefaults": {
           "type": "object",
@@ -1674,6 +1714,10 @@
             "type": "string",
             "description": "pi-experiment-6q0y.4: State-level tool prompt profile. Overrides settings.toolPromptProfile for this state and all its actions (unless an action declares its own toolPromptProfile). Must reference a key in settings.toolPromptProfiles."
           },
+          "promptBudget": {
+            "$ref": "#/definitions/promptBudgetPolicy",
+            "description": "pi-experiment-6q0y.17: State-level prompt-budget policy. When present, all actions in this state inherit this budget unless the action declares its own promptBudget (action > state > settings precedence). Startup lint rejects negative limits and routes absent from the statechart vocabulary."
+          },
           "contextPolicy": {
             "description": "pi-experiment-6q0y.44: State-level context policy. Declares how this state's worker context is handled at spawn time. Default when absent: freshSubagent (new isolated sub-agent context). String shorthand: freshSubagent or namedContinuation (namedContinuation requires structured form with contextKey). Structured form: { mode, contextKey }.",
             "oneOf": [
@@ -1852,6 +1896,10 @@
                 "toolPromptProfile": {
                   "type": "string",
                   "description": "pi-experiment-6q0y.4: Action-level tool prompt profile (highest precedence). Overrides state.toolPromptProfile and settings.toolPromptProfile for this action. Must reference a key in settings.toolPromptProfiles."
+                },
+                "promptBudget": {
+                  "$ref": "#/definitions/promptBudgetPolicy",
+                  "description": "pi-experiment-6q0y.17: Action-level prompt-budget policy (highest precedence). Overrides state.promptBudget and settings.promptBudget for this action. Startup lint rejects negative limits and routes absent from the statechart vocabulary."
                 }
               }
             }

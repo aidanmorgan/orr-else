@@ -412,6 +412,21 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: []
   },
+
+  // ── Prompt-budget admission (pi-experiment-6q0y.17) ───────────────────────
+  // Emitted ONLY when a budget policy is configured AND the final prompt exceeds
+  // a limit. With no budget configured this event is NEVER emitted (true no-op).
+  // Required fields carry the deterministic evidence: hashes, byte counts, token
+  // estimates, config path, state/action identity, scope, and route.
+  // NO prompt body is ever included (AC5).
+  // Optional: beadId (absent when no bead context), actionId (absent when
+  //   resolving at state scope), limitBytes/limitTokens (each may be absent when
+  //   the policy declares only the other kind of limit).
+  [DomainEventName.PROMPT_BUDGET_ADMISSION]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'actionId', 'limitBytes', 'limitTokens']
+  },
 };
 
 /**
@@ -580,5 +595,17 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   [DomainEventName.TOOL_RETRY_DECISION]: [
     'tool', 'invocationId', 'attempt', 'idempotencyClass',
     'failureCategory', 'configuredLimit', 'decision', 'nextRoute'
+  ],
+
+  // ── Prompt-budget admission (pi-experiment-6q0y.17) ───────────────────────
+  // Required: all sizing fields (bytes + tokens + hash for each of the 4 segments),
+  // configPath (identifies the policy source), stateId + limitScope + exceeded + route.
+  // beadId + actionId are optional (absent when no bead context or state-scope policy).
+  [DomainEventName.PROMPT_BUDGET_ADMISSION]: [
+    'configPath', 'stateId', 'limitScope', 'exceeded', 'route',
+    'stableBlockBytes', 'stableBlockTokens', 'stableBlockHash',
+    'piBasePromptBytes', 'piBasePromptTokens', 'piBasePromptHash',
+    'volatileSuffixBytes', 'volatileSuffixTokens', 'volatileSuffixHash',
+    'finalPromptBytes', 'finalPromptTokens', 'finalPromptHash'
   ],
 };

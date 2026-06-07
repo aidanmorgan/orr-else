@@ -830,6 +830,138 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.17 (AC7): Reject prompt-budget policies that declare:
+   *   (a) negative limits (maxBytes < 0 or maxTokens < 0),
+   *   (b) unknown state/action references (state/action ids not in the config),
+   *   (c) a route that is absent from the declared statechart outcome vocabulary.
+   *
+   * Scopes: settings.promptBudget, state.promptBudget, action.promptBudget.
+   * This check runs AFTER declaredOutcomes is built so route validation is accurate.
+   */
+  private validatePromptBudgetDeclarations(
+    config: HarnessConfig,
+    stateIds: Set<string>,
+    declaredOutcomes: Set<string>
+  ): void {
+    const configPath = this.getConfigPath();
+
+    const validatePolicy = (
+      policy: { maxBytes?: number; maxTokens?: number; route: string } | undefined,
+      context: string
+    ): void => {
+      if (!policy) return;
+
+      // (a) Negative limits
+      if (policy.maxBytes !== undefined && policy.maxBytes < 0) {
+        throw new Error(
+          `${context} declares promptBudget.maxBytes: ${policy.maxBytes} which is negative. ` +
+          `Prompt budget limits must be non-negative integers. ` +
+          `Remove the field or set a non-negative value.`
+        );
+      }
+      if (policy.maxTokens !== undefined && policy.maxTokens < 0) {
+        throw new Error(
+          `${context} declares promptBudget.maxTokens: ${policy.maxTokens} which is negative. ` +
+          `Prompt budget limits must be non-negative integers. ` +
+          `Remove the field or set a non-negative value.`
+        );
+      }
+
+      // (c) Route absent from statechart vocabulary
+      if (!declaredOutcomes.has(policy.route.toUpperCase())) {
+        throw new Error(
+          `${context} declares promptBudget.route: "${policy.route}" which is absent ` +
+          `from the statechart outcome vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
+          `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+          `Add "${policy.route}" to the appropriate outcome list or correct the route.`
+        );
+      }
+    };
+
+    // Settings-level global policy
+    validatePolicy(
+      config.settings.promptBudget as { maxBytes?: number; maxTokens?: number; route: string } | undefined,
+      `settings (${configPath})`
+    );
+
+    // (b) settings.promptBudgetStateOverrides: keyed by state ID — validate each
+    // key exists in the statechart.  This is the AC7(b) unknown-state-reference
+    // check: the key is a NAME that must resolve to a declared state.  Iterating
+    // config.states (structural nesting) can never encounter an undeclared state;
+    // this named map is the only place where an unknown state ID can be referenced.
+    const settings = config.settings as {
+      promptBudget?: { maxBytes?: number; maxTokens?: number; route: string };
+      promptBudgetStateOverrides?: Record<string, { maxBytes?: number; maxTokens?: number; route: string }>;
+      promptBudgetActionOverrides?: Record<string, { maxBytes?: number; maxTokens?: number; route: string }>;
+    };
+    for (const [refStateId, policy] of Object.entries(settings.promptBudgetStateOverrides ?? {})) {
+      if (!stateIds.has(refStateId)) {
+        throw new Error(
+          `settings.promptBudgetStateOverrides key "${refStateId}" (${configPath}) references an unknown state. ` +
+          `Known states: ${[...stateIds].join(', ')}. ` +
+          `Remove or correct the state reference.`
+        );
+      }
+      validatePolicy(policy, `settings.promptBudgetStateOverrides["${refStateId}"] (${configPath})`);
+    }
+
+    // (b) settings.promptBudgetActionOverrides: keyed by "stateId/actionId" — validate
+    // both segments.  The key is a compound NAME; an unknown state or action ID is
+    // rejected with a diagnostic naming the unknown reference and config path.
+    // Build a map of stateId → Set<actionId> from config.states for O(1) lookup.
+    const stateActionIds = new Map<string, Set<string>>();
+    for (const [sid, state] of Object.entries(config.states || {})) {
+      const ids = new Set<string>();
+      for (const action of state.actions || []) {
+        if (action.id) ids.add(action.id);
+      }
+      stateActionIds.set(sid, ids);
+    }
+    for (const [refKey, policy] of Object.entries(settings.promptBudgetActionOverrides ?? {})) {
+      const slashIdx = refKey.indexOf('/');
+      if (slashIdx === -1) {
+        throw new Error(
+          `settings.promptBudgetActionOverrides key "${refKey}" (${configPath}) is not in "stateId/actionId" format. ` +
+          `Use slash-separated "stateId/actionId" as the key.`
+        );
+      }
+      const refStateId = refKey.slice(0, slashIdx);
+      const refActionId = refKey.slice(slashIdx + 1);
+      if (!stateIds.has(refStateId)) {
+        throw new Error(
+          `settings.promptBudgetActionOverrides key "${refKey}" (${configPath}) references unknown state "${refStateId}". ` +
+          `Known states: ${[...stateIds].join(', ')}. ` +
+          `Remove or correct the state reference.`
+        );
+      }
+      const knownActions = stateActionIds.get(refStateId) ?? new Set<string>();
+      if (!knownActions.has(refActionId)) {
+        throw new Error(
+          `settings.promptBudgetActionOverrides key "${refKey}" (${configPath}) references unknown action "${refActionId}" in state "${refStateId}". ` +
+          `Known actions for state "${refStateId}": ${[...knownActions].join(', ')}. ` +
+          `Remove or correct the action reference.`
+        );
+      }
+      validatePolicy(policy, `settings.promptBudgetActionOverrides["${refKey}"] (${configPath})`);
+    }
+
+    // State-level and action-level (structural nesting — state IDs are always declared)
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      validatePolicy(
+        (state as { promptBudget?: { maxBytes?: number; maxTokens?: number; route: string } }).promptBudget,
+        `state "${stateId}" (${configPath})`
+      );
+
+      for (const action of state.actions || []) {
+        validatePolicy(
+          (action as { promptBudget?: { maxBytes?: number; maxTokens?: number; route: string } }).promptBudget,
+          `state "${stateId}" / action "${action.id}" (${configPath})`
+        );
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1180,6 +1312,10 @@ export class ConfigLoader {
     this.validateSerializeRequiresSerializationKey(config);
     this.validateProbeContextDeclarations(config);
     this.validateRetryPolicyDeclarations(config);
+    // Note: validatePromptBudgetDeclarations checks route against the declared
+    // outcome vocabulary, so it must run AFTER the statechart/vocabulary block
+    // below. We call it at the end of validateSemantics once declaredOutcomes is
+    // built — see the call site at the bottom of this method.
     this.validateNoDuplicateStableArrays(config);
     this.validateToolPromptProfiles(config);
     this.validateStateContextPolicies(config);
@@ -1393,6 +1529,10 @@ export class ConfigLoader {
         }
       }
     }
+
+    // ── AC7 (pi-experiment-6q0y.17): prompt-budget policy validation ──────────
+    // Now that declaredOutcomes is built we can validate budget routes.
+    this.validatePromptBudgetDeclarations(config, stateIds, declaredOutcomes);
   }
 
   /**

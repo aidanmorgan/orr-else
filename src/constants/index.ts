@@ -359,7 +359,25 @@ export enum DomainEventName {
    * All fields are required — partial emits are rejected by EventStore.record.
    * Deterministic: no Date.now() or Math.random() in the decision logic.
    */
-  TOOL_RETRY_DECISION = 'TOOL_RETRY_DECISION'
+  TOOL_RETRY_DECISION = 'TOOL_RETRY_DECISION',
+
+  /**
+   * Emitted when a prompt-budget admission check runs (pi-experiment-6q0y.17).
+   *
+   * Carries: { beadId?, stateId?, actionId?, configPath,
+   *   stableBlockBytes, stableBlockTokens, stableBlockHash,
+   *   piBasePromptBytes, piBasePromptTokens, piBasePromptHash,
+   *   volatileSuffixBytes, volatileSuffixTokens, volatileSuffixHash,
+   *   finalPromptBytes, finalPromptTokens, finalPromptHash,
+   *   limitBytes?, limitTokens?, limitScope, exceeded, route? }.
+   *
+   * Only emitted when a budget policy is configured AND the limit is exceeded
+   * (AC4). With no budget configured this event is NEVER emitted (true no-op).
+   *
+   * NO prompt body is ever included — only hashes, byte counts, token estimates,
+   * config path, state/action identity, and route (AC5).
+   */
+  PROMPT_BUDGET_ADMISSION = 'PROMPT_BUDGET_ADMISSION'
 }
 
 export enum BeadsCliCommand {
