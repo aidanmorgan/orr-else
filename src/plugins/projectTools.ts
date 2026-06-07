@@ -77,6 +77,10 @@ import {
   ProjectToolParameter
 } from './projectTools/constants.js';
 import { isJsonRecord } from './projectTools/utils.js';
+import {
+  extractCanonicalEvidence,
+  buildCanonicalRejectionResult
+} from './projectTools/canonicalEvidence.js';
 
 // ---- Re-export public surface ----
 
@@ -234,6 +238,38 @@ export async function executeConfiguredProjectTool(
       const rawResult = definition.type === ProjectToolType.COMMAND
         ? await executeCommandTool(definition as ProjectCommandToolConfig, args, context, signal)
         : await executeMcpTool(definition as ProjectMcpToolConfig, args, ctx, context, signal);
+
+      // zog2.3 (producer-half): canonical evidence validation for command/tsProjectTool.
+      // If the raw result carries an evidenceHandle in its stdout JSON (the opt-in signal),
+      // validate it. Reject with a deterministic error for any canonical-path violation.
+      // Non-canonical tools (no evidenceHandle) pass through unchanged — cerdiwen/legacy unaffected.
+      if (definition.type === ProjectToolType.COMMAND) {
+        const canonicalCheck = extractCanonicalEvidence(rawResult);
+        if (canonicalCheck.kind === 'rejected') {
+          // Tool declared canonical evidence but it failed validation. Short-circuit with REJECTED.
+          const rejectionResult = buildCanonicalRejectionResult(
+            definition.name,
+            canonicalCheck.errors,
+            canonicalCheck.rejectionReason
+          );
+          const rejectionPersisted = await persistAndBoundResult(definition, rejectionResult, context);
+          await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
+            beadId,
+            stateId,
+            actionId,
+            tool: definition.name,
+            type: definition.type,
+            status: ToolResultStatus.REJECTED,
+            toolInvocationId: context.templateContext.toolInvocationId,
+            failureCategory: 'INPUT',
+            outputFile: context.outputFile,
+            result: summarizeToolResult(rejectionPersisted)
+          }).catch(() => {});
+          return rejectionPersisted;
+        }
+        // kind === 'valid': handle recorded; continue with normal result processing.
+        // kind === 'non-canonical': legacy tool; continue unchanged.
+      }
 
       const result = await persistAndBoundResult(definition, rawResult, context);
       const status = statusFromToolResult(result);
