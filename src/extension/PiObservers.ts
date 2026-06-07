@@ -21,6 +21,13 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from '../core/ProviderRequestCap.js';
 import { buildTurnUsageRecord } from '../core/TokenUsage.js';
+import {
+  type ProviderBudgetPolicy,
+  computeRequestSizing,
+  resolveCeiling,
+  checkBudgetCeilings,
+  buildBudgetRejectionEvent
+} from '../core/ProviderBudgetPreflight.js';
 import { Logger } from '../core/Logger.js';
 import { type Observability, SpanStatusValue } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
@@ -88,6 +95,12 @@ export interface ProviderRequestCapSession {
   providerRequestCapRegistered: boolean;
   /** Stable-block digest IDs recorded in the current worker run (insertion-ordered Set). */
   recordedPromptDigestIds: Set<string>;
+  /**
+   * Optional provider budget policy (pi-experiment-6q0y.16).
+   * When absent or `enabled: false`, the preflight is a no-op and existing
+   * behaviour is fully preserved (default-off).
+   */
+  providerBudgetPolicy?: ProviderBudgetPolicy;
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +311,34 @@ export function registerProviderRequestCap(pi: ExtensionAPI, session: ProviderRe
   session.providerRequestCapRegistered = true;
 
   pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: BeforeProviderRequestEvent) => {
+    // ── pi-experiment-6q0y.16: optional budget preflight (default-off) ────────
+    // Compute sizing for every request (observability). Only enforce ceilings
+    // when the policy is explicitly enabled — existing behaviour is fully
+    // preserved when providerBudgetPolicy is absent or enabled: false.
+    const budgetPolicy = session.providerBudgetPolicy;
+    if (budgetPolicy?.enabled) {
+      const digestIds = session.recordedPromptDigestIds;
+      const digestId = digestIds.size > 0 ? [...digestIds].at(-1) : undefined;
+      const sizing = computeRequestSizing(event.payload, digestId);
+      const ceiling = resolveCeiling(budgetPolicy, sizing.provider, sizing.model);
+      if (ceiling) {
+        const violation = checkBudgetCeilings(sizing, ceiling);
+        if (violation) {
+          const rejectionEvent = buildBudgetRejectionEvent(sizing, violation);
+          if (violation.action === 'block') {
+            Logger.warn(Component.ORR_ELSE, 'Provider request budget ceiling exceeded — blocking request', rejectionEvent as unknown as Record<string, unknown>);
+            throw new Error(
+              `Provider request budget exceeded: ${violation.dimension} ${violation.actual} > ceiling ${violation.ceiling} (provider=${sizing.provider}, model=${sizing.model})`
+            );
+          } else {
+            // warn — log but allow the request to continue
+            Logger.warn(Component.ORR_ELSE, 'Provider request budget ceiling exceeded — warning only', rejectionEvent as unknown as Record<string, unknown>);
+          }
+        }
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     const cap = resolveMaxOutputTokens(process.env[EnvVars.MAX_OUTPUT_TOKENS]);
     const payload = event.payload;
     const originalMaxTokens =
