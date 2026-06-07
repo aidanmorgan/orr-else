@@ -78,6 +78,120 @@ export function buildToolTokenAccounting(
   return { tool, toolInvocationId, beadId, stateId, actionId, modelFacingBytes, estimatedTokens, cached };
 }
 
+// ---------------------------------------------------------------------------
+// pi-experiment-6q0y.15: strict, schema-validated accounting shapes
+//
+// These are the event payload types for MODEL_TURN_USAGE_RECORDED and
+// TOOL_PAYLOAD_ACCOUNTED. They are DISTINCT from each other:
+//   - ModelTurnAccountingEvent  → one per assistant turn; provider-reported
+//     token counts, cost, and duration. Never carries prompt bodies.
+//   - ToolPayloadAccountingEvent → one per tool invocation result; model-facing
+//     byte/token estimate. Never carries raw tool output bodies.
+//
+// JSON Schemas for both shapes are registered in SchemaRegistry.ts
+// (harness.accounting.modelTurnUsage / harness.accounting.toolPayload).
+// DOMAIN_EVENT_SCHEMAS entries live in DomainEventSchemas.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Schema-validated payload for MODEL_TURN_USAGE_RECORDED events
+ * (pi-experiment-6q0y.15).
+ *
+ * Carries provider-reported token usage and cost for one assistant turn.
+ * MUST NOT include prompt bodies, raw message content, or source files.
+ *
+ * OTel scalar attributes (gen_ai.usage.*) mirror these fields for tracing
+ * but are NOT authoritative for replay — the event payload is the record.
+ */
+export interface ModelTurnAccountingEvent {
+  /** Stable bead identifier — always present (writer guarantees this). */
+  beadId: string;
+  /** State name the turn ran in — always present. */
+  stateId: string;
+  /** Action id within the state — always present. */
+  actionId: string;
+  /** Worker id that executed the turn — always present. */
+  workerId: string;
+  /** Provider-reported model identifier (e.g. "claude-opus-4-5"). */
+  model: string;
+  /** Provider name (e.g. "anthropic", "openai"). Optional — not all code paths know it. */
+  provider?: string;
+  /** Provider-reported input token count (not counting cache hits/writes). */
+  inputTokens: number;
+  /** Provider-reported output token count. */
+  outputTokens: number;
+  /** Provider-reported cache-read token count (0 when not applicable). */
+  cacheReadTokens: number;
+  /** Provider-reported cache-write token count (0 when not applicable). */
+  cacheWriteTokens: number;
+  /** Total tokens: provider value if available, else sum of the four counts above. */
+  totalTokens: number;
+  /** Total cost in USD (0 when not reported). */
+  costTotal: number;
+  /** Wall-clock duration for the full turn in milliseconds. */
+  durationMs: number;
+  /**
+   * Idempotency key — a stable identifier for this specific turn that lets
+   * replayers deduplicate retried writes. Computed as `${actionId}:${workerId}:${stateId}`.
+   * Optional: absent on legacy events that predate 6q0y.15.
+   */
+  idempotencyKey?: string;
+}
+
+/**
+ * Schema-validated payload for TOOL_PAYLOAD_ACCOUNTED events
+ * (pi-experiment-6q0y.15).
+ *
+ * Carries the model-facing byte and token estimate for ONE tool invocation.
+ * MUST NOT include raw tool output bodies, source files, or logs.
+ *
+ * OTel scalar attributes mirror modelFacingBytes and estimatedTokens for
+ * tracing but are NOT authoritative for replay.
+ */
+export interface ToolPayloadAccountingEvent {
+  /** Registered tool name — always present (writer guarantees this). */
+  tool: string;
+  /** Bead identifier — present when the tool ran in a bead context; undefined otherwise. */
+  beadId?: string;
+  /** State identifier — present when available. */
+  stateId?: string;
+  /** Action identifier — present when available. */
+  actionId?: string;
+  /** Canonical invocation identifier from TOOL_INVOCATION_* events. */
+  toolInvocationId?: string;
+  /** Byte length of the JSON-serialised model-facing result (no raw body stored). */
+  modelFacingBytes: number;
+  /** Estimated token count: ceil(modelFacingBytes / 4). */
+  estimatedTokens: number;
+  /** Whether the result was served from the in-session cache. */
+  cached: boolean;
+  /**
+   * Idempotency key — a stable identifier to deduplicate retried writes.
+   * Computed as `${toolInvocationId ?? tool}:${beadId ?? 'global'}`.
+   * Optional: absent on legacy events that predate 6q0y.15.
+   */
+  idempotencyKey?: string;
+}
+
+/**
+ * Build the idempotency key for a ModelTurnAccountingEvent.
+ * Stable across retries because it uses writer-guaranteed fields only.
+ */
+export function buildModelTurnIdempotencyKey(actionId: string, workerId: string, stateId: string): string {
+  return `${actionId}:${workerId}:${stateId}`;
+}
+
+/**
+ * Build the idempotency key for a ToolPayloadAccountingEvent.
+ */
+export function buildToolPayloadIdempotencyKey(
+  tool: string,
+  toolInvocationId: string | undefined,
+  beadId: string | undefined
+): string {
+  return `${toolInvocationId ?? tool}:${beadId ?? 'global'}`;
+}
+
 /** Token/cost usage as reported on a Pi assistant message (`message.usage`). */
 export interface RawUsage {
   input?: number;

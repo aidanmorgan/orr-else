@@ -220,6 +220,20 @@ export enum DomainEventName {
   TEAMMATE_SPAWN_FAILED = 'TEAMMATE_SPAWN_FAILED',
   TEAMMATE_SPAWN_STARTED = 'TEAMMATE_SPAWN_STARTED',
   TOKEN_USAGE_RECORDED = 'TOKEN_USAGE_RECORDED',
+  /**
+   * pi-experiment-6q0y.15: model-turn token/cost accounting. Distinct from
+   * TOOL_PAYLOAD_ACCOUNTED — this records provider-reported usage for one
+   * assistant turn (input/output/cache tokens + cost + duration).
+   * Never carries prompt bodies or raw content.
+   */
+  MODEL_TURN_USAGE_RECORDED = 'MODEL_TURN_USAGE_RECORDED',
+  /**
+   * pi-experiment-6q0y.15: tool-payload byte/token accounting. Distinct from
+   * MODEL_TURN_USAGE_RECORDED — this records the model-facing byte/token estimate
+   * for a single tool invocation result payload.
+   * Never carries raw tool output bodies or source files.
+   */
+  TOOL_PAYLOAD_ACCOUNTED = 'TOOL_PAYLOAD_ACCOUNTED',
   TOOL_INVOCATION_FAILED = 'TOOL_INVOCATION_FAILED',
   TOOL_INVOCATION_STARTED = 'TOOL_INVOCATION_STARTED',
   TOOL_INVOCATION_SUCCEEDED = 'TOOL_INVOCATION_SUCCEEDED',

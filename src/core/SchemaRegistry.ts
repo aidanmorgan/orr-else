@@ -714,6 +714,233 @@ schemaRegistry.register(requiredToolSchema);
 })();
 
 // ---------------------------------------------------------------------------
+// pi-experiment-6q0y.15: token accounting boundary schemas
+//
+// Two distinct, schema-validated event payload shapes:
+//   1. harness.accounting.modelTurnUsage  — MODEL_TURN_USAGE_RECORDED payload
+//   2. harness.accounting.toolPayload     — TOOL_PAYLOAD_ACCOUNTED payload
+//
+// Registered here (same module as the other seed schemas) to keep all
+// compile-time boundary-contract registrations together.
+// Corresponding DOMAIN_EVENT_SCHEMAS entries live in DomainEventSchemas.ts.
+// ---------------------------------------------------------------------------
+
+const modelTurnUsageSchema: SchemaRegistryEntry = {
+  id: 'harness.accounting.modelTurnUsage',
+  version: '1.0.0',
+  owner: 'src/core/TokenUsage.ts',
+  replayPolicy: 'BEST_EFFORT',
+  compatibilityPolicy: 'ADDITIVE_ONLY',
+  jsonSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    required: [
+      'beadId', 'stateId', 'actionId', 'workerId', 'model',
+      'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+      'totalTokens', 'costTotal', 'durationMs'
+    ],
+    additionalProperties: false,
+    properties: {
+      // Required: stable identifiers (always writer-guaranteed)
+      beadId:           { type: 'string', minLength: 1 },
+      stateId:          { type: 'string', minLength: 1 },
+      actionId:         { type: 'string', minLength: 1 },
+      workerId:         { type: 'string', minLength: 1 },
+      model:            { type: 'string', minLength: 1 },
+      // Required: provider-reported token counts
+      inputTokens:      { type: 'integer', minimum: 0 },
+      outputTokens:     { type: 'integer', minimum: 0 },
+      cacheReadTokens:  { type: 'integer', minimum: 0 },
+      cacheWriteTokens: { type: 'integer', minimum: 0 },
+      totalTokens:      { type: 'integer', minimum: 0 },
+      // Required: cost and duration scalars
+      costTotal:        { type: 'number', minimum: 0 },
+      durationMs:       { type: 'integer', minimum: 0 },
+      // Optional: provider name (e.g. "anthropic", "openai")
+      provider:         { type: 'string', minLength: 1 },
+      // Optional: deduplication key for replayers
+      idempotencyKey:   { type: 'string', minLength: 1 }
+    }
+  },
+  positiveFixtures: [
+    {
+      label: 'minimal valid model-turn accounting payload',
+      value: {
+        beadId: 'bead-abc',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        workerId: 'worker-1',
+        model: 'claude-opus-4-5',
+        inputTokens: 1200,
+        outputTokens: 800,
+        cacheReadTokens: 300,
+        cacheWriteTokens: 100,
+        totalTokens: 2400,
+        costTotal: 0.33,
+        durationMs: 2500
+      }
+    },
+    {
+      label: 'with optional provider and idempotencyKey',
+      value: {
+        beadId: 'bead-abc',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        workerId: 'worker-1',
+        model: 'claude-opus-4-5',
+        provider: 'anthropic',
+        inputTokens: 500,
+        outputTokens: 200,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 700,
+        costTotal: 0.0,
+        durationMs: 1200,
+        idempotencyKey: 'formulate-plan:worker-1:Planning'
+      }
+    }
+  ],
+  negativeFixtures: [
+    {
+      label: 'missing required model field',
+      value: {
+        beadId: 'bead-abc',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        workerId: 'worker-1',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 150,
+        costTotal: 0,
+        durationMs: 1000
+      }
+    },
+    {
+      label: 'negative totalTokens (minimum: 0 violated)',
+      value: {
+        beadId: 'bead-abc',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        workerId: 'worker-1',
+        model: 'claude-opus-4-5',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: -1,
+        costTotal: 0,
+        durationMs: 1000
+      }
+    },
+    {
+      label: 'unknown field rejected (additionalProperties: false)',
+      value: {
+        beadId: 'bead-abc',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        workerId: 'worker-1',
+        model: 'claude-opus-4-5',
+        inputTokens: 100,
+        outputTokens: 50,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 150,
+        costTotal: 0,
+        durationMs: 1000,
+        promptBody: 'raw prompt text must never appear here'
+      }
+    }
+  ]
+};
+
+const toolPayloadAccountingSchema: SchemaRegistryEntry = {
+  id: 'harness.accounting.toolPayload',
+  version: '1.0.0',
+  owner: 'src/core/TokenUsage.ts',
+  replayPolicy: 'BEST_EFFORT',
+  compatibilityPolicy: 'ADDITIVE_ONLY',
+  jsonSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    required: ['tool', 'modelFacingBytes', 'estimatedTokens', 'cached'],
+    additionalProperties: false,
+    properties: {
+      // Required: tool identity + byte/token estimates
+      tool:             { type: 'string', minLength: 1 },
+      modelFacingBytes: { type: 'integer', minimum: 0 },
+      estimatedTokens:  { type: 'integer', minimum: 0 },
+      cached:           { type: 'boolean' },
+      // Optional: invocation context
+      beadId:           { type: 'string', minLength: 1 },
+      stateId:          { type: 'string', minLength: 1 },
+      actionId:         { type: 'string', minLength: 1 },
+      toolInvocationId: { type: 'string', minLength: 1 },
+      // Optional: deduplication key for replayers
+      idempotencyKey:   { type: 'string', minLength: 1 }
+    }
+  },
+  positiveFixtures: [
+    {
+      label: 'minimal valid tool-payload accounting (no bead context)',
+      value: {
+        tool: 'my_tool',
+        modelFacingBytes: 1024,
+        estimatedTokens: 256,
+        cached: false
+      }
+    },
+    {
+      label: 'full tool-payload accounting with all optional fields',
+      value: {
+        tool: 'my_tool',
+        modelFacingBytes: 4096,
+        estimatedTokens: 1024,
+        cached: true,
+        beadId: 'bead-xyz',
+        stateId: 'Implementation',
+        actionId: 'act-1',
+        toolInvocationId: '01935c28-1234-7abc-def0-123456789abc',
+        idempotencyKey: '01935c28-1234-7abc-def0-123456789abc:bead-xyz'
+      }
+    }
+  ],
+  negativeFixtures: [
+    {
+      label: 'missing required tool field',
+      value: {
+        modelFacingBytes: 1024,
+        estimatedTokens: 256,
+        cached: false
+      }
+    },
+    {
+      label: 'negative modelFacingBytes (minimum: 0 violated)',
+      value: {
+        tool: 'my_tool',
+        modelFacingBytes: -1,
+        estimatedTokens: 256,
+        cached: false
+      }
+    },
+    {
+      label: 'unknown field rejected (additionalProperties: false)',
+      value: {
+        tool: 'my_tool',
+        modelFacingBytes: 100,
+        estimatedTokens: 25,
+        cached: false,
+        rawOutputBody: 'raw tool output must never appear here'
+      }
+    }
+  ]
+};
+
+schemaRegistry.register(modelTurnUsageSchema);
+schemaRegistry.register(toolPayloadAccountingSchema);
+
+// ---------------------------------------------------------------------------
 // Convenience re-exports for the seeded schema ids
 // ---------------------------------------------------------------------------
 
@@ -724,6 +951,10 @@ export const SchemaId = {
   REQUIRED_TOOL:     'harness.tool.requiredTool',
   /** Authoritative full harness YAML schema (published from harness.schema.json). */
   HARNESS_YAML:      'harness.config.harnessYaml',
+  /** pi-experiment-6q0y.15: model-turn token/cost accounting event payload. */
+  MODEL_TURN_USAGE:  'harness.accounting.modelTurnUsage',
+  /** pi-experiment-6q0y.15: tool-payload byte/token accounting event payload. */
+  TOOL_PAYLOAD:      'harness.accounting.toolPayload',
 } as const;
 
 export type SchemaId = typeof SchemaId[keyof typeof SchemaId];
@@ -760,4 +991,6 @@ export const REQUIRED_BOUNDARY_IDS: ReadonlySet<string> = new Set<string>([
   SchemaId.COMMAND_TOOL,
   SchemaId.REQUIRED_TOOL,
   SchemaId.HARNESS_YAML,
+  SchemaId.MODEL_TURN_USAGE,
+  SchemaId.TOOL_PAYLOAD,
 ]);

@@ -338,6 +338,29 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     optionalFields: ['stateId', 'actionId', 'count']
   },
 
+  // ── Token accounting (pi-experiment-6q0y.15) ──────────────────────────────
+  //
+  // MODEL_TURN_USAGE_RECORDED: carries provider-reported token usage + cost for
+  //   one assistant turn. beadId/stateId/actionId/workerId/model are always
+  //   populated by PiObservers.ts (env vars with App.* fallbacks).
+  //   provider and idempotencyKey are optional — new fields added by 6q0y.15;
+  //   legacy events written before this bead lack them.
+  [DomainEventName.MODEL_TURN_USAGE_RECORDED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['provider', 'idempotencyKey']
+  },
+  //
+  // TOOL_PAYLOAD_ACCOUNTED: carries model-facing byte/token estimate for one
+  //   tool invocation. tool is always present (definition.name). beadId/stateId/
+  //   actionId/toolInvocationId/idempotencyKey are optional — absent when the tool
+  //   runs without a bead context or on the legacy code path.
+  [DomainEventName.TOOL_PAYLOAD_ACCOUNTED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'idempotencyKey']
+  },
+
   // ── Startup / substrate events ─────────────────────────────────────────────
   [DomainEventName.BEAD_CREATED]: {
     version: 1,
@@ -476,6 +499,27 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
 
   // ── Context compaction counter ─────────────────────────────────────────────
   [DomainEventName.CONTEXT_COMPACTION_RECORDED]: ['beadId'],
+
+  // ── Token accounting (pi-experiment-6q0y.15) ──────────────────────────────
+  //
+  // MODEL_TURN_USAGE_RECORDED: writer-guaranteed fields are all of
+  //   beadId, stateId, actionId, workerId, model, inputTokens, outputTokens,
+  //   cacheReadTokens, cacheWriteTokens, totalTokens, costTotal, durationMs.
+  //   PiObservers.ts always provides them (env-var + App.* fallbacks mean they
+  //   can never be undefined). provider + idempotencyKey are optional (new in
+  //   6q0y.15; absent on legacy events).
+  [DomainEventName.MODEL_TURN_USAGE_RECORDED]: [
+    'beadId', 'stateId', 'actionId', 'workerId', 'model',
+    'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
+    'totalTokens', 'costTotal', 'durationMs'
+  ],
+  //
+  // TOOL_PAYLOAD_ACCOUNTED: writer-guaranteed field is only `tool`
+  //   (definition.name is always present). modelFacingBytes, estimatedTokens,
+  //   and cached are also always written by buildToolTokenAccounting().
+  //   beadId/stateId/actionId/toolInvocationId: absent when tool runs without
+  //   a bead context; idempotencyKey: new in 6q0y.15, absent on legacy.
+  [DomainEventName.TOOL_PAYLOAD_ACCOUNTED]: ['tool', 'modelFacingBytes', 'estimatedTokens', 'cached'],
 
   // ── Startup / substrate events ─────────────────────────────────────────────
   // These are not in REPLAY_CRITICAL_EVENT_TYPES but feed monitoring, startup
