@@ -31,8 +31,7 @@ import {
   getHarnessRegisteredProjectToolNames,
   getNativePiExtensionProjectToolNames,
   projectToolFailureLimitSuggestedOutcome,
-  registerConfiguredProjectTools,
-  extractSequencedToolCalls
+  registerConfiguredProjectTools
 } from './plugins/projectTools.js';
 import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import type { ToolResultBase } from './contract.js';
@@ -1268,29 +1267,28 @@ async function runParentSequenceActionsBeforeActive(
     }, ctx, undefined, services.projectToolBackpressure, services.projectRoot);
     runtimeObservability.recordToolInvocation(action.tool, result);
 
-    // Extract framework toolCalls with outputFile fallback and provenance tracking.
-    // The _internalOutputFile field is attached by executeConfiguredProjectTool as a
-    // model-hidden internal channel (never forwarded to the LLM).
-    const internalOutputFile = isRecord(result) && typeof (result as any)._internalOutputFile === 'string'
-      ? (result as any)._internalOutputFile as string
+    // Extract framework toolCalls from the explicit inline result only.
+    // Hidden outputFile backchannels must not drive framework mutations.
+    const inlineRecord = isRecord(result) ? result as Record<string, unknown> : undefined;
+    const inlineToolCalls = inlineRecord
+      ? (Array.isArray(inlineRecord.toolCalls) ? inlineRecord.toolCalls
+        : Array.isArray(inlineRecord.frameworkToolCalls) ? inlineRecord.frameworkToolCalls
+        : undefined)
       : undefined;
-    const { toolCalls: sequencedToolCalls, source: toolCallSource } =
-      await extractSequencedToolCalls(result, internalOutputFile);
+    const sequencedToolCalls: unknown[] = Array.isArray(inlineToolCalls) ? inlineToolCalls : [];
 
-    // AC3: fail closed when the action declares it generates framework toolCalls but
-    // neither stdout nor outputFile evidence contains any.
-    if (action.generatesFrameworkToolCalls && toolCallSource === 'none') {
+    // Fail closed when the action declares it generates framework toolCalls but
+    // the returned result omits explicit toolCalls/frameworkToolCalls.
+    if (action.generatesFrameworkToolCalls && sequencedToolCalls.length === 0) {
       throw new Error(
-        `Sequenced action ${action.id} declares generatesFrameworkToolCalls but produced no toolCalls ` +
-        `in either the inline result or the persisted outputFile. ` +
-        `Stdout-only path omitted toolCalls and outputFile contained none. ` +
+        `Sequenced action ${action.id} declares generatesFrameworkToolCalls but the returned result ` +
+        `contains no explicit toolCalls or frameworkToolCalls. ` +
         `Failing closed to prevent silent checklist mutations from being skipped.`
       );
     }
 
-    // When sequencedToolCalls has entries (from stdout or outputFile), pass them
-    // directly to skip the recursive inline-result dig. When empty, fall back to
-    // the original result-based extraction (backward-compatible for non-generator tools).
+    // Pass explicit toolCalls directly, or fall back to full result-based extraction
+    // for non-generator tools that embed framework calls in other shapes.
     const frameworkCallSource = sequencedToolCalls.length > 0 ? sequencedToolCalls : result;
     for (const toolCall of extractFrameworkToolCalls(frameworkCallSource)) {
       const toolResult = await executeFrameworkToolCall(toolCall, action.tool, runtimeObservability, services, session);
@@ -1313,9 +1311,7 @@ async function runParentSequenceActionsBeforeActive(
       actionKey,
       tool: action.tool,
       result: summarizeForEvent(result),
-      // AC2: record count of applied framework toolCalls and their provenance source.
-      generatedToolCallsApplied: sequencedToolCalls.length,
-      generatedToolCallsSource: toolCallSource
+      generatedToolCallsApplied: sequencedToolCalls.length
     });
   }
 

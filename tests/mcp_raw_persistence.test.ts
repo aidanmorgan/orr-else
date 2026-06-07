@@ -126,18 +126,25 @@ function sha256Hex16(text: string): string {
 }
 
 /**
- * Resolve the mcp-raw.json path from the _internalOutputFile returned by
- * executeConfiguredProjectTool. The raw archive lives in the same directory
- * as the tool's canonical outputFile (context.outputDir).
+ * Resolve the mcp-raw.json path via the canonical event-store evidence path.
+ * The raw archive lives in the same directory as the tool's canonical outputFile
+ * (context.outputDir), which is recorded on the PROJECT_TOOL_SUCCEEDED/FAILED event.
  *
  * This is the canonical evidence path: consumers discover raw archives by
  * locating the per-invocation output directory via event/evidence data, NOT
- * by reading model-facing rawFile references.
+ * by reading model-facing rawFile references or internal result fields.
  */
-function rawFileFromResult(result: Record<string, unknown>): string {
-  const internalOutputFile = result._internalOutputFile as string;
-  expect(typeof internalOutputFile, '_internalOutputFile must be present on result').toBe('string');
-  return path.join(path.dirname(internalOutputFile), MCP_RAW_FILE_NAME);
+async function rawFileFromEventStore(
+  es: EventStore,
+  beadId: string,
+  stateId: string,
+  actionId: string,
+  toolName: string
+): Promise<string> {
+  const event = await es.latestToolResultEvent(beadId as any, stateId as any, actionId as any, toolName as any);
+  const outputFile = (event?.data as Record<string, unknown> | undefined)?.outputFile as string | undefined;
+  expect(typeof outputFile, 'event outputFile must be a string (canonical evidence path)').toBe('string');
+  return path.join(path.dirname(outputFile!), MCP_RAW_FILE_NAME);
 }
 
 // FORBIDDEN generic output-control wrapper keys (per docs/raw-output-contract.md).
@@ -261,8 +268,8 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
     assertNoInlineRawResult(result);
 
     // 4. Persistence is asserted via the canonical evidence path:
-    //    _internalOutputFile → output dir → mcp-raw.json
-    const rawFilePath = rawFileFromResult(result);
+    //    event outputFile → output dir → mcp-raw.json
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'analyze', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at canonical evidence path: ${rawFilePath}`).toBe(true);
 
     // 5. File contains the COMPLETE payload (verified by byte count and checksum).
@@ -321,7 +328,7 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
     assertNoInlineRawResult(result);
 
     // 3. Persistence via canonical evidence path.
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'symbols', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at: ${rawFilePath}`).toBe(true);
 
     // 4. File holds the COMPLETE payload including structuredContent.
@@ -364,7 +371,7 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
     assertNoInlineRawResult(result);
 
     // 3. Persistence via canonical evidence path.
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'inspect', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), `mcp-raw.json must exist at: ${rawFilePath}`).toBe(true);
 
     // 4. File contains the COMPLETE failure payload.
@@ -388,7 +395,7 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
   // ---- (d) Cached/repeated invocation ----
 
   it('(d) writes a distinct raw file for each repeated invocation (no stale cache cross-contamination)', async () => {
-    // First invocation
+    // First invocation (actionId: 'analyze-1')
     const firstPayload = {
       content: [{ type: 'text', text: 'first-invocation-unique-response' }],
       isError: false
@@ -397,11 +404,11 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
 
     const result1 = await executeConfiguredProjectTool(
       eventStore, toolCallPathFactory, mcpTool,
-      { beadId: 'bd-1', stateId: 'Planning', actionId: 'analyze', operation: 'query' },
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'analyze-1', operation: 'query' },
       {} as any, undefined, new Map()
     ) as Record<string, unknown>;
 
-    // Second invocation with a different payload
+    // Second invocation with a different payload (actionId: 'analyze-2')
     const secondPayload = {
       content: [{ type: 'text', text: 'second-invocation-unique-response' }],
       isError: false
@@ -410,7 +417,7 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
 
     const result2 = await executeConfiguredProjectTool(
       eventStore, toolCallPathFactory, mcpTool,
-      { beadId: 'bd-1', stateId: 'Planning', actionId: 'analyze', operation: 'query' },
+      { beadId: 'bd-1', stateId: 'Planning', actionId: 'analyze-2', operation: 'query' },
       {} as any, undefined, new Map()
     ) as Record<string, unknown>;
 
@@ -418,8 +425,8 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
     assertNoRawArchiveFields(result1);
     assertNoRawArchiveFields(result2);
 
-    const rawFilePath1 = rawFileFromResult(result1);
-    const rawFilePath2 = rawFileFromResult(result2);
+    const rawFilePath1 = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'analyze-1', 'test_mcp_tool');
+    const rawFilePath2 = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'analyze-2', 'test_mcp_tool');
 
     // The two invocations must have DIFFERENT per-invocation directories.
     // (toolInvocationId is a UUID7 so the paths differ.)
@@ -485,7 +492,7 @@ describe('cosx: MCP raw result persistence via canonical evidence path', () => {
 
     // Persistence STILL happens via the canonical evidence path.
     // The raw file MUST exist on disk even though the model doesn't see the reference.
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'gate-check', 'test_mcp_tool');
     expect(
       fs.existsSync(rawFilePath),
       `Raw archive must still be persisted at canonical path ${rawFilePath} even though model-facing result carries no rawFile reference`

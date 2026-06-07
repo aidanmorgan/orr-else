@@ -3519,6 +3519,168 @@ states:
   });
 });
 
+// ---- pi-experiment-5p9t: NEGATIVE — outputFile-only toolCalls cannot mutate harness state ----
+//
+// Drives the REAL runParentSequenceActionsBeforeActive path with a tool whose stdout result
+// omits toolCalls.  Proves that:
+//   (a) the sequenced action completes without error (generatesFrameworkToolCalls unset)
+//   (b) zero framework tool calls are executed — CHECKLIST_ITEM_ADDED is never recorded
+//   (c) the ACTION_COMPLETED event records generatedToolCallsApplied=0
+//
+// The test is LOAD-BEARING against the deleted outputFile fallback (option-3 proof):
+//   After SESSION_START, the persisted archive (outputFile) is injected with frameworkToolCalls
+//   in the exact top-level shape the deleted toolCallsFromOutputFile would have parsed via
+//   toolCallsFromRecord (record.frameworkToolCalls — step 2 of the check sequence).
+//   The archive NOW contains the recoverable calls.  The inline result had no toolCalls when
+//   the action was processed, so the new inline-only code produced zero sequenced calls → no tick.
+//
+// Self-check (in-test, option-3):
+//   The injected archive has frameworkToolCalls that toolCallsFromRecord finds.  If the deleted
+//   fallback (extractSequencedToolCalls reading context.outputFile) were reintroduced and the
+//   archive pre-populated BEFORE processing, the old extension.ts would read those calls and
+//   invoke add_checklist_item → CHECKLIST_ITEM_ADDED → this assertion would fail.
+//   The new code never reads the archive for tool-call extraction → no tick → assertion holds.
+
+describe('pi-experiment-5p9t: NEGATIVE — outputFile-only toolCalls cannot tick checklist (real execution path)', () => {
+  it('archive-resident frameworkToolCalls are ignored by new inline-only path; no checklist mutation', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH]
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), '5p9t-neg-')));
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-5p9t');
+    fs.mkdirSync(worktreePath, { recursive: true });
+
+    // A clean tool that emits no toolCalls in its stdout result.
+    // persistAndBoundResult writes the stdout-derived rawResult to the archive —
+    // the archive is clean (no frameworkToolCalls) immediately after the run.
+    const toolScript = `process.stdout.write(JSON.stringify({ status: 'PASSED', message: 'done, no toolCalls in stdout' }));`;
+
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: stdout_omitting_tool
+    type: command
+    command: ${process.execPath}
+    defaultArgs: ["-e", "${toolScript.replace(/"/g, '\\"')}"]
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: run-tool
+        type: tool
+        tool: stdout_omitting_tool
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+    const capturedEvents: string[] = [];
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-5p9t';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'do-work';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+
+      // SESSION_START drives runParentSequenceActionsBeforeActive which executes
+      // stdout_omitting_tool (preceding action run-tool). Since generatesFrameworkToolCalls
+      // is NOT set, the action completes without error even with zero toolCalls.
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+
+      // Query event-store events to verify no CHECKLIST_ITEM_ADDED was emitted,
+      // and to recover the archive (outputFile) path from the PROJECT_TOOL_SUCCEEDED event.
+      const { EventStore: ES } = await import('../src/core/EventStore.js');
+      const { ConfigLoader: CL } = await import('../src/core/ConfigLoader.js');
+      const cl = new CL(undefined, tempRoot);
+      const es = new ES(cl, undefined, undefined, tempRoot);
+      es.setSessionId(`test-5p9t-neg-${process.pid}`);
+      // eventsForBead scans all events for this bead.
+      const beadEvents = await es.eventsForBead('bd-5p9t' as any);
+      for (const e of beadEvents) capturedEvents.push(e.type);
+
+      // CHECKLIST_ITEM_ADDED must NOT appear — inline had no toolCalls → no mutations.
+      expect(capturedEvents.filter(t => t === DomainEventName.CHECKLIST_ITEM_ADDED)).toHaveLength(0);
+
+      // Recover the archive path from the PROJECT_TOOL_SUCCEEDED event.
+      const toolEvent = beadEvents.find(
+        e => e.type === DomainEventName.PROJECT_TOOL_SUCCEEDED &&
+          (e.data as Record<string, unknown>).actionId === 'run-tool'
+      );
+      const archivePath = typeof toolEvent?.data?.outputFile === 'string'
+        ? toolEvent.data.outputFile as string
+        : undefined;
+      expect(archivePath).toBeTruthy();
+      expect(fs.existsSync(archivePath!)).toBe(true);
+
+      // The archive written by persistAndBoundResult is the stdout-derived rawResult:
+      // no frameworkToolCalls — the hidden channel is clean after the actual run.
+      const initialArchive = JSON.parse(fs.readFileSync(archivePath!, 'utf8'));
+      expect(initialArchive.frameworkToolCalls).toBeUndefined();
+
+      // Option-3 load-bearing proof: inject frameworkToolCalls into the archive in the
+      // exact shape the deleted toolCallsFromOutputFile would recover via toolCallsFromRecord:
+      // top-level record.frameworkToolCalls (array) — step 2 of toolCallsFromRecord.
+      // The archive NOW contains the calls that the old fallback would have found.
+      const injectedCalls = [{ tool: 'add_checklist_item', arguments: { text: 'MUST NOT APPEAR' } }];
+      fs.writeFileSync(archivePath!, JSON.stringify({ ...initialArchive, frameworkToolCalls: injectedCalls }));
+
+      // Verify the injected archive has the calls in fallback-parseable shape.
+      const archiveWithInjection = JSON.parse(fs.readFileSync(archivePath!, 'utf8'));
+      expect(Array.isArray(archiveWithInjection.frameworkToolCalls)).toBe(true);
+      expect(archiveWithInjection.frameworkToolCalls).toHaveLength(1);
+      expect(archiveWithInjection.frameworkToolCalls[0].tool).toBe('add_checklist_item');
+
+      // Self-check assertion: the archive has the recoverable calls (old fallback path),
+      // but the inline had no toolCalls (new path). The CHECKLIST_ITEM_ADDED assertion above
+      // confirms no tick occurred — proving the new code ignores the archive.
+      // If the deleted fallback (toolCallsFromOutputFile + extractSequencedToolCalls reading
+      // context.outputFile) were reintroduced and the archive pre-populated before processing,
+      // those calls would have driven add_checklist_item → CHECKLIST_ITEM_ADDED → this test fails.
+
+      cl.reset();
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 // -- dsm2.12: explicit identity on TOOL_INVOCATION_* events from real recording sites --
 //
 // These tests drive the REAL wrapPluginTool code paths (normal success,

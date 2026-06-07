@@ -749,8 +749,8 @@ states:
       {} as any, undefined, new Map()
     );
 
-    // Result must have an outputFile path (artifact retained)
-    expect((result as any)._internalOutputFile || (result as any).outputFile).toBeTruthy();
+    // Result must have an stdoutFile path (artifact retained; _internalOutputFile removed per 5p9t)
+    expect((result as any).stdoutFile).toBeTruthy();
     // stdoutFile must exist and contain the full output
     if ((result as any).stdoutFile && fs.existsSync((result as any).stdoutFile)) {
       const content = fs.readFileSync((result as any).stdoutFile, 'utf8');

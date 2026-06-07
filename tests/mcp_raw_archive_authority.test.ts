@@ -151,10 +151,17 @@ function sha256Hex16(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }
 
-function rawFileFromResult(result: Record<string, unknown>): string {
-  const internalOutputFile = result._internalOutputFile as string;
-  expect(typeof internalOutputFile, '_internalOutputFile must be present').toBe('string');
-  return path.join(path.dirname(internalOutputFile), MCP_RAW_FILE_NAME);
+async function rawFileFromEventStore(
+  es: EventStore,
+  beadId: string,
+  stateId: string,
+  actionId: string,
+  toolName: string
+): Promise<string> {
+  const event = await es.latestToolResultEvent(beadId as any, stateId as any, actionId as any, toolName as any);
+  const outputFile = (event?.data as Record<string, unknown> | undefined)?.outputFile as string | undefined;
+  expect(typeof outputFile, 'event outputFile must be a string (canonical evidence path)').toBe('string');
+  return path.join(path.dirname(outputFile!), MCP_RAW_FILE_NAME);
 }
 
 // ---- Shared setup ----
@@ -232,7 +239,7 @@ describe('zog2.12: MCP raw archive persistence — AUTHORITATIVE semantics', () 
     expect(result.tool).toBe('test_mcp_tool');
 
     // Archive is durably present at canonical evidence path
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'a1', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), `mcp-raw.json must be durably written: ${rawFilePath}`).toBe(true);
 
     // Archive has correct content (complete payload, not truncated)
@@ -290,13 +297,7 @@ describe('zog2.12: MCP raw archive persistence — AUTHORITATIVE semantics', () 
     // Must name the tool in the rejection message
     expect(result.tool).toBe('test_mcp_tool');
 
-    // Archive must NOT exist (write failed, no partial/corrupt file should satisfy gates)
-    const rawFilePath = path.join(
-      path.dirname(result._internalOutputFile as string),
-      MCP_RAW_FILE_NAME
-    );
-    // After fail-closed, the file is either absent or incomplete — it cannot satisfy gates
-    // The gate depends on the RESULT status (REJECTED), not on the file presence
+    // After fail-closed, the result status is REJECTED — the gate depends on status, not file presence.
     expect(result.status).toBe(ToolResultStatus.REJECTED);
   });
 
@@ -323,7 +324,7 @@ describe('zog2.12: MCP raw archive persistence — AUTHORITATIVE semantics', () 
     expect(message).toMatch(/ECONNREFUSED|backend|unavailable|connect/i);
 
     // Error envelope must be archived at canonical evidence path (even on connect failure)
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'a1', 'test_mcp_tool');
     if (fs.existsSync(rawFilePath)) {
       const rawContent = fs.readFileSync(rawFilePath, 'utf8');
       const parsed = JSON.parse(rawContent);
@@ -359,7 +360,7 @@ describe('zog2.12: MCP raw archive persistence — AUTHORITATIVE semantics', () 
     expect(result.status).toBe(ToolResultStatus.PASSED);
 
     // Archive is complete — not truncated or dropped
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'a1', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), 'archive must exist for large response').toBe(true);
 
     const rawContent = fs.readFileSync(rawFilePath, 'utf8');
@@ -397,7 +398,7 @@ describe('zog2.12: MCP raw archive persistence — AUTHORITATIVE semantics', () 
     expect(result.status).toBe(ToolResultStatus.REJECTED);
 
     // Archive contains COMPLETE failure payload (authoritative for forensics/replay)
-    const rawFilePath = rawFileFromResult(result);
+    const rawFilePath = await rawFileFromEventStore(eventStore, 'bd-1', 'Planning', 'a1', 'test_mcp_tool');
     expect(fs.existsSync(rawFilePath), 'archive must exist even for isError responses').toBe(true);
 
     const rawContent = fs.readFileSync(rawFilePath, 'utf8');

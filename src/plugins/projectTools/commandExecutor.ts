@@ -236,68 +236,6 @@ export function toolCallsFromRecord(record: Record<string, unknown>): unknown[] 
   return toolCallsFromRecord(stdoutRecord);
 }
 
-// ---- Sequenced tool-call extraction with provenance ----
-
-/**
- * Read and extract toolCalls from a persisted outputFile.
- * Returns undefined when the file is absent, unreadable, oversized, or contains
- * no toolCalls.  This is the canonical fallback for sequenced framework tool
- * call extraction when model-facing stdout omits the toolCalls array.
- */
-export async function toolCallsFromOutputFile(filePath: string): Promise<unknown[] | undefined> {
-  const record = await jsonRecordFromFile(filePath);
-  return record ? toolCallsFromRecord(record) : undefined;
-}
-
-/**
- * Provenance of sequenced framework tool calls: which source(s) provided them.
- * 'stdout'     — toolCalls came from the model-facing inline result only.
- * 'outputFile' — toolCalls came from the persisted outputFile only (stdout omitted them).
- * 'both'       — toolCalls present in both; inline result took precedence.
- * 'none'       — no toolCalls found in either source.
- */
-export type ToolCallSource = 'stdout' | 'outputFile' | 'both' | 'none';
-
-/**
- * Extract sequenced framework toolCalls from the inline result with outputFile fallback.
- *
- * Priority:
- *   1. Inline result (stdout-derived toolCalls) — fast, no file I/O
- *   2. outputFile fallback — reads the persisted artifact when stdout omitted toolCalls
- *
- * Returns the toolCalls array and a provenance source descriptor so the caller
- * can record provenance on ACTION_COMPLETED.
- */
-export async function extractSequencedToolCalls(
-  inlineResult: unknown,
-  outputFilePath: string | undefined
-): Promise<{ toolCalls: unknown[]; source: ToolCallSource }> {
-  const inlineRecord = isJsonRecord(inlineResult) ? inlineResult as Record<string, unknown> : undefined;
-  const inlineCalls = inlineRecord ? toolCallsFromRecord(inlineRecord) : undefined;
-  const hasInline = Array.isArray(inlineCalls) && inlineCalls.length > 0;
-
-  if (hasInline && !outputFilePath) {
-    return { toolCalls: inlineCalls!, source: 'stdout' };
-  }
-
-  if (hasInline && outputFilePath) {
-    // Peek at outputFile to determine provenance, but use inline calls.
-    const fileCalls = await toolCallsFromOutputFile(outputFilePath);
-    const hasFile = Array.isArray(fileCalls) && fileCalls.length > 0;
-    return { toolCalls: inlineCalls!, source: hasFile ? 'both' : 'stdout' };
-  }
-
-  // No inline calls — try outputFile.
-  if (outputFilePath) {
-    const fileCalls = await toolCallsFromOutputFile(outputFilePath);
-    if (Array.isArray(fileCalls) && fileCalls.length > 0) {
-      return { toolCalls: fileCalls, source: 'outputFile' };
-    }
-  }
-
-  return { toolCalls: [], source: 'none' };
-}
-
 // ---- command no-match annotations ----
 
 function commandArgumentFlagName(argument: string): string | undefined {
