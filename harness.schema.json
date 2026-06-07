@@ -29,6 +29,28 @@
         }
       }
     },
+    "retryPolicy": {
+      "type": "object",
+      "description": "pi-experiment-t6gw: Opt-in retry policy. Absent = zero automatic retries. When present, the harness retry pipeline consults sideEffectContract.idempotencyClass before admitting any retry. non_idempotent tools are never retried.",
+      "additionalProperties": false,
+      "required": ["maxAttempts", "retriableCategories"],
+      "properties": {
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Total attempts including the first (1 = no retry; 2 = one retry; etc.)."
+        },
+        "retriableCategories": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "enum": ["TRANSPORT", "TIMEOUT", "INPUT", "INFRA"]
+          },
+          "description": "Closed set of ToolFailureCategory values that may trigger a retry."
+        }
+      }
+    },
     "sideEffectContract": {
       "type": "object",
       "description": "zog2.9: Deterministic side-effect/resource contract. Required for tools with serialize:true (serializationKey must be non-empty).",
@@ -831,6 +853,9 @@
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
               },
+              "retryPolicy": {
+                "$ref": "#/definitions/retryPolicy"
+              },
               "successExitCodes": {
                 "type": "array",
                 "items": {
@@ -954,6 +979,9 @@
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
+              },
+              "retryPolicy": {
+                "$ref": "#/definitions/retryPolicy"
               },
               "probeContext": {
                 "type": "boolean",
@@ -1267,6 +1295,9 @@
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
+              },
+              "retryPolicy": {
+                "$ref": "#/definitions/retryPolicy"
               },
               "probeContext": {
                 "type": "boolean",

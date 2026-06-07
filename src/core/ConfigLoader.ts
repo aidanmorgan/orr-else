@@ -801,6 +801,35 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-t6gw: Reject tools that declare a retryPolicy without a
+   * sideEffectContract.idempotencyClass.
+   *
+   * A retry policy is useless without an idempotencyClass declaration: the
+   * retry pipeline will always reject the retry with REJECT_NO_IDEMPOTENCY_CLASS.
+   * Fail fast at config load so operators get a deterministic startup error.
+   *
+   * Note: idempotencyClass is NOT required for tools without a retryPolicy —
+   * this validation only fires when retryPolicy is explicitly declared.
+   */
+  private validateRetryPolicyDeclarations(config: HarnessConfig): void {
+    for (const tool of config.tools || []) {
+      const t = tool as { retryPolicy?: { maxAttempts?: number }; sideEffectContract?: { idempotencyClass?: string } };
+      if (t.retryPolicy !== undefined) {
+        const idempotencyClass = t.sideEffectContract?.idempotencyClass;
+        if (!idempotencyClass) {
+          const configPath = this.getConfigPath();
+          throw new Error(
+            `Tool "${tool.name}" (${configPath}) declares retryPolicy but has no ` +
+            `sideEffectContract.idempotencyClass. The retry pipeline requires an idempotencyClass ` +
+            `to determine retry eligibility. Add sideEffectContract: { idempotencyClass: "idempotent" | ` +
+            `"at_least_once" | "non_idempotent", ... } to the tool declaration.`
+          );
+        }
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1150,6 +1179,7 @@ export class ConfigLoader {
     }
     this.validateSerializeRequiresSerializationKey(config);
     this.validateProbeContextDeclarations(config);
+    this.validateRetryPolicyDeclarations(config);
     this.validateNoDuplicateStableArrays(config);
     this.validateToolPromptProfiles(config);
     this.validateStateContextPolicies(config);

@@ -345,7 +345,21 @@ export enum DomainEventName {
    * NO raw output bodies are logged — only byte count and sha256 digest.
    * elapsedMs is provided by the injected Clock (deterministic in tests).
    */
-  PROJECT_TOOL_PROBE_COMPLETED = 'PROJECT_TOOL_PROBE_COMPLETED'
+  PROJECT_TOOL_PROBE_COMPLETED = 'PROJECT_TOOL_PROBE_COMPLETED',
+
+  /**
+   * Emitted once per harness retry-pipeline decision (pi-experiment-t6gw).
+   *
+   * Carries: { tool, invocationId, attempt, idempotencyClass, failureCategory,
+   *   configuredLimit, decision, nextRoute }.
+   *
+   * decision   — 'RETRY' | 'SUPPRESS' | 'EXHAUSTED' | 'REJECT_NO_IDEMPOTENCY_CLASS'
+   * nextRoute  — 'retry' | 'fail' (what happens next after this decision)
+   *
+   * All fields are required — partial emits are rejected by EventStore.record.
+   * Deterministic: no Date.now() or Math.random() in the decision logic.
+   */
+  TOOL_RETRY_DECISION = 'TOOL_RETRY_DECISION'
 }
 
 export enum BeadsCliCommand {

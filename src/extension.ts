@@ -37,6 +37,7 @@ import {
 import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
 import { runStartupProbeAdmission } from './plugins/projectTools/readinessProbe.js';
 import type { ToolResultBase } from './contract.js';
+import { evaluateRetry } from './core/ToolRetryPipeline.js';
 import { ToolResultRecorder } from './core/ToolResultRecorder.js';
 import { registerBuiltInVerifiers } from './tools/index.js';
 import {
@@ -603,6 +604,27 @@ function lookupToolGuards(
   };
 }
 
+function lookupRetryPolicy(
+  toolName: string,
+  config: HarnessConfig
+): import('./core/domain/StateModels.js').ToolRetryPolicy | undefined {
+  const toolConfig = config.tools?.find(t => t.name === toolName);
+  return (toolConfig as { retryPolicy?: import('./core/domain/StateModels.js').ToolRetryPolicy } | undefined)?.retryPolicy;
+}
+
+function lookupIdempotencyClass(
+  toolName: string,
+  config: HarnessConfig
+): 'idempotent' | 'non_idempotent' | 'at_least_once' | undefined {
+  // Project-configured tools: sideEffectContract.idempotencyClass wins.
+  const toolConfig = config.tools?.find(t => t.name === toolName);
+  if (toolConfig) {
+    const contract = (toolConfig as { sideEffectContract?: { idempotencyClass?: 'idempotent' | 'non_idempotent' | 'at_least_once' } }).sideEffectContract;
+    if (contract?.idempotencyClass) return contract.idempotencyClass;
+  }
+  return undefined;
+}
+
 function toolCacheKey(toolName: string, params: unknown): string {
   let serialised: string;
   try {
@@ -726,7 +748,8 @@ function wrapPluginTool(
       // zog2.16: generate toolInvocationId and resolve context vars at invocation
       // start so ALL exit paths (early short-circuits included) can record durable
       // evidence artifacts via the ToolResultRecorder.
-      const toolInvocationId = uuidv7();
+      // pi-experiment-t6gw: let (not const) so retry attempts can generate a new invocationId.
+      let toolInvocationId = uuidv7();
       const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
       const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
       const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
@@ -889,169 +912,226 @@ function wrapPluginTool(
         return toolResult(terminalRejection);
       }
 
-      const tracedExecute = runtimeObservability.tracedAsync(
-        `tool:${tool.name}`,
-        toolSpanAttributes(tool.name, params, beadId, session, false, toolInvocationId),
-        async (p: any, c: ExtensionContext) => {
-          if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
-          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c, _signal)));
-          if (c.hasUI) c.ui.setWorkingMessage(undefined);
-
-          // Record invocation and result for audit
-          runtimeObservability.recordToolInvocation(tool.name, result);
-          const terminalFailureLimitData = terminalFailureLimitDataFromResult(result);
-          const run = session.activeRun;
-          if (terminalFailureLimitData && run !== null && run.beadId === beadId) {
-            run.terminalFailureLimitResult = terminalFailureLimitData;
-            run.terminalFailureLimitScanned = true;
-          }
-
-          const failed = resultIndicatesFailure(result);
-          // 0yt5.27: persist the raw result to the single PROJECT-scoped tool-output
-          // location and record the typed ToolResultBase (tool/status/outputFile/
-          // outputFileBytes) ON the tool-result event — like command/MCP. status here
-          // means "did the tool RUN to completion". A returned failure result still
-          // RAN (status PASSED); only a thrown exception (catch block below) is a
-          // REJECTED run. The semantic verdict is the verifier's job, not this field.
-          const toolResultHandle = await persistPluginToolRawResult(
-            services.toolCallPathFactory,
-            tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
-            ToolResultStatus.PASSED, undefined, toolInvocationId
-          );
-
-          // zog2.2 (producer-side): look up this tool's RTK summary factory in the
-          // registry. If registered, call the factory with the result + params to get
-          // the tool-local summary, assemble the canonical ToolEvidenceHandle, write
-          // the semantic artifact to disk, and attach the handle to the event-store
-          // record. The model-facing result is never modified — the handle is coordinator/
-          // event-store only (AC: MODEL-FACING responses contain NO raw artifact paths
-          // or the full canonical handle).
-          //
-          // runStatus correctness (AC5 / zog2.2): two distinct paths:
-          //   SUCCEEDED — assembleAndWriteBuiltInHandle with runStatus='PASSED' (tool ran, result is good).
-          //   FAILED    — buildRejectedBuiltInHandle with runStatus='REJECTED' (tool ran but returned
-          //               failure; replay/verifier must see REJECTED, not a PASSED summary handle).
-          let succeededEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
-          let failedEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
-          const rtkFactory = getBuiltInRtkSummaryFactory(tool.name);
-          if (rtkFactory) {
-            try {
-              const outputDir = toolResultHandle.outputFile
-                ? path.dirname(toolResultHandle.outputFile)
-                : undefined;
-              if (!failed && outputDir) {
-                // SUCCEEDED path: assemble a full PASSED handle with the RTK summary.
-                const rtkSummary = rtkFactory(result, params);
-                succeededEvidenceHandle = assembleAndWriteBuiltInHandle({
-                  toolName: tool.name,
-                  invocationId: toolInvocationId,
-                  outputDir,
-                  rtkSummary,
-                });
-              } else if (failed) {
-                // FAILED path: the tool ran but returned failure — record a REJECTED handle
-                // so replay/verifiers see the correct runStatus, not a misleading PASSED summary.
-                failedEvidenceHandle = buildRejectedBuiltInHandle({
-                  toolName: tool.name,
-                  invocationId: toolInvocationId,
-                  noSummaryReason: 'tool ran to completion but returned a failure result',
-                });
-              }
-            } catch {
-              // RTK handle build failure is swallowed — the tool result is never blocked.
-            }
-          }
-
-          if (failed) {
-            if (breakerEnabled) {
-              session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
-            }
-            await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-              beadId,
-              tool: tool.name,
-              toolName: tool.name,
-              toolInvocationId,
-              stateId: stateIdForPersist,
-              actionId: actionIdForPersist,
-              result: summarizeForEvent(result),
-              toolResult: toolResultHandle,
-              ...(failedEvidenceHandle ? { evidenceHandle: failedEvidenceHandle } : {}),
-            });
-            if (typeof result === 'string') {
-              if (c.hasUI) c.ui.notify(result, 'error');
-            } else if (isRecord(result)) {
-              if (c.hasUI) c.ui.notify(result.error || `Tool ${tool.name} failed`, 'error');
-            }
-          } else {
-            if (breakerEnabled) session.toolBreakerFailures.delete(key);
-            if (cacheable && isWorkerMode()) {
-              session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now(), toolResult: toolResultHandle });
-            }
-            await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-              beadId,
-              tool: tool.name,
-              toolName: tool.name,
-              toolInvocationId,
-              stateId: stateIdForPersist,
-              actionId: actionIdForPersist,
-              result: summarizeForEvent(result),
-              toolResult: toolResultHandle,
-              ...(succeededEvidenceHandle ? { evidenceHandle: succeededEvidenceHandle } : {}),
-            });
-          }
-          return result;
-        },
-        spanCompletionForToolResult
-      );
-
       // zog2.16: projectRoot, stateIdForPersist, actionIdForPersist are declared
       // at the top of the execute closure (moved up to serve short-circuit exits).
 
-      try {
-        const result = await tracedExecute(params, ctx);
-        // 0yt5.27: raw persistence + typed ToolResultBase event already happened
-        // inside tracedExecute (success branch). No second persist here — the
-        // single PROJECT-scoped tool-output archive is written exactly once.
-        // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
-        // Does NOT mutate `result`; accounting is harness-side only.
-        void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
-          tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false, toolInvocationId
-        )).catch(() => {});
-        return toolResult(result);
-      } catch (error) {
-        if (breakerEnabled) {
-          session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
-        }
-        // 0yt5.27: a thrown exception is a tool that could NOT run to completion —
-        // persist the error envelope to the single PROJECT-scoped location and
-        // record the typed ToolResultBase with status:REJECTED + failureCategory:INFRA.
-        const errorHandle = await persistPluginToolRawResult(
-          services.toolCallPathFactory,
-          tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot,
-          {
-            error: String(error),
-            errorType: error instanceof Error ? error.constructor.name : typeof error,
-            tool: tool.name
+      // pi-experiment-t6gw: retry pipeline — wrap execution in a loop.
+      // Default: zero retries (no retryPolicy). Non-idempotent tools: SUPPRESS (body ran once).
+      // idempotencyClass check is load-bearing: evaluateRetry returns REJECT_NO_IDEMPOTENCY_CLASS
+      // when absent for a retry attempt, and SUPPRESS for non_idempotent tools.
+      const retryPolicy = lookupRetryPolicy(tool.name, config);
+      const idempotencyClass = lookupIdempotencyClass(tool.name, config);
+      let attempt = 1;
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        // Rebuild tracedExecute each attempt so span attributes and all closures
+        // capture the current toolInvocationId (pi-experiment-t6gw retry loop).
+        const currentInvocationId = toolInvocationId;
+        const tracedExecute = runtimeObservability.tracedAsync(
+          `tool:${tool.name}`,
+          toolSpanAttributes(tool.name, params, beadId, session, false, currentInvocationId),
+          async (p: any, c: ExtensionContext) => {
+            if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
+            const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c, _signal)));
+            if (c.hasUI) c.ui.setWorkingMessage(undefined);
+
+            // Record invocation and result for audit
+            runtimeObservability.recordToolInvocation(tool.name, result);
+            const terminalFailureLimitData = terminalFailureLimitDataFromResult(result);
+            const run = session.activeRun;
+            if (terminalFailureLimitData && run !== null && run.beadId === beadId) {
+              run.terminalFailureLimitResult = terminalFailureLimitData;
+              run.terminalFailureLimitScanned = true;
+            }
+
+            const failed = resultIndicatesFailure(result);
+            // 0yt5.27: persist the raw result to the single PROJECT-scoped tool-output
+            // location and record the typed ToolResultBase (tool/status/outputFile/
+            // outputFileBytes) ON the tool-result event — like command/MCP. status here
+            // means "did the tool RUN to completion". A returned failure result still
+            // RAN (status PASSED); only a thrown exception (catch block below) is a
+            // REJECTED run. The semantic verdict is the verifier's job, not this field.
+            const toolResultHandle = await persistPluginToolRawResult(
+              services.toolCallPathFactory,
+              tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
+              ToolResultStatus.PASSED, undefined, currentInvocationId
+            );
+
+            // zog2.2 (producer-side): look up this tool's RTK summary factory in the
+            // registry. If registered, call the factory with the result + params to get
+            // the tool-local summary, assemble the canonical ToolEvidenceHandle, write
+            // the semantic artifact to disk, and attach the handle to the event-store
+            // record. The model-facing result is never modified — the handle is coordinator/
+            // event-store only (AC: MODEL-FACING responses contain NO raw artifact paths
+            // or the full canonical handle).
+            //
+            // runStatus correctness (AC5 / zog2.2): two distinct paths:
+            //   SUCCEEDED — assembleAndWriteBuiltInHandle with runStatus='PASSED' (tool ran, result is good).
+            //   FAILED    — buildRejectedBuiltInHandle with runStatus='REJECTED' (tool ran but returned
+            //               failure; replay/verifier must see REJECTED, not a PASSED summary handle).
+            let succeededEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
+            let failedEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
+            const rtkFactory = getBuiltInRtkSummaryFactory(tool.name);
+            if (rtkFactory) {
+              try {
+                const outputDir = toolResultHandle.outputFile
+                  ? path.dirname(toolResultHandle.outputFile)
+                  : undefined;
+                if (!failed && outputDir) {
+                  // SUCCEEDED path: assemble a full PASSED handle with the RTK summary.
+                  const rtkSummary = rtkFactory(result, params);
+                  succeededEvidenceHandle = assembleAndWriteBuiltInHandle({
+                    toolName: tool.name,
+                    invocationId: currentInvocationId,
+                    outputDir,
+                    rtkSummary,
+                  });
+                } else if (failed) {
+                  // FAILED path: the tool ran but returned failure — record a REJECTED handle
+                  // so replay/verifiers see the correct runStatus, not a misleading PASSED summary.
+                  failedEvidenceHandle = buildRejectedBuiltInHandle({
+                    toolName: tool.name,
+                    invocationId: currentInvocationId,
+                    noSummaryReason: 'tool ran to completion but returned a failure result',
+                  });
+                }
+              } catch {
+                // RTK handle build failure is swallowed — the tool result is never blocked.
+              }
+            }
+
+            if (failed) {
+              if (breakerEnabled) {
+                session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
+              }
+              await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+                beadId,
+                tool: tool.name,
+                toolName: tool.name,
+                toolInvocationId: currentInvocationId,
+                stateId: stateIdForPersist,
+                actionId: actionIdForPersist,
+                result: summarizeForEvent(result),
+                toolResult: toolResultHandle,
+                ...(failedEvidenceHandle ? { evidenceHandle: failedEvidenceHandle } : {}),
+              });
+              if (typeof result === 'string') {
+                if (c.hasUI) c.ui.notify(result, 'error');
+              } else if (isRecord(result)) {
+                if (c.hasUI) c.ui.notify(result.error || `Tool ${tool.name} failed`, 'error');
+              }
+            } else {
+              if (breakerEnabled) session.toolBreakerFailures.delete(key);
+              if (cacheable && isWorkerMode()) {
+                session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now(), toolResult: toolResultHandle });
+              }
+              await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
+                beadId,
+                tool: tool.name,
+                toolName: tool.name,
+                toolInvocationId: currentInvocationId,
+                stateId: stateIdForPersist,
+                actionId: actionIdForPersist,
+                result: summarizeForEvent(result),
+                toolResult: toolResultHandle,
+                ...(succeededEvidenceHandle ? { evidenceHandle: succeededEvidenceHandle } : {}),
+              });
+            }
+            return result;
           },
-          ToolResultStatus.REJECTED,
-          'INFRA',
-          toolInvocationId
+          spanCompletionForToolResult
         );
-        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId,
-          tool: tool.name,
-          toolName: tool.name,
-          toolInvocationId,
-          stateId: stateIdForPersist,
-          actionId: actionIdForPersist,
-          error: String(error),
-          toolResult: errorHandle
-        }).catch(() => {});
-        if (ctx.hasUI) {
-          ctx.ui.setWorkingMessage(undefined);
-          ctx.ui.notify(`Tool ${tool.name} error: ${String(error)}`, 'error');
+
+        try {
+          const result = await tracedExecute(params, ctx);
+          // 0yt5.27: raw persistence + typed ToolResultBase event already happened
+          // inside tracedExecute (success branch). No second persist here — the
+          // single PROJECT-scoped tool-output archive is written exactly once.
+          // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
+          // Does NOT mutate `result`; accounting is harness-side only.
+          void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
+            tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false, currentInvocationId
+          )).catch(() => {});
+
+          if (resultIndicatesFailure(result)) {
+            // Tool ran but returned a failure — consult the retry pipeline only
+            // when a retryPolicy is configured. No policy → plain failure return
+            // with no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
+            if (retryPolicy) {
+              const retryDecision = await evaluateRetry({
+                tool: tool.name,
+                invocationId: currentInvocationId,
+                attempt,
+                failureCategory: 'INFRA',
+                retryPolicy,
+                idempotencyClass
+              }, services.eventStore);
+              if (retryDecision.nextRoute === 'retry') {
+                attempt++;
+                // Generate a new invocationId for the retry attempt.
+                toolInvocationId = uuidv7();
+                continue;
+              }
+            }
+          }
+
+          return toolResult(result);
+        } catch (error) {
+          if (breakerEnabled) {
+            session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
+          }
+          // 0yt5.27: a thrown exception is a tool that could NOT run to completion —
+          // persist the error envelope to the single PROJECT-scoped location and
+          // record the typed ToolResultBase with status:REJECTED + failureCategory:INFRA.
+          const errorHandle = await persistPluginToolRawResult(
+            services.toolCallPathFactory,
+            tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot,
+            {
+              error: String(error),
+              errorType: error instanceof Error ? error.constructor.name : typeof error,
+              tool: tool.name
+            },
+            ToolResultStatus.REJECTED,
+            'INFRA',
+            currentInvocationId
+          );
+          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
+            beadId,
+            tool: tool.name,
+            toolName: tool.name,
+            toolInvocationId: currentInvocationId,
+            stateId: stateIdForPersist,
+            actionId: actionIdForPersist,
+            error: String(error),
+            toolResult: errorHandle
+          }).catch(() => {});
+
+          // Consult the retry pipeline for thrown exceptions only when a
+          // retryPolicy is configured. No policy → plain error return with
+          // no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
+          if (retryPolicy) {
+            const retryDecision = await evaluateRetry({
+              tool: tool.name,
+              invocationId: currentInvocationId,
+              attempt,
+              failureCategory: 'INFRA',
+              retryPolicy,
+              idempotencyClass
+            }, services.eventStore);
+            if (retryDecision.nextRoute === 'retry') {
+              attempt++;
+              toolInvocationId = uuidv7();
+              continue;
+            }
+          }
+
+          if (ctx.hasUI) {
+            ctx.ui.setWorkingMessage(undefined);
+            ctx.ui.notify(`Tool ${tool.name} error: ${String(error)}`, 'error');
+          }
+          return toolResult(`Error: ${String(error)}`);
         }
-        return toolResult(`Error: ${String(error)}`);
       }
     }
   };

@@ -16,6 +16,30 @@ import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.
  */
 
 /**
+ * Retry policy for project-configured tools (pi-experiment-t6gw).
+ *
+ * Opt-in: absent retryPolicy means ZERO automatic retries (default).
+ * When declared:
+ *   - maxAttempts: total number of attempts (1 = no retry; must be >= 1).
+ *     The retry count is maxAttempts - 1. E.g. maxAttempts:3 allows 2 retries.
+ *   - retriableCategories: closed set of ToolFailureCategory values that trigger
+ *     a retry. Only TRANSPORT | TIMEOUT | INPUT | INFRA are valid. The retry
+ *     pipeline admits a retry ONLY when the failure category is in this set
+ *     AND the tool declares an eligible idempotencyClass (idempotent | at_least_once).
+ *     non_idempotent tools are NEVER retried regardless of policy.
+ *
+ * AC-binding constraints enforced at config load:
+ *   - maxAttempts must be >= 1 (zero retries means "don't declare retryPolicy").
+ *   - retriableCategories must be non-empty.
+ */
+export interface ToolRetryPolicy {
+  /** Total attempts including the first (1 = no retry; 2 = one retry; etc.). */
+  maxAttempts: number;
+  /** Closed set of ToolFailureCategory values that may trigger a retry. */
+  retriableCategories: Array<'TRANSPORT' | 'TIMEOUT' | 'INPUT' | 'INFRA'>;
+}
+
+/**
  * Deterministic side-effect / resource contract for project-configured tools (zog2.9).
  *
  * Startup lint enforces:
@@ -103,6 +127,12 @@ export interface BaseProjectToolConfig {
    * Enforced at startup and execution time.
    */
   sideEffectContract?: ProjectToolSideEffectContract;
+  /**
+   * Optional retry policy (pi-experiment-t6gw). Absent = ZERO automatic retries.
+   * When present, the harness retry pipeline consults the tool's sideEffectContract
+   * idempotencyClass before admitting any retry. non_idempotent tools are NEVER retried.
+   */
+  retryPolicy?: ToolRetryPolicy;
 }
 
 /**

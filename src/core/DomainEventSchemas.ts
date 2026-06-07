@@ -401,6 +401,17 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['bytes', 'sha256', 'semanticArtifactPath']
   },
+
+  // ── Retry pipeline decision (pi-experiment-t6gw) ──────────────────────────
+  // All eight fields are required — partial emits are rejected by EventStore.
+  // Deterministic: decision is driven only by configured policy + attempt count
+  //   + closed failure category + tool side-effect contract (no Date.now()/
+  //   Math.random()). Replay yields the same decisions.
+  [DomainEventName.TOOL_RETRY_DECISION]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: []
+  },
 };
 
 /**
@@ -560,5 +571,14 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   // probeStatus + elapsedMs + gateDec are the deterministic outcome evidence.
   [DomainEventName.PROJECT_TOOL_PROBE_COMPLETED]: [
     'tool', 'configPath', 'probeStatus', 'elapsedMs', 'gateDec'
+  ],
+
+  // ── Retry pipeline decision (pi-experiment-t6gw) ──────────────────────────
+  // All eight fields are required: tool + invocationId identify the invocation;
+  // attempt + idempotencyClass + failureCategory + configuredLimit encode the
+  // decision inputs; decision + nextRoute encode the outcome.
+  [DomainEventName.TOOL_RETRY_DECISION]: [
+    'tool', 'invocationId', 'attempt', 'idempotencyClass',
+    'failureCategory', 'configuredLimit', 'decision', 'nextRoute'
   ],
 };
