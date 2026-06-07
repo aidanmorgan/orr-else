@@ -248,13 +248,13 @@ describe('AC3 – production rejects synthetic:true; fixture path via raw JSONL 
     expect(productionEvents.some(e => (e.data as Record<string, unknown>)?.synthetic === true)).toBe(false);
   });
 
-  it('events with an empty required-field schema (no enforcement) are unaffected (no regression)', async () => {
-    // CHECKLIST_ITEM_TICKED is registered in the g0bi registry with an empty
-    // required-field list — it accepts any payload shape including { text: 'Done' }
-    // without beadId (grandfathered: test fixtures predate the registry).
+  it('CHECKLIST_ITEM_TICKED without beadId is REJECTED (pi-experiment-824i: empty schema grandfathering removed)', async () => {
+    // pi-experiment-824i: CHECKLIST_ITEM_TICKED now requires beadId + text.
+    // The prior empty-schema back-compat shim is removed; partial legacy payloads
+    // that omit beadId must be rejected at the production write boundary.
     await expect(
       store.record(DomainEventName.CHECKLIST_ITEM_TICKED, { text: 'Done' })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/CHECKLIST_ITEM_TICKED.*missing required field.*beadId/i);
   });
 });
 

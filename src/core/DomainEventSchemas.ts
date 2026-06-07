@@ -1,6 +1,7 @@
 /**
  * pi-experiment-g0bi: Canonical domain-event schema registry.
  * pi-experiment-kutb: Extended with version, replayImpact, and optionalFields metadata.
+ * pi-experiment-824i: Removed permissive back-compat shims; all schemas require minimum fields.
  *
  * Defines required-field schemas for every replay-critical and startup-critical
  * domain event. This is the authoritative, code-owned contract for event shapes
@@ -16,16 +17,14 @@
  * this module is imported there to replace the inline two-entry constant with
  * a registry covering all replay-critical events.
  *
- * BACKWARD COMPATIBILITY:
- *   Required-field sets are INTENTIONALLY MINIMAL — only fields present in
- *   EVERY production write of that event, including test writes that do not
- *   use synthetic:true. Fields that appear in some writes but not others are
- *   NOT in the required set. This prevents false positives against older events
- *   or test fixtures that predate the registry.
+ * NO BACKWARD COMPATIBILITY (pi-experiment-824i):
+ *   Legacy partial-shape writes are REJECTED at record() time. There is no
+ *   back-compat shim or grandfathering — older/partial payloads that omit
+ *   now-required fields must not enter the event log.
  *
- *   Grandfathered / partial-shape writes:
+ *   Required-field policy:
  *   - PROJECT_TOOL_FAILED/SUCCEEDED: some test writes omit stateId/actionId
- *     (project_tools.test.ts:975); schema requires only beadId + tool.
+ *     (project_tools.test.ts:975); schema requires only tool.
  *   - STATE_TRANSITION_APPLIED: workerId is optional; schema requires
  *     beadId + fromState + nextState + transitionEvent.
  *   - CONTEXT/HARNESS_RESTART_REQUESTED: restartId and targetState required
@@ -41,6 +40,9 @@
  *   - TOOL_INVOCATION_*: beadIdFromToolParams() returns string|undefined (extension.ts:416)
  *     and PiObservers.ts:149 does the same — beadId absent when no bead context;
  *     schema requires only tool.
+ *   - CHECKLIST_ITEM_TICKED: requires beadId + text (pi-experiment-824i: no longer
+ *     grandfathered with empty required-field list; partial payloads are rejected).
+ *   - CHECKLIST_ITEM_ADDED: requires beadId + item (pi-experiment-824i: same).
  *
  * KUTB EXTENSION (pi-experiment-kutb):
  *   DOMAIN_EVENT_SCHEMA_METADATA adds per-event:
@@ -51,7 +53,8 @@
  *                    reconstruction logic can warn when expected-but-optional fields
  *                    are absent from historical events.
  *
- *   DOMAIN_EVENT_SCHEMAS (g0bi required-field map) is UNCHANGED.
+ *   DOMAIN_EVENT_SCHEMAS (g0bi required-field map) is UNCHANGED except where
+ *   pi-experiment-824i tightened previously-empty schemas.
  *   EventStore.validateProductionPayload() is UNCHANGED.
  */
 
@@ -306,15 +309,18 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
 
   // ── Checklist / checkpoint (replay-critical) ──────────────────────────────
   [DomainEventName.CHECKLIST_ITEM_TICKED]: {
-    version: 1,
+    version: 2,
     replayImpact: 'CRITICAL',
-    // beadId/stateId/text: present in most writes; beadId absent in some test fixtures.
-    optionalFields: ['beadId', 'stateId', 'text', 'evidence', 'mandatory']
+    // pi-experiment-824i: beadId and text are now required (removed grandfathered empty schema).
+    // stateId/evidence/mandatory: present in most writes but not required.
+    optionalFields: ['stateId', 'actionId', 'actionKey', 'evidence', 'mandatory']
   },
   [DomainEventName.CHECKLIST_ITEM_ADDED]: {
-    version: 1,
+    version: 2,
     replayImpact: 'CRITICAL',
-    optionalFields: ['beadId', 'stateId', 'text', 'mandatory', 'type']
+    // pi-experiment-824i: beadId and item are now required (removed grandfathered empty schema).
+    // stateId/source/mandatory/type: present in most writes but not required.
+    optionalFields: ['stateId', 'actionId', 'actionKey', 'source', 'mandatory', 'type']
   },
   [DomainEventName.CHECKPOINT_SUBMITTED]: {
     version: 1,
@@ -488,15 +494,13 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   [DomainEventName.TOOL_INVOCATION_FAILED]: ['tool'],
 
   // ── Checklist / checkpoint (replay-critical) ──────────────────────────────
-  // CHECKLIST_ITEM_TICKED/ADDED: registered but with NO required fields.
-  //   Existing tests write these without beadId
-  //   (eventstore_payload_validation.test.ts:229 tests the "schema-free event
-  //   passes through" invariant using CHECKLIST_ITEM_TICKED { text: 'Done' }).
-  //   These events are replay-critical but accept any payload shape — requiring
-  //   beadId would break existing test fixtures. Empty list = registered but
-  //   no field enforcement.
-  [DomainEventName.CHECKLIST_ITEM_TICKED]: [],
-  [DomainEventName.CHECKLIST_ITEM_ADDED]: [],
+  // CHECKLIST_ITEM_TICKED: pi-experiment-824i: requires beadId + text.
+  //   extension.ts always writes both; partial-shape legacy writes (e.g.
+  //   { text: 'Done' } without beadId) are rejected at record() time.
+  // CHECKLIST_ITEM_ADDED: pi-experiment-824i: requires beadId + item.
+  //   extension.ts always writes both.
+  [DomainEventName.CHECKLIST_ITEM_TICKED]: ['beadId', 'text'],
+  [DomainEventName.CHECKLIST_ITEM_ADDED]: ['beadId', 'item'],
   // CHECKPOINT_SUBMITTED: beadId + stateId always present in all writes.
   [DomainEventName.CHECKPOINT_SUBMITTED]: ['beadId', 'stateId'],
 

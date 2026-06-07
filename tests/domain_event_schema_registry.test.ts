@@ -475,11 +475,24 @@ describe('AC3 – production rejects synthetic:true; g0bi registry does not rest
     ).resolves.toBeUndefined();
   });
 
-  it('events with empty required-field schemas (grandfathered) continue to accept any payload', async () => {
-    // CHECKLIST_ITEM_TICKED is registered with an empty required-field list —
-    // any payload shape is accepted (grandfathered: tests write it without beadId).
+  it('CHECKLIST_ITEM_TICKED without beadId is REJECTED (pi-experiment-824i: no longer grandfathered)', async () => {
+    // pi-experiment-824i: CHECKLIST_ITEM_TICKED now requires beadId + text.
+    // The old empty-schema grandfathering is removed. Partial legacy payloads
+    // that omit beadId must be rejected at the production write boundary.
     await expect(
       store.record(DomainEventName.CHECKLIST_ITEM_TICKED, { text: 'Done' })
+    ).rejects.toThrow(/CHECKLIST_ITEM_TICKED.*missing required field.*beadId/i);
+  });
+
+  it('CHECKLIST_ITEM_TICKED with beadId + text is accepted', async () => {
+    await expect(
+      store.record(DomainEventName.CHECKLIST_ITEM_TICKED, {
+        beadId: 'bd-1',
+        stateId: 'Planning',
+        actionId: 'formulate-plan',
+        text: 'Read the spec',
+        evidence: 'CLAUDE.md'
+      })
     ).resolves.toBeUndefined();
   });
 });
@@ -571,10 +584,13 @@ describe('AC4 – replay-critical required fields: absent fields cause rejection
 });
 
 // ---------------------------------------------------------------------------
-// AC5: Backward compatibility — grandfathered fields do NOT crash projections
+// AC5: Permissive-but-intentional schemas: partial writes that are still
+//      accepted because the writer has a real code path that omits those fields.
+//      pi-experiment-824i: CHECKLIST events were grandfathered here but are
+//      now required (beadId + text / item); see AC3 section for inversion.
 // ---------------------------------------------------------------------------
 
-describe('AC5 – backward compatibility: grandfathered partial-shape writes are accepted', () => {
+describe('AC5 – intentional partial-field writes that are still accepted', () => {
   let tempRoot: string;
   let store: EventStore;
 

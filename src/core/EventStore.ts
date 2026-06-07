@@ -19,7 +19,7 @@ import {
 import { asEventId, asSessionId, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';
 import { BeadEventIndex } from './BeadEventIndex.js';
 import { BeadStateProjection } from './BeadStateProjection.js';
-import { DOMAIN_EVENT_SCHEMAS } from './DomainEventSchemas.js';
+import { DOMAIN_EVENT_SCHEMAS, DOMAIN_EVENT_SCHEMA_METADATA } from './DomainEventSchemas.js';
 
 // Re-export all public types so existing callers of EventStore remain unaffected.
 export type {
@@ -63,9 +63,12 @@ const PRODUCTION_PAYLOAD_SCHEMAS: Readonly<Record<string, readonly string[]>> = 
 
 /**
  * Structured diagnostic attached to EventStoreValidationError as `.diagnostic`.
+ *
+ * pi-experiment-824i: added schemaVersion for deterministic diagnostics (AC4).
  */
 export interface EventStoreValidationDiagnostic {
   eventType: string;
+  schemaVersion: number | undefined;
   missingFields: string[];
   receivedKeys: string[];
 }
@@ -79,8 +82,9 @@ export class EventStoreValidationError extends Error {
 
   constructor(diagnostic: EventStoreValidationDiagnostic) {
     const missing = diagnostic.missingFields.join(', ');
+    const schemaRef = diagnostic.schemaVersion !== undefined ? ` (schema v${diagnostic.schemaVersion})` : '';
     super(
-      `${diagnostic.eventType}: missing required field(s) [${missing}] in production event payload. ` +
+      `${diagnostic.eventType}${schemaRef}: missing required field(s) [${missing}] in production event payload. ` +
       `Received keys: [${diagnostic.receivedKeys.join(', ')}]. ` +
       `Use a TestEventStore (tests/helpers/TestEventStore.ts) for test/fixture writes.`
     );
@@ -130,8 +134,10 @@ function validateProductionPayload(
   const missingFields = requiredFields.filter(field => !(field in data) || data[field] === undefined);
   if (missingFields.length === 0) return null;
 
+  const schemaVersion = DOMAIN_EVENT_SCHEMA_METADATA[eventType]?.version;
   return {
     eventType,
+    schemaVersion,
     missingFields,
     receivedKeys: Object.keys(data)
   };
