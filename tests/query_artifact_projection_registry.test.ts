@@ -1,6 +1,6 @@
 /**
- * pi-experiment-0yt5.9 — query_artifact projections are GENERIC and
- * registration-driven.
+ * pi-experiment-0yt5.9 / 6q0y.21 — query_artifact projections are GENERIC and
+ * registration-driven; unregistered projections are REJECTED (fail-closed).
  *
  * The generic harness embeds NO project's artifact schema. Named projections
  * are resolved through the harness-owned `projections` registry in
@@ -9,9 +9,9 @@
  *
  * These tests prove:
  *   - AC3: a caller-registered projection resolves through query_artifact.
- *   - AC3: an UNregistered named projection FALLS BACK to the generic dot-path
- *     selector (it is NOT a built-in default), and is REJECTED when that
- *     selector also misses.
+ *   - AC3/AC4: an UNregistered named projection is REJECTED immediately
+ *     (fail-closed) — no dot-path fallback; dot-path access requires the
+ *     explicit `selector` parameter.
  *   - AC4 (ADVERSARIAL): with cerdiwen's projections NOT registered, querying
  *     `gapFlags` no longer silently resolves `completenessGaps` from harness
  *     built-ins — the Cerdiwen alias is gone from the generic harness.
@@ -179,22 +179,39 @@ describe('query_artifact projections are registration-driven (0yt5.9)', () => {
     }
   });
 
-  // ── AC3: an UNregistered named projection falls back to the selector path ──
+  // ── AC3/AC4: unregistered projections are REJECTED fail-closed ───────────
+  // Dot-path access requires the explicit `selector` parameter (6q0y.21).
 
-  it('(AC3) an UNregistered projection name falls back to the generic dot-path selector', async () => {
-    // No projection is registered for REG_TYPE:underlyingKey. The projection
-    // NAME 'underlyingKey' is treated as a plain dot-path selector and resolves
-    // because the artifact happens to have that key.
+  it('(AC3/AC4) an UNregistered projection name is REJECTED fail-closed (no dot-path fallback)', async () => {
+    // No projection is registered for REG_TYPE:underlyingKey.
+    // 6q0y.21: unregistered projections no longer fall back to the dot-path
+    // selector — they are rejected immediately so dot-path access is only
+    // reachable through the explicit `selector` parameter.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: REG_TYPE,
       projection: 'underlyingKey'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.selector).toBe('underlyingKey');
-    expect(result.result).toEqual(REG_ARTIFACT.underlyingKey);
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('underlyingKey');
+    expect(result.reason).toContain('not registered');
+    expect(result.exists).toBe(true);
+  });
+
+  it('(AC4) an unregistered projection whose name matches a real key is REJECTED (dot-path requires selector)', async () => {
+    // The artifact has 'underlyingKey' at its root, but since no projection is
+    // registered for that name, using projection: 'underlyingKey' must reject.
+    // The data IS reachable — but only via selector: 'underlyingKey'.
+    const selectorResult = await query.query({
+      beadId: 'bd-1',
+      artifactId: REG_TYPE,
+      selector: 'underlyingKey'
+    });
+    expect(selectorResult.status).toBe('ok');
+    if (selectorResult.status !== 'ok') throw new Error('unexpected status');
+    expect(selectorResult.result).toEqual(REG_ARTIFACT.underlyingKey);
   });
 
   it('(AC3) an UNregistered projection that is not a present key is REJECTED (no built-in default)', async () => {

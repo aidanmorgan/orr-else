@@ -190,7 +190,7 @@ describe('artifact_minimal_schema — large planContract', () => {
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'planContract',
-      projection: 'writeSet'
+      selector: 'writeSet'
     });
 
     expect(result.status).toBe('ok');
@@ -315,7 +315,7 @@ describe('artifact_minimal_schema — large requirementsAnalysis', () => {
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
-      projection: 'requirementsInventory'
+      selector: 'requirementsInventory'
     });
 
     // Large requirementsInventory exceeds RESULT_MAX_BYTES → tooMuchData path

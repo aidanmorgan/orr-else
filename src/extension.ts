@@ -2804,7 +2804,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           artifactPath: Type.Optional(Type.String({ description: 'Explicit filesystem path to the artifact JSON. Mutually exclusive with artifactId.' })),
           projection: Type.Optional(Type.String({ description: 'Named schema-aware projection (e.g. "writeSet", "implementationSteps" for planContract). Mutually exclusive with selector and summary.' })),
           selector: Type.Optional(Type.String({ description: 'Dot-path or JSON Pointer selector into the artifact JSON (e.g. "writeSet", "implementationSteps.0.description", or "/writeSet/0"). Mutually exclusive with projection and summary. Empty string returns artifact root subject to byte cap.' })),
-          summary: Type.Optional(Type.Boolean({ description: 'When true, return per-projection size estimates (byteCount + tokenEstimate) WITHOUT content. Use this first to see what is available and how large each projection is before fetching inline. Mutually exclusive with projection and selector.' }))
+          summary: Type.Optional(Type.Boolean({ description: 'When true, return per-projection size estimates (byteCount + tokenEstimate) WITHOUT content. Use this first to see what is available and how large each projection is before fetching inline. Mutually exclusive with projection, selector, and schema.' })),
+          schema: Type.Optional(Type.Boolean({ description: 'When true, return the recursive SHAPE of the artifact (object keys + value types + array lengths) with values dropped. Use this to navigate an unfamiliar large JSON before choosing a projection or selector. Mutually exclusive with projection, selector, and summary.' }))
         }),
         execute: async (params: any) => artifactQuery.query(params)
       }) as any);

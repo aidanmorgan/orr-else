@@ -723,26 +723,20 @@ export class ArtifactQuery {
     if (input.projection) {
       const projDef = this.lookupProjection(resolvedId, input.projection);
       if (!projDef) {
-        // UNregistered named projection: fall back to the GENERIC dot-path
-        // selector. The harness embeds NO project's artifact schema, so an
-        // unregistered projection name is treated as a plain selector against
-        // the artifact JSON. (Consuming-project projections are registered via
-        // projections.register at extension load.)
-        effectiveSelector = normalizeSelectorToDotPath(input.projection);
-        value = safeSelectPath(parsed, effectiveSelector);
-
-        if (value === undefined) {
-          const validProjections = this.validProjectionNames(resolvedId);
-          const hint = closestProjection(input.projection, validProjections);
-          const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
-          return {
-            status: 'rejected',
-            reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection name is not registered and did not resolve as a dot-path selector; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
-            ...(validProjections.length > 0 ? { validProjections } : {}),
-            artifactPath: resolvedPath,
-            exists: true
-          };
-        }
+        // UNregistered named projection: fail closed — reject immediately.
+        // Dot-path access is only through the explicit `selector` parameter
+        // (AC4). Projections must be registered via projections.register at
+        // extension load; the harness embeds NO project's artifact schema.
+        const validProjections = this.validProjectionNames(resolvedId);
+        const hint = closestProjection(input.projection, validProjections);
+        const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
+        return {
+          status: 'rejected',
+          reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection is not registered; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
+          ...(validProjections.length > 0 ? { validProjections } : {}),
+          artifactPath: resolvedPath,
+          exists: true
+        };
       } else {
         // Projection is registered — try each candidate selector.
         const { value: projValue, resolvedSelector } = resolveProjectionValue(parsed, projDef);
