@@ -18,6 +18,7 @@ import { FlowManager } from './FlowManager.js';
 import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
+import { resolveActiveToolSet } from './ActiveToolSetResolver.js';
 
 /**
  * Port for resolving the names of configured project tools to activate in a
@@ -76,6 +77,34 @@ export class Teammate {
     Logger.info(Component.TEAMMATE, 'Teammate mode activated', { beadId, stateId, worktreePath });
     const config = await this.configLoader.load();
 
+    // pi-experiment-6q0y.3: resolve the active project tool set for this state/action
+    // boundary. When activeTools is declared on the state or action, only the resolved
+    // subset is exposed; otherwise all project tools remain callable (default path).
+    //
+    // Granularity: worker entry is STATE-level. The actionId in WorkerContext comes
+    // from env(ACTION_ID) || AUTO_CONTEXT_RESTART_ACTION_ID. In production, PI_ACTION_ID
+    // is never set at spawn — the real action is selected worker-side after startup —
+    // so actionId is always the sentinel. Passing the sentinel to resolveActiveToolSet
+    // would throw (no state declares an 'auto-context-restart' action). Instead:
+    //   - When actionId IS the sentinel: resolve at state level (actionId = undefined).
+    //   - When actionId is a real value (set explicitly, e.g. in tests or future
+    //     harnesses that do pre-select the action): use it for action-level refinement.
+    //
+    // If stateId is absent from config.states (e.g. minimal test configs, partial
+    // config fixtures), fall back to all project tools — the state declared no
+    // restriction. Genuine resolver errors (unknown tool names, duplicates) propagate
+    // as startup-fatal; the "state not found" branch is not a misconfiguration when
+    // the config has no state declarations.
+    const resolvedProjectTools = (() => {
+      if (!stateId) return this.projectToolNameResolver(config);
+      if (!config.states[stateId as string]) return this.projectToolNameResolver(config);
+      const isSentinel =
+        (this.workerContext.actionId as string) === WorkerDefaults.AUTO_CONTEXT_RESTART_ACTION_ID;
+      const effectiveActionId = isSentinel ? undefined : (this.workerContext.actionId as string);
+      const resolved = resolveActiveToolSet(stateId as string, effectiveActionId, config);
+      return resolved.isDefault ? this.projectToolNameResolver(config) : resolved.toolNames;
+    })();
+
     // Activate tools for teammate
     this.flowManager.activateTools(this.pi, [
       BuiltInToolName.TICK_ITEMS,
@@ -90,7 +119,7 @@ export class Teammate {
       ...this.gitPlugin.tools.map(t => t.name).filter(name => name !== PluginToolName.MERGE_AND_COMMIT),
       ...this.mailboxPlugin.tools.map(t => t.name),
       ...this.qualityPlugin.tools.map(t => t.name),
-      ...this.projectToolNameResolver(config),
+      ...resolvedProjectTools,
       ...getConfiguredPiToolNames(config)
     ]);
 

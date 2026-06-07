@@ -4039,3 +4039,432 @@ states:
   });
 });
 
+// ── 6q0y.3: active tool set wiring ────────────────────────────────────────────
+//
+// Tests that pi.setActiveTools is called with the resolver's output at the real
+// state/action boundary (worker SESSION_START → Teammate.start() path).
+// Load-bearing: the finalActive assertions fail if the resolveActiveToolSet wiring
+// is removed from Teammate.startInner() — tool_wide / tool_z would then appear.
+
+describe('6q0y.3: active tool set applied to Pi setActiveTools at worker state/action boundaries', () => {
+  it('pi.setActiveTools excludes inactive project tools when state declares activeTools', async () => {
+    // AC2: scoped state excludes inactive project tools while keeping core harness tools callable.
+    // The Teammate.start() path (the real state-entry boundary) applies the resolved active set.
+    // LOAD-BEARING: removing the resolveActiveToolSet wiring causes tool_wide to appear → test fails.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-6q0y3-state-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // Two project tools; state declares activeTools: [tool_narrow] only.
+    // tool_wide must be excluded from Pi's active tool set for this state.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Narrow
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: tool_narrow
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+  - name: tool_wide
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+states:
+  Narrow:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "Plan"
+    activeTools: [tool_narrow]
+    actions:
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Narrow" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-6q0y3-state';
+      process.env[EnvVars.STATE_ID] = 'Narrow';
+      process.env[EnvVars.ACTION_ID] = 'do-work';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      // Spy on setActiveTools to verify it is called as part of Teammate.start()
+      const setActiveToolsCalls: string[][] = [];
+      const origSetActiveTools = harness.pi.setActiveTools.bind(harness.pi);
+      harness.pi.setActiveTools = (names: string[]) => {
+        setActiveToolsCalls.push([...names]);
+        origSetActiveTools(names);
+      };
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      // Verify setActiveTools was called at least once (via Teammate.start() activateTools)
+      expect(setActiveToolsCalls.length).toBeGreaterThanOrEqual(1);
+
+      // Load-bearing: the final active set must contain tool_narrow and MUST NOT contain
+      // tool_wide. If the resolveActiveToolSet wiring is removed from Teammate.startInner(),
+      // tool_wide would appear in the active set and this assertion would fail.
+      const finalActive = harness.pi.getActiveTools();
+      expect(finalActive).toContain('tool_narrow');
+      expect(finalActive).not.toContain('tool_wide');
+
+      // Core harness tools remain callable (AC2)
+      expect(finalActive).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+      expect(finalActive).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('pi.setActiveTools exposes all project tools when no activeTools are declared (AC1 default path)', async () => {
+    // AC1: harnesses without active-tool config activate the same tools they activate today.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-6q0y3-default-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // No activeTools declared: both project tools should appear in the active set.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Open
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: tool_alpha
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+  - name: tool_beta
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+states:
+  Open:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Open" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-6q0y3-default';
+      process.env[EnvVars.STATE_ID] = 'Open';
+      process.env[EnvVars.ACTION_ID] = 'do-work';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      // Default path: both project tools should be in the active set.
+      const finalActive = harness.pi.getActiveTools();
+      expect(finalActive).toContain('tool_alpha');
+      expect(finalActive).toContain('tool_beta');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('applies action-level active tool sets for two consecutive actions (AC5)', async () => {
+    // AC3 + AC5: action-level activeTools applied after action selection.
+    // Two separate worker sessions simulate consecutive action changes:
+    //   - action_a session: only tool_x visible (not tool_y or tool_z)
+    //   - action_b session: only tool_y visible (not tool_x or tool_z)
+    // LOAD-BEARING: if resolveActiveToolSet wiring removed, tool_z appears → test fails.
+    // Each state has exactly one action to avoid the sequenced-parent-action guard.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-6q0y3-action-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // Two states with one action each; each action declares a different activeTools set.
+    // tool_z is declared in config.tools but not in any action's activeTools.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: StepA
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: tool_x
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+  - name: tool_y
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+  - name: tool_z
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+states:
+  StepA:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "Do Step A"
+    actions:
+      - id: action_a
+        type: prompt
+        prompt: "Step A"
+        activeTools: [tool_x]
+    requiredTools: []
+    transitions: { SUCCESS: "StepB", FAILURE: "StepA" }
+  StepB:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "Do Step B"
+    actions:
+      - id: action_b
+        type: prompt
+        prompt: "Step B"
+        activeTools: [tool_y]
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "StepB" }
+`);
+
+    const runWorkerForState = async (stateId: string, actionId: string): Promise<string[]> => {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = `bd-6q0y3-${stateId}`;
+      process.env[EnvVars.STATE_ID] = stateId;
+      process.env[EnvVars.ACTION_ID] = actionId;
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+
+      const harness = fakePi();
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const active = harness.pi.getActiveTools();
+      await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      return active;
+    };
+
+    try {
+      // First action change: StepA/action_a → only tool_x should be active
+      const stepAActive = await runWorkerForState('StepA', 'action_a');
+      // Second action change: StepB/action_b → only tool_y should be active
+      const stepBActive = await runWorkerForState('StepB', 'action_b');
+
+      // AC5: two consecutive action changes with different active tool sets
+      // StepA/action_a: tool_x active; tool_y and tool_z excluded
+      expect(stepAActive).toContain('tool_x');
+      expect(stepAActive).not.toContain('tool_y');
+      // LOAD-BEARING: tool_z absent because action_a.activeTools = [tool_x]
+      // Removing the resolveActiveToolSet wiring makes tool_z appear → test fails
+      expect(stepAActive).not.toContain('tool_z');
+
+      // StepB/action_b: tool_y active; tool_x and tool_z excluded
+      expect(stepBActive).toContain('tool_y');
+      expect(stepBActive).not.toContain('tool_x');
+      expect(stepBActive).not.toContain('tool_z');
+
+      // Core harness tools remain callable in both states (AC2)
+      expect(stepAActive).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+      expect(stepBActive).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+    } finally {
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('restricts project tools at state level when PI_ACTION_ID is absent (production-mirroring)', async () => {
+    // Production-mirroring: in production, PI_ACTION_ID is NEVER set at spawn —
+    // the worker always gets the AUTO_CONTEXT_RESTART_ACTION_ID sentinel in
+    // workerContext.actionId. This test does NOT set process.env[EnvVars.ACTION_ID],
+    // exactly like production. It verifies that state-level activeTools restriction
+    // is applied correctly (sentinel → state-level resolution → restricted tool absent).
+    //
+    // SELF-CHECK: against the pre-fix code (sentinel → throw → catch-all → all-tools),
+    // this test FAILS because the restricted tool leaks into the active set.
+    // After the fix (sentinel → state-level resolve → tool excluded), it PASSES.
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-6q0y3-no-action-id-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    // State declares activeTools: [tool_allowed] only. tool_restricted must be absent.
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
+settings:
+  startState: Restricted
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+tools:
+  - name: tool_allowed
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+  - name: tool_restricted
+    type: command
+    command: node
+    defaultArgs: ["-e", "console.log(JSON.stringify({ status: 'PASSED' }))"]
+states:
+  Restricted:
+    identity: { role: "R", expertise: "E", constraints: [] }
+    baseInstructions: "Work"
+    activeTools: [tool_allowed]
+    actions:
+      - id: do-work
+        type: prompt
+        prompt: "Work"
+    requiredTools: []
+    transitions: { SUCCESS: "completed", FAILURE: "Restricted" }
+`);
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-6q0y3-no-action-id';
+      process.env[EnvVars.STATE_ID] = 'Restricted';
+      // ACTION_ID is deliberately NOT set — mirrors production spawn where
+      // PI_ACTION_ID is never provided; workerContext.actionId gets the sentinel.
+      delete process.env[EnvVars.ACTION_ID];
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      // State-level restriction must hold even without ACTION_ID.
+      // Pre-fix: sentinel → throw → catch-all → all tools → tool_restricted leaks (FAIL).
+      // Post-fix: sentinel → state-level resolve → tool_restricted absent (PASS).
+      const finalActive = harness.pi.getActiveTools();
+      expect(finalActive).toContain('tool_allowed');
+      expect(finalActive).not.toContain('tool_restricted');
+
+      // Core harness tools remain callable.
+      expect(finalActive).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+      expect(finalActive).toContain(BuiltInToolName.SUBMIT_CHECKPOINT);
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
