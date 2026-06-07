@@ -8,10 +8,42 @@ import {
   ThinkingLevel,
   ToolValidationCondition
 } from '../../constants/index.js';
+import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.js';
 
 /**
  * Domain types for configured Orr Else states.
  */
+
+/**
+ * Deterministic side-effect / resource contract for project-configured tools (zog2.9).
+ *
+ * Startup lint enforces:
+ *   - serialize: true tools MUST have a non-empty serializationKey.
+ *
+ * Execution enforces:
+ *   - allowedInReadOnlyContext: false → REJECTED in review/read-only action contexts.
+ *   - safeForReadinessProbe: false → REJECTED during harness readiness probes.
+ */
+export interface ProjectToolSideEffectContract {
+  /** Whether the tool honours AbortSignal cancellation. */
+  cancellationPolicy: RtkCancellationPolicy;
+  /** Retry-safety classification. */
+  idempotencyClass: RtkIdempotencyClass;
+  /**
+   * Non-null string means this tool must not run concurrently with other tools
+   * sharing the same key. MUST be non-empty when the tool also declares serialize: true.
+   * null means no serialization constraint beyond the per-tool default keying.
+   */
+  serializationKey: string | null;
+  /**
+   * false means this tool is rejected in review/read-only statechart action contexts.
+   */
+  allowedInReadOnlyContext: boolean;
+  /**
+   * false means this tool must not be called during a harness readiness probe.
+   */
+  safeForReadinessProbe: boolean;
+}
 
 export interface AgentIdentity {
   role: string;
@@ -64,6 +96,12 @@ export interface BaseProjectToolConfig {
     message?: string;
     terminal?: boolean;
   };
+  /**
+   * Deterministic side-effect / resource contract for this project-configured tool (zog2.9).
+   * Required for tools with serialize: true — serializationKey must be non-empty.
+   * Enforced at startup and execution time.
+   */
+  sideEffectContract?: ProjectToolSideEffectContract;
 }
 
 /**

@@ -637,6 +637,12 @@ tools:
     type: tsProjectTool
     description: "serialized ts tool"
     serialize: true
+    sideEffectContract:
+      cancellationPolicy: not_supported
+      idempotencyClass: idempotent
+      serializationKey: serial_ts_backend
+      allowedInReadOnlyContext: false
+      safeForReadinessProbe: false
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }

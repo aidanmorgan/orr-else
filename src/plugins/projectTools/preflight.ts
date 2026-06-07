@@ -237,6 +237,38 @@ export async function projectToolFailureLimit(
   };
 }
 
+// ---- Side-effect contract gate (zog2.9) ----
+
+/**
+ * Check whether a tool's sideEffectContract allows invocation in the current context.
+ *
+ * Returns a rejection message string when blocked, or undefined when the tool may proceed.
+ * Called from preflightProjectTool with the real readOnlyContext/probeContext flags
+ * derived from the production execution path.
+ */
+export function checkSideEffectContractGates(
+  definition: ProjectToolConfig,
+  opts: { readOnlyContext?: boolean; probeContext?: boolean }
+): string | undefined {
+  const contract = definition.sideEffectContract;
+  if (!contract) return undefined;
+  if (opts.readOnlyContext && contract.allowedInReadOnlyContext === false) {
+    return (
+      `REJECTED: \`${definition.name}\` is not allowed in read-only review contexts ` +
+      `(sideEffectContract.allowedInReadOnlyContext: false). ` +
+      `This tool may only be called in action contexts that permit mutations.`
+    );
+  }
+  if (opts.probeContext && contract.safeForReadinessProbe === false) {
+    return (
+      `REJECTED: \`${definition.name}\` may not be invoked during a harness readiness probe ` +
+      `(sideEffectContract.safeForReadinessProbe: false). ` +
+      `Readiness probes must only call tools that are safe without side-effects.`
+    );
+  }
+  return undefined;
+}
+
 // ---- PreflightOutcome ----
 
 export type PreflightOutcome =
@@ -262,8 +294,39 @@ export async function preflightProjectTool(
   backpressure: ProjectToolBackpressure,
   beadId: string | undefined,
   stateId: string | undefined,
-  actionId: string | undefined
+  actionId: string | undefined,
+  opts: { readOnlyContext?: boolean; probeContext?: boolean } = {}
 ): Promise<PreflightOutcome> {
+  // 0. Side-effect contract gate (zog2.9) — no reservation needed (pure policy check)
+  const contractRejection = checkSideEffectContractGates(definition, opts);
+  if (contractRejection) {
+    const contractResult = attachFailureCategory(definition, {
+      tool: definition.name,
+      status: ToolResultStatus.REJECTED,
+      message: contractRejection,
+      failureCategory: ProjectToolFailureCategory.TOOL_INPUT_ERROR
+    });
+    const contractRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const contractHandle = await contractRecorder.recordShortCircuit({
+      toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
+      beadId, stateId, actionId,
+      status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
+      rejectionReason: contractRejection,
+    }).catch(() => undefined);
+    await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
+      beadId,
+      stateId,
+      actionId,
+      tool: definition.name,
+      type: definition.type,
+      status: ToolResultStatus.REJECTED,
+      toolInvocationId: context.templateContext.toolInvocationId,
+      ...(contractHandle?.outputFile ? { outputFile: contractHandle.outputFile } : {}),
+      result: summarizeToolResult(contractResult)
+    }).catch(() => {});
+    return { tag: 'ready', result: contractResult };
+  }
+
   // 1. Extension-type rejection — no reservation needed
   if (definition.type === ProjectToolType.EXTENSION) {
     const result = {

@@ -8,6 +8,38 @@
   ],
   "additionalProperties": false,
   "definitions": {
+    "sideEffectContract": {
+      "type": "object",
+      "description": "zog2.9: Deterministic side-effect/resource contract. Required for tools with serialize:true (serializationKey must be non-empty).",
+      "additionalProperties": false,
+      "properties": {
+        "cancellationPolicy": {
+          "type": "string",
+          "enum": ["supported", "not_supported"],
+          "description": "Whether the tool honours AbortSignal cancellation."
+        },
+        "idempotencyClass": {
+          "type": "string",
+          "enum": ["idempotent", "non_idempotent", "at_least_once"],
+          "description": "Retry-safety classification."
+        },
+        "serializationKey": {
+          "description": "Non-null string means tools with this key must not run concurrently. MUST be non-empty when serialize:true. null means no cross-tool serialization constraint.",
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            { "type": "null" }
+          ]
+        },
+        "allowedInReadOnlyContext": {
+          "type": "boolean",
+          "description": "false means this tool is rejected in review/read-only statechart action contexts."
+        },
+        "safeForReadinessProbe": {
+          "type": "boolean",
+          "description": "false means this tool must not be called during a harness readiness probe."
+        }
+      }
+    },
     "toolProfileShape": {
       "type": "object",
       "description": "Reusable partial command-tool configuration. Fields here are applied as defaults before per-tool values. Per-tool fields always win.",
@@ -756,6 +788,9 @@
                 "type": "boolean",
                 "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)."
               },
+              "sideEffectContract": {
+                "$ref": "#/definitions/sideEffectContract"
+              },
               "successExitCodes": {
                 "type": "array",
                 "items": {
@@ -872,6 +907,9 @@
               "serialize": {
                 "type": "boolean",
                 "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)."
+              },
+              "sideEffectContract": {
+                "$ref": "#/definitions/sideEffectContract"
               },
               "timeoutMs": {
                 "type": "integer",
@@ -1178,6 +1216,9 @@
               "serialize": {
                 "type": "boolean",
                 "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)."
+              },
+              "sideEffectContract": {
+                "$ref": "#/definitions/sideEffectContract"
               },
               "successExitCodes": {
                 "type": "array",

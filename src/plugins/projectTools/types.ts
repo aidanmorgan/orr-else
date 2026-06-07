@@ -115,6 +115,7 @@ export interface CommandResultInput {
   exitCode: number | undefined;
   maxBufferExceeded: boolean;
   timedOut?: boolean;
+  cancelled?: boolean;
   signal?: string | undefined;
   stdoutFile: string;
   stderrFile: string;

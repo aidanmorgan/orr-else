@@ -47,6 +47,26 @@ export type RtkToolClass =
   | 'project_configured';
 
 /**
+ * Whether the tool honours AbortSignal cancellation (zog2.9).
+ *
+ *   supported     — the tool executor propagates cancellation (AbortSignal) and
+ *                   terminates early when the signal fires.
+ *   not_supported — the tool runs to completion regardless of cancellation.
+ */
+export type RtkCancellationPolicy = 'supported' | 'not_supported';
+
+/**
+ * Retry-safety classification (zog2.9).
+ *
+ *   idempotent     — calling the tool multiple times with the same arguments
+ *                    produces the same outcome; safe to retry.
+ *   non_idempotent — a second call with the same arguments produces a different
+ *                    or harmful outcome; MUST NOT be retried automatically.
+ *   at_least_once  — safe to retry, but may produce duplicates (e.g. event append).
+ */
+export type RtkIdempotencyClass = 'idempotent' | 'non_idempotent' | 'at_least_once';
+
+/**
  * Where the complete raw output of a tool invocation is persisted by the harness.
  *
  *   tool_calls_dir  — written to PI_TOOL_CALL_DIR under the standard
@@ -98,6 +118,23 @@ export interface RtkContractEntry {
   readonly rawOutputLocation: RtkRawOutputLocation;
   readonly deterministicCompaction: boolean;
   readonly mutating: boolean;
+  /** Whether the tool honours AbortSignal cancellation (zog2.9). */
+  readonly cancellationPolicy: RtkCancellationPolicy;
+  /** Retry-safety classification (zog2.9). */
+  readonly idempotencyClass: RtkIdempotencyClass;
+  /**
+   * Non-null string means tools sharing this key must not run concurrently (zog2.9).
+   * null means no cross-tool serialization constraint.
+   */
+  readonly serializationKey: string | null;
+  /**
+   * false = this tool is rejected in review/read-only statechart action contexts (zog2.9).
+   */
+  readonly allowedInReadOnlyContext: boolean;
+  /**
+   * false = this tool must not be called during a harness readiness probe (zog2.9).
+   */
+  readonly safeForReadinessProbe: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,7 +171,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -145,7 +187,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -156,7 +203,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -167,7 +219,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -178,7 +235,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -189,7 +251,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/reviewer/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -200,7 +267,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -211,7 +283,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -222,7 +299,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -233,7 +315,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/artifact-evidence/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -244,7 +331,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/artifact-evidence/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -255,7 +347,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -266,7 +363,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -277,7 +379,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   // =========================================================================
@@ -294,7 +401,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -305,7 +417,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -316,7 +433,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -327,7 +449,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_output_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -338,7 +465,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -349,7 +481,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -360,7 +497,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -371,7 +513,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -382,7 +529,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -393,7 +545,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   {
@@ -404,7 +561,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -415,7 +577,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   // -- Git plugin — src/plugins/git.ts --
@@ -428,7 +595,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -439,7 +611,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -450,7 +627,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: 'git_merge',
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   // -- Mailbox plugin — src/plugins/mailbox.ts --
@@ -463,7 +645,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -474,7 +661,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -485,7 +677,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: true,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   // -- Quality plugin — src/plugins/quality.ts --
@@ -498,7 +695,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: false
   },
 
   // -- Teammates plugin — src/plugins/teammates.ts --
@@ -511,7 +713,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   // -- Meta plugin — src/plugins/meta.ts --
@@ -524,7 +731,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   // =========================================================================
@@ -540,7 +752,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -551,7 +768,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -562,7 +784,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -573,7 +800,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -584,7 +816,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -595,7 +832,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   },
 
   {
@@ -606,7 +848,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
     deterministicCompaction: false,
-    mutating: false
+    mutating: false,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
   },
 
   {
@@ -617,7 +864,12 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
     deterministicCompaction: false,
-    mutating: true
+    mutating: true,
+    cancellationPolicy: 'supported',
+    idempotencyClass: 'non_idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
   }
 
   // =========================================================================

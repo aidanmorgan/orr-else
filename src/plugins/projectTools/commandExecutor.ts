@@ -406,7 +406,7 @@ const STDERR_HINT_MAX_CHARS = 512;
 
 export function buildCommandResult(input: CommandResultInput): object {
   const {
-    definition, status, exitCode, timedOut, signal,
+    definition, status, exitCode, timedOut, cancelled, signal,
     stdoutFile, stderrFile, boundedStdout, boundedStderr,
     structuredStdout, structuredSummary, toolCalls, normalizedPathArguments
   } = input;
@@ -422,6 +422,7 @@ export function buildCommandResult(input: CommandResultInput): object {
     status,
     exitCode,
     ...(timedOut !== undefined ? { timedOut } : {}),
+    ...(cancelled ? { cancelled } : {}),
     ...(signal !== undefined ? { signal } : {}),
     stdoutFile,
     stderrFile,
@@ -497,25 +498,35 @@ export function serializedCommandLockTimeoutResult(
   };
 }
 
-export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
+export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal) {
   if (!shouldSerializeCommandTool(definition)) {
-    return await executeCommandToolUnlocked(definition, args, context);
+    return await executeCommandToolUnlocked(definition, args, context, signal);
   }
   const projectRoot = context.templateContext.projectRoot || process.cwd();
+  // zog2.9: when the tool declares a sideEffectContract.serializationKey, use that
+  // key (instead of the tool name) as the lock-bucket differentiator so that two
+  // distinct tools sharing the same serializationKey genuinely serialize against
+  // each other. Without this, only tools with the same NAME would collide.
+  const serializationKey = (definition as { sideEffectContract?: { serializationKey?: string | null } })
+    .sideEffectContract?.serializationKey;
+  const lockBucket = (typeof serializationKey === 'string' && serializationKey.trim())
+    ? serializationKey.trim()
+    : definition.name;
   try {
     return await withSerializedToolLock(
       {
         lockDir: COMMAND_TOOL_LOCK_DIR,
-        keyParts: [projectRoot, definition.name],
+        keyParts: [projectRoot, lockBucket],
         lockName: definition.name,
         logFields: {
           tool: definition.name,
+          lockBucket,
           lockScope: SERIAL_MCP_LOCK_SCOPE,
           lockReason: SERIAL_TOOL_LOCK_REASON
         }
       },
       `Timed out acquiring serialized project-tool lock for ${definition.name}`,
-      async () => executeCommandToolUnlocked(definition, args, context)
+      async () => executeCommandToolUnlocked(definition, args, context, signal)
     );
   } catch (error) {
     if (error instanceof SerializedToolLockTimeoutError) {
@@ -525,7 +536,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
   }
 }
 
-async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext) {
+async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal) {
   const templateContext = context.templateContext;
   const command = resolveTemplateString(definition.command, templateContext);
   const finalArgs = (definition.defaultArgs || []).map(arg => resolveTemplateString(arg, templateContext));
@@ -587,6 +598,13 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
     }
   }
 
+  // zog2.9: propagate the Pi AbortSignal to execa only for tools that declare
+  // cancellationPolicy: 'supported' in their sideEffectContract.  Tools that
+  // declare 'not_supported' run to completion regardless of the signal.
+  const cancellationPolicy = (definition as { sideEffectContract?: { cancellationPolicy?: string } })
+    .sideEffectContract?.cancellationPolicy;
+  const cancelSignal = cancellationPolicy === 'supported' && signal ? signal : undefined;
+
   try {
     const result = await execa(command, spawnArgs, {
       cwd: context.cwd,
@@ -596,12 +614,14 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
       stdout: { file: stdoutFile },
       stderr: { file: stderrFile },
       reject: false,
-      timeout: definition.timeoutMs || Defaults.PROCESS_REAP_INTERVAL_MS
+      timeout: definition.timeoutMs || Defaults.PROCESS_REAP_INTERVAL_MS,
+      ...(cancelSignal ? { cancelSignal } : {})
     });
     const stdoutInfo = await fileInfo(stdoutFile);
     const stderrInfo = await fileInfo(stderrFile);
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
     const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined;
+    const isCanceled = (result as { isCanceled?: boolean }).isCanceled === true;
 
     // If a structured handler is active, parse the process output into a compact
     // structuredResult.  If parse() returns null (malformed/empty JSON), fall back
@@ -617,7 +637,7 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
     const acceptedNonZeroExitCode = exitCode !== CommandExitCode.SUCCESS
       && acceptedExitCode
       && stderrInfo.text.trim().length === 0;
-    const passed = !result.timedOut && (exitCode === CommandExitCode.SUCCESS || acceptedNonZeroExitCode);
+    const passed = !result.timedOut && !isCanceled && (exitCode === CommandExitCode.SUCCESS || acceptedNonZeroExitCode);
 
     return buildCommandResult({
       definition,
@@ -625,6 +645,7 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
       exitCode,
       maxBufferExceeded: false,
       timedOut: result.timedOut,
+      cancelled: isCanceled || undefined,
       signal: result.signal,
       stdoutFile,
       stderrFile,

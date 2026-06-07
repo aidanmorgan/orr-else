@@ -90,9 +90,10 @@ export { resolveContextField } from './projectTools/contextHelpers.js';
 export { normalizeCommandArguments } from './projectTools/commandExecutor.js';
 export { normalizeMcpPathArguments } from './projectTools/pathNormalization.js';
 export { shouldSerializeMcpTool, mcpToolRequestTimeoutMs } from './projectTools/mcpExecutor.js';
-export { projectToolFailureLimitSuggestedOutcome } from './projectTools/preflight.js';
+export { projectToolFailureLimitSuggestedOutcome, checkSideEffectContractGates } from './projectTools/preflight.js';
 export { isSuccessfulCommandExitCode, isAcceptedMaxBufferFailure, shouldSerializeCommandTool, toolCallsFromOutputFile, extractSequencedToolCalls } from './projectTools/commandExecutor.js';
 export type { ToolCallSource } from './projectTools/commandExecutor.js';
+export { stripLeadingAt } from './projectTools/pathNormalization.js';
 
 // ---- ProjectToolRuntimeContext ----
 
@@ -112,7 +113,8 @@ export async function executeConfiguredProjectTool(
   ctx: ExtensionContext,
   env: RuntimeEnvironment | undefined,
   backpressure: ProjectToolBackpressure,
-  injectedRoot: string = process.cwd()
+  injectedRoot: string = process.cwd(),
+  signal?: AbortSignal
 ): Promise<unknown> {
   // Deprecation guard: intercept before any execution when tool is marked deprecated.
   const defAny = definition as { deprecated?: boolean; replacedBy?: string[]; deprecationReason?: string };
@@ -166,10 +168,20 @@ export async function executeConfiguredProjectTool(
   const stateId = context.templateContext.stateId;
   const actionId = context.templateContext.actionId;
 
+  // zog2.9: derive readOnlyContext from env. When WORKTREE_PATH equals PROJECT_ROOT
+  // the teammate is running at the project root without an isolated worktree — this
+  // is the "read-only / review" context (no worktree provisioned; Supervisor comment:
+  // "read-only states such as Planning/Review"). Tools with allowedInReadOnlyContext:false
+  // are rejected in this context.
+  const worktreePath = context.templateContext.worktreePath;
+  const projectRoot = context.templateContext.projectRoot;
+  const isReadOnlyContext = Boolean(worktreePath && projectRoot && worktreePath === projectRoot);
+
   // WI-12: preflightProjectTool handles extension/backpressure/failure-limit.
   // Returns { tag: 'ready', result } (short-circuit) OR { tag: 'proceed', failureLimit }.
   const preflight = await preflightProjectTool(
-    eventStore, definition, context, backpressure, beadId, stateId, actionId
+    eventStore, definition, context, backpressure, beadId, stateId, actionId,
+    { readOnlyContext: isReadOnlyContext }
   );
 
   if (preflight.tag === 'ready') {
@@ -223,8 +235,8 @@ export async function executeConfiguredProjectTool(
       await mkdir(context.tmpDir, { recursive: true });
 
       const rawResult = definition.type === ProjectToolType.COMMAND
-        ? await executeCommandTool(definition as ProjectCommandToolConfig, args, context)
-        : await executeMcpTool(definition as ProjectMcpToolConfig, args, ctx, context);
+        ? await executeCommandTool(definition as ProjectCommandToolConfig, args, context, signal)
+        : await executeMcpTool(definition as ProjectMcpToolConfig, args, ctx, context, signal);
 
       const result = await persistAndBoundResult(definition, rawResult, context);
       const status = statusFromToolResult(result);
@@ -412,7 +424,7 @@ export function registerConfiguredProjectTools(
   pi: ExtensionAPI,
   config: HarnessConfig,
   seen: Set<string>,
-  wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
+  wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
   runtimeContext: (() => ProjectToolRuntimeContext | undefined) | undefined,
   env: RuntimeEnvironment | undefined,
   backpressure: ProjectToolBackpressure,
@@ -444,7 +456,7 @@ export function registerConfiguredProjectTools(
             operation: Type.Optional(Type.String({ description: 'The configured MCP operation or alias to perform' })),
             arguments: Type.Optional(Type.Object({}, { additionalProperties: true, description: 'JSON object arguments for the MCP tool operation' }))
           }),
-      execute: async (params: unknown, ctx: ExtensionContext) => {
+      execute: async (params: unknown, ctx: ExtensionContext, signal?: AbortSignal) => {
         const hiddenContext = runtimeContext?.() || {};
         const configuredFrameworkRoot = frameworkRootFromConfig(config, env, injectedRoot);
         const configuredNamedRoots = namedRootsFromConfig(config, env, injectedRoot);
@@ -454,7 +466,7 @@ export function registerConfiguredProjectTools(
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {}),
           ...(configuredNamedRoots ? { namedRoots: configuredNamedRoots } : {})
-        }, ctx, env, backpressure, injectedRoot);
+        }, ctx, env, backpressure, injectedRoot, signal);
         // Strip _internalOutputFile at the model boundary: this field is an
         // internal sequencing channel used only by runParentSequenceActionsBeforeActive
         // (which calls executeConfiguredProjectTool directly). The registered tool

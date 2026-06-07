@@ -23,6 +23,21 @@ import type {
   PathArgumentEscapeGuidance,
   PathArgumentRootResolution
 } from './types.js';
+/**
+ * Strip a single leading `@` from a path argument value (zog2.9).
+ *
+ * Pi model calls sometimes prefix file paths with `@` (e.g. `@src/foo.ts`).
+ * The leading `@` is a Pi-specific mention marker that has no filesystem meaning.
+ * Stripping it before root validation prevents spurious escape rejections and
+ * allows the rest of the path normalization pipeline to operate on a clean value.
+ *
+ * Only the FIRST leading `@` is stripped — `@@double` becomes `@double`, not `double`.
+ * Interior `@` characters (e.g. `foo@bar`) are left untouched.
+ */
+export function stripLeadingAt(value: string): string {
+  return value.startsWith('@') ? value.slice(1) : value;
+}
+
 // Local pure helpers — duplicated to avoid circular imports
 function isInsidePath(root: string, candidate: string): boolean {
   const relativePath = path.relative(root, candidate);
@@ -159,6 +174,9 @@ export function normalizePathArgumentValue(
   config: ProjectToolPathArgumentConfig,
   templateContext: TemplateContext
 ): string {
+  // zog2.9: strip a leading @ before root validation so Pi model mention markers
+  // (@src/foo.ts → src/foo.ts) do not cause spurious root-escape rejections.
+  const strippedValue = stripLeadingAt(value);
   const root = resolvePathArgumentRoot(config, templateContext);
   const virtualRoots = (config[PathArgumentConfigKey.VIRTUAL_ROOTS] || [])
     .map(rootValue => resolveTemplateString(rootValue, templateContext))
@@ -166,7 +184,7 @@ export function normalizePathArgumentValue(
   let candidate: string | undefined;
 
   for (const virtualRoot of virtualRoots) {
-    const relativeSuffix = stripConfiguredVirtualRoot(value, virtualRoot);
+    const relativeSuffix = stripConfiguredVirtualRoot(strippedValue, virtualRoot);
     if (relativeSuffix !== undefined) {
       candidate = path.resolve(root.path, relativeSuffix);
       break;
@@ -174,7 +192,7 @@ export function normalizePathArgumentValue(
   }
 
   if (!candidate) {
-    const resolvedValue = resolveTemplateString(value, templateContext);
+    const resolvedValue = resolveTemplateString(strippedValue, templateContext);
     candidate = path.isAbsolute(resolvedValue)
       ? path.resolve(resolvedValue)
       : path.resolve(root.path, resolvedValue);
@@ -183,7 +201,7 @@ export function normalizePathArgumentValue(
   if (config[PathArgumentConfigKey.MUST_STAY_INSIDE_ROOT] !== false && !isInsidePath(root.path, candidate)) {
     const guidance = pathArgumentEscapeGuidance(root, virtualRoots);
     throw new PathArgumentRootEscapeError(
-      pathArgumentEscapeMessage(toolName, argumentName, value, root, guidance),
+      pathArgumentEscapeMessage(toolName, argumentName, strippedValue, root, guidance),
       guidance
     );
   }

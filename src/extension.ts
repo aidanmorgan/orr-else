@@ -698,7 +698,7 @@ async function persistPluginToolRawResult(
 }
 
 function wrapPluginTool(
-  tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> },
+  tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> },
   runtimeObservability: Observability,
   services: RuntimeServices,
   session: ExtensionSession
@@ -880,7 +880,7 @@ function wrapPluginTool(
         toolSpanAttributes(tool.name, params, beadId, session, false, toolInvocationId),
         async (p: any, c: ExtensionContext) => {
           if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
-          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c)));
+          const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c, _signal)));
           if (c.hasUI) c.ui.setWorkingMessage(undefined);
 
           // Record invocation and result for audit
@@ -2759,7 +2759,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       registerClaudeCodeLiveLogin(pi);
     }
 
-    const wrapRuntimeTool = (tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown): unknown | Promise<unknown> }) =>
+    const wrapRuntimeTool = (tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> }) =>
       wrapPluginTool(tool, runtimeObservability, services, session);
 
     if (!session.artifactPathsToolRegistered) {

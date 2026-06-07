@@ -601,12 +601,39 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * zog2.9: Reject project-configured tools that declare serialize: true without a
+   * non-empty serializationKey in their sideEffectContract.
+   *
+   * A serialized tool MUST name the lock bucket so two different tools sharing a
+   * backend can genuinely serialize against each other (same key → same lock).
+   * A tool that omits serializationKey but declares serialize:true has an
+   * inconsistent contract and is rejected at startup.
+   */
+  private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
+    for (const tool of config.tools || []) {
+      const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
+      if (t.serialize === true) {
+        const key = t.sideEffectContract?.serializationKey;
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new Error(
+            `Tool "${tool.name}" declares serialize: true but its sideEffectContract.serializationKey is missing or empty. ` +
+            `Serialized tools must declare a non-empty serializationKey so the harness can deterministically enforce ` +
+            `non-concurrent access for tools sharing the same backend. ` +
+            `Add sideEffectContract: { serializationKey: "<key>", ... } to the tool declaration.`
+          );
+        }
+      }
+    }
+  }
+
   private validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
     this.validateNoDeprecatedTools(config);
     this.validateObserveOnlyInRequiredTools(config);
     this.validateTraceabilityOwner(config);
     this.validateWorktreePolicy(config);
+    this.validateSerializeRequiresSerializationKey(config);
 
     const stateIds = new Set(Object.keys(config.states || {}));
     const sc = config.statechart;

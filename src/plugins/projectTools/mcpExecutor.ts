@@ -67,8 +67,16 @@ export function mcpToolRequestTimeoutMs(definition: Pick<ProjectMcpToolConfig, '
   return shouldSerializeMcpTool(definition) ? SERIAL_MCP_REQUEST_TIMEOUT_MS : Defaults.PROCESS_REAP_INTERVAL_MS;
 }
 
-function mcpToolRequestOptions(definition: ProjectMcpToolConfig): RequestOptions {
-  return { timeout: mcpToolRequestTimeoutMs(definition) };
+function mcpToolRequestOptions(definition: ProjectMcpToolConfig, signal?: AbortSignal): RequestOptions {
+  // zog2.9: propagate the Pi AbortSignal to the MCP request only for tools that
+  // declare cancellationPolicy: 'supported' in their sideEffectContract.
+  const cancellationPolicy = (definition as { sideEffectContract?: { cancellationPolicy?: string } })
+    .sideEffectContract?.cancellationPolicy;
+  const opts: RequestOptions = { timeout: mcpToolRequestTimeoutMs(definition) };
+  if (cancellationPolicy === 'supported' && signal) {
+    opts.signal = signal;
+  }
+  return opts;
 }
 
 // ---- Lock helpers ----
@@ -91,15 +99,25 @@ async function withSerializedMcpToolLock<T>(
   if (!shouldSerializeMcpTool(definition)) return await fn();
 
   const metadata = serializedMcpLockMetadata(context);
+  // zog2.9: when the tool declares a sideEffectContract.serializationKey, use that
+  // key (instead of the tool name) as the lock-bucket differentiator so that two
+  // distinct tools sharing the same serializationKey genuinely serialize against
+  // each other. Without this, only tools with the same NAME would collide.
+  const serializationKey = (definition as { sideEffectContract?: { serializationKey?: string | null } })
+    .sideEffectContract?.serializationKey;
+  const lockBucket = (typeof serializationKey === 'string' && serializationKey.trim())
+    ? serializationKey.trim()
+    : definition.name;
   try {
     return await withSerializedToolLock(
       {
         lockDir: MCP_TOOL_LOCK_DIR,
-        keyParts: [metadata.projectRoot, definition.server, definition.name],
+        keyParts: [metadata.projectRoot, lockBucket],
         lockName: definition.name,
         logFields: {
           tool: definition.name,
           server: definition.server,
+          lockBucket,
           lockScope: metadata.scope,
           lockReason: metadata.reason
         }
@@ -319,9 +337,9 @@ export async function persistMcpRawResult(
 
 // ---- executeMcpTool ----
 
-export async function executeMcpTool(definition: ProjectMcpToolConfig, args: any, ctx: ExtensionContext, context: ProjectToolExecutionContext) {
+export async function executeMcpTool(definition: ProjectMcpToolConfig, args: any, ctx: ExtensionContext, context: ProjectToolExecutionContext, signal?: AbortSignal) {
   try {
-    return await withSerializedMcpToolLock(definition, context, async () => executeMcpToolUnlocked(definition, args, ctx, context));
+    return await withSerializedMcpToolLock(definition, context, async () => executeMcpToolUnlocked(definition, args, ctx, context, signal));
   } catch (error) {
     if (error instanceof SerializedMcpToolLockTimeoutError) {
       return serializedMcpLockTimeoutResult(definition, error);
@@ -330,7 +348,7 @@ export async function executeMcpTool(definition: ProjectMcpToolConfig, args: any
   }
 }
 
-async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: any, ctx: ExtensionContext, context: ProjectToolExecutionContext) {
+async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: any, ctx: ExtensionContext, context: ProjectToolExecutionContext, signal?: AbortSignal) {
   const templateContext = context.templateContext;
   const configPath = resolveConfiguredPath(definition.configPath || DEFAULT_MCP_CONFIG_PATH, templateContext);
   const operation = resolveMcpOperation(definition, args.operation);
@@ -386,7 +404,7 @@ async function executeMcpToolUnlocked(definition: ProjectMcpToolConfig, args: an
       const callToolResult = await client.callTool({
         name: operation,
         arguments: normalizedArguments.arguments
-      }, undefined, mcpToolRequestOptions(definition));
+      }, undefined, mcpToolRequestOptions(definition, signal));
 
       // cosx: persist the COMPLETE raw client.callTool payload to mcp-raw.json as
       // harness-side evidence BEFORE building the compact model-facing result.
