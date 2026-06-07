@@ -120,6 +120,7 @@ import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInve
 import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
+import { resolveActiveToolSet } from './core/ActiveToolSetResolver.js';
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
@@ -1523,6 +1524,12 @@ interface StateSystemPromptResult {
   estimatedTokens: number;
   /** True when estimatedTokens exceeds the default budget. */
   overBudget: boolean;
+  /**
+   * Sorted active tool names included in the assembled prompt, or undefined when the full
+   * default tool set is used (no activeTools declared on the state/action).
+   * 6q0y.2: recorded on STATE_PROMPT_ASSEMBLED for observability (no prompt body).
+   */
+  activeToolNames: string[] | undefined;
 }
 
 /**
@@ -1545,7 +1552,31 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   const protocol = services.protocolInjector.inject(activeRun.state, config);
   const checklistProtocol = services.protocolParser.generatePrompt(activeRun.requiredItems);
   const profileId = resolveToolPromptProfileId(config, activeRun.state, activeRun.action);
-  const projectTools = describeConfiguredProjectTools(config, profileId);
+
+  // pi-experiment-6q0y.2: resolve the active tool set for this state/action pair so
+  // only active tools appear in the stable prompt (token reduction for narrow states).
+  //
+  // Sentinel handling mirrors 6q0y.3 (Teammate.startInner): at the BEFORE_AGENT_START
+  // boundary the action has already been selected by initializeWorkerRun via
+  // selectActiveAction, so activeRun.action.id is a real action ID — not the sentinel.
+  // We resolve at state+action level directly.  If the state is absent from
+  // config.states (e.g. minimal test configs), fall back to the full tool set.
+  let activeToolNamesSet: ReadonlySet<string> | undefined;
+  let resolvedActiveToolNames: string[] | undefined;
+  if (config.states[activeRun.stateId]) {
+    try {
+      const resolved = resolveActiveToolSet(activeRun.stateId, activeRun.action.id, config);
+      if (!resolved.isDefault) {
+        activeToolNamesSet = new Set(resolved.toolNames);
+        resolvedActiveToolNames = resolved.toolNames; // already sorted
+      }
+    } catch {
+      // Resolver errors (unknown names, duplicates) are startup-fatal at lint time;
+      // if one slips through here, fall back to full tool set rather than crashing.
+    }
+  }
+
+  const projectTools = describeConfiguredProjectTools(config, profileId, activeToolNamesSet);
   const actionPrompt = activeRun.action.prompt || '';
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
@@ -1561,7 +1592,14 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
   // Build the stable identity for digest computation.  Arrays are sorted inside
   // digestStableBlock / canonicalise so insertion order is irrelevant.
   // The protocolLabel folds in the resolved profile ID so different profiles produce
-  // different digest/cache-keys (AC3) while identical runs remain deterministic.
+  // different digest/cache-keys while identical runs remain deterministic.
+  // 6q0y.2: also fold the sorted active tool names into the label so that two states
+  // with different active sets always produce different digest/cache-keys (AC3).
+  let protocolLabel = profileId ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}` : 'ORR_ELSE_PROTOCOL_v1';
+  if (resolvedActiveToolNames !== undefined) {
+    // Append sorted active-tool fingerprint so cache-key changes when the active set changes.
+    protocolLabel = `${protocolLabel}|activeTools:${resolvedActiveToolNames.join(',')}`;
+  }
   const identity: StableBootstrapInputs = {
     projectRoot,
     configIdentity: configPath,
@@ -1569,7 +1607,7 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
     toolNames: getConfiguredPiToolNames(config),
     skillNames,
     ruleCategories: [],
-    protocolLabel: profileId ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}` : 'ORR_ELSE_PROTOCOL_v1'
+    protocolLabel
   };
 
   const injected = services.contextInjector.injectWithDigest(
@@ -1599,7 +1637,8 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
     volatileSuffix: injected.volatileSuffix,
     digestId: injected.digestId,
     estimatedTokens: injected.estimatedTokens,
-    overBudget: injected.overBudget
+    overBudget: injected.overBudget,
+    activeToolNames: resolvedActiveToolNames
   };
 }
 
@@ -2664,6 +2703,12 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         admissionRuleCode: admission.ruleCode,
         // AC3: harness fingerprint binds this event to the running build (1elr.9).
         admittedHarnessFingerprint: session.admittedHarnessFingerprint,
+        // 6q0y.2: active-tool telemetry — names only, no prompt bodies (AC5).
+        // Absent when the full default tool set is used (no activeTools declared).
+        ...(promptResult.activeToolNames !== undefined ? {
+          activeToolNames: promptResult.activeToolNames,
+          activeToolCount: promptResult.activeToolNames.length,
+        } : {}),
       }).catch(() => {});
 
       if (promptResult.overBudget) {

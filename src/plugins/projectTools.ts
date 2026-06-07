@@ -426,7 +426,8 @@ export function resolveToolPromptProfileId(
 
 export function describeConfiguredProjectTools(
   config: HarnessConfig,
-  profileId?: string
+  profileId?: string,
+  activeToolNames?: ReadonlySet<string>
 ): string {
   const tools = config.tools || [];
   if (tools.length === 0) return '';
@@ -442,7 +443,15 @@ export function describeConfiguredProjectTools(
   }
 
   // Sort by name so prompt text is canonical regardless of YAML declaration order.
-  const sortedTools = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  // When activeToolNames is provided, omit inactive tools — reducing token spend for
+  // narrow states while keeping canonical alphabetical ordering (6q0y.2).
+  const allSorted = [...tools].sort((a, b) => a.name.localeCompare(b.name));
+  const sortedTools = activeToolNames !== undefined
+    ? allSorted.filter(t => activeToolNames.has(t.name))
+    : allSorted;
+
+  if (sortedTools.length === 0) return '';
+
   const descriptions = sortedTools.map(tool => {
     // Profile text overrides tool.description; all other summary fields are preserved
     // (transport, mcpDetails, commandDetails, usageNotes are structural — not overridden).
