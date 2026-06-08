@@ -484,6 +484,56 @@ export class ConfigLoader {
       });
     }
 
+    // AC4 (cfzu): v2 configs must not declare old v1 outcome/custom-event fields.
+    // These are replaced by the category-first event vocabulary (events.advance/failure/blocked/neutral).
+    const V2_BANNED_OUTCOME_FIELDS: Array<{ path: string; hint: string }> = [];
+
+    if ('advanceOutcomes' in statechart) {
+      V2_BANNED_OUTCOME_FIELDS.push({
+        path: 'statechart.advanceOutcomes',
+        hint: 'Declare advance-category events under events.advance in v2. ' +
+          'Example: events: { advance: ["SUCCESS"] }'
+      });
+    }
+    if ('failedOutcomes' in statechart) {
+      V2_BANNED_OUTCOME_FIELDS.push({
+        path: 'statechart.failedOutcomes',
+        hint: 'Declare failure-category events under events.failure in v2. ' +
+          'Example: events: { failure: ["FAILURE"] }'
+      });
+    }
+    if ('blockedOutcomes' in statechart) {
+      V2_BANNED_OUTCOME_FIELDS.push({
+        path: 'statechart.blockedOutcomes',
+        hint: 'Declare blocked-category events under events.blocked in v2. ' +
+          'Example: events: { blocked: ["BLOCKED"] }'
+      });
+    }
+    if ('customOutcomes' in statechart) {
+      V2_BANNED_OUTCOME_FIELDS.push({
+        path: 'statechart.customOutcomes',
+        hint: 'Declare custom outcomes as additional event names in the appropriate category under events in v2. ' +
+          'Example: events: { neutral: ["MY_CUSTOM_EVENT"] }'
+      });
+    }
+    if ('customEvents' in statechart) {
+      V2_BANNED_OUTCOME_FIELDS.push({
+        path: 'statechart.customEvents',
+        hint: 'Declare custom events under the appropriate category in events in v2. ' +
+          'Example: events: { neutral: ["MY_EVENT"] }'
+      });
+    }
+
+    if (V2_BANNED_OUTCOME_FIELDS.length > 0) {
+      const details = V2_BANNED_OUTCOME_FIELDS.map(f => `  ${f.path}: ${f.hint}`).join('\n');
+      throw new Error(
+        `v2 harness config (version: 2) contains ${V2_BANNED_OUTCOME_FIELDS.length} removed v1 outcome/event field(s):\n` +
+        details + '\n' +
+        `In v2, the event vocabulary is declared under the top-level \`events\` key with categories ` +
+        `(advance/failure/blocked/neutral). Remove these v1 fields and migrate to the v2 events structure.`
+      );
+    }
+
     if (staleV1Fields.length > 0) {
       const details = staleV1Fields.map(f => `  ${f.path}: ${f.hint}`).join('\n');
       throw new Error(
@@ -492,6 +542,19 @@ export class ConfigLoader {
         `Remove the stale fields to comply with the v2 schema. ` +
         `These fields are no longer part of the v2 config contract and will not be read by the runtime.`
       );
+    }
+
+    // AC1/AC2 (cfzu): validate the v2 event vocabulary if declared.
+    const eventsRaw = isRecord(config['events']) ? config['events'] as Record<string, unknown> : undefined;
+    if (eventsRaw !== undefined) {
+      this.validateV2EventVocabulary(eventsRaw);
+    }
+
+    // AC3 (cfzu): startup lint — state transition keys must be exact declared event names.
+    // Only enforced when events are declared (a v2 config may validly have no events declared yet).
+    if (eventsRaw !== undefined) {
+      const declaredV2Vocab = this.buildV2EventVocabulary(eventsRaw);
+      this.validateV2TransitionKeys(config, declaredV2Vocab);
     }
 
     // AC5: terminal sink not runnable.
@@ -505,6 +568,132 @@ export class ConfigLoader {
           `Terminal sinks must not be runnable states. ` +
           `Either remove "${sinkName}" from statechart.terminal, or remove its actions block to make it a true sink state.`
         );
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-cfzu AC1/AC2: Validate v2 event vocabulary.
+   *
+   * Rules (all startup-fatal):
+   *   1. Each event name must match the canonical pattern: one or more segments of
+   *      uppercase letters/digits, joined by underscores (e.g. SUCCESS, QUALITY_PASSED).
+   *      Case-insensitive on input — normalized to upper-case.
+   *   2. Duplicate event names (case-insensitive) within the same category → rejected.
+   *   3. Duplicate event names (case-insensitive) across categories → rejected, naming
+   *      both categories and the normalized key.
+   *
+   * The valid pattern: /^[A-Z0-9]+(_[A-Z0-9]+)*$/ (after normalization to upper-case).
+   */
+  private validateV2EventVocabulary(eventsRaw: Record<string, unknown>): void {
+    const VALID_EVENT_PATTERN = /^[A-Z0-9]+(_[A-Z0-9]+)*$/;
+    const CATEGORIES = ['advance', 'failure', 'blocked', 'neutral'] as const;
+
+    // Map of normalized event name → first category that declared it
+    const seenAcrossCategories = new Map<string, string>();
+
+    for (const category of CATEGORIES) {
+      const raw = eventsRaw[category];
+      if (raw === undefined) continue;
+      if (!Array.isArray(raw)) {
+        throw new Error(
+          `v2 events.${category} must be an array of event name strings, but got ${typeof raw}. ` +
+          `Declare event names as a YAML array under events.${category}.`
+        );
+      }
+      const seenInCategory = new Map<string, string>(); // normalized → original
+      for (const entry of raw) {
+        if (typeof entry !== 'string' || !entry.trim()) {
+          throw new Error(
+            `v2 events.${category} contains an invalid entry: ${JSON.stringify(entry)}. ` +
+            `Event names must be non-empty strings.`
+          );
+        }
+        const normalized = entry.toUpperCase();
+        if (!VALID_EVENT_PATTERN.test(normalized)) {
+          throw new Error(
+            `v2 events.${category} contains event name "${entry}" which does not match the required pattern. ` +
+            `Event names must be UPPER_SNAKE_CASE: one or more segments of uppercase letters or digits, ` +
+            `joined by underscores (e.g. SUCCESS, QUALITY_PASSED, MY_EVENT_123). ` +
+            `Rename "${entry}" to match the pattern.`
+          );
+        }
+        // Duplicate within same category
+        const prevInCat = seenInCategory.get(normalized);
+        if (prevInCat !== undefined) {
+          throw new Error(
+            `v2 events.${category} declares duplicate event name "${entry}" (normalized: "${normalized}") — ` +
+            `already declared in the same category as "${prevInCat}". ` +
+            `Each event name must appear at most once within and across all categories. ` +
+            `Remove the duplicate from events.${category}.`
+          );
+        }
+        seenInCategory.set(normalized, entry);
+        // Duplicate across categories
+        const prevCategory = seenAcrossCategories.get(normalized);
+        if (prevCategory !== undefined) {
+          throw new Error(
+            `v2 event vocabulary declares "${normalized}" in both "${prevCategory}" and "${category}" categories. ` +
+            `Duplicate event names (case-insensitive) across categories are not allowed — ` +
+            `each event name must appear in exactly one category. ` +
+            `Remove "${entry}" from one of the two category lists.`
+          );
+        }
+        seenAcrossCategories.set(normalized, category);
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-cfzu: Build the closed v2 event vocabulary set from a raw events block.
+   *
+   * Returns a Map of normalized event name (upper-case) → category name.
+   * Assumes validateV2EventVocabulary() has already confirmed no duplicates.
+   */
+  private buildV2EventVocabulary(eventsRaw: Record<string, unknown>): Map<string, string> {
+    const vocab = new Map<string, string>();
+    const CATEGORIES = ['advance', 'failure', 'blocked', 'neutral'] as const;
+    for (const category of CATEGORIES) {
+      const raw = eventsRaw[category];
+      if (!Array.isArray(raw)) continue;
+      for (const entry of raw) {
+        if (typeof entry === 'string' && entry.trim()) {
+          vocab.set(entry.toUpperCase(), category);
+        }
+      }
+    }
+    return vocab;
+  }
+
+  /**
+   * pi-experiment-cfzu AC3 startup lint: Every state transition key must be an exact
+   * declared event name from the v2 vocabulary.
+   *
+   * Harness-internal restart events (HARNESS_RESTART / CONTEXT_RESTART) are always
+   * admitted regardless of whether they appear in the vocabulary.
+   */
+  private validateV2TransitionKeys(config: unknown, declaredVocab: Map<string, string>): void {
+    if (!isRecord(config)) return;
+    const states = isRecord(config['states']) ? config['states'] as Record<string, unknown> : {};
+    const ALWAYS_ADMITTED = new Set(['HARNESS_RESTART', 'CONTEXT_RESTART']);
+
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (!isRecord(stateRaw)) continue;
+      const transitions = isRecord(stateRaw['transitions']) ? stateRaw['transitions'] as Record<string, unknown> : {};
+      for (const key of Object.keys(transitions)) {
+        const normalized = key.toUpperCase();
+        if (ALWAYS_ADMITTED.has(normalized)) continue;
+        if (!declaredVocab.has(normalized)) {
+          const declared = [...declaredVocab.keys()].sort().join(', ') || '(none)';
+          throw new Error(
+            `v2 state "${stateId}" declares transition key "${key}" which is not in the declared ` +
+            `event vocabulary (events.advance/failure/blocked/neutral). ` +
+            `Declared event names: ${declared}. ` +
+            `Add "${key}" to the appropriate category in the events block, or remove this transition key. ` +
+            `In v2, state transition keys must be exact declared event names — ` +
+            `category membership alone never routes an event.`
+          );
+        }
       }
     }
   }
@@ -1573,12 +1762,18 @@ export class ConfigLoader {
 
     // ── Mandatory explicit outcome vocabulary ─────────────────────────────────
     // A statechart block without explicit outcome vocabulary is also rejected.
+    // pi-experiment-cfzu: v2 configs declare events via the top-level `events` block
+    // (events.advance/failure/blocked/neutral) instead of v1 outcome fields. The
+    // v1 outcome fields (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes)
+    // are rejected in v2 configs by preValidateV2Admission above, so this check
+    // only applies to v1 configs.
+    const isV2 = config.version === 2;
     const hasExplicitVocab =
       sc.advanceOutcomes !== undefined ||
       sc.failedOutcomes !== undefined ||
       sc.blockedOutcomes !== undefined ||
       sc.customOutcomes !== undefined;
-    if (!hasExplicitVocab) {
+    if (!isV2 && !hasExplicitVocab) {
       throw new Error(
         'statechart block is present but declares no explicit outcome vocabulary ' +
         '(advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ' +
@@ -1632,12 +1827,9 @@ export class ConfigLoader {
     }
 
     // ── AC4 (1elr.2): duplicate outcomes across sets (case-insensitive) ───────
-    // Outcomes must be declared exactly once.  A duplicate means the same
-    // outcome key is in two lists (e.g. both advanceOutcomes and failedOutcomes)
-    // — the classification would be non-deterministic depending on evaluation
-    // order.
-    // At this point we know hasExplicitVocab is true (checked above).
-    {
+    // Only applies to v1 configs — v2 configs use the category-first events block
+    // (validated in preValidateV2Admission → validateV2EventVocabulary).
+    if (!isV2) {
       const seenUpper = new Map<string, string>(); // normalized → first list name
       const checkList = (outcomes: string[] | undefined, listName: string): void => {
         for (const o of outcomes ?? []) {
@@ -1659,16 +1851,35 @@ export class ConfigLoader {
       checkList(sc.customOutcomes, 'customOutcomes');
     }
 
-    // Declared outcome vocabulary (always present — explicit vocab is required).
-    const declaredOutcomes: Set<string> = new Set([
-      ...(sc.advanceOutcomes ?? ['SUCCESS']),
-      ...(sc.failedOutcomes ?? ['FAILURE']),
-      ...(sc.blockedOutcomes ?? ['BLOCKED']),
-      ...(sc.customOutcomes ?? []),
-      // Always include harness-internal restart events
-      EventName.HARNESS_RESTART,
-      EventName.CONTEXT_RESTART
-    ].map(o => o.toUpperCase()));
+    // Declared outcome vocabulary.
+    // pi-experiment-cfzu: v2 configs build the vocabulary from the top-level events block;
+    // v1 configs use the statechart outcome lists.
+    let declaredOutcomes: Set<string>;
+    if (isV2) {
+      // v2: vocabulary is derived from events.advance/failure/blocked/neutral.
+      // The events block was already validated in preValidateV2Admission.
+      const eventsConfig = config.events;
+      declaredOutcomes = new Set([
+        ...(eventsConfig?.advance ?? []),
+        ...(eventsConfig?.failure ?? []),
+        ...(eventsConfig?.blocked ?? []),
+        ...(eventsConfig?.neutral ?? []),
+        // Always include harness-internal restart events
+        EventName.HARNESS_RESTART,
+        EventName.CONTEXT_RESTART
+      ].map(o => o.toUpperCase()));
+    } else {
+      // v1: vocabulary from statechart outcome lists (always present — checked above).
+      declaredOutcomes = new Set([
+        ...(sc.advanceOutcomes ?? ['SUCCESS']),
+        ...(sc.failedOutcomes ?? ['FAILURE']),
+        ...(sc.blockedOutcomes ?? ['BLOCKED']),
+        ...(sc.customOutcomes ?? []),
+        // Always include harness-internal restart events
+        EventName.HARNESS_RESTART,
+        EventName.CONTEXT_RESTART
+      ].map(o => o.toUpperCase()));
+    }
 
     // ── AC2 (1elr.2): every runnable state has ≥1 action; action ids unique ──
     // A state with no actions is inert — worker startup throws because there is
@@ -1738,6 +1949,10 @@ export class ConfigLoader {
     }
 
     // ── Transition target + vocabulary validation ─────────────────────────────
+    // pi-experiment-cfzu: v2 configs have transition key validation done in
+    // preValidateV2Admission → validateV2TransitionKeys (on the raw document).
+    // Here we only validate transition targets (must be known states/terminals/sinks)
+    // and, for v1 configs, transition keys against the declared outcome vocabulary.
     for (const [stateId, state] of Object.entries(config.states || {})) {
       const allTransitions: Record<string, string> = {
         ...(state.transitions || {}),
@@ -1752,7 +1967,9 @@ export class ConfigLoader {
             `coarse sink statuses: ${[...RECOGNIZED_COARSE_SINK_STATUSES].join(', ')}`
           );
         }
-        if (!declaredOutcomes.has(outcomeKey.toUpperCase())) {
+        // v1 only: validate transition key against statechart outcome vocabulary.
+        // v2 transition key validation is done in preValidateV2Admission.
+        if (!isV2 && !declaredOutcomes.has(outcomeKey.toUpperCase())) {
           throw new Error(
             `State "${stateId}" uses transition outcome "${outcomeKey}" which is not in the declared ` +
             `statechart vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
@@ -1792,7 +2009,11 @@ export class ConfigLoader {
     // (state.requiredTools ∪ matching routeEvidence[outcome]).
     // A zero-evidence advance/terminal route is a configuration error — it means the
     // artifact-first invariant would be silently bypassed at runtime. Fail at load().
-    this.validateEmptyAdvanceEvidence(config, sc.advanceOutcomes ?? ['SUCCESS'], terminalStates);
+    // pi-experiment-cfzu: v2 configs do not have advanceOutcomes; use events.advance instead.
+    const advanceOutcomesForEvidence = isV2
+      ? (config.events?.advance ?? [])
+      : (sc.advanceOutcomes ?? ['SUCCESS']);
+    this.validateEmptyAdvanceEvidence(config, advanceOutcomesForEvidence, terminalStates);
 
     // ── AC4 (pi-experiment-6q0y.49): loop detection config validation ─────────
     this.validateLoopDetectionConfig(config, declaredOutcomes);

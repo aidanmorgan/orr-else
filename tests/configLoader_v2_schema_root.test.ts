@@ -79,10 +79,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-  customEvents: [HARNESS_RESTART]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "Implementer", expertise: "Coding", constraints: [] }
@@ -117,9 +118,10 @@ describe('pi-experiment-202g: v2 schema root admission (AC1)', () => {
     // v2 shape: statechart.initial + statechart.terminal (not v1 initialState/terminalStates)
     expect(config!.statechart?.initial).toBe('Implement');
     expect(config!.statechart?.terminal).toContain('completed');
-    expect(config!.statechart?.advanceOutcomes).toContain('SUCCESS');
-    expect(config!.statechart?.failedOutcomes).toContain('FAILURE');
-    expect(config!.statechart?.blockedOutcomes).toContain('BLOCKED');
+    // pi-experiment-cfzu: v2 uses events block instead of v1 statechart outcome lists
+    expect(config!.events?.advance).toContain('SUCCESS');
+    expect(config!.events?.failure).toContain('FAILURE');
+    expect(config!.events?.blocked).toContain('BLOCKED');
   });
 });
 
@@ -139,9 +141,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -169,9 +173,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -199,9 +205,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -230,9 +238,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -264,9 +274,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -303,9 +315,11 @@ scheduler:
 statechart:
   initialState: Planning
   terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -348,9 +362,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -378,9 +394,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -470,9 +488,11 @@ scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 statechart:
   terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states: {}
 `;
     const p = writeYaml('s8_version1.yaml', yaml);
@@ -491,9 +511,11 @@ scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 statechart:
   terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states: {}
 `;
     const p = writeYaml('s8b_version99.yaml', yaml);
@@ -512,9 +534,11 @@ scheduler:
   weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
 statechart:
   terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states: {}
 `;
     const p = writeYaml('s8c_version_string.yaml', yaml);
@@ -541,9 +565,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed, Implement]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }
@@ -570,9 +596,11 @@ scheduler:
 statechart:
   initial: Implement
   terminal: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 states:
   Implement:
     identity: { role: "R", expertise: "E", constraints: [] }

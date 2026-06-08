@@ -1574,6 +1574,33 @@
         }
       }
     },
+    "events": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "pi-experiment-cfzu: v2 category-first event vocabulary. Only valid in version:2 configs. Each event name is canonical (UPPER_SNAKE_CASE) and appears in exactly one category after case-insensitive normalization. Categories are TAXONOMY ONLY — category membership never supplies a default transition, failure route, or fallback status. A state routes an event only when it declares an exact transition key for the canonical event name.",
+      "properties": {
+        "advance": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Advance-category event names. Taxonomy only — no routing fallback from category membership."
+        },
+        "failure": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Failure-category event names. Taxonomy only — no routing fallback from category membership."
+        },
+        "blocked": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Blocked-category event names. Taxonomy only — no routing fallback from category membership."
+        },
+        "neutral": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Neutral-category event names. Taxonomy only — no routing fallback from category membership."
+        }
+      }
+    },
     "validationGates": {
       "type": "array",
       "items": {

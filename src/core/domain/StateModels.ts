@@ -768,6 +768,14 @@ export interface HarnessConfig {
    * Any value other than 2 → fail closed (unknown version).
    */
   version?: 2;
+  /**
+   * pi-experiment-cfzu: v2 category-first event vocabulary.
+   * Declared when version: 2. Each event name appears in exactly one category.
+   * Categories are TAXONOMY ONLY — no routing fallback from category membership.
+   * A state routes an event only when it declares an exact transition key for it.
+   * Absent (v1 configs) → unaffected; v1 outcome/transition resolution is unchanged.
+   */
+  events?: V2EventsConfig;
   settings: {
     maxConcurrentSlots: number;
     handoverTemplate: string;
@@ -982,6 +990,29 @@ export interface HarnessConfig {
   validationGates?: ValidationGateConfig[];
   states: Record<string, SDLCState>;
   tools?: ProjectToolConfig[];
+}
+
+/**
+ * v2 category-first event vocabulary (pi-experiment-cfzu).
+ *
+ * Declared at the top-level `events` key in harness.yaml when version: 2.
+ * Each event name is canonical (UPPER_SNAKE_CASE pattern) and appears in
+ * exactly one category after case-insensitive normalization.
+ *
+ * Categories are TAXONOMY ONLY: category membership never supplies a
+ * default transition, terminal/failure route, or fallback status. A state
+ * routes an event ONLY when it declares an exact transition for the
+ * canonical event name.
+ */
+export interface V2EventsConfig {
+  /** Advance-category event names (taxonomy only — no routing fallback). */
+  advance?: string[];
+  /** Failure-category event names (taxonomy only — no routing fallback). */
+  failure?: string[];
+  /** Blocked-category event names (taxonomy only — no routing fallback). */
+  blocked?: string[];
+  /** Neutral-category event names (taxonomy only — no routing fallback). */
+  neutral?: string[];
 }
 
 /**

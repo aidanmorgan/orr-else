@@ -212,6 +212,57 @@ export interface RestartTransitionResult {
   targetStateId: string;
 }
 
+/**
+ * pi-experiment-cfzu: Build the v2 closed event vocabulary from a config's events block.
+ *
+ * Returns a Map of normalized event name (upper-case) → category name.
+ * Returns an empty map when the config has no events block (v1 or v2 without events).
+ */
+export function buildV2EventVocabulary(config: HarnessConfig): Map<string, string> {
+  const events = config.events;
+  if (!events) return new Map();
+  const vocab = new Map<string, string>();
+  const categories = ['advance', 'failure', 'blocked', 'neutral'] as const;
+  for (const cat of categories) {
+    const names = events[cat];
+    if (!Array.isArray(names)) continue;
+    for (const name of names) {
+      if (typeof name === 'string' && name.trim()) {
+        vocab.set(name.toUpperCase(), cat);
+      }
+    }
+  }
+  return vocab;
+}
+
+/**
+ * pi-experiment-cfzu AC3: v2 exact-key transition admission.
+ *
+ * For v2 configs, applies an event to a state using EXACT key matching ONLY.
+ * Returns the target state ID when the state declares an exact transition for the
+ * canonical (upper-cased) event name. Returns null when:
+ *   - The event is not in the declared v2 vocabulary, OR
+ *   - The event IS in the vocabulary but the state has no exact transition for it.
+ *
+ * Category membership NEVER provides a routing fallback. Only the exact declared
+ * transition key routes the event.
+ *
+ * This function is version-gated: call it only for v2 configs. For v1 configs
+ * use FlowManager.nextState() which preserves the existing v1 behavior.
+ */
+export function v2ApplyTransition(
+  state: SDLCState,
+  eventName: string,
+  vocab: Map<string, string>
+): string | null {
+  const normalized = eventName.toUpperCase();
+  // Event must be in the declared vocabulary.
+  if (!vocab.has(normalized)) return null;
+  // State must have an exact transition key for the canonical event name.
+  const target = state.transitions[eventName] ?? state.transitions[normalized] ?? null;
+  return target ?? null;
+}
+
 export class FlowManager {
   private stateLabel(state: SDLCState, fallbackStateId?: string): string {
     return state.id || fallbackStateId || '<unknown>';
