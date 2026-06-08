@@ -122,31 +122,20 @@ describe('EventStore.latestEvent() fast path', () => {
     expect(fastPathResult!.timestamp).toBe(expected.timestamp);
   });
 
-  it('excludes synthetic events from the fast-path result (equivalence with readAll filter semantics)', async () => {
-    // Write one real event, then one synthetic event after it.
-    await writeFixtureEvent(tempRoot, DomainEventName.HARNESS_STARTED, {
-      beadId: 'bd-synth-eq',
-      maxSlots: 1
-    });
-    await new Promise(resolve => setTimeout(resolve, 5));
+  it('fails closed (throws EventStoreSyntheticReadError) when a synthetic event is on disk (pi-experiment-jxdk)', async () => {
+    // pi-experiment-jxdk: production reads no longer silently drop synthetic
+    // records — they throw EventStoreSyntheticReadError (fail-closed).
+    // A synthetic record on disk indicates store corruption or a pre-824i record.
+    const { EventStoreSyntheticReadError } = await import('../src/core/EventStore.js');
+
     await writeFixtureEvent(tempRoot, DomainEventName.BEAD_CLAIMED, {
       beadId: 'bd-synth-eq',
       synthetic: true
     });
 
-    // readAll() also filters synthetic events (read-layer filter).
-    const allEvents = await eventStore.readAll();
-    const fastPathResult = await eventStore.latestEvent();
-
-    // readAll should NOT include the synthetic event.
-    expect(allEvents.every(e => e.data?.synthetic !== true)).toBe(true);
-    // Fast path should agree: its result must match readAll().at(-1).
-    if (allEvents.length === 0) {
-      expect(fastPathResult).toBeUndefined();
-    } else {
-      expect(fastPathResult).toBeDefined();
-      expect(fastPathResult!.id).toBe(allEvents.at(-1)!.id);
-    }
+    // Both readAll() and latestEvent() fail closed.
+    await expect(eventStore.readAll()).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
+    await expect(eventStore.latestEvent()).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
   });
 
   // -------------------------------------------------------------------------

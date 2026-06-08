@@ -31,7 +31,7 @@
  *     (pi-experiment-q8tl); all production writers now populate them. actionId
  *     and previousRunId remain optional (supervisor-triggered restarts omit them).
  *   - SIGNAL_ACKNOWLEDGED/INTENT_RECORDED: some test writes omit idempotencyKey
- *     (project_tools.test.ts:1117, synthetic_read_filter.test.ts:222);
+ *     (project_tools.test.ts:1117);
  *     schema requires only beadId + type.
  *   - TEAMMATE_PROCESS_EXITED: Supervisor can write with only { beadId } when
  *     a pane goes missing without a restart; schema requires only beadId.
@@ -563,7 +563,7 @@ export function getDomainEventMeta(eventType: string): DomainEventSchemaMetadata
  *
  * Key: DomainEventName (string)
  * Value: tuple of field names that MUST be present (non-undefined) in every
- *        non-synthetic production write of that event.
+ *        production write of that event (synthetic writes are rejected — 824i).
  *
  * Source of truth for which events are covered:
  *   REPLAY_CRITICAL_EVENT_TYPES (src/constants/index.ts) — events that must
@@ -620,8 +620,8 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
 
   // ── Signal idempotency & intent reconciliation ─────────────────────────────
   // Both SIGNAL_ACKNOWLEDGED and SIGNAL_INTENT_RECORDED: some test writes
-  //   (project_tools.test.ts:1117, synthetic_read_filter.test.ts:222) omit
-  //   idempotencyKey. type + beadId are always present.
+  //   (project_tools.test.ts:1117) omit idempotencyKey. type + beadId are
+  //   always present.
   [DomainEventName.TEAMMATE_EVENT]: ['beadId', 'type', 'processingDecision'],
   [DomainEventName.SIGNAL_INTENT_RECORDED]: ['beadId', 'type'],
   [DomainEventName.SIGNAL_ACKNOWLEDGED]: ['beadId', 'type'],

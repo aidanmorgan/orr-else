@@ -1,33 +1,28 @@
 /**
- * pi-experiment-y2ax (redesign): LEGACY-COMPAT read-layer synthetic filter.
+ * pi-experiment-jxdk: production read paths FAIL CLOSED on synthetic records.
  *
- * Proves that filtering synthetic:true events at the EventStore read layer
- * (eventsForBeads / eventsForBead / scanEvents) defensively protects production
- * consumers from any legacy synthetic records already on disk.
+ * Inverted from y2ax (which proved silent read-layer filtering).  Per the
+ * owner's no-backcompat directive the silent filter is removed.  This file now
+ * proves the new fail-closed behaviour:
  *
- * Under the y2ax redesign the production write path now REJECTS synthetic events,
- * so these tests use raw JSONL injection (writeFixtureEvent) to place synthetic
- * records on disk — exactly as a pre-redesign harness would have written them.
+ *   (a) Production EventStore read throws EventStoreSyntheticReadError when a
+ *       synthetic record is present on disk — it does NOT silently drop it.
  *
- *   (a) WorkerRunController SHIP_POST_REVIEW gate / prompt-provenance —
- *       a legacy synthetic STATE_RUN_INITIALIZED must NOT shift the current-run
- *       boundary used by the review-artifact gate or the provenance check.
+ *   (b) No production gate/projection makes progress by ignoring a synthetic
+ *       record — the read itself fails before the caller can act.
  *
- *   (b) EventStore.latestProjectToolFailureLimitEvent circuit-breaker —
- *       a legacy synthetic STATE_RUN_INITIALIZED must NOT reset the failure-limit
- *       window, so a real failure before and after the synthetic record is
- *       still visible to the circuit breaker.
+ *   (c) Real production event logs contain no synthetic records (824i rejects
+ *       synthetic writes), so for non-synthetic data the read path is a no-op.
  *
- * Both test groups use raw JSONL injection so the actual read path
- * (eventsForBead → isSyntheticEvent filter) is exercised end-to-end with
- * realistic on-disk legacy data.
+ * Note: y2ax reversal.  The isSyntheticEvent read-layer filter is removed.
+ * EventStore.rejectSyntheticReadIfPresent() now throws instead of skipping.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { EventStore } from '../src/core/EventStore.js';
+import { EventStore, EventStoreSyntheticReadError } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName, TeammateEventType } from '../src/constants/index.js';
@@ -38,7 +33,7 @@ import { writeFixtureEvent } from './support/TestEventStore.js';
 // ---------------------------------------------------------------------------
 
 function setupTempRoot(): string {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-y2ax-synth-'));
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-jxdk-synth-'));
   fs.mkdirSync(path.join(tempRoot, '.pi/events'), { recursive: true });
   fs.mkdirSync(path.join(tempRoot, '.pi/logs'), { recursive: true });
   fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
@@ -66,25 +61,19 @@ states:
 
 function makeStore(tempRoot: string): EventStore {
   const store = new EventStore(new ConfigLoader(undefined, tempRoot), undefined, undefined, tempRoot);
-  store.setSessionId('y2ax-synth-test');
+  store.setSessionId('jxdk-synth-test');
   return store;
 }
 
 // ---------------------------------------------------------------------------
-// (a) LEGACY-COMPAT: current-run boundary must NOT shift on a legacy synthetic
-//     STATE_RUN_INITIALIZED record already on disk.
+// (a) Fail-closed: production read THROWS on a synthetic record on disk.
 //
-// The gate reads eventsForBead and reverse-finds the LATEST
-// STATE_RUN_INITIALIZED for activeRun.stateId to determine when the current
-// run started.  A legacy synthetic record with the same stateId must be
-// invisible at the read layer.
-//
-// Synthetic records are injected via writeFixtureEvent() (raw JSONL) to
-// simulate pre-redesign records that were written before production write
-// validation was enforced.
+// A synthetic record injected via writeFixtureEvent() (raw JSONL — simulating
+// a pre-824i legacy record or store corruption) must cause the production read
+// to throw EventStoreSyntheticReadError, NOT silently disappear.
 // ---------------------------------------------------------------------------
 
-describe('(a) LEGACY-COMPAT: current-run boundary — legacy on-disk synthetic STATE_RUN_INITIALIZED does not shift it', () => {
+describe('(a) Fail-closed: production read throws on a synthetic record', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -99,48 +88,71 @@ describe('(a) LEGACY-COMPAT: current-run boundary — legacy on-disk synthetic S
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('eventsForBead omits a legacy synthetic STATE_RUN_INITIALIZED — real init event remains latest', async () => {
-    const beadId = 'bd-gate-test';
-    const stateId = 'AdversarialPostReview';
+  it('eventsForBead THROWS EventStoreSyntheticReadError when a synthetic record is on disk', async () => {
+    const beadId = 'bd-fail-closed';
 
-    // Real STATE_RUN_INITIALIZED — the run boundary (written via production path).
-    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
-      beadId,
-      stateId,
-      actionId: 'review',
-      promptProvenanceResolutionFailed: true
-    });
-
-    // LEGACY: inject a synthetic STATE_RUN_INITIALIZED for the same stateId via
-    // raw JSONL (simulating a pre-redesign harness record already on disk).
+    // Inject a synthetic record via raw JSONL (simulating a pre-824i or
+    // corrupted store record — production write would reject this).
     await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
-      stateId,
-      actionId: 'injected-action',
+      stateId: 'Planning',
+      actionId: 'sentinel',
       synthetic: true
     });
 
-    const events = await store.eventsForBead(beadId);
-
-    // The synthetic record must not appear in the production read (legacy defense).
-    expect(events.some(e => e.data?.synthetic === true)).toBe(false);
-
-    // The real init event must still be present.
-    const initEvents = events.filter(
-      e => e.type === DomainEventName.STATE_RUN_INITIALIZED && e.data?.stateId === stateId
-    );
-    expect(initEvents).toHaveLength(1);
-    expect(initEvents[0].data?.actionId).toBe('review');
+    // Production read must fail closed — NOT silently drop the record.
+    await expect(store.eventsForBead(beadId)).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
   });
 
-  it('LEGACY-COMPAT: raw JSONL synthetic record is on disk but hidden by the read-layer filter', async () => {
-    const beadId = 'bd-persistence-check';
-    const stateId = 'Planning';
+  it('readAll THROWS EventStoreSyntheticReadError when a synthetic record is on disk', async () => {
+    await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
+      beadId: 'bd-readall',
+      stateId: 'Planning',
+      actionId: 'sentinel',
+      synthetic: true
+    });
 
-    // Inject legacy synthetic record directly onto disk.
+    await expect(store.readAll()).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
+  });
+
+  it('latestEvent THROWS EventStoreSyntheticReadError when a synthetic record is on disk', async () => {
+    await writeFixtureEvent(tempRoot, DomainEventName.HARNESS_STARTED, {
+      beadId: 'bd-latest',
+      synthetic: true
+    });
+
+    await expect(store.latestEvent()).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
+  });
+
+  it('EventStoreSyntheticReadError carries the event type and deterministic message', async () => {
+    const beadId = 'bd-err-shape';
+
+    await writeFixtureEvent(tempRoot, DomainEventName.BEAD_CLAIMED, {
+      beadId,
+      synthetic: true
+    });
+
+    let caught: unknown;
+    try {
+      await store.eventsForBead(beadId);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(EventStoreSyntheticReadError);
+    const err = caught as EventStoreSyntheticReadError;
+    expect(err.eventType).toBe(DomainEventName.BEAD_CLAIMED);
+    expect(err.message).toMatch(/synthetic/i);
+    expect(err.message).toMatch(/production EventStore encountered/i);
+    // Deterministic: no live timestamp in the message.
+    expect(err.message).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+  });
+
+  it('synthetic record on disk IS present (raw read confirms) — fail-closed is not a silent drop', async () => {
+    const beadId = 'bd-disk-confirm';
+
     await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
-      stateId,
+      stateId: 'Planning',
       actionId: 'sentinel',
       synthetic: true
     });
@@ -154,29 +166,20 @@ describe('(a) LEGACY-COMPAT: current-run boundary — legacy on-disk synthetic S
     expect(rawEvents[0].type).toBe(DomainEventName.STATE_RUN_INITIALIZED);
     expect(rawEvents[0].data.synthetic).toBe(true);
 
-    // Production read layer hides it (legacy defense).
-    const productionEvents = await store.eventsForBead(beadId);
-    expect(productionEvents).toHaveLength(0);
+    // Production read fails closed — does NOT silently drop the record.
+    await expect(store.eventsForBead(beadId)).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
   });
 });
 
 // ---------------------------------------------------------------------------
-// (b) LEGACY-COMPAT: Circuit-breaker window must NOT reset on a legacy
-//     synthetic STATE_RUN_INITIALIZED record already on disk.
+// (b) No production gate/projection progresses via a synthetic record.
 //
-// Sequence:
-//   1. SIGNAL_ACKNOWLEDGED (STATE_TRANSITIONED) — terminal outcome acknowledged
-//   2. LEGACY synthetic STATE_RUN_INITIALIZED (raw JSONL) — must NOT be seen as
-//      a run-start reset by the read layer
-//   3. Real PROJECT_TOOL_FAILED with failureLimit — must still be returned
-//
-// Without the read-layer filter a legacy synthetic record would be treated as a
-// new run boundary, clearing `latest` and causing
-// latestProjectToolFailureLimitEvent to return undefined even though a real
-// failure-limit event was present.
+// latestProjectToolFailureLimitEvent reads via eventsForBead, so it also fails
+// closed when a synthetic record is on disk.  The circuit-breaker cannot
+// advance (or be incorrectly reset) by a synthetic record.
 // ---------------------------------------------------------------------------
 
-describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic STATE_RUN_INITIALIZED does not reset it', () => {
+describe('(b) No production gate progresses via a synthetic record (fail-closed propagates)', () => {
   let tempRoot: string;
   let store: EventStore;
 
@@ -191,12 +194,12 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
     fs.rmSync(tempRoot, { recursive: true, force: true });
   });
 
-  it('failure-limit event before the legacy synthetic init is still returned (circuit breaker intact)', async () => {
-    const beadId = 'bd-circuit-test';
+  it('latestProjectToolFailureLimitEvent THROWS when a synthetic record is on disk (gate cannot progress)', async () => {
+    const beadId = 'bd-circuit-fail-closed';
     const stateId = 'Planning';
     const actionId = 'formulate-plan';
 
-    // 1. A real PROJECT_TOOL_FAILED with failureLimit payload.
+    // Real PROJECT_TOOL_FAILED.
     await store.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,
@@ -208,9 +211,7 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
       }
     });
 
-    // 2. LEGACY: inject a synthetic STATE_RUN_INITIALIZED via raw JSONL —
-    //    simulating a pre-redesign record on disk.  The read-layer filter must
-    //    make it invisible so it cannot act as a window-reset boundary.
+    // Inject a synthetic record — simulates pre-824i or corrupted store.
     await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
@@ -218,22 +219,18 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
       synthetic: true
     });
 
-    // latestProjectToolFailureLimitEvent reads via eventsForBead; the legacy
-    // synthetic record is filtered out so it cannot reset the circuit-breaker window.
-    const result = await store.latestProjectToolFailureLimitEvent(beadId, { stateId, actionId });
-
-    expect(result).toBeDefined();
-    expect(result!.type).toBe(DomainEventName.PROJECT_TOOL_FAILED);
-    const failureLimit = (result!.data?.result as any)?.failureLimit;
-    expect(failureLimit?.terminal).toBe(true);
+    // The circuit-breaker must not silently advance — read fails closed.
+    await expect(
+      store.latestProjectToolFailureLimitEvent(beadId, { stateId, actionId })
+    ).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
   });
 
-  it('a REAL STATE_RUN_INITIALIZED after acknowledgement DOES reset the window (control case)', async () => {
+  it('a REAL STATE_RUN_INITIALIZED still resets the circuit-breaker window (control — no synthetic on disk)', async () => {
     const beadId = 'bd-circuit-control';
     const stateId = 'Planning';
     const actionId = 'formulate-plan';
 
-    // 1. Real failure event.
+    // Real failure event.
     await store.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId,
       stateId,
@@ -245,7 +242,7 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
       }
     });
 
-    // 2. Acknowledge terminal outcome.
+    // Acknowledge terminal outcome.
     await store.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
       beadId,
       stateId,
@@ -253,7 +250,7 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
       type: TeammateEventType.STATE_TRANSITIONED
     });
 
-    // 3. REAL STATE_RUN_INITIALIZED — this one IS a legitimate run-start boundary.
+    // REAL STATE_RUN_INITIALIZED — legitimate run-start boundary.
     await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
       beadId,
       stateId,
@@ -264,5 +261,62 @@ describe('(b) LEGACY-COMPAT: circuit-breaker window — legacy on-disk synthetic
     // After a real init following an acknowledgement, the window is reset.
     const result = await store.latestProjectToolFailureLimitEvent(beadId, { stateId, actionId });
     expect(result).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (c) Non-synthetic data is unaffected — no regression for real production reads.
+//
+// Since 824i rejects synthetic writes, real production event logs contain no
+// synthetic records.  Removing the read-layer filter is a no-op for real data.
+// ---------------------------------------------------------------------------
+
+describe('(c) Non-synthetic data reads correctly — fail-closed is a no-op for clean stores', () => {
+  let tempRoot: string;
+  let store: EventStore;
+
+  beforeEach(() => {
+    tempRoot = setupTempRoot();
+    store = makeStore(tempRoot);
+  });
+
+  afterEach(async () => {
+    Logger.close();
+    await new Promise(resolve => setTimeout(resolve, 25));
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('eventsForBead returns real events unaffected when no synthetic record is on disk', async () => {
+    const beadId = 'bd-clean';
+
+    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
+      beadId,
+      stateId: 'Planning',
+      actionId: 'formulate-plan'
+    });
+
+    const events = await store.eventsForBead(beadId);
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe(DomainEventName.STATE_RUN_INITIALIZED);
+    expect(events[0].data?.synthetic).toBeUndefined();
+  });
+
+  it('readAll returns all real events when no synthetic record is on disk', async () => {
+    await store.record(DomainEventName.STATE_RUN_INITIALIZED, {
+      beadId: 'bd-ra-1',
+      stateId: 'Planning',
+      actionId: 'formulate-plan'
+    });
+    await store.record(DomainEventName.PROJECT_TOOL_FAILED, {
+      beadId: 'bd-ra-1',
+      stateId: 'Planning',
+      actionId: 'formulate-plan',
+      tool: 'verifier',
+      result: { status: 'FAILURE' }
+    });
+
+    const events = await store.readAll();
+    expect(events).toHaveLength(2);
+    expect(events.every(e => e.data?.synthetic !== true)).toBe(true);
   });
 });

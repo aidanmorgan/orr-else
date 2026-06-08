@@ -1,21 +1,26 @@
 /**
  * Test-only isolated fixture writer for the event store.
  *
- * pi-experiment-y2ax (redesign): The production EventStore.record() now rejects
+ * pi-experiment-y2ax (redesign): The production EventStore.record() rejects
  * data.synthetic === true.  Tests that need to inject malformed or synthetic
  * fixture events must use this helper instead of the production writer.
  *
- * Usage — writing raw fixtures:
+ * pi-experiment-jxdk: The production EventStore read paths now FAIL CLOSED
+ * (throw EventStoreSyntheticReadError) when a synthetic record is encountered
+ * on disk — they no longer silently drop it.  Tests that write synthetic fixture
+ * events via writeFixtureEvent() should use an isolated fixture store that is
+ * NOT shared with a production EventStore, OR must expect the production read
+ * to throw.
  *
- *   const fixture = new TestEventStore(tempRoot);
- *   await fixture.writeFixture(DomainEventName.STATE_RUN_INITIALIZED, {
+ * Usage — writing raw fixtures (for testing fail-closed behaviour):
+ *
+ *   await writeFixtureEvent(tempRoot, DomainEventName.STATE_RUN_INITIALIZED, {
  *     beadId: 'bd-1', stateId: 'Planning', actionId: 'plan', synthetic: true
  *   });
  *
- *   // The production store reads from the same JSONL, so the read-layer
- *   // isSyntheticEvent filter is exercised end-to-end.
- *   const events = await productionStore.eventsForBead('bd-1');
- *   expect(events.some(e => e.data?.synthetic === true)).toBe(false);
+ *   // Production read fails closed — NOT a silent drop.
+ *   await expect(productionStore.eventsForBead('bd-1'))
+ *     .rejects.toBeInstanceOf(EventStoreSyntheticReadError);
  *
  * The fixture is appended directly to the same JSONL file that the production
  * EventStore reads.  No production validation is run — this is intentional:

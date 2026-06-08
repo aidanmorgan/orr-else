@@ -115,6 +115,39 @@ export class EventStoreSyntheticRejectedError extends Error {
 }
 
 /**
+ * Thrown when a production EventStore READ path encounters a record with
+ * data.synthetic === true on disk (pi-experiment-jxdk: fail-closed).
+ *
+ * Since pi-experiment-824i, the production write path rejects synthetic writes,
+ * so a synthetic record on disk indicates store corruption or a pre-824i legacy
+ * record.  Production reads MUST NOT silently drop it — they fail closed with
+ * this deterministic diagnostic so the caller can quarantine or surface the
+ * anomaly.
+ *
+ * Note: this reverses the y2ax decision that kept a silent read-layer filter.
+ * Per the owner's no-backcompat directive, the silent filter is removed.
+ * Real production event logs contain no synthetic records (824i rejects writes),
+ * so this error fires only if the store is corrupted or a pre-824i record is
+ * encountered.
+ */
+export class EventStoreSyntheticReadError extends Error {
+  public readonly eventType: string;
+  public readonly eventId: string | undefined;
+
+  constructor(eventType: string, eventId: string | undefined) {
+    super(
+      `${eventType}${eventId ? ` (id=${eventId})` : ''}: production EventStore encountered data.synthetic === true during a read. ` +
+      `Synthetic records must never appear in production event logs (pi-experiment-824i rejects synthetic writes). ` +
+      `Store may be corrupted or contain a pre-824i legacy record. ` +
+      `Use a TestEventStore (tests/support/TestEventStore.ts) for test/fixture data.`
+    );
+    this.name = 'EventStoreSyntheticReadError';
+    this.eventType = eventType;
+    this.eventId = eventId;
+  }
+}
+
+/**
  * Validates the payload of a domain event before it is written to the
  * production event store.
  *
@@ -233,17 +266,20 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   /**
-   * Returns true for events that carry `data.synthetic === true`.
+   * Fail-closed guard for production reads (pi-experiment-jxdk).
    *
-   * Synthetic events are test/fixture writes that bypass production payload
-   * validation (AC3, pi-experiment-y2ax).  They must NEVER appear in production
-   * replay, projection, or gate reads — filtering them at the read layer ensures
-   * every consumer (BeadStateProjection, WorkerRunController, EventStore circuit-
-   * breaker, RestartCorrelation, preflight) is uniformly covered without
-   * requiring per-consumer guards.
+   * Since pi-experiment-824i the production write path rejects synthetic events,
+   * so a synthetic record on disk is unexpected.  Production reads MUST NOT
+   * silently drop it — they throw so the anomaly is surfaced deterministically.
+   *
+   * This reverses the y2ax decision (silent read-layer filter).  Real production
+   * event logs contain no synthetic records, so this throws only for corrupted
+   * or pre-824i stores.
    */
-  private isSyntheticEvent(event: DomainEvent): boolean {
-    return isRecord(event.data) && event.data.synthetic === true;
+  private rejectSyntheticReadIfPresent(event: DomainEvent): void {
+    if (isRecord(event.data) && event.data.synthetic === true) {
+      throw new EventStoreSyntheticReadError(event.type, typeof event.id === 'string' ? event.id : undefined);
+    }
   }
 
   private beadIdFor(event: DomainEvent): string | undefined {
@@ -294,18 +330,24 @@ export class EventStore implements ProjectionCapableStore {
 
     for (const filePath of await this.eventLog.eventFilePaths(location.dir)) {
       await this.eventLog.scan(filePath, value => {
-        if (this.isDomainEvent(value) && !this.isSyntheticEvent(value)) visitor(value);
+        if (!this.isDomainEvent(value)) return;
+        this.rejectSyntheticReadIfPresent(value); // fail-closed (jxdk)
+        visitor(value);
       });
     }
   }
 
   /**
-   * Scan all event files, yielding valid non-synthetic DomainEvents AND
-   * counting records that are present on disk as JSON objects but fail the
-   * domain-event shape check (missing type/timestamp strings).
+   * Scan all event files, yielding valid DomainEvents AND counting records that
+   * are present on disk as JSON objects but fail the domain-event shape check
+   * (missing type/timestamp strings).
    *
    * Used by HarnessEventQuery to surface a real skippedCount (AC5: malformed
    * records are reported as counts, never hidden or inlined).
+   *
+   * Throws EventStoreSyntheticReadError if a synthetic record is encountered
+   * (pi-experiment-jxdk: fail-closed; synthetic records must not be silently
+   * ignored).
    */
   private async scanEventsWithCount(
     visitor: (event: DomainEvent) => void
@@ -321,7 +363,7 @@ export class EventStore implements ProjectionCapableStore {
           skippedCount++;
           return;
         }
-        if (this.isSyntheticEvent(value)) return; // synthetic: filtered, not counted as malformed
+        this.rejectSyntheticReadIfPresent(value); // fail-closed (jxdk)
         visitor(value);
       });
     }
@@ -379,38 +421,54 @@ export class EventStore implements ProjectionCapableStore {
   }
 
   /**
-   * Return the most-recent valid non-synthetic DomainEvent across all event
-   * log files using a bounded tail scan — O(tailBytes × files) rather than
-   * O(total_events).
+   * Return the most-recent valid DomainEvent across all event log files using a
+   * bounded tail scan — O(tailBytes × files) rather than O(total_events).
    *
    * Strategy: read only the last `tailBytes` of each JSONL file, parse every
-   * complete record in that window, keep the chronologically latest valid
-   * non-synthetic event.  The tail window is generous enough to contain dozens
-   * of recent events without scanning the whole store.
+   * complete record in that window, keep the chronologically latest valid event.
+   * The tail window is generous enough to contain dozens of recent events without
+   * scanning the whole store.
    *
    * If no event is found in the tail window (e.g. only very old files) the
    * method returns undefined.
+   *
+   * Throws EventStoreSyntheticReadError if a synthetic record is encountered
+   * (pi-experiment-jxdk: fail-closed).
    */
   public async latestEvent(tailBytes = 65_536): Promise<DomainEvent | undefined> {
     const location = await this.resolveLocation();
     if (!location || !existsSync(location.dir)) return undefined;
 
     let latest: DomainEvent | undefined;
+    let syntheticError: EventStoreSyntheticReadError | undefined;
+
     for (const filePath of await this.eventLog.eventFilePaths(location.dir)) {
       if (!existsSync(filePath)) continue;
+      // NOTE: scanTail swallows exceptions thrown from within the visitor
+      // callback (it catches JSON-parse errors broadly).  Track synthetic errors
+      // via a captured variable and re-throw after the scan (fail-closed, jxdk).
       await this.eventLog.scanTail(filePath, tailBytes, value => {
         if (!this.isDomainEvent(value)) return;
-        if (this.isSyntheticEvent(value)) return;
+        if (isRecord(value.data) && value.data.synthetic === true) {
+          syntheticError = new EventStoreSyntheticReadError(
+            value.type,
+            typeof value.id === 'string' ? value.id : undefined
+          );
+          return; // stop accumulating; error will be thrown below
+        }
         if (!latest || this.compareEvents(latest, value) < 0) latest = value;
       });
+      if (syntheticError) throw syntheticError; // fail-closed (jxdk)
     }
     return latest;
   }
 
   /**
-   * Read all valid non-synthetic domain events, also returning the count of
-   * records that were present on disk as JSON objects but failed the
-   * domain-event shape check.
+   * Read all valid domain events, also returning the count of records that were
+   * present on disk as JSON objects but failed the domain-event shape check.
+   *
+   * Throws EventStoreSyntheticReadError if a synthetic record is encountered
+   * (pi-experiment-jxdk: fail-closed).
    *
    * Used by HarnessEventQuery to surface a real skippedCount (AC5).
    */
@@ -449,9 +507,9 @@ export class EventStore implements ProjectionCapableStore {
       if (indexedEvents === undefined) {
         missing.add(beadId);
       } else {
-        // Filter synthetic events at the read layer: no production consumer
-        // should ever see a synthetic:true event (pi-experiment-y2ax review fix).
-        grouped.set(beadId, indexedEvents.filter(e => !this.isSyntheticEvent(e)));
+        // Fail-closed: reject any synthetic record encountered in indexed reads (jxdk).
+        for (const e of indexedEvents) this.rejectSyntheticReadIfPresent(e);
+        grouped.set(beadId, indexedEvents);
       }
     }
 
@@ -460,7 +518,7 @@ export class EventStore implements ProjectionCapableStore {
     for (const filePath of primaryFilePaths) {
       await this.eventLog.scan(filePath, value => {
         if (!this.isDomainEvent(value)) return;
-        if (this.isSyntheticEvent(value)) return;
+        this.rejectSyntheticReadIfPresent(value); // fail-closed (jxdk)
         const beadId = this.beadIdFor(value) as BeadId | undefined;
         if (!beadId || !missing.has(beadId)) return;
         grouped.get(beadId)!.push(value);

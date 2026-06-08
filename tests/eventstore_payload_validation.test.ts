@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { EventStore, EventStoreSyntheticRejectedError } from '../src/core/EventStore.js';
+import { EventStore, EventStoreSyntheticRejectedError, EventStoreSyntheticReadError } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
 import { DomainEventName } from '../src/constants/index.js';
@@ -194,10 +194,9 @@ describe('AC2 – STATE_RUN_INITIALIZED production payload validation', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC3: Production write path REJECTS synthetic:true.
+// AC3: Production write path REJECTS synthetic:true (824i — preserved).
 //      Fixture/test writes use writeFixtureEvent() (raw JSONL injection).
-//      Read-layer legacy filter (isSyntheticEvent) is the defense for any
-//      on-disk synthetic records that pre-date this bead.
+//      Production READ path FAILS CLOSED on synthetic records (jxdk — no silent drop).
 // ---------------------------------------------------------------------------
 
 describe('AC3 – production rejects synthetic:true; fixture path via raw JSONL injection', () => {
@@ -233,8 +232,8 @@ describe('AC3 – production rejects synthetic:true; fixture path via raw JSONL 
   });
 
   it('fixture write via writeFixtureEvent() lands on disk with synthetic:true (raw JSONL)', async () => {
-    // LEGACY-COMPAT: inject a synthetic record directly onto disk (as if it were
-    // a pre-y2ax-redesign record written by an older harness version).
+    // Inject a synthetic record directly onto disk (simulating a pre-824i record
+    // or store corruption — production write rejects this).
     await writeFixtureEvent(tempRoot, DomainEventName.BEAD_CLAIMED, { test: 'data', synthetic: true });
 
     const eventsPath = path.join(tempRoot, '.pi/events', `${path.basename(tempRoot)}.jsonl`);
@@ -243,9 +242,9 @@ describe('AC3 – production rejects synthetic:true; fixture path via raw JSONL 
     expect(rawEvents).toHaveLength(1);
     expect(rawEvents[0].data.synthetic).toBe(true);
 
-    // But the production read layer must hide it (legacy defense).
-    const productionEvents = await store.readAll();
-    expect(productionEvents.some(e => (e.data as Record<string, unknown>)?.synthetic === true)).toBe(false);
+    // pi-experiment-jxdk: production read FAILS CLOSED — throws EventStoreSyntheticReadError,
+    // does NOT silently drop the record.
+    await expect(store.readAll()).rejects.toBeInstanceOf(EventStoreSyntheticReadError);
   });
 
   it('CHECKLIST_ITEM_TICKED without beadId is REJECTED (pi-experiment-824i: empty schema grandfathering removed)', async () => {
