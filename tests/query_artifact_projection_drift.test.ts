@@ -7,8 +7,11 @@
  * writeSet, verifierObligations) rather than the older registry names.
  *
  * Goals:
- *   (m)  Fallback selectors — projections resolve even when the artifact uses
- *        a different but registered candidate key.
+ *   (m)  Old alias names (implementationSteps, traceabilityReferences,
+ *        gapFlags, unresolvedQuestions) are NOT registered here and REJECT
+ *        as unknown projections (fail-closed, no fallback).
+ *        Canonical current names (planSteps, completenessGaps,
+ *        clarificationQuestions, traceability) resolve directly.
  *   (n)  Summary availability — summary mode marks projections as
  *        available/unavailable based on the actual artifact shape.
  *   (o)  Rejection text distinction — "unknown projection" vs "registered
@@ -36,12 +39,16 @@ const root = path.join(os.tmpdir(), 'orr-else-query-artifact-drift-test');
  * NONE of these — bead 0yt5.12 registers them from the cerdiwen extension. The
  * test (re-)registers them in beforeEach; registration is last-wins idempotent
  * on the singleton registry, so re-running is safe regardless of order.
+ *
+ * Only CURRENT canonical names are registered here. Old aliases
+ * (implementationSteps, traceabilityReferences, gapFlags, unresolvedQuestions)
+ * are intentionally absent so tests assert they reject as unknown projections
+ * (fail-closed; no fallback to dot-path for unregistered names).
  */
 const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
   writeSet: { selectors: ['writeSet'], description: 'Approved file write set for this implementation step' },
   verifierObligations: { selectors: ['verifierObligations'], description: 'Verifier obligations that must pass before acceptance' },
-  implementationSteps: { selectors: ['implementationSteps', 'planSteps'], description: 'Ordered implementation steps from the plan' },
-  planSteps: { selectors: ['planSteps', 'implementationSteps'], description: 'Ordered plan steps' },
+  planSteps: { selectors: ['planSteps'], description: 'Ordered plan steps' },
   smtEvidence: { selectors: ['smtEvidence'], description: 'SMT/formal evidence associated with this plan' },
   riskList: { selectors: ['riskList'], description: 'Identified risks and mitigations' },
   evidenceReferences: { selectors: ['evidenceReferences'], description: 'Evidence references supporting the plan' },
@@ -50,13 +57,10 @@ const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
 
 const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionDef> = {
   requirementsInventory: { selectors: ['requirementsInventory'], description: 'Full inventory of discovered requirements' },
-  traceabilityReferences: { selectors: ['traceabilityReferences', 'traceability'], description: 'Traceability links' },
-  traceability: { selectors: ['traceability', 'traceabilityReferences'], description: 'Traceability map' },
-  gapFlags: { selectors: ['gapFlags', 'completenessGaps'], description: 'Flags indicating gaps in requirements coverage' },
-  completenessGaps: { selectors: ['completenessGaps', 'gapFlags'], description: 'Completeness gaps identified in requirements' },
+  traceability: { selectors: ['traceability'], description: 'Traceability map' },
+  completenessGaps: { selectors: ['completenessGaps'], description: 'Completeness gaps identified in requirements' },
   referenceCitations: { selectors: ['referenceCitations'], description: 'Source citations referenced in the requirements analysis' },
-  unresolvedQuestions: { selectors: ['unresolvedQuestions', 'clarificationQuestions'], description: 'Open questions to resolve before planning' },
-  clarificationQuestions: { selectors: ['clarificationQuestions', 'unresolvedQuestions'], description: 'Clarification questions to be resolved' }
+  clarificationQuestions: { selectors: ['clarificationQuestions'], description: 'Clarification questions to be resolved' }
 };
 
 function registerCerdiwenProjections(): void {
@@ -225,22 +229,23 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  // ── (m) Fallback selectors — live planContract with planSteps ────────────
+  // ── (m) Old alias names REJECT; canonical names resolve directly ─────────
 
-  it('(m1) projection=implementationSteps falls back to planSteps in Cerdiwen planContract', async () => {
-    // The artifact uses 'planSteps', not 'implementationSteps'.
-    // The projection registry lists implementationSteps with selectors: ['implementationSteps', 'planSteps'].
+  it('(m1) projection=implementationSteps rejects as unknown — alias not registered', async () => {
+    // implementationSteps is NOT registered as a current projection name.
+    // The canonical name is planSteps. Unknown projections fail closed and
+    // NEVER fall through to dot-path selector behavior (AC4).
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'planContract',
       projection: 'implementationSteps'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(CERDIWEN_PLAN_CONTRACT.planSteps);
-    // The resolved selector is the one that actually worked (planSteps)
-    expect(result.selector).toBe('planSteps');
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('implementationSteps');
+    expect(result.exists).toBe(true);
   });
 
   it('(m2) projection=planSteps resolves directly in Cerdiwen planContract', async () => {
@@ -294,18 +299,20 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
 
   // ── (m) Fallback selectors — live requirementsAnalysis ───────────────────
 
-  it('(m6) projection=gapFlags falls back to completenessGaps in Cerdiwen requirementsAnalysis', async () => {
-    // The artifact uses 'completenessGaps', not 'gapFlags'.
+  it('(m6) projection=gapFlags rejects as unknown — alias not registered', async () => {
+    // gapFlags is NOT registered as a current projection name.
+    // The canonical name is completenessGaps. Unknown projections fail closed.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'gapFlags'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(CERDIWEN_REQUIREMENTS_ANALYSIS.completenessGaps);
-    expect(result.selector).toBe('completenessGaps');
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('gapFlags');
+    expect(result.exists).toBe(true);
   });
 
   it('(m7) projection=completenessGaps resolves directly in Cerdiwen requirementsAnalysis', async () => {
@@ -320,18 +327,20 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     expect(result.result).toEqual(CERDIWEN_REQUIREMENTS_ANALYSIS.completenessGaps);
   });
 
-  it('(m8) projection=unresolvedQuestions falls back to clarificationQuestions in Cerdiwen requirementsAnalysis', async () => {
-    // The artifact uses 'clarificationQuestions', not 'unresolvedQuestions'.
+  it('(m8) projection=unresolvedQuestions rejects as unknown — alias not registered', async () => {
+    // unresolvedQuestions is NOT registered as a current projection name.
+    // The canonical name is clarificationQuestions. Unknown projections fail closed.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'unresolvedQuestions'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(CERDIWEN_REQUIREMENTS_ANALYSIS.clarificationQuestions);
-    expect(result.selector).toBe('clarificationQuestions');
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('unresolvedQuestions');
+    expect(result.exists).toBe(true);
   });
 
   it('(m9) projection=clarificationQuestions resolves directly in Cerdiwen requirementsAnalysis', async () => {
@@ -346,18 +355,20 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     expect(result.result).toEqual(CERDIWEN_REQUIREMENTS_ANALYSIS.clarificationQuestions);
   });
 
-  it('(m10) projection=traceabilityReferences falls back to traceability in Cerdiwen requirementsAnalysis', async () => {
-    // The artifact uses 'traceability', not 'traceabilityReferences'.
+  it('(m10) projection=traceabilityReferences rejects as unknown — alias not registered', async () => {
+    // traceabilityReferences is NOT registered as a current projection name.
+    // The canonical name is traceability. Unknown projections fail closed.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'traceabilityReferences'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(CERDIWEN_REQUIREMENTS_ANALYSIS.traceability);
-    expect(result.selector).toBe('traceability');
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('traceabilityReferences');
+    expect(result.exists).toBe(true);
   });
 
   it('(m11) projection=traceability resolves directly in Cerdiwen requirementsAnalysis', async () => {
@@ -374,8 +385,9 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
 
   // ── (n) Summary availability — absent projections marked unavailable ──────
 
-  it('(n1) summary on Cerdiwen planContract marks planSteps/smtEvidence available, implementationSteps unavailable', async () => {
-    // The artifact has planSteps and smtEvidence but NOT implementationSteps or riskList.
+  it('(n1) summary on Cerdiwen planContract marks planSteps/smtEvidence available, absent canonical projections unavailable', async () => {
+    // The artifact has planSteps and smtEvidence but NOT riskList or evidenceReferences.
+    // implementationSteps is NOT a registered projection name (alias removed).
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'planContract',
@@ -386,6 +398,7 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     if (result.status !== 'summary') throw new Error('unexpected status');
 
     const byName = Object.fromEntries(result.projections.map(p => [p.name, p]));
+    const projectionNames = result.projections.map(p => p.name);
 
     // writeSet is present in the artifact → available
     expect(byName['writeSet']?.available).toBe(true);
@@ -394,28 +407,26 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     // verifierObligations is present → available
     expect(byName['verifierObligations']?.available).toBe(true);
 
-    // planSteps is present → available
+    // planSteps is present → available (canonical name, single selector)
     expect(byName['planSteps']?.available).toBe(true);
     expect(byName['planSteps']?.resolvedSelector).toBe('planSteps');
 
     // smtEvidence is present → available
     expect(byName['smtEvidence']?.available).toBe(true);
 
-    // implementationSteps is NOT in this artifact — even with the fallback to
-    // planSteps, the projection 'implementationSteps' resolves via planSteps,
-    // so it is available (fallback resolved). Verify the resolved selector.
-    // (implementationSteps falls back to planSteps which IS present)
-    expect(byName['implementationSteps']?.available).toBe(true);
-    expect(byName['implementationSteps']?.resolvedSelector).toBe('planSteps');
+    // implementationSteps is NOT a registered projection — must not appear in summary
+    expect(projectionNames).not.toContain('implementationSteps');
 
-    // riskList is absent and has no fallback → unavailable
+    // riskList is absent → unavailable
     expect(byName['riskList']?.available).toBe(false);
 
-    // evidenceReferences is absent and has no fallback → unavailable
+    // evidenceReferences is absent → unavailable
     expect(byName['evidenceReferences']?.available).toBe(false);
   });
 
-  it('(n2) summary on Cerdiwen requirementsAnalysis marks Cerdiwen keys available, old-schema keys unavailable when no fallback resolves', async () => {
+  it('(n2) summary on Cerdiwen requirementsAnalysis lists only canonical names; old aliases absent from registry', async () => {
+    // Old aliases (gapFlags, unresolvedQuestions, traceabilityReferences) are NOT
+    // registered — they must not appear in the summary's projection list.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
@@ -426,34 +437,29 @@ describe('ArtifactQuery — projection drift (live-style artifacts)', () => {
     if (result.status !== 'summary') throw new Error('unexpected status');
 
     const byName = Object.fromEntries(result.projections.map(p => [p.name, p]));
+    const projectionNames = result.projections.map(p => p.name);
 
-    // completenessGaps is present → available
+    // completenessGaps is present → available (canonical single selector)
     expect(byName['completenessGaps']?.available).toBe(true);
     expect(byName['completenessGaps']?.resolvedSelector).toBe('completenessGaps');
 
     // clarificationQuestions is present → available
     expect(byName['clarificationQuestions']?.available).toBe(true);
 
-    // traceability is present → available
+    // traceability is present → available (canonical single selector)
     expect(byName['traceability']?.available).toBe(true);
-
-    // gapFlags falls back to completenessGaps which IS present → available
-    expect(byName['gapFlags']?.available).toBe(true);
-    expect(byName['gapFlags']?.resolvedSelector).toBe('completenessGaps');
-
-    // unresolvedQuestions falls back to clarificationQuestions which IS present → available
-    expect(byName['unresolvedQuestions']?.available).toBe(true);
-    expect(byName['unresolvedQuestions']?.resolvedSelector).toBe('clarificationQuestions');
-
-    // traceabilityReferences falls back to traceability which IS present → available
-    expect(byName['traceabilityReferences']?.available).toBe(true);
-    expect(byName['traceabilityReferences']?.resolvedSelector).toBe('traceability');
+    expect(byName['traceability']?.resolvedSelector).toBe('traceability');
 
     // requirementsInventory is present → available
     expect(byName['requirementsInventory']?.available).toBe(true);
 
     // referenceCitations is present → available
     expect(byName['referenceCitations']?.available).toBe(true);
+
+    // Old aliases must NOT appear in the registry-driven summary
+    expect(projectionNames).not.toContain('gapFlags');
+    expect(projectionNames).not.toContain('unresolvedQuestions');
+    expect(projectionNames).not.toContain('traceabilityReferences');
   });
 
   it('(n3) unavailable projections in summary have zero-byte size estimates', async () => {

@@ -4232,9 +4232,10 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           'WORKFLOW: (1) Call with "summary":true to get per-projection size estimates (byteCount + tokenEstimate) WITHOUT content — ' +
           'use this to decide which projections fit your context budget. ' +
           '(2) Call with "projection" for schema-aware named extractions: ' +
-          'planContract: writeSet, verifierObligations, implementationSteps, riskList, evidenceReferences, acceptanceCriteria; ' +
-          'requirementsAnalysis: requirementsInventory, traceabilityReferences, gapFlags, referenceCitations, unresolvedQuestions. ' +
-          '(3) Call with "selector" for dot-path or JSON Pointer ad-hoc access (e.g. "implementationSteps.0" or "/implementationSteps/0"). ' +
+          'projection names are registered by the consuming project extension (e.g. planContract: writeSet, verifierObligations, planSteps, riskList, evidenceReferences, acceptanceCriteria; ' +
+          'requirementsAnalysis: requirementsInventory, traceability, completenessGaps, clarificationQuestions, referenceCitations). ' +
+          'Only registered current projection names are accepted; unregistered names reject with a structured error and validProjections list. ' +
+          '(3) Call with "selector" for dot-path or JSON Pointer ad-hoc access (e.g. "planSteps.0" or "/planSteps/0"). ' +
           'Every successful result includes a sizeEstimate {byteCount, tokenEstimate} so you know the cost of what was returned. ' +
           'If the selected subtree exceeds the byte cap, the tool returns counts + representative samples + a narrower-selector hint instead of dumping the full subtree. ' +
           'Missing artifacts and invalid projections return structured rejections with validProjections and path/existence metadata.',
@@ -4244,8 +4245,8 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           actionId: Type.Optional(Type.String({ description: 'Optional action ID for artifact template resolution' })),
           artifactId: Type.Optional(Type.String({ description: 'Artifact identifier matching a harness.yaml template key (e.g. "planContract", "requirementsAnalysis"). Mutually exclusive with artifactPath.' })),
           artifactPath: Type.Optional(Type.String({ description: 'Explicit filesystem path to the artifact JSON. Mutually exclusive with artifactId.' })),
-          projection: Type.Optional(Type.String({ description: 'Named schema-aware projection (e.g. "writeSet", "implementationSteps" for planContract). Mutually exclusive with selector and summary.' })),
-          selector: Type.Optional(Type.String({ description: 'Dot-path or JSON Pointer selector into the artifact JSON (e.g. "writeSet", "implementationSteps.0.description", or "/writeSet/0"). Mutually exclusive with projection and summary. Empty string returns artifact root subject to byte cap.' })),
+          projection: Type.Optional(Type.String({ description: 'Named schema-aware projection registered by the consuming project extension (e.g. "writeSet", "planSteps" for planContract). Only registered current names are accepted. Mutually exclusive with selector and summary.' })),
+          selector: Type.Optional(Type.String({ description: 'Dot-path or JSON Pointer selector into the artifact JSON (e.g. "writeSet", "planSteps.0.description", or "/writeSet/0"). Mutually exclusive with projection and summary. Empty string returns artifact root subject to byte cap.' })),
           summary: Type.Optional(Type.Boolean({ description: 'When true, return per-projection size estimates (byteCount + tokenEstimate) WITHOUT content. Use this first to see what is available and how large each projection is before fetching inline. Mutually exclusive with projection, selector, and schema.' })),
           schema: Type.Optional(Type.Boolean({ description: 'When true, return the recursive SHAPE of the artifact (object keys + value types + array lengths) with values dropped. Use this to navigate an unfamiliar large JSON before choosing a projection or selector. Mutually exclusive with projection, selector, and summary.' }))
         }),

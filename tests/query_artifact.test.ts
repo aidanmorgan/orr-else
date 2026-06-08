@@ -36,11 +36,15 @@ const root = path.join(os.tmpdir(), 'orr-else-query-artifact-test');
  * the orr-else/contract `projections` registry. These mirror the fixtures
  * below. Registration is last-wins idempotent on the singleton, so the
  * beforeEach re-registration is safe regardless of test order.
+ *
+ * Only CURRENT canonical names are registered. Old aliases
+ * (implementationSteps, traceabilityReferences, gapFlags, unresolvedQuestions)
+ * are intentionally absent so tests assert those names reject as unknown
+ * projections (fail-closed; no dot-path fallback for unregistered names).
  */
 const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
   writeSet: { selectors: ['writeSet'], description: 'Approved file write set for this implementation step' },
   verifierObligations: { selectors: ['verifierObligations'], description: 'Verifier obligations that must pass before acceptance' },
-  implementationSteps: { selectors: ['implementationSteps'], description: 'Ordered implementation steps from the plan' },
   riskList: { selectors: ['riskList'], description: 'Identified risks and mitigations' },
   evidenceReferences: { selectors: ['evidenceReferences'], description: 'Evidence references supporting the plan' },
   acceptanceCriteria: { selectors: ['acceptanceCriteria'], description: 'Acceptance criteria for this bead' }
@@ -48,10 +52,7 @@ const PLAN_CONTRACT_PROJECTIONS: Record<string, ProjectionDef> = {
 
 const REQUIREMENTS_ANALYSIS_PROJECTIONS: Record<string, ProjectionDef> = {
   requirementsInventory: { selectors: ['requirementsInventory'], description: 'Full inventory of discovered requirements' },
-  traceabilityReferences: { selectors: ['traceabilityReferences'], description: 'Traceability links' },
-  gapFlags: { selectors: ['gapFlags'], description: 'Flags indicating gaps in requirements coverage' },
-  referenceCitations: { selectors: ['referenceCitations'], description: 'Source citations referenced in the requirements analysis' },
-  unresolvedQuestions: { selectors: ['unresolvedQuestions'], description: 'Open questions to resolve before planning' }
+  referenceCitations: { selectors: ['referenceCitations'], description: 'Source citations referenced in the requirements analysis' }
 };
 
 function registerProjections(): void {
@@ -181,18 +182,20 @@ describe('ArtifactQuery', () => {
     expect(JSON.stringify(result.result)).not.toContain('implementationSteps');
   });
 
-  it('(a) returns only the implementationSteps projection from planContract', async () => {
+  it('(a) implementationSteps rejects as unknown projection — alias not registered', async () => {
+    // implementationSteps is NOT a registered current projection name.
+    // Unknown projections fail closed and never fall through to dot-path access (AC4).
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'planContract',
       projection: 'implementationSteps'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(Array.isArray(result.result)).toBe(true);
-    expect((result.result as any[])[0].description).toBe('Create Foo class');
-    expect(JSON.stringify(result.result)).not.toContain('writeSet');
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('implementationSteps');
+    expect(result.exists).toBe(true);
   });
 
   it('(a) returns verifierObligations projection from planContract', async () => {
@@ -258,28 +261,35 @@ describe('ArtifactQuery', () => {
     expect(JSON.stringify(result.result)).not.toContain('gapFlags');
   });
 
-  it('(b) returns traceabilityReferences projection from requirementsAnalysis', async () => {
+  it('(b) traceabilityReferences rejects as unknown projection — alias not registered', async () => {
+    // traceabilityReferences is NOT a registered current projection name.
+    // Unknown projections fail closed (AC4).
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'traceabilityReferences'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(REQUIREMENTS_ANALYSIS_FIXTURE.traceabilityReferences);
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('traceabilityReferences');
+    expect(result.exists).toBe(true);
   });
 
-  it('(b) returns gapFlags projection from requirementsAnalysis', async () => {
+  it('(b) gapFlags rejects as unknown projection — alias not registered', async () => {
+    // gapFlags is NOT a registered current projection name.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'gapFlags'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(REQUIREMENTS_ANALYSIS_FIXTURE.gapFlags);
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('gapFlags');
+    expect(result.exists).toBe(true);
   });
 
   it('(b) returns referenceCitations projection from requirementsAnalysis', async () => {
@@ -294,16 +304,19 @@ describe('ArtifactQuery', () => {
     expect(result.result).toEqual(REQUIREMENTS_ANALYSIS_FIXTURE.referenceCitations);
   });
 
-  it('(b) returns unresolvedQuestions projection from requirementsAnalysis', async () => {
+  it('(b) unresolvedQuestions rejects as unknown projection — alias not registered', async () => {
+    // unresolvedQuestions is NOT a registered current projection name.
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
       projection: 'unresolvedQuestions'
     });
 
-    expect(result.status).toBe('ok');
-    if (result.status !== 'ok') throw new Error('unexpected status');
-    expect(result.result).toEqual(REQUIREMENTS_ANALYSIS_FIXTURE.unresolvedQuestions);
+    expect(result.status).toBe('rejected');
+    if (result.status !== 'rejected') throw new Error('unexpected status');
+    expect(result.reason).toContain('not registered');
+    expect(result.reason).toContain('unresolvedQuestions');
+    expect(result.exists).toBe(true);
   });
 
   // ── (c) Dot-path selector returns requested subtree ───────────────────────
@@ -437,12 +450,14 @@ describe('ArtifactQuery', () => {
     if (result.status !== 'rejected') throw new Error('unexpected status');
     expect(result.reason).toContain('nonExistentProjection');
     expect(Array.isArray(result.validProjections)).toBe(true);
+    // Only current canonical names appear in validProjections
     expect(result.validProjections).toContain('writeSet');
-    expect(result.validProjections).toContain('implementationSteps');
     expect(result.validProjections).toContain('verifierObligations');
     expect(result.validProjections).toContain('riskList');
     expect(result.validProjections).toContain('evidenceReferences');
     expect(result.validProjections).toContain('acceptanceCriteria');
+    // Old aliases must NOT appear as valid projection names
+    expect(result.validProjections).not.toContain('implementationSteps');
     expect(result.exists).toBe(true);
     expect(result.artifactPath).toContain('planContract.json');
   });
@@ -889,7 +904,7 @@ describe('ArtifactQuery — summary mode', () => {
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it('(i1) summary:true on planContract returns schema-aware summary with all projection names', async () => {
+  it('(i1) summary:true on planContract returns schema-aware summary with current canonical projection names only', async () => {
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'planContract',
@@ -903,14 +918,15 @@ describe('ArtifactQuery — summary mode', () => {
     expect(result.schemaAware).toBe(true);
     expect(result.artifactId).toBe('planContract');
 
-    // Must list ALL projection names from the registry
+    // Must list only current canonical projection names from the registry
     const projectionNames = result.projections.map(p => p.name);
     expect(projectionNames).toContain('writeSet');
     expect(projectionNames).toContain('verifierObligations');
-    expect(projectionNames).toContain('implementationSteps');
     expect(projectionNames).toContain('riskList');
     expect(projectionNames).toContain('evidenceReferences');
     expect(projectionNames).toContain('acceptanceCriteria');
+    // Old alias must NOT appear in the summary
+    expect(projectionNames).not.toContain('implementationSteps');
 
     // Each projection must have sizeEstimate
     for (const proj of result.projections) {
@@ -928,7 +944,7 @@ describe('ArtifactQuery — summary mode', () => {
     expect(summaryJson).not.toContain('Breaking change');
   });
 
-  it('(i2) summary:true on requirementsAnalysis returns schema-aware summary with all projection names', async () => {
+  it('(i2) summary:true on requirementsAnalysis returns schema-aware summary with current canonical projection names only', async () => {
     const result = await query.query({
       beadId: 'bd-1',
       artifactId: 'requirementsAnalysis',
@@ -940,11 +956,13 @@ describe('ArtifactQuery — summary mode', () => {
 
     expect(result.schemaAware).toBe(true);
     const projectionNames = result.projections.map(p => p.name);
+    // Only current canonical names appear
     expect(projectionNames).toContain('requirementsInventory');
-    expect(projectionNames).toContain('traceabilityReferences');
-    expect(projectionNames).toContain('gapFlags');
     expect(projectionNames).toContain('referenceCitations');
-    expect(projectionNames).toContain('unresolvedQuestions');
+    // Old aliases must NOT appear
+    expect(projectionNames).not.toContain('traceabilityReferences');
+    expect(projectionNames).not.toContain('gapFlags');
+    expect(projectionNames).not.toContain('unresolvedQuestions');
 
     // No actual requirement content
     const summaryJson = JSON.stringify(result);
