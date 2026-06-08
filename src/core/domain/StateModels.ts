@@ -64,6 +64,55 @@ export interface ToolPayloadBudgetPolicy {
 }
 
 /**
+ * Optional per-bead/per-state/per-action runtime budget policy (pi-experiment-6q0y.48).
+ *
+ * Opt-in: absent = no enforcement (true no-op when unconfigured, AC1).
+ * When declared, exceeded hard limits fail BEFORE the next model/provider/tool
+ * spend and route through the configured deterministic outcome (AC4).
+ *
+ * Supported dimensions (AC3):
+ *   - maxModelCalls:           total model-request count across the run.
+ *   - maxEstimatedInputTokens: cumulative estimated input tokens (ceil(bytes/4)).
+ *   - maxProviderTotalTokens:  cumulative provider-reported total tokens.
+ *   - maxWallClockMs:          wall-clock elapsed ms since worker-run start.
+ *   - maxRetries:              cumulative retry count across all tool invocations.
+ *   - maxToolFailures:         cumulative per-tool failure count.
+ *   - maxVerifierFailures:     cumulative verifier-gate rejection count.
+ *   - maxToolPayloadBytes:     cumulative tool-result payload bytes sent to model.
+ *
+ * All dimension fields are optional — omitting a field means no limit for that
+ * dimension. At least one dimension should be set to be meaningful.
+ *
+ * Precedence (highest first): action > state > settings (AC2).
+ * Only the innermost configured policy takes effect — there is no merging.
+ *
+ * `route` must be a declared outcome in the statechart vocabulary (AC6 startup lint).
+ */
+export interface RuntimeBudgetPolicy {
+  /** Maximum total model-request count (fails BEFORE the next request when reached). */
+  maxModelCalls?: number;
+  /** Maximum cumulative estimated input tokens (ceil(bytes/4)). */
+  maxEstimatedInputTokens?: number;
+  /** Maximum cumulative provider-reported total tokens. */
+  maxProviderTotalTokens?: number;
+  /** Maximum wall-clock elapsed ms since worker-run start (AC7: fake clock in tests). */
+  maxWallClockMs?: number;
+  /** Maximum cumulative retry count across all tool invocations. */
+  maxRetries?: number;
+  /** Maximum cumulative per-tool failure count. */
+  maxToolFailures?: number;
+  /** Maximum cumulative verifier-gate rejection count. */
+  maxVerifierFailures?: number;
+  /** Maximum cumulative tool-result payload bytes sent to the model. */
+  maxToolPayloadBytes?: number;
+  /**
+   * Deterministic outcome route emitted when any limit is exceeded.
+   * Must reference a declared outcome in the statechart vocabulary (AC6 lint).
+   */
+  route: string;
+}
+
+/**
  * Retry policy for project-configured tools (pi-experiment-t6gw).
  *
  * Opt-in: absent retryPolicy means ZERO automatic retries (default).
@@ -462,6 +511,14 @@ export interface TeammateAction {
    * policy applies (action > state > settings precedence, AC3).
    */
   promptBudget?: PromptBudgetPolicy;
+  /**
+   * Action-level runtime budget policy (pi-experiment-6q0y.48).
+   *
+   * Highest-precedence runtime budget — overrides state.runtimeBudget and
+   * settings.runtimeBudget for this specific action (action > state > settings, AC2).
+   * When absent, the state-level policy applies.
+   */
+  runtimeBudget?: RuntimeBudgetPolicy;
 }
 
 export type ActionDefinition = TeammateAction;
@@ -622,6 +679,14 @@ export interface SDLCState {
    * Absent means no per-state limit — falls back to settings.promptBudget.
    */
   promptBudget?: PromptBudgetPolicy;
+  /**
+   * State-level runtime budget policy (pi-experiment-6q0y.48).
+   *
+   * When present, all actions in this state inherit this runtime budget unless
+   * the action declares its own runtimeBudget (action > state > settings, AC2).
+   * Absent means no per-state runtime limit — falls back to settings.runtimeBudget.
+   */
+  runtimeBudget?: RuntimeBudgetPolicy;
 }
 
 export interface HarnessConfig {
@@ -780,6 +845,14 @@ export interface HarnessConfig {
      * (full no-op, AC1). State and action-level declarations override this.
      */
     promptBudget?: PromptBudgetPolicy;
+    /**
+     * Settings-level (global) runtime budget policy (pi-experiment-6q0y.48).
+     *
+     * Lowest-precedence runtime budget — applies when no state or action policy
+     * is configured. When absent, no runtime enforcement anywhere (full no-op,
+     * AC1). State and action-level runtimeBudget declarations override this.
+     */
+    runtimeBudget?: RuntimeBudgetPolicy;
     /**
      * pi-experiment-6q0y.17 AC7(b): Named per-state budget overrides keyed by
      * state ID. Startup lint rejects any key that does not match a declared state.

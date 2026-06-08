@@ -1027,6 +1027,91 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.48 (AC6): Reject runtime-budget policies that declare:
+   *   (a) negative limits (any dimension field < 0),
+   *   (b) unknown routes (route absent from statechart vocabulary),
+   *   (c) policies on unknown states or actions (structural scopes are always
+   *       valid; only named override maps can reference unknown state/action IDs),
+   *   (d) outcomes absent from the declared statechart vocabulary.
+   *
+   * Checks (a) and (b)/(d) are the same check — a negative limit or an unknown
+   * route both cause rejection. Check (c) applies to the settings-level named
+   * override maps (promptBudgetStateOverrides pattern) — runtime budget uses
+   * structural nesting, so (c) applies to any runtimeBudget declared directly
+   * on a state or action (always valid by construction), and to any unknown
+   * state or action ids referenced by the structure parser (caught by AJV).
+   * We validate all structural runtimeBudget policies for (a) and (b).
+   *
+   * Scopes: settings.runtimeBudget, state.runtimeBudget, action.runtimeBudget.
+   */
+  private validateRuntimeBudgetDeclarations(
+    config: HarnessConfig,
+    stateIds: Set<string>,
+    declaredOutcomes: Set<string>
+  ): void {
+    const configPath = this.getConfigPath();
+
+    // Dimension field names for negative-limit checks.
+    const DIMENSION_FIELDS: ReadonlyArray<string> = [
+      'maxModelCalls', 'maxEstimatedInputTokens', 'maxProviderTotalTokens',
+      'maxWallClockMs', 'maxRetries', 'maxToolFailures', 'maxVerifierFailures',
+      'maxToolPayloadBytes',
+    ];
+
+    const validatePolicy = (
+      policy: Record<string, unknown> | undefined,
+      context: string
+    ): void => {
+      if (!policy) return;
+
+      // (a) Negative limits — any dimension field must be non-negative.
+      for (const field of DIMENSION_FIELDS) {
+        const val = policy[field];
+        if (typeof val === 'number' && val < 0) {
+          throw new Error(
+            `${context} declares runtimeBudget.${field}: ${val} which is negative. ` +
+            `Runtime budget limits must be non-negative integers. ` +
+            `Remove the field or set a non-negative value.`
+          );
+        }
+      }
+
+      // (b)/(d) Route absent from statechart vocabulary.
+      if (typeof policy['route'] === 'string') {
+        if (!declaredOutcomes.has((policy['route'] as string).toUpperCase())) {
+          throw new Error(
+            `${context} declares runtimeBudget.route: "${policy['route']}" which is absent ` +
+            `from the statechart outcome vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
+            `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+            `Add "${policy['route']}" to the appropriate outcome list or correct the route.`
+          );
+        }
+      }
+    };
+
+    // (c) Settings-level policy: no unknown-state-reference check needed (no named maps for runtimeBudget).
+    const settings = config.settings as typeof config.settings & {
+      runtimeBudget?: Record<string, unknown>;
+    };
+    validatePolicy(settings.runtimeBudget, `settings (${configPath})`);
+
+    // State-level and action-level structural policies — always reference known states/actions.
+    // We validate the policies themselves for (a) and (b); (c) does not apply here.
+    for (const [sid, state] of Object.entries(config.states || {})) {
+      if (!stateIds.has(sid)) continue; // defensive; stateIds was built from config.states keys
+
+      const statePolicy = (state as { runtimeBudget?: Record<string, unknown> }).runtimeBudget;
+      validatePolicy(statePolicy, `state "${sid}" (${configPath})`);
+
+      // Action-level policies.
+      for (const action of (state.actions || [])) {
+        const actionPolicy = (action as { runtimeBudget?: Record<string, unknown> }).runtimeBudget;
+        validatePolicy(actionPolicy, `state "${sid}" action "${action.id}" (${configPath})`);
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1603,6 +1688,9 @@ export class ConfigLoader {
     // Build the set of declared tool names for unknown-tool-name checks (AC7(b)).
     const declaredToolNames = new Set<string>((config.tools ?? []).map(t => t.name));
     this.validateToolPayloadBudgetDeclarations(config, declaredToolNames, declaredOutcomes);
+
+    // ── AC6 (pi-experiment-6q0y.48): runtime budget policy validation ──────
+    this.validateRuntimeBudgetDeclarations(config, stateIds, declaredOutcomes);
   }
 
   /**

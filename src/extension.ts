@@ -134,6 +134,9 @@ import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapD
 import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';
 import { computePromptSizing, evaluatePromptBudgetAdmission } from './core/PromptBudgetAdmission.js';
 import { evaluateToolPayloadBudget } from './core/ToolPayloadBudget.js';
+import { RuntimeBudgetTracker, createRuntimeBudgetTracker, resolveRuntimeBudgetPolicy } from './core/RuntimeBudgetTracker.js';
+import { computeRequestSizing } from './core/ProviderBudgetPreflight.js';
+import { systemClock } from './core/Clock.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -269,6 +272,15 @@ interface ExtensionSession {
   // ── coordinator cycle-cap ─────────────────────────────────────────────────
   /** Per-(bead, state, blocker-fingerprint) re-entry counter. */
   stateCycleCounter: Map<string, number>;
+  /**
+   * Per-bead RuntimeBudgetTracker instances for the coordinator-side verifier gate
+   * (coordinator mode only). One tracker is created per beadId on first verifier
+   * failure and reused on subsequent failures for that bead. Replaces the former
+   * parallel `verifierFailureCounts` raw counter map (pi-experiment-6q0y.48).
+   * Using the tracker unifies verifierFailureCount enforcement on the same mechanism
+   * as all other runtime budget dimensions.
+   */
+  verifierBudgetTrackers: Map<string, RuntimeBudgetTracker>;
   // ── tool execution ────────────────────────────────────────────────────────
   /**
    * Per-(bead, tool) consecutive-failure counter.  Worker mode only.
@@ -320,6 +332,12 @@ interface ExtensionSession {
   observedPiToolSpans: Map<string, SpanContext>;
   /** Maps Pi toolCallId → harness toolInvocationId (generated at TOOL_CALL time). */
   observedPiToolInvocationIds: Map<string, string>;
+  /**
+   * Per-worker-run runtime budget tracker (pi-experiment-6q0y.48).
+   * Null when no runtime budget is configured (true no-op, AC1).
+   * Created in initializeWorkerRun; cleared at the start of each new run.
+   */
+  runtimeBudgetTracker: RuntimeBudgetTracker | null;
   // ── registration guards (reset each invocation so a second call re-registers) ──
   artifactPathsToolRegistered: boolean;
   queryArtifactToolRegistered: boolean;
@@ -347,12 +365,14 @@ function createExtensionSession(): ExtensionSession {
     checklistMutationQueue: Promise.resolve(),
     currentTurnStartMs: undefined,
     stateCycleCounter: new Map(),
+    verifierBudgetTrackers: new Map(),
     toolBreakerFailures: new Map(),
     toolResultCache: new Map(),
     recordedPromptDigestIds: new Set(),
     admittedPiBasePromptHash: null,
     admittedHarnessFingerprint: undefined,
     pendingRunInitPayload: undefined,
+    runtimeBudgetTracker: null,
     piToolObservability: null,
     observedPiTools: new Set(),
     blockedObservedPiToolCallIds: new Set(),
@@ -944,6 +964,26 @@ function wrapPluginTool(
         }
       }
 
+      // pi-experiment-6q0y.48: check tool-failure budget BEFORE the tool runs.
+      // This is the pre-spend hook for accumulated tool failures: if the bead has
+      // already reached the configured maxToolFailures, block before the next attempt.
+      {
+        const preToolBudgetCheck = session.runtimeBudgetTracker?.checkPreToolResult({ toolFailures: true });
+        if (preToolBudgetCheck?.exceeded) {
+          await session.runtimeBudgetTracker!.emitExceededEvent(preToolBudgetCheck, services.eventStore);
+          const activeRun = session.activeRun;
+          if (activeRun && preToolBudgetCheck.route) {
+            const summary = `Runtime budget exceeded (${preToolBudgetCheck.dimension}: ${preToolBudgetCheck.currentValue} >= ${preToolBudgetCheck.limit}). Route: ${preToolBudgetCheck.route}`;
+            const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(preToolBudgetCheck.route, config), {
+              beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+              transitionEvent: preToolBudgetCheck.route, summary, evidence: summary, handover: summary,
+            });
+            await postWorkerSignal(services, routeEvent).catch(() => {});
+          }
+          return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${preToolBudgetCheck.dimension} limit (${preToolBudgetCheck.limit}) reached. Route: ${preToolBudgetCheck.route}`);
+        }
+      }
+
       await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
         beadId,
         tool: tool.name,
@@ -1133,10 +1173,31 @@ function wrapPluginTool(
           )).catch(() => {});
 
           if (resultIndicatesFailure(result)) {
+            // pi-experiment-6q0y.48: accumulate tool failure count for runtime budget.
+            // The PRE-TOOL check (above) fires on the NEXT invocation after this failure.
+            session.runtimeBudgetTracker?.recordToolFailure();
+
             // Tool ran but returned a failure — consult the retry pipeline only
             // when a retryPolicy is configured. No policy → plain failure return
             // with no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
             if (retryPolicy) {
+              // pi-experiment-6q0y.48: check retry budget BEFORE admitting the retry.
+              const retryBudgetCheck = session.runtimeBudgetTracker?.checkPreRetry();
+              if (retryBudgetCheck?.exceeded) {
+                await session.runtimeBudgetTracker!.emitExceededEvent(retryBudgetCheck, services.eventStore);
+                const activeRun = session.activeRun;
+                if (activeRun && retryBudgetCheck.route) {
+                  const summary = `Runtime budget exceeded (${retryBudgetCheck.dimension}: ${retryBudgetCheck.currentValue} >= ${retryBudgetCheck.limit}). Route: ${retryBudgetCheck.route}`;
+                  const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(retryBudgetCheck.route, config), {
+                    beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+                    transitionEvent: retryBudgetCheck.route, summary, evidence: summary, handover: summary,
+                  });
+                  await postWorkerSignal(services, routeEvent).catch(() => {});
+                }
+                return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${retryBudgetCheck.dimension} limit (${retryBudgetCheck.limit}) reached. Route: ${retryBudgetCheck.route}`);
+              }
+              // Admit retry: record the retry attempt in the tracker.
+              session.runtimeBudgetTracker?.recordRetry();
               const retryDecision = await evaluateRetry({
                 tool: tool.name,
                 invocationId: currentInvocationId,
@@ -1156,6 +1217,28 @@ function wrapPluginTool(
 
           // pi-experiment-6q0y.18: enforce optional tool-payload budget BEFORE
           // the result reaches the model. No-op when no budget is configured (AC2).
+          // pi-experiment-6q0y.48: also check runtime tool-payload-bytes budget.
+          if (session.runtimeBudgetTracker && !resultIndicatesFailure(result)) {
+            const serializedText = serializeToolResultText(result);
+            const payloadBytes = Buffer.byteLength(serializedText, 'utf8');
+            const payloadBudgetCheck = session.runtimeBudgetTracker.checkPreToolResult({ payloadBytes });
+            if (payloadBudgetCheck.exceeded) {
+              await session.runtimeBudgetTracker.emitExceededEvent(payloadBudgetCheck, services.eventStore);
+              const activeRun = session.activeRun;
+              if (activeRun && payloadBudgetCheck.route) {
+                const summary = `Runtime budget exceeded (${payloadBudgetCheck.dimension}: ${payloadBudgetCheck.currentValue} >= ${payloadBudgetCheck.limit}). Route: ${payloadBudgetCheck.route}`;
+                const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(payloadBudgetCheck.route, config), {
+                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+                  transitionEvent: payloadBudgetCheck.route, summary, evidence: summary, handover: summary,
+                });
+                await postWorkerSignal(services, routeEvent).catch(() => {});
+              }
+              return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${payloadBudgetCheck.dimension} limit (${payloadBudgetCheck.limit}) reached. Route: ${payloadBudgetCheck.route}`);
+            }
+            // Accumulate payload bytes now that we've cleared the check.
+            session.runtimeBudgetTracker.recordToolPayloadBytes(payloadBytes);
+          }
+
           return applyToolPayloadBudget(
             tool.name, result, config,
             { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
@@ -1192,10 +1275,30 @@ function wrapPluginTool(
             toolResult: errorHandle
           }).catch(() => {});
 
+          // pi-experiment-6q0y.48: accumulate tool failure count (exception path).
+          // The PRE-TOOL check fires on the NEXT invocation.
+          session.runtimeBudgetTracker?.recordToolFailure();
+
           // Consult the retry pipeline for thrown exceptions only when a
           // retryPolicy is configured. No policy → plain error return with
           // no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
           if (retryPolicy) {
+            // pi-experiment-6q0y.48: check retry budget before admitting the retry (exception path).
+            const retryBudgetCheckEx = session.runtimeBudgetTracker?.checkPreRetry();
+            if (retryBudgetCheckEx?.exceeded) {
+              await session.runtimeBudgetTracker!.emitExceededEvent(retryBudgetCheckEx, services.eventStore);
+              const activeRun = session.activeRun;
+              if (activeRun && retryBudgetCheckEx.route) {
+                const sum = `Runtime budget exceeded (${retryBudgetCheckEx.dimension}: ${retryBudgetCheckEx.currentValue} >= ${retryBudgetCheckEx.limit}). Route: ${retryBudgetCheckEx.route}`;
+                const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(retryBudgetCheckEx.route, config), {
+                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+                  transitionEvent: retryBudgetCheckEx.route, summary: sum, evidence: sum, handover: sum,
+                });
+                await postWorkerSignal(services, routeEvent).catch(() => {});
+              }
+              return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${retryBudgetCheckEx.dimension} limit (${retryBudgetCheckEx.limit}) reached. Route: ${retryBudgetCheckEx.route}`);
+            }
+            session.runtimeBudgetTracker?.recordRetry();
             const retryDecision = await evaluateRetry({
               tool: tool.name,
               invocationId: currentInvocationId,
@@ -1587,6 +1690,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   session.recordedPromptDigestIds.clear();
   session.admittedPiBasePromptHash = null;
   session.pendingRunInitPayload = undefined;
+  // pi-experiment-6q0y.48: reset runtime budget tracker for each new run (AC1 no-op when no policy).
+  session.runtimeBudgetTracker = null;
 
   const config = await services.configLoader.load();
   const state = config.states[stateId];
@@ -1599,6 +1704,15 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     : [];
   const action = selectActiveAction(config, stateId, state, actionId, completedActionIds);
   if (!action) throw new Error(`State ${stateId} has no configured actions.`);
+
+  // pi-experiment-6q0y.48: create runtime budget tracker for this run.
+  // No-op (null) when no policy is configured at any scope (AC1).
+  session.runtimeBudgetTracker = createRuntimeBudgetTracker(config, {
+    beadId,
+    stateId,
+    actionId: action.id,
+    clock: systemClock,
+  });
 
   const worktreePath = process.env[EnvVars.WORKTREE_PATH] || process.cwd();
   const configuredRequiredItems = deriveChecklistItems(state, action, config, stateId);
@@ -2065,6 +2179,47 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         );
 
         if (gateOutcome.ran && !gateOutcome.pass) {
+          // pi-experiment-6q0y.48: route verifier failure count through the
+          // RuntimeBudgetTracker (unified mechanism — replaces the former parallel
+          // session.verifierFailureCounts raw counter). One tracker per bead is
+          // created on first failure; reused on subsequent failures.
+          {
+            let verifierTracker = session.verifierBudgetTrackers.get(beadId as string);
+            if (!verifierTracker) {
+              const newTracker = createRuntimeBudgetTracker(config, {
+                beadId: beadId as string,
+                stateId: event.stateId,
+                actionId: event.actionId || undefined,
+                clock: systemClock,
+              });
+              if (newTracker) {
+                verifierTracker = newTracker;
+                // Persist so the count accumulates across subsequent gate failures.
+                session.verifierBudgetTrackers.set(beadId as string, verifierTracker);
+              }
+            }
+            if (verifierTracker) {
+              verifierTracker.recordVerifierFailure();
+              const verifierBudgetCheck = verifierTracker.checkPreVerifier();
+              if (verifierBudgetCheck.exceeded) {
+                await verifierTracker.emitExceededEvent(verifierBudgetCheck, services.eventStore);
+                Logger.warn(Component.ORR_ELSE, 'Runtime budget exceeded: maxVerifierFailures — routing bead', {
+                  beadId, stateId: event.stateId, dimension: 'verifierFailureCount',
+                  currentValue: verifierBudgetCheck.currentValue, limit: verifierBudgetCheck.limit,
+                  route: verifierBudgetCheck.route,
+                });
+                // Route through configured outcome (AC4).
+                const budgetRoute = verifierBudgetCheck.route!;
+                const summary = `Runtime budget exceeded (verifierFailureCount: ${verifierBudgetCheck.currentValue} >= ${verifierBudgetCheck.limit}). Route: ${budgetRoute}`;
+                const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(budgetRoute, config), {
+                  beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+                  transitionEvent: budgetRoute, summary, evidence: summary, handover: summary,
+                });
+                await postWorkerSignal(services, routeEvent).catch(() => {});
+              }
+            }
+          }
+
           Logger.warn(Component.ORR_ELSE, 'Coordinator verifier gate BLOCKED the transition', {
             beadId,
             stateId: event.stateId,
@@ -3153,10 +3308,81 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       commandMatchesPattern
     });
     registerProviderRequestCap(pi, session);
+
+    // pi-experiment-6q0y.48: runtime budget pre-provider-request check (AC1/AC4).
+    // Wired here (not in PiObservers.ts) so the full ExtensionSession is available.
+    // No-op when session.runtimeBudgetTracker is null (no policy configured, AC1).
+    pi.on(PiEventName.BEFORE_PROVIDER_REQUEST, async (event: BeforeProviderRequestEvent) => {
+      const tracker = session.runtimeBudgetTracker;
+      if (!tracker) return undefined; // no-op: no runtime budget configured (AC1)
+
+      // pi-experiment-6q0y.48: feed estimatedInputTokens from the request payload
+      // using the same estimator (ceil(bytes / CHARS_PER_TOKEN)) as ProviderBudgetPreflight.
+      // Called BEFORE checkPreProviderRequest so the check sees the current request's tokens.
+      const sizing = computeRequestSizing(event.payload, undefined);
+      tracker.recordEstimatedInputTokens(sizing.estimatedInputTokens);
+
+      // Check dimensions that apply before a provider request.
+      const budgetCheck = tracker.checkPreProviderRequest();
+      if (budgetCheck.exceeded) {
+        await tracker.emitExceededEvent(budgetCheck, services.eventStore);
+        Logger.warn(Component.ORR_ELSE, 'Runtime budget exceeded — failing before provider request', {
+          budgetId: budgetCheck.budgetId,
+          dimension: budgetCheck.dimension,
+          currentValue: budgetCheck.currentValue,
+          limit: budgetCheck.limit,
+          route: budgetCheck.route,
+        });
+        // AC4: route to configured deterministic outcome BEFORE the provider request.
+        const activeRun = session.activeRun;
+        if (activeRun && budgetCheck.route) {
+          const summary = `Runtime budget exceeded (${budgetCheck.dimension}: ${budgetCheck.currentValue} >= ${budgetCheck.limit}). Route: ${budgetCheck.route}`;
+          const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(budgetCheck.route, await services.configLoader.load()), {
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            actionId: activeRun.action.id,
+            transitionEvent: budgetCheck.route,
+            summary,
+            evidence: summary,
+            handover: summary,
+          });
+          await postWorkerSignal(services, routeEvent).catch(signalError => {
+            Logger.warn(Component.ORR_ELSE, 'Failed to post runtime budget exceeded route signal', {
+              beadId: activeRun.beadId,
+              route: budgetCheck.route,
+              error: String(signalError),
+            });
+          });
+        }
+        throw new Error(
+          `Runtime budget exceeded (${budgetCheck.dimension}: ${budgetCheck.currentValue} >= ${budgetCheck.limit}). ` +
+          `Route: ${budgetCheck.route}`
+        );
+      }
+
+      // Budget not exceeded — record the model call now that we've cleared the pre-check.
+      tracker.recordModelCall();
+      return undefined;
+    });
+
     registerAgentLifecycleObservers(pi, services, session, {
       isWorkerMode,
       buildWorkerEvent,
       setAgentFailureSignaled: (v) => { session.agentFailureSignaled = v; }
+    });
+
+    // pi-experiment-6q0y.48: accumulate provider-reported total tokens after each turn
+    // so the runtime budget tracker can check the providerTotalTokens dimension.
+    // Fire-and-forget: accumulation failure must never block normal execution.
+    pi.on(PiEventName.TURN_END, async (event: TurnEndEvent) => {
+      const tracker = session.runtimeBudgetTracker;
+      if (!tracker) return;
+      const msg = isRecord(event.message) ? (event.message as unknown as Record<string, unknown>) : {};
+      const usage = isRecord(msg['usage']) ? (msg['usage'] as Record<string, unknown>) : undefined;
+      if (usage) {
+        const total = typeof usage['total_tokens'] === 'number' ? usage['total_tokens'] as number : 0;
+        if (total > 0) tracker.recordProviderTotalTokens(total);
+      }
     });
 
     if (!session.claudeCodeLoginRegistered && resolveProviderName(config.settings.defaultProvider) === LLMProviderName.ANTHROPIC) {

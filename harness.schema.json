@@ -47,6 +47,58 @@
         }
       }
     },
+    "runtimeBudgetPolicy": {
+      "type": "object",
+      "description": "pi-experiment-6q0y.48: Optional per-bead/per-state/per-action runtime budget policy. Absent = no enforcement (true no-op, AC1). When declared, exceeded hard limits fail BEFORE the next model/provider/tool spend and route through the configured deterministic outcome. Precedence: action > state > settings (AC2). LLM is NOT asked to self-report budget compliance (AC8).",
+      "additionalProperties": false,
+      "required": ["route"],
+      "properties": {
+        "maxModelCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum total model-request count across the run. Fails BEFORE the next request when reached."
+        },
+        "maxEstimatedInputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative estimated input tokens (ceil(bytes/4)). Checked before each provider request."
+        },
+        "maxProviderTotalTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative provider-reported total tokens. Checked before each provider request."
+        },
+        "maxWallClockMs": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum wall-clock elapsed milliseconds since worker-run start. Uses injected Clock (deterministic in tests)."
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative retry count across all tool invocations. Checked before admitting each retry."
+        },
+        "maxToolFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative per-tool failure count. Checked after each tool failure."
+        },
+        "maxVerifierFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative verifier-gate rejection count. Checked after each gate rejection."
+        },
+        "maxToolPayloadBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum cumulative tool-result payload bytes sent to the model. Checked before each tool result."
+        },
+        "route": {
+          "type": "string",
+          "description": "Deterministic outcome route emitted when any limit is exceeded. Must be a declared outcome in the statechart vocabulary (AC6 startup lint rejects unknown routes)."
+        }
+      }
+    },
     "toolPromptProfileEntry": {
       "type": "object",
       "description": "pi-experiment-6q0y.4: A single per-tool prompt text override within a named tool prompt profile.",
@@ -569,6 +621,10 @@
           "additionalProperties": {
             "$ref": "#/definitions/toolPayloadBudgetPolicy"
           }
+        },
+        "runtimeBudget": {
+          "$ref": "#/definitions/runtimeBudgetPolicy",
+          "description": "pi-experiment-6q0y.48: Settings-level (global) runtime budget policy. Lowest precedence — applies when no state or action runtimeBudget is configured. Absent = no runtime enforcement anywhere (full no-op, AC1). State and action-level declarations override this."
         },
         "tsProjectToolDefaults": {
           "type": "object",
@@ -1746,6 +1802,10 @@
             "$ref": "#/definitions/promptBudgetPolicy",
             "description": "pi-experiment-6q0y.17: State-level prompt-budget policy. When present, all actions in this state inherit this budget unless the action declares its own promptBudget (action > state > settings precedence). Startup lint rejects negative limits and routes absent from the statechart vocabulary."
           },
+          "runtimeBudget": {
+            "$ref": "#/definitions/runtimeBudgetPolicy",
+            "description": "pi-experiment-6q0y.48: State-level runtime budget policy. Applies to all actions in this state unless the action declares its own runtimeBudget (action > state > settings precedence, AC2). Absent = falls back to settings.runtimeBudget. AC6 startup lint rejects negative limits and routes absent from the statechart vocabulary."
+          },
           "contextPolicy": {
             "description": "pi-experiment-6q0y.44: State-level context policy. Declares how this state's worker context is handled at spawn time. Default when absent: freshSubagent (new isolated sub-agent context). String shorthand: freshSubagent or namedContinuation (namedContinuation requires structured form with contextKey). Structured form: { mode, contextKey }.",
             "oneOf": [
@@ -1928,6 +1988,10 @@
                 "promptBudget": {
                   "$ref": "#/definitions/promptBudgetPolicy",
                   "description": "pi-experiment-6q0y.17: Action-level prompt-budget policy (highest precedence). Overrides state.promptBudget and settings.promptBudget for this action. Startup lint rejects negative limits and routes absent from the statechart vocabulary."
+                },
+                "runtimeBudget": {
+                  "$ref": "#/definitions/runtimeBudgetPolicy",
+                  "description": "pi-experiment-6q0y.48: Action-level runtime budget policy (highest precedence, AC2). Overrides state.runtimeBudget and settings.runtimeBudget for this specific action. AC6 startup lint rejects negative limits and routes absent from the statechart vocabulary."
                 }
               }
             }

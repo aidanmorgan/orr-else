@@ -393,7 +393,28 @@ export enum DomainEventName {
    * NO raw tool-output body is ever included — only tool name, identity fields,
    * exact byte count, limit, artifact references, and the route (AC6).
    */
-  TOOL_PAYLOAD_BUDGET_REJECTED = 'TOOL_PAYLOAD_BUDGET_REJECTED'
+  TOOL_PAYLOAD_BUDGET_REJECTED = 'TOOL_PAYLOAD_BUDGET_REJECTED',
+
+  /**
+   * Emitted when a configured runtime budget is exceeded and the harness fails
+   * BEFORE the next model/provider/tool spend (pi-experiment-6q0y.48 AC5).
+   *
+   * Carries: { budgetId, dimension, currentValue, limit,
+   *   beadId?, stateId?, actionId?, nextRoute }.
+   *
+   * Only emitted when a runtime budget is configured AND a limit is exceeded.
+   * With no runtime budget configured this event is NEVER emitted (true no-op, AC1).
+   *
+   * NO prompt body or raw tool output is ever included — only structured identity
+   * fields, dimension name, numeric values, and the route (AC5).
+   *
+   * budgetId   — stable identifier: 'settings' | 'state:<id>' | 'action:<state>/<action>'.
+   * dimension  — which limit was exceeded (e.g. 'modelCallCount', 'wallClockMs').
+   * currentValue — accumulated value at the time the limit was exceeded.
+   * limit      — the configured limit for that dimension.
+   * nextRoute  — the configured route that will drive the deterministic outcome.
+   */
+  RUNTIME_BUDGET_EXCEEDED = 'RUNTIME_BUDGET_EXCEEDED'
 }
 
 export enum BeadsCliCommand {

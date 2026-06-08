@@ -440,6 +440,18 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'outputFile']
   },
+
+  // ── Runtime budget exceeded (pi-experiment-6q0y.48) ───────────────────────
+  // Emitted ONLY when a runtime budget is configured AND a hard limit is exceeded.
+  // With no runtime budget configured this event is NEVER emitted (true no-op, AC1).
+  // Required fields carry structured decision evidence: budgetId, dimension,
+  //   currentValue, limit, nextRoute. No prompt body or raw tool output (AC5).
+  // Optional: beadId/stateId/actionId (absent when no bead context).
+  [DomainEventName.RUNTIME_BUDGET_EXCEEDED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'stateId', 'actionId']
+  },
 };
 
 /**
@@ -629,5 +641,15 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   //   (semantic artifact path when persisted — AC6 ref without raw body).
   [DomainEventName.TOOL_PAYLOAD_BUDGET_REJECTED]: [
     'tool', 'actualBytes', 'limitBytes', 'decision', 'route'
+  ],
+
+  // ── Runtime budget exceeded (pi-experiment-6q0y.48) ──────────────────────
+  // Required: budgetId (stable identifier for the policy scope), dimension (which
+  //   limit was exceeded), currentValue (accumulated value), limit (configured
+  //   limit), nextRoute (the outcome route). All identity fields (beadId,
+  //   stateId, actionId) are optional — absent when no bead context.
+  // NO prompt body or raw tool output: only structured identity + numeric fields.
+  [DomainEventName.RUNTIME_BUDGET_EXCEEDED]: [
+    'budgetId', 'dimension', 'currentValue', 'limit', 'nextRoute'
   ],
 };
