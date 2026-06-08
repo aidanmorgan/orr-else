@@ -491,6 +491,12 @@ export class ConfigLoader {
       });
     }
 
+    // pi-experiment-ux5e: v2 adapter/worktree field rejection.
+    // tmux workers and isolated git worktrees are MANDATORY in v2 — not configurable.
+    // Reject any field that tries to configure the worker adapter, workspace adapter,
+    // backlog adapter, worktree policy, or per-state worktree overrides.
+    this.validateV2WorkerAdapterFields(config, settings, states);
+
     // AC4 (cfzu): v2 configs must not declare old v1 outcome/custom-event fields.
     // These are replaced by the category-first event vocabulary (events.advance/failure/blocked/neutral).
     const V2_BANNED_OUTCOME_FIELDS: Array<{ path: string; hint: string }> = [];
@@ -617,6 +623,131 @@ export class ConfigLoader {
     const gatesRawForV2 = config['validationGates'];
     if (gatesRawForV2 !== undefined && !Array.isArray(gatesRawForV2) && isRecord(gatesRawForV2)) {
       this.validateV2GateAmbiguity(gatesRawForV2 as Record<string, unknown>, emitsVocab);
+    }
+  }
+
+  /**
+   * pi-experiment-ux5e: Reject adapter/worktree fields in v2 configs.
+   *
+   * In v2, tmux workers and isolated git worktrees are MANDATORY framework behavior.
+   * They are NOT configurable. Any field that tries to configure:
+   *   - runtime.adapters.worker / workspace / backlog — rejected
+   *   - runtime.worktreePolicy — rejected
+   *   - states.*.provisionWorktree — rejected (per-state override is not configurable)
+   *   - settings.pi.workerArgs — rejected (provider-specific worker process alternative)
+   *   - settings.pi.workerExtensions — rejected (provider-specific worker process alternative)
+   *
+   * Admitted (AC1): runtime.teammates — numeric concurrency setting; no adapter knobs.
+   *
+   * Each rejection names the field + states that tmux workers and isolated git worktrees
+   * are mandatory/non-configurable in v2 (AC3).
+   *
+   * @param config   Raw parsed document (version: 2 already verified).
+   * @param settings Extracted settings record (already coerced by caller).
+   * @param states   Extracted states record (already coerced by caller).
+   */
+  private validateV2WorkerAdapterFields(
+    config: Record<string, unknown>,
+    settings: Record<string, unknown>,
+    states: Record<string, unknown>
+  ): void {
+    const forbidden: Array<{ path: string; hint: string }> = [];
+
+    // ── runtime block ────────────────────────────────────────────────────────
+    // runtime.adapters.* and runtime.worktreePolicy are forbidden.
+    // runtime.teammates is the ONLY admitted runtime key.
+    const runtimeRaw = config['runtime'];
+    if (isRecord(runtimeRaw)) {
+      const runtime = runtimeRaw as Record<string, unknown>;
+
+      // runtime.adapters — reject any adapter configuration.
+      const adaptersRaw = runtime['adapters'];
+      if (adaptersRaw !== undefined && adaptersRaw !== null) {
+        if (isRecord(adaptersRaw)) {
+          const adapters = adaptersRaw as Record<string, unknown>;
+          if ('worker' in adapters) {
+            forbidden.push({
+              path: 'runtime.adapters.worker',
+              hint: 'In v2, tmux is the mandatory worker adapter. Worker adapter selection is not configurable. Remove runtime.adapters.worker.'
+            });
+          }
+          if ('workspace' in adapters) {
+            forbidden.push({
+              path: 'runtime.adapters.workspace',
+              hint: 'In v2, isolated git worktrees are the mandatory workspace. Workspace adapter selection is not configurable. Remove runtime.adapters.workspace.'
+            });
+          }
+          if ('backlog' in adapters) {
+            forbidden.push({
+              path: 'runtime.adapters.backlog',
+              hint: 'In v2, the backlog adapter is not configurable. Remove runtime.adapters.backlog.'
+            });
+          }
+          // Reject any other adapter sub-keys too.
+          for (const key of Object.keys(adapters)) {
+            if (key !== 'worker' && key !== 'workspace' && key !== 'backlog') {
+              forbidden.push({
+                path: `runtime.adapters.${key}`,
+                hint: `In v2, adapter selection is not configurable. tmux workers and isolated git worktrees are mandatory. Remove runtime.adapters.${key}.`
+              });
+            }
+          }
+        } else {
+          // adapters present but not a record — still forbidden
+          forbidden.push({
+            path: 'runtime.adapters',
+            hint: 'In v2, adapter selection is not configurable. tmux workers and isolated git worktrees are mandatory. Remove runtime.adapters.'
+          });
+        }
+      }
+
+      // runtime.worktreePolicy — forbidden (worktree policy is not configurable in v2).
+      if ('worktreePolicy' in runtime) {
+        forbidden.push({
+          path: 'runtime.worktreePolicy',
+          hint: 'In v2, isolated git worktrees are mandatory for every worker — worktree policy is not configurable. Remove runtime.worktreePolicy.'
+        });
+      }
+    }
+
+    // ── states.*.provisionWorktree — per-state worktree override forbidden in v2 ──
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (!isRecord(stateRaw)) continue;
+      if ('provisionWorktree' in (stateRaw as Record<string, unknown>)) {
+        forbidden.push({
+          path: `states.${stateId}.provisionWorktree`,
+          hint: `In v2, isolated git worktrees are mandatory for every worker — per-state worktree overrides are not configurable. Remove states.${stateId}.provisionWorktree.`
+        });
+      }
+    }
+
+    // ── settings.pi.workerArgs / workerExtensions ────────────────────────────
+    // These are provider-specific worker process alternatives — not configurable in v2.
+    const piRaw = settings['pi'];
+    if (isRecord(piRaw)) {
+      const pi = piRaw as Record<string, unknown>;
+      if ('workerArgs' in pi) {
+        forbidden.push({
+          path: 'settings.pi.workerArgs',
+          hint: 'In v2, tmux workers are mandatory — provider-specific worker process arguments are not configurable. Remove settings.pi.workerArgs.'
+        });
+      }
+      if ('workerExtensions' in pi) {
+        forbidden.push({
+          path: 'settings.pi.workerExtensions',
+          hint: 'In v2, tmux workers are mandatory — provider-specific worker process extensions are not configurable. Remove settings.pi.workerExtensions.'
+        });
+      }
+    }
+
+    if (forbidden.length > 0) {
+      const details = forbidden.map(f => `  ${f.path}: ${f.hint}`).join('\n');
+      throw new Error(
+        `v2 harness config (version: 2) declares ${forbidden.length} non-configurable adapter/worktree field(s):\n` +
+        details + '\n' +
+        `In v2, tmux workers and isolated git worktrees are mandatory framework behavior — they are not configurable. ` +
+        `Remove these fields from your harness.yaml to comply with the v2 schema.`
+      );
     }
   }
 

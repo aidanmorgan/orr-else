@@ -2249,6 +2249,18 @@
           }
         }
       }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "pi-experiment-ux5e: v2 runtime block. In v2, tmux workers and isolated git worktrees are mandatory — adapter selection and worktree policy are not configurable. Only teammates (numeric concurrency) is admitted here. Adapter/worktree fields are rejected by preValidateV2Admission before schema validation.",
+      "additionalProperties": true,
+      "properties": {
+        "teammates": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of concurrent teammate workers. The only admitted runtime setting — no adapter or worktree policy is configurable in v2."
+        }
+      }
     }
   }
 }
