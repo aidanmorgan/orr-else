@@ -187,7 +187,7 @@ states:
       worktreePath: process.env[EnvVars.WORKTREE_PATH]
     };
     writeFile('.gitignore', 'generated/\n');
-    const eventStore = new EventStore(configLoader);
+    const eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
     const policy = new FileAccessPolicy(eventStore, new ShellCommandParser(), planWriteSet);
 
     try {
