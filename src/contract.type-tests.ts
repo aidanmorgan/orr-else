@@ -15,7 +15,8 @@ import {
   VerifyVerdict,
   type ToolResultBase,
   type VerifyResult,
-  type VerifyContext
+  type VerifyContext,
+  type VerifyEvidenceHandle
 } from './contract.js';
 
 // ---------------------------------------------------------------------------
@@ -73,10 +74,23 @@ export const verifyWithPass: VerifyResult = {
 };
 
 // ---------------------------------------------------------------------------
-// AC4: VerifyContext is PATHS-ONLY. artifacts/toolOutputs are
-//      Record<string,string>; a {path,bytes}/{outputFile,outputFileBytes}
-//      shape is a compile error, and there is no bytes/status field.
+// AC4: VerifyContext exposes evidenceHandles (VerifyEvidenceHandle map), NOT
+//      a path-only toolOutputs map (pi-experiment-yhec, no-backcompat).
+//      artifacts is Record<string,string>.
 // ---------------------------------------------------------------------------
+
+// A well-formed VerifyEvidenceHandle (minimal required fields for REJECTED run).
+const minimalHandle: VerifyEvidenceHandle = {
+  schemaVersion: '1.0.0',
+  toolName: 'my_tool',
+  invocationId: 'inv-001',
+  runStatus: 'PASSED',
+  toolOutputRoot: '/proj/.pi/tool-output',
+  semanticArtifactPath: '/proj/.pi/tool-output/inv/artifact.json',
+  summaryMode: 'none',
+  admittedHarnessFingerprint: 'sha256:abc',
+  admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
+};
 
 export const okContext: VerifyContext = {
   beadId: 'b',
@@ -84,7 +98,7 @@ export const okContext: VerifyContext = {
   actionId: 'a',
   writeSet: ['/w/one'],
   artifacts: { plan: '/path/to/plan' },
-  toolOutputs: { read_path_context: '/path/to/output.json' }
+  evidenceHandles: { my_tool: minimalHandle }
 };
 
 // artifacts values are PATHS (strings), not {path,bytes} objects.
@@ -95,18 +109,30 @@ export const ctxArtifactObjectShape: VerifyContext = {
   writeSet: [],
   // @ts-expect-error — artifacts is Record<string,string>, NOT {path,bytes}.
   artifacts: { plan: { path: '/path', bytes: 10 } },
-  toolOutputs: {}
+  evidenceHandles: {}
 };
 
-// toolOutputs values are PATHS (strings), not {outputFile,outputFileBytes}.
-export const ctxToolOutputObjectShape: VerifyContext = {
+// evidenceHandles values are VerifyEvidenceHandle objects, NOT plain strings.
+export const ctxEvidenceHandleStringShape: VerifyContext = {
   beadId: 'b',
   stateId: 's',
   actionId: 'a',
   writeSet: [],
   artifacts: {},
-  // @ts-expect-error — toolOutputs is Record<string,string>, NOT {outputFile,outputFileBytes}.
-  toolOutputs: { t: { outputFile: '/o', outputFileBytes: 5 } }
+  // @ts-expect-error — evidenceHandles is Record<string,VerifyEvidenceHandle>, NOT Record<string,string>.
+  evidenceHandles: { t: '/path/to/output.json' }
+};
+
+// There is NO `toolOutputs` field on the context (removed no-backcompat).
+export const ctxWithToolOutputs: VerifyContext = {
+  beadId: 'b',
+  stateId: 's',
+  actionId: 'a',
+  writeSet: [],
+  artifacts: {},
+  evidenceHandles: {},
+  // @ts-expect-error — VerifyContext has no toolOutputs field (removed in pi-experiment-yhec).
+  toolOutputs: { t: '/path' }
 };
 
 // There is NO `bytes` field and NO `status` field on the context itself.
@@ -116,7 +142,7 @@ export const ctxWithBytes: VerifyContext = {
   actionId: 'a',
   writeSet: [],
   artifacts: {},
-  toolOutputs: {},
+  evidenceHandles: {},
   // @ts-expect-error — VerifyContext has no `bytes` field.
   bytes: 10
 };
@@ -127,7 +153,7 @@ export const ctxWithStatus: VerifyContext = {
   actionId: 'a',
   writeSet: [],
   artifacts: {},
-  toolOutputs: {},
-  // @ts-expect-error — VerifyContext has no `status` field (status is read from the persisted event).
+  evidenceHandles: {},
+  // @ts-expect-error — VerifyContext has no `status` field (status is on the handle's runStatus).
   status: 'PASSED'
 };

@@ -8,17 +8,19 @@
  * required tool it:
  *
  *  1. Resolves the LATEST tool-result event for (beadId, stateId, actionId,
- *     tool) coordinator-side, re-reading durable state from PROJECT-scoped
- *     paths (EventStore.latestToolResultEvent reconciles the FLAT command/MCP
- *     shape and the NESTED plugin shape).
- *  2. Reads that event's run status + outputFile. A required tool whose latest
- *     event status === REJECTED (it ran and failed) OR has NO event for this
- *     attempt (it was never invoked / no readable outputFile) BLOCKS the
- *     transition immediately — independent of any verify() verdict.
- *  3. Otherwise looks up the tool's REGISTERED verify() callback (from the
- *     contract `verifier` registry) and runs it with the full PATHS-ONLY
- *     VerifyContext { beadId, stateId, actionId, writeSet, artifacts,
- *     toolOutputs }.
+ *     tool) coordinator-side (EventStore.latestToolResultEvent).
+ *  2. Reads the canonical ToolEvidenceHandle from the event. Events that do NOT
+ *     carry a validated canonical handle (outputFile-only events, command
+ *     envelopes, child ToolResultBase records) are REJECTED — the gate fails
+ *     CLOSED. One canonical shape only (pi-experiment-yhec, no-backcompat).
+ *  3. Classifies the handle's runStatus. REJECTED/UNAVAILABLE/UNRECOGNIZED all
+ *     block immediately, independent of any verify() verdict.
+ *  4. For PASSED handles: validates the handle fully (missing/malformed fields,
+ *     stale fingerprint, hash mismatch, semanticArtifactPath outside toolOutputRoot).
+ *     Fails CLOSED on every violation.
+ *  5. Looks up the tool's REGISTERED verify() callback and runs it with the full
+ *     VerifyContext { beadId, stateId, actionId, writeSet, artifacts, evidenceHandles }
+ *     carrying validated canonical handles — never raw paths.
  *
  * Aggregate routing (by enum, never boolean):
  *  - ANY verdict === FAIL blocks the transition.
@@ -44,6 +46,7 @@ import {
   type Registry,
   type VerifyCallback,
   type VerifyContext,
+  type VerifyEvidenceHandle,
   type VerifyResult,
   type ToolRunStatus
 } from '../contract.js';
@@ -51,6 +54,11 @@ import { DomainEventName, ToolResultStatus } from '../constants/index.js';
 import { isRecord } from './RecordUtils.js';
 import type { DomainEvent } from './EventStoreTypes.js';
 import { asToolName, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';
+import {
+  validateToolEvidenceHandle,
+  validateToolEvidenceArtifact,
+  type ToolEvidenceHandle,
+} from './ToolEvidenceHandle.js';
 
 /**
  * The narrow EventStore surface the gate reads. Declaring it structurally
@@ -88,7 +96,21 @@ export enum VerifierGateBlockKind {
    * A tool with no registered verify() AND no outputFile cannot satisfy the
    * gate — implicit presence-only evidence is removed.
    */
-  TOOL_MISSING_ARTIFACT = 'TOOL_MISSING_ARTIFACT'
+  TOOL_MISSING_ARTIFACT = 'TOOL_MISSING_ARTIFACT',
+  /**
+   * The required tool's latest event does NOT carry a valid canonical
+   * ToolEvidenceHandle (pi-experiment-yhec, no-backcompat). Rejected cases:
+   *   - no evidenceHandle field on the event (outputFile-only event, command
+   *     envelope, child ToolResultBase record, legacy shape)
+   *   - evidenceHandle present but fails validateToolEvidenceHandle (malformed
+   *     fields, semanticArtifactPath outside toolOutputRoot, forbidden
+   *     rawOutput/modelFacingRawOutput fields, unknown schema version, …)
+   *   - evidenceHandle present and valid but semanticArtifactPath not readable
+   *     on disk (hash mismatch / path not found)
+   * The gate FAILS CLOSED on every such case — outputFile-only events are
+   * never admissible evidence.
+   */
+  EVIDENCE_HANDLE_INVALID = 'EVIDENCE_HANDLE_INVALID'
 }
 
 /** One failing required tool, with its verdict (when a verify() ran) + reasons. */
@@ -244,30 +266,18 @@ async function runIsolatedVerify(
 }
 
 /**
- * Read a tool-result event's run status (did the tool RUN to completion) and
- * its outputFile path, reconciling the FLAT and NESTED recorded shapes.
+ * Read the canonical ToolEvidenceHandle from a tool-result event.
  *
- * Returns the raw status string exactly as recorded (may be undefined when
- * the field is absent / malformed). The gate caller is responsible for
- * exhaustive handling of every possible value.
+ * One canonical shape only (pi-experiment-yhec, no-backcompat). Both
+ * PROJECT_TOOL and TOOL_INVOCATION events may carry an `evidenceHandle` field
+ * at the top level of event.data. If absent, returns undefined (outputFile-only
+ * event — gate fails CLOSED).
  */
-function readToolRun(event: DomainEvent): { status: string | undefined; outputFile: string | undefined } {
+function readEventEvidenceHandle(event: DomainEvent): unknown {
   const data = isRecord(event.data) ? event.data : {};
-
-  if (event.type === DomainEventName.PROJECT_TOOL_SUCCEEDED || event.type === DomainEventName.PROJECT_TOOL_FAILED) {
-    // FLAT shape — status + outputFile are top-level on the event data.
-    return {
-      status: typeof data.status === 'string' ? data.status : undefined,
-      outputFile: typeof data.outputFile === 'string' ? data.outputFile : undefined
-    };
-  }
-
-  // NESTED shape — status + outputFile live on the typed toolResult handle.
-  const toolResult = isRecord(data.toolResult) ? data.toolResult : undefined;
-  return {
-    status: typeof toolResult?.status === 'string' ? toolResult.status : undefined,
-    outputFile: typeof toolResult?.outputFile === 'string' ? toolResult.outputFile : undefined
-  };
+  // Both flat (PROJECT_TOOL_*) and nested (TOOL_INVOCATION_*) events carry
+  // evidenceHandle at the top level of data when emitted by canonical tools.
+  return data.evidenceHandle;
 }
 
 /**
@@ -310,6 +320,71 @@ function classifyRunStatus(rawStatus: string | undefined): 'PASSED' | 'REJECTED'
   return 'UNRECOGNIZED';
 }
 
+/**
+ * Validate and extract a canonical ToolEvidenceHandle from a raw event value.
+ *
+ * Returns { valid: true, handle } on success, or { valid: false, errors } on
+ * any validation failure. Used by runVerifierGate to reject events that do not
+ * carry a valid canonical handle (outputFile-only events, command envelopes,
+ * child ToolResultBase records, stale fingerprints, hash mismatches, out-of-root).
+ */
+function validateEventHandle(
+  rawHandle: unknown,
+  tool: string
+): { valid: true; handle: ToolEvidenceHandle } | { valid: false; errors: string[] } {
+  if (rawHandle === undefined || rawHandle === null) {
+    return {
+      valid: false,
+      errors: [
+        `Required tool "${tool}" event carries no canonical ToolEvidenceHandle ` +
+        `(outputFile-only event, command envelope, or child ToolResultBase record). ` +
+        `Only events with a validated evidenceHandle field are admissible (pi-experiment-yhec).`
+      ]
+    };
+  }
+
+  // Validate the handle against the full ToolEvidenceHandle contract.
+  // The gate does NOT enforce semanticArtifactPath presence here for PASSED runs —
+  // that is the responsibility of the per-tool TOOL_MISSING_ARTIFACT check (zog2.8).
+  // Tools with registered verify() callbacks handle absent artifacts themselves.
+  const result = validateToolEvidenceHandle(rawHandle, { expectedToolName: tool });
+  if (!result.valid) {
+    // Filter out the semanticArtifactPath-required-for-PASSED error: the gate uses
+    // TOOL_MISSING_ARTIFACT (for presence-only tools) for clearer diagnostics.
+    const relevantErrors = result.errors.filter(e =>
+      !e.startsWith('semanticArtifactPath: required for PASSED runs')
+    );
+    if (relevantErrors.length > 0) {
+      return {
+        valid: false,
+        errors: [
+          `Required tool "${tool}" evidenceHandle failed canonical validation: ` +
+          relevantErrors.join('; ')
+        ]
+      };
+    }
+    // The only error was the semanticArtifactPath-required one — construct the
+    // handle manually from the raw object (safe since all other fields validated).
+    const raw = rawHandle as Record<string, unknown>;
+    const handle: ToolEvidenceHandle = {
+      schemaVersion: raw['schemaVersion'] as string,
+      toolName: raw['toolName'] as string,
+      invocationId: raw['invocationId'] as string,
+      runStatus: raw['runStatus'] as ToolEvidenceHandle['runStatus'],
+      ...(raw['failureCategory'] !== undefined ? { failureCategory: raw['failureCategory'] as ToolEvidenceHandle['failureCategory'] } : {}),
+      // semanticArtifactPath intentionally absent (TOOL_MISSING_ARTIFACT handles this)
+      toolOutputRoot: raw['toolOutputRoot'] as string,
+      summaryMode: raw['summaryMode'] as ToolEvidenceHandle['summaryMode'],
+      ...(raw['noSummaryReason'] !== undefined ? { noSummaryReason: raw['noSummaryReason'] as string } : {}),
+      admittedHarnessFingerprint: raw['admittedHarnessFingerprint'] as string,
+      admittedExecutionBoundary: raw['admittedExecutionBoundary'] as string,
+    };
+    return { valid: true, handle };
+  }
+
+  return { valid: true, handle: result.handle };
+}
+
 function renderRejectMessage(failures: VerifierGateFailure[]): string {
   if (failures.length === 0) return '';
   const header = failures.length === 1
@@ -350,17 +425,25 @@ export async function runVerifierGate(
   const tools = [...new Set(requiredTools.filter(Boolean))];
 
   // Resolve every required tool's latest event up front so the VerifyContext
-  // toolOutputs map exposes ALL produced outputs to every callback.
+  // evidenceHandles map exposes ALL validated canonical handles to every callback.
   const latestByTool = new Map<string, DomainEvent | undefined>();
   for (const tool of tools) {
     latestByTool.set(tool, await store.latestToolResultEvent(ctx.beadId, ctx.stateId, ctx.actionId, asToolName(tool)));
   }
 
-  const toolOutputs: Record<string, string> = {};
+  // Build the validated evidenceHandles map. Only tools with valid canonical
+  // ToolEvidenceHandle instances appear here. Tools without a valid handle are
+  // not included — they are blocked below with EVIDENCE_HANDLE_INVALID.
+  const evidenceHandles: Record<string, VerifyEvidenceHandle> = {};
   for (const [tool, event] of latestByTool) {
     if (!event) continue;
-    const { outputFile } = readToolRun(event);
-    if (outputFile) toolOutputs[tool] = outputFile;
+    const rawHandle = readEventEvidenceHandle(event);
+    const validation = validateEventHandle(rawHandle, tool);
+    if (validation.valid) {
+      // Cast to VerifyEvidenceHandle — ToolEvidenceHandle is a structural superset.
+      evidenceHandles[tool] = validation.handle as VerifyEvidenceHandle;
+    }
+    // Invalid handles are excluded; the per-tool loop below will block with EVIDENCE_HANDLE_INVALID.
   }
 
   const verifyContext: VerifyContext = {
@@ -369,7 +452,7 @@ export async function runVerifierGate(
     actionId: ctx.actionId,
     writeSet: ctx.writeSet,
     artifacts: ctx.artifacts,
-    toolOutputs
+    evidenceHandles
   };
 
   for (const tool of tools) {
@@ -383,9 +466,20 @@ export async function runVerifierGate(
       continue;
     }
 
-    // (2) Classify the tool's run status exhaustively + fail closed on non-PASSED.
-    const { status: rawStatus } = readToolRun(event);
-    const statusClass = classifyRunStatus(rawStatus);
+    // (2) Validate the canonical ToolEvidenceHandle from the event.
+    //     Fail CLOSED if no handle or invalid handle (pi-experiment-yhec).
+    const rawHandle = readEventEvidenceHandle(event);
+    const handleValidation = validateEventHandle(rawHandle, tool);
+    if (!handleValidation.valid) {
+      failures.push({ tool, kind: VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID, reasons: handleValidation.errors });
+      perTool.push({ tool, reasons: handleValidation.errors, durationMs: 0 });
+      continue;
+    }
+
+    const handle = handleValidation.handle;
+
+    // (3) Classify the handle's runStatus exhaustively + fail closed on non-PASSED.
+    const statusClass = classifyRunStatus(handle.runStatus);
 
     if (statusClass === 'REJECTED') {
       const reasons = [`Required tool "${tool}" did not run to completion (latest tool-result status === REJECTED).`];
@@ -406,7 +500,7 @@ export async function runVerifierGate(
 
     if (statusClass === 'UNRECOGNIZED') {
       // Fail CLOSED: unknown, missing, or malformed status — never allow gate passage.
-      const statusDisplay = rawStatus === undefined ? 'undefined (missing)' : JSON.stringify(rawStatus);
+      const statusDisplay = JSON.stringify(handle.runStatus);
       const reasons = [
         `Required tool "${tool}" has an unrecognized run status: ${statusDisplay}. ` +
         `Gate fails closed on any non-PASSED or unknown status (zog2.15 exhaustive handling).`
@@ -416,25 +510,39 @@ export async function runVerifierGate(
       continue;
     }
 
-    // statusClass === 'PASSED': the tool ran to completion — proceed to verify().
-    // (3) The tool ran — run its registered verify() callback (if any).
+    // statusClass === 'PASSED': the tool ran to completion.
+
+    // (4) Proceed to verify() lookup. For PRESENCE_ONLY tools (no verify()), the
+    //     gate enforces artifact presence. For tools WITH verify(), the verify()
+    //     callback is responsible for artifact checks.
     const verify = registry.get(tool);
     if (!verify) {
       // No registered verify() callback (presence-only tool per zog2.8).
       // Implicit presence-only evidence is REMOVED: a durable semantic artifact
-      // path (outputFile in toolOutputs) is now REQUIRED. Missing artifact paths
-      // are NEVER evidence — gate fails CLOSED.
-      if (!toolOutputs[tool]) {
+      // path (semanticArtifactPath on the handle) is now REQUIRED. Missing artifact
+      // paths are NEVER evidence — gate fails CLOSED.
+      if (!handle.semanticArtifactPath) {
         const reasons = [
-          `Required tool "${tool}" ran (PASSED) but recorded no semantic artifact path (outputFile is absent). ` +
+          `Required tool "${tool}" ran (PASSED) but recorded no semantic artifact path (semanticArtifactPath is absent). ` +
           `Implicit presence-only evidence is not admissible (zog2.8). ` +
-          `The tool must persist a minimal semantic artifact and record its path in the tool-result event.`
+          `The tool must persist a minimal semantic artifact and record its path in the ToolEvidenceHandle.`
         ];
         failures.push({ tool, kind: VerifierGateBlockKind.TOOL_MISSING_ARTIFACT, reasons });
         perTool.push({ tool, reasons, durationMs: 0 });
         continue;
       }
-      // The tool ran and recorded a semantic artifact path — presence satisfied with artifact.
+      // For presence-only tools: validate the semantic artifact is readable on disk.
+      const artifactCheck = validateToolEvidenceArtifact(handle);
+      if (!artifactCheck.readable) {
+        const reasons = [
+          `Required tool "${tool}" semantic artifact path is not readable: ${artifactCheck.error}. ` +
+          `Gate fails closed on unreadable artifact paths (pi-experiment-yhec).`
+        ];
+        failures.push({ tool, kind: VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID, reasons });
+        perTool.push({ tool, reasons, durationMs: 0 });
+        continue;
+      }
+      // The tool ran and recorded a readable semantic artifact path — presence satisfied with artifact.
       perTool.push({ tool, verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['no registered verify() callback; semantic artifact present'], durationMs: 0 });
       continue;
     }

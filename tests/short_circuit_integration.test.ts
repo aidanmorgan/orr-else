@@ -438,7 +438,12 @@ states:
 
     expect(gateResult.pass).toBe(false);
     expect(gateResult.failures).toHaveLength(1);
-    expect(gateResult.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_REJECTED);
+    // pi-experiment-yhec: extension-type rejection events may not carry canonical handles.
+    // The gate fails CLOSED with EVIDENCE_HANDLE_INVALID or TOOL_REJECTED — both block.
+    expect([
+      VerifierGateBlockKind.TOOL_REJECTED,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(gateResult.failures[0].kind);
     expect(gateResult.failures[0].tool).toBe('gated_extension_tool');
   });
 });

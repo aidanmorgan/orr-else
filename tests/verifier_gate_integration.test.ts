@@ -55,6 +55,7 @@ import {
   type CoordinatorGateInput
 } from '../src/core/CoordinatorVerifierGate.js';
 import { VerifierGateBlockKind } from '../src/core/VerifierGate.js';
+import { TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION, type ToolEvidenceHandle } from '../src/core/ToolEvidenceHandle.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
@@ -146,20 +147,61 @@ const input = (overrides: Partial<CoordinatorGateInput> = {}): CoordinatorGateIn
 
 /**
  * The "run" side of the fixture dual-mode tool: write a REAL outputFile to disk
- * and record a typed PROJECT_TOOL_SUCCEEDED event into the REAL store — exactly
- * as a live tool persists its result. Returns the outputFile path so a verify()
- * can read it back.
+ * and record a typed PROJECT_TOOL_SUCCEEDED event into the REAL store with a
+ * canonical ToolEvidenceHandle. Returns the outputFile path so a verify() can
+ * read it via ctx.evidenceHandles[FIXTURE_TOOL].semanticArtifactPath.
+ *
+ * pi-experiment-yhec: events must carry a canonical evidenceHandle.
  */
 async function runFixtureTool(h: Harness, body: string): Promise<string> {
-  const outputDir = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', FIXTURE_TOOL, 'inv');
+  const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+  const outputDir = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', FIXTURE_TOOL, 'inv');
   fs.mkdirSync(outputDir, { recursive: true });
   const outputFile = path.join(outputDir, 'o.json');
   fs.writeFileSync(outputFile, body);
+  const evidenceHandle: ToolEvidenceHandle = {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: FIXTURE_TOOL,
+    invocationId: 'inv-fixture-test',
+    runStatus: 'PASSED',
+    semanticArtifactPath: outputFile,
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'fixture dual-mode tool test',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
   await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
     beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: FIXTURE_TOOL,
-    status: ToolResultStatus.PASSED, outputFile, outputFileBytes: Buffer.byteLength(body)
+    status: ToolResultStatus.PASSED, outputFile, outputFileBytes: Buffer.byteLength(body),
+    evidenceHandle
   });
   return outputFile;
+}
+
+/**
+ * The "REJECTED" side of the fixture dual-mode tool: record a REJECTED event
+ * with a canonical ToolEvidenceHandle.
+ */
+async function runFixtureToolRejected(h: Harness): Promise<void> {
+  const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+  const evidenceHandle: ToolEvidenceHandle = {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: FIXTURE_TOOL,
+    invocationId: 'inv-fixture-rejected',
+    runStatus: 'REJECTED',
+    failureCategory: 'INFRA',
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'fixture dual-mode tool — REJECTED',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
+  await h.store.record(DomainEventName.PROJECT_TOOL_FAILED, {
+    beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: FIXTURE_TOOL,
+    status: ToolResultStatus.REJECTED, outputFile: '',
+    evidenceHandle
+  });
 }
 
 let h: Harness;
@@ -176,10 +218,11 @@ afterEach(() => {
 describe('AC1 — end-to-end coordinator gate with a fixture dual-mode tool', () => {
   it('artifact present + verify PASS => transition ADVANCES (and no edge is auto-selected)', async () => {
     const outputFile = await runFixtureTool(h, JSON.stringify({ ok: true }));
-    // The verify() reads the REAL outputFile the gate resolved + handed it.
+    // The verify() reads the REAL outputFile via ctx.evidenceHandles (pi-experiment-yhec).
     let sawContent: string | undefined;
     registerVerify(FIXTURE_TOOL, (ctx): VerifyResult => {
-      sawContent = fs.readFileSync(ctx.toolOutputs[FIXTURE_TOOL], 'utf8');
+      const semanticPath = ctx.evidenceHandles[FIXTURE_TOOL]?.semanticArtifactPath;
+      if (semanticPath) sawContent = fs.readFileSync(semanticPath, 'utf8');
       return { verdict: VerifyVerdict.PASS, reasons: [] };
     });
 
@@ -307,12 +350,9 @@ describe('AC2 — throwing and timing-out verify() both BLOCK via the coordinato
 // ─────────────────────────────────────────────────────────────────────────────
 describe('AC3 — a latest tool-result status===REJECTED blocks (independent of verify())', () => {
   it('blocks (TOOL_REJECTED) even when a PASS-returning verify() is registered', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', FIXTURE_TOOL, 'inv', 'o.json');
     // The tool RAN but its result is REJECTED (it could not run to completion).
-    await h.store.record(DomainEventName.PROJECT_TOOL_FAILED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: FIXTURE_TOOL,
-      status: ToolResultStatus.REJECTED, failureCategory: 'INFRA', outputFile
-    });
+    // pi-experiment-yhec: must include a canonical evidenceHandle.
+    await runFixtureToolRejected(h);
     let verifyConsulted = false;
     registerVerify(FIXTURE_TOOL, () => { verifyConsulted = true; return { verdict: VerifyVerdict.PASS, reasons: ['would pass'] }; });
 

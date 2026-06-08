@@ -41,6 +41,7 @@ import {
 } from '../src/core/CoordinatorVerifierGate.js';
 import { loadCoordinatorWorkerExtensions } from '../src/core/CoordinatorExtensionLoader.js';
 import { runVerifierGate, VerifierGateBlockKind, type VerifierGateContext } from '../src/core/VerifierGate.js';
+import { TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION, type ToolEvidenceHandle } from '../src/core/ToolEvidenceHandle.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
@@ -52,6 +53,37 @@ import { createTeammateEventIdempotencyKey, type TeammateEvent } from '../src/co
 import { DomainEventName, ToolResultStatus, TeammateEventType } from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
+
+/** Build a minimal PASSED ToolEvidenceHandle for a test output file. */
+function makeTestHandle(tool: string, outputFile: string, toolOutputRoot: string): ToolEvidenceHandle {
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: tool,
+    invocationId: `inv-${tool}-test`,
+    runStatus: 'PASSED',
+    semanticArtifactPath: outputFile,
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'coordinator gate test fixture',
+    admittedHarnessFingerprint: 'sha256:test-fingerprint',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
+}
+
+/** Build a minimal REJECTED ToolEvidenceHandle for a test. */
+function makeRejectedTestHandle(tool: string, toolOutputRoot: string): ToolEvidenceHandle {
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: tool,
+    invocationId: `inv-${tool}-test-rejected`,
+    runStatus: 'REJECTED',
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'coordinator gate test fixture — REJECTED',
+    admittedHarnessFingerprint: 'sha256:test-fingerprint',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
+}
 
 // ── registry cleanup (module-level singleton, last-wins, no removal API) ──────
 const registered: string[] = [];
@@ -143,26 +175,39 @@ afterEach(() => {
 
 describe('AC1 — coordinator gate resolves the latest tool-result, runs verify(), and blocks/advances', () => {
   it('advances when the required tool ran and its verify() PASSes', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+    const evidenceHandle = makeTestHandle('tA', outputFile, toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile,
+      evidenceHandle
     });
-    let sawOutput: string | undefined;
-    registerVerify('tA', (ctx) => { sawOutput = ctx.toolOutputs.tA; return { verdict: VerifyVerdict.PASS, reasons: [] }; });
+    let sawSemanticPath: string | undefined;
+    registerVerify('tA', (ctx) => {
+      sawSemanticPath = ctx.evidenceHandles['tA']?.semanticArtifactPath;
+      return { verdict: VerifyVerdict.PASS, reasons: [] };
+    });
 
     const outcome = await evaluateCoordinatorGate(h.deps, input());
 
     expect(outcome.ran).toBe(true);
     expect(outcome.pass).toBe(true);
     expect(outcome.evaluatedTools).toEqual(['tA']);
-    // The verify() saw the durable outputFile path resolved coordinator-side.
-    expect(sawOutput).toBe(outputFile);
+    // The verify() saw the durable semanticArtifactPath from the canonical handle.
+    expect(sawSemanticPath).toBe(outputFile);
   });
 
   it('blocks on verify() FAIL and surfaces structured failures + a rendered message', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ ok: false }));
+    const evidenceHandle = makeTestHandle('tA', outputFile, toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile,
+      evidenceHandle
     });
     registerVerify('tA', () => ({ verdict: VerifyVerdict.FAIL, reasons: ['tA content invalid'], failureOutcome: 'REWORK' }));
 
@@ -176,9 +221,12 @@ describe('AC1 — coordinator gate resolves the latest tool-result, runs verify(
   });
 
   it('blocks on status:REJECTED even when a verify() would PASS', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const evidenceHandle = makeRejectedTestHandle('tA', toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_FAILED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.REJECTED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.REJECTED, outputFile,
+      evidenceHandle
     });
     registerVerify('tA', () => ({ verdict: VerifyVerdict.PASS, reasons: ['would pass'] }));
 
@@ -208,9 +256,14 @@ describe('AC3 — a locally-passing worker is still BLOCKED when the durable eve
 
 describe('AC6 — a VERIFY_EVALUATED event is recorded per gate with per-tool diagnostics', () => {
   it('records {beadId,stateId,actionId,perTool,blocked} with verdict/reasons/timing', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+    const evidenceHandle = makeTestHandle('tA', outputFile, toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile,
+      evidenceHandle
     });
     registerVerify('tA', () => ({ verdict: VerifyVerdict.FAIL, reasons: ['nope'] }));
 
@@ -238,9 +291,23 @@ describe('AC5 — per-verify isolation: throw and timeout both yield FAIL withou
   };
   class FakeStore {
     async latestToolResultEvent(beadId: string, stateId: string, actionId: string, tool: string): Promise<DomainEvent> {
+      const toolOutputRoot = `/proj/.pi/tool-output`;
+      const outputFile = `/proj/.pi/tool-output/${beadId}/${stateId}/${actionId}/${tool}/inv/o.json`;
+      const evidenceHandle: ToolEvidenceHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: tool,
+        invocationId: `inv-${tool}-fake`,
+        runStatus: 'PASSED',
+        semanticArtifactPath: outputFile,
+        toolOutputRoot,
+        summaryMode: 'none',
+        noSummaryReason: 'fake store test fixture',
+        admittedHarnessFingerprint: 'sha256:test-fp',
+        admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+      };
       return {
         id: `e-${tool}`, type: DomainEventName.PROJECT_TOOL_SUCCEEDED, timestamp: new Date().toISOString(), sessionId: 't',
-        data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED, outputFile: `/o/${tool}.json` }
+        data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED, outputFile, evidenceHandle }
       };
     }
   }
@@ -347,9 +414,14 @@ describe('AC3 — synchronous gate verdict round-trip in the completion-signal H
   }
 
   it('a gate that FAILS returns the structured verdict (pass:false + failures{tool,verdict,reasons} + rejectMessage), NOT a bare {ok:true}', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ ok: false }));
+    const evidenceHandle = makeTestHandle('tA', outputFile, toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile,
+      evidenceHandle
     });
     registerVerify('tA', () => ({ verdict: VerifyVerdict.FAIL, reasons: ['tA content invalid'] }));
 
@@ -378,9 +450,14 @@ describe('AC3 — synchronous gate verdict round-trip in the completion-signal H
   });
 
   it('a gate that PASSes returns an advance verdict {ok:true, gate:{pass:true}}', async () => {
-    const outputFile = path.join(h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    const toolOutputRoot = path.join(h.projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'tA', 'inv', 'o.json');
+    fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+    fs.writeFileSync(outputFile, JSON.stringify({ ok: true }));
+    const evidenceHandle = makeTestHandle('tA', outputFile, toolOutputRoot);
     await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
-      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile
+      beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'tA', status: ToolResultStatus.PASSED, outputFile,
+      evidenceHandle
     });
     registerVerify('tA', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
 

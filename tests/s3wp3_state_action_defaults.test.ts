@@ -32,6 +32,10 @@ import {
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
 import type { ActiveRun } from '../src/extension/SessionTypes.js';
+import { TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION, type ToolEvidenceHandle } from '../src/core/ToolEvidenceHandle.js';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -538,6 +542,19 @@ describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.
 
     // MISSING_TOOL: no tool-result event (artifact absent / did-not-run).
     // FAIL_TOOL: a tool-result event whose run status is REJECTED (present but FAIL).
+    const failToolOutputRoot = '.pi/tool-output';
+    const failToolHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: FAIL_TOOL,
+      invocationId: 'inv-fail-tool-1',
+      runStatus: 'REJECTED',
+      failureCategory: 'INFRA',
+      toolOutputRoot: failToolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 's3wp3 test fixture — REJECTED',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: 'bead:bd-test/state:TestState/action:a1',
+    };
     const { services, obs, config } = makeRequiredToolServices(
       state,
       [MISSING_TOOL, FAIL_TOOL],
@@ -551,7 +568,8 @@ describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.
             actionId: 'a1',
             tool: FAIL_TOOL,
             status: ToolResultStatus.REJECTED,
-            outputFile: '.pi/tool-output/bd-test/TestState/a1/fail_tool/inv/out.json'
+            outputFile: '.pi/tool-output/bd-test/TestState/a1/fail_tool/inv/out.json',
+            evidenceHandle: failToolHandle
           }
         }
       }
@@ -595,6 +613,24 @@ describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.
 
     // Present, status PASSED, and no registered verify() callback ⇒ passes the
     // artifact-presence gate (presence satisfied, no semantic verifier to fail).
+    // pi-experiment-yhec: write a real file for the readability check.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 's3wp3-ok-'));
+    try {
+    const okOutputFile = path.join(tmpDir, 'ok_tool', 'out.json');
+    fs.mkdirSync(path.dirname(okOutputFile), { recursive: true });
+    fs.writeFileSync(okOutputFile, '{"ok":true}');
+    const okHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: OK_TOOL,
+      invocationId: 'inv-ok-tool-1',
+      runStatus: 'PASSED',
+      semanticArtifactPath: okOutputFile,
+      toolOutputRoot: tmpDir,
+      summaryMode: 'none',
+      noSummaryReason: 's3wp3 test fixture — PASSED',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: 'bead:bd-test/state:TestState/action:a1',
+    };
     const { services, obs, config } = makeRequiredToolServices(state, [OK_TOOL], {
       [OK_TOOL]: {
         type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
@@ -604,7 +640,8 @@ describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.
           actionId: 'a1',
           tool: OK_TOOL,
           status: ToolResultStatus.PASSED,
-          outputFile: '.pi/tool-output/bd-test/TestState/a1/ok_tool/inv/out.json'
+          outputFile: okOutputFile,
+          evidenceHandle: okHandle
         }
       }
     });
@@ -614,5 +651,8 @@ describe('artifact-presence required-tool audit — evaluateGateReadiness (0yt5.
     expect(gate.requiredTools.find(t => t.name === OK_TOOL)?.state).toBe('passed');
     expect(gate.blockingEvidence.some(e => e.includes(OK_TOOL))).toBe(false);
     expect(gate.ready).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });

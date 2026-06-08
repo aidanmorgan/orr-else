@@ -65,8 +65,13 @@ import {
   VerifierGateBlockKind,
   type VerifierGateEventStore
 } from '../src/core/VerifierGate.js';
+import {
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  type ToolEvidenceHandle,
+} from '../src/core/ToolEvidenceHandle.js';
 import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
+import * as os from 'node:os';
 
 // ---------------------------------------------------------------------------
 // Cerdiwen source paths
@@ -459,12 +464,26 @@ class FakeToolResultStore implements VerifierGateEventStore {
   setProjectToolSucceeded(
     beadId: string, stateId: string, actionId: string, tool: string, outputFile: string
   ): void {
+    // pi-experiment-yhec: include a canonical ToolEvidenceHandle.
+    const toolOutputRoot = path.dirname(outputFile);
+    const evidenceHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: tool,
+      invocationId: `inv-${tool}-ac7`,
+      runStatus: 'PASSED',
+      semanticArtifactPath: outputFile,
+      toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 'cerdiwen AC7 test fixture',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+    };
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `succeeded-${tool}`,
       type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
-      data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED, outputFile }
+      data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED, outputFile, evidenceHandle }
     });
   }
 
@@ -516,21 +535,32 @@ describe('AC7: PRESENCE_ONLY gate requires a durable PROJECT_TOOL_SUCCEEDED even
   });
 
   it('gate PASSES when a durable PROJECT_TOOL_SUCCEEDED event exists for the tool', async () => {
-    const store = new FakeToolResultStore();
-    // Record a real PROJECT_TOOL_SUCCEEDED event (the only thing that can satisfy the gate).
-    store.setProjectToolSucceeded(
-      gateCtx.beadId,
-      gateCtx.stateId,
-      gateCtx.actionId,
-      presenceOnlyTool,
-      `/proj/.pi/tool-output/${gateCtx.beadId}/${gateCtx.stateId}/${gateCtx.actionId}/${presenceOnlyTool}/inv/output/o.json`
-    );
-    // No verify() for PRESENCE_ONLY; gate should pass on presence alone.
+    // pi-experiment-yhec: presence-only tools require a readable semantic artifact.
+    // Write a real file so the artifact readability check passes.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cerdiwen-ac7-'));
+    try {
+      const outputFile = path.join(tmpDir, `${presenceOnlyTool}`, 'o.json');
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      fs.writeFileSync(outputFile, '{"ok":true}');
 
-    const result = await runVerifierGate(gateCtx, [presenceOnlyTool], store);
+      const store = new FakeToolResultStore();
+      // Record a real PROJECT_TOOL_SUCCEEDED event (the only thing that can satisfy the gate).
+      store.setProjectToolSucceeded(
+        gateCtx.beadId,
+        gateCtx.stateId,
+        gateCtx.actionId,
+        presenceOnlyTool,
+        outputFile
+      );
+      // No verify() for PRESENCE_ONLY; gate should pass on presence alone.
 
-    expect(result.pass).toBe(true);
-    expect(result.failures).toHaveLength(0);
+      const result = await runVerifierGate(gateCtx, [presenceOnlyTool], store);
+
+      expect(result.pass).toBe(true);
+      expect(result.failures).toHaveLength(0);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('a tool that registers a verify() but produces no PROJECT_TOOL event still blocks (no implicit verify bypass)', async () => {

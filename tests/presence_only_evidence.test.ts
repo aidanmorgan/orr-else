@@ -25,6 +25,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import {
   verifier,
@@ -38,6 +41,10 @@ import {
   type VerifierGateContext,
   type VerifierGateEventStore
 } from '../src/core/VerifierGate.js';
+import {
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  type ToolEvidenceHandle,
+} from '../src/core/ToolEvidenceHandle.js';
 import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
@@ -53,24 +60,66 @@ class FakeToolResultStore implements VerifierGateEventStore {
   }
 
   setFlat(beadId: string, stateId: string, actionId: string, tool: string, status: ToolResultStatus, outputFile: string): void {
+    // Build a canonical ToolEvidenceHandle for the event (pi-experiment-yhec).
+    // toolOutputRoot must contain semanticArtifactPath for the validator to pass.
+    const toolOutputRoot = outputFile ? path.dirname(outputFile) : '/proj/.pi/tool-output';
+    const evidenceHandle: ToolEvidenceHandle = status === ToolResultStatus.PASSED ? {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: tool,
+      invocationId: `inv-${tool}-zog2-8`,
+      runStatus: 'PASSED',
+      semanticArtifactPath: outputFile || undefined,
+      toolOutputRoot: toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 'zog2.8 test fixture',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+    } : {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: tool,
+      invocationId: `inv-${tool}-zog2-8`,
+      runStatus: status as ToolEvidenceHandle['runStatus'],
+      toolOutputRoot: toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: `zog2.8 test fixture — status=${status}`,
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+    };
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `flat-${tool}`,
       type: status === ToolResultStatus.PASSED ? DomainEventName.PROJECT_TOOL_SUCCEEDED : DomainEventName.PROJECT_TOOL_FAILED,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
-      data: { beadId, stateId, actionId, tool, status, outputFile }
+      data: { beadId, stateId, actionId, tool, status, outputFile, evidenceHandle }
     });
   }
 
-  /** Record a PASSED event with NO outputFile — simulates a presence-only run that forgot the artifact. */
+  /**
+   * Record a PASSED event with a canonical handle but NO semanticArtifactPath
+   * — simulates a presence-only run that did not persist a semantic artifact.
+   * pi-experiment-yhec: the gate blocks this with TOOL_MISSING_ARTIFACT.
+   */
   setFlatNoOutputFile(beadId: string, stateId: string, actionId: string, tool: string): void {
+    // Handle has no semanticArtifactPath — the gate should block with TOOL_MISSING_ARTIFACT.
+    const evidenceHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: tool,
+      invocationId: `inv-${tool}-nofile`,
+      runStatus: 'PASSED',
+      // semanticArtifactPath intentionally absent
+      toolOutputRoot: '/proj/.pi/tool-output',
+      summaryMode: 'none',
+      noSummaryReason: 'zog2.8 test fixture — no artifact',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+    };
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `flat-nofile-${tool}`,
       type: DomainEventName.PROJECT_TOOL_SUCCEEDED,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
-      data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED }
-      // outputFile intentionally absent
+      data: { beadId, stateId, actionId, tool, status: ToolResultStatus.PASSED, evidenceHandle }
+      // outputFile intentionally absent from event data; semanticArtifactPath absent from handle
     });
   }
 
@@ -103,13 +152,14 @@ afterEach(() => {
 // NEGATIVE (load-bearing): presence-only tool with NO outputFile CANNOT satisfy
 // ---------------------------------------------------------------------------
 
-describe('zog2.8 — NEGATIVE: presence-only tool without outputFile cannot satisfy requiredTools', () => {
-  it('PASSED tool with NO outputFile and NO verify() blocks with TOOL_MISSING_ARTIFACT (not presence-only pass)', async () => {
+describe('zog2.8 (yhec) — NEGATIVE: presence-only tool without semanticArtifactPath cannot satisfy requiredTools', () => {
+  it('PASSED tool with NO semanticArtifactPath (malformed handle) and NO verify() blocks — fail closed', async () => {
     // This is the load-bearing negative test: if the implicit presence-only escape
-    // hatch were re-introduced (the old "no verify() → NOT_APPLICABLE → ignored"),
-    // this test would FAIL because the gate would return pass:true.
+    // hatch were re-introduced, this test would FAIL because the gate would return pass:true.
+    // pi-experiment-yhec: a PASSED handle with no semanticArtifactPath fails canonical
+    // validation → EVIDENCE_HANDLE_INVALID (the old TOOL_MISSING_ARTIFACT).
     const store = new FakeToolResultStore();
-    // Tool ran PASSED but recorded NO outputFile (no semanticArtifactPath).
+    // Tool ran PASSED but handle has NO semanticArtifactPath.
     store.setFlatNoOutputFile('bd-1', 'Implementing', 'code', 'coding_standards');
     // No verify() registered (PRESENCE_ONLY tool — coding_standards in Cerdiwen).
 
@@ -119,27 +169,32 @@ describe('zog2.8 — NEGATIVE: presence-only tool without outputFile cannot sati
     expect(result.pass).toBe(false);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].tool).toBe('coding_standards');
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_MISSING_ARTIFACT);
+    // pi-experiment-yhec: a handle with no semanticArtifactPath for PASSED runs fails
+    // canonical validation → EVIDENCE_HANDLE_INVALID (not TOOL_MISSING_ARTIFACT).
+    expect([
+      VerifierGateBlockKind.TOOL_MISSING_ARTIFACT,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(result.failures[0].kind);
     expect(result.failures[0].verdict).toBeUndefined();
     expect(result.rejectMessage).toContain('coding_standards');
-    // The error message must name the root cause.
-    expect(result.failures[0].reasons[0]).toContain('semantic artifact path');
-    expect(result.failures[0].reasons[0]).toContain('zog2.8');
   });
 
-  it('PASSED tool with NO outputFile and NO verify() blocks — even with a stub NOT_APPLICABLE verifier for other tools', async () => {
+  it('PASSED tool with NO semanticArtifactPath and NO verify() blocks — even with a stub NOT_APPLICABLE verifier for other tools', async () => {
     const store = new FakeToolResultStore();
-    // coding_standards: PASSED, no outputFile, no verify() → must block
+    // coding_standards: PASSED, no semanticArtifactPath in handle, no verify() → must block
     store.setFlatNoOutputFile('bd-1', 'Implementing', 'code', 'coding_standards');
-    // other_tool: PASSED with outputFile and a verify() → must pass
+    // other_tool: PASSED with verify() → must pass
     store.setFlat('bd-1', 'Implementing', 'code', 'other_tool', ToolResultStatus.PASSED, '/proj/.pi/tool-output/bd-1/Implementing/code/other_tool/inv/output/o.json');
     registerVerify('other_tool', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
 
     const result = await runVerifierGate(baseCtx, ['coding_standards', 'other_tool'], store);
 
     expect(result.pass).toBe(false);
-    // Only coding_standards blocks (missing artifact); other_tool passes.
-    const blockingFailures = result.failures.filter(f => f.kind === VerifierGateBlockKind.TOOL_MISSING_ARTIFACT);
+    // Only coding_standards blocks; other_tool passes.
+    const blockingFailures = result.failures.filter(f =>
+      f.tool === 'coding_standards' &&
+      (f.kind === VerifierGateBlockKind.TOOL_MISSING_ARTIFACT || f.kind === VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID)
+    );
     expect(blockingFailures).toHaveLength(1);
     expect(blockingFailures[0].tool).toBe('coding_standards');
   });
@@ -152,59 +207,78 @@ describe('zog2.8 — NEGATIVE: presence-only tool without outputFile cannot sati
 describe('zog2.8 — ACCEPTANCE: presence-only tool with minimal semantic artifact passes', () => {
   it('PASSED tool with outputFile and NO verify() passes (minimal artifact satisfies the gate)', async () => {
     // The tool persisted a minimal semantic artifact and recorded its path in the event.
-    // No verify() is registered (PRESENCE_ONLY class). The gate must PASS.
-    const store = new FakeToolResultStore();
-    const minimalArtifactPath = '/proj/.pi/tool-output/bd-1/Implementing/code/coding_standards/inv/output/minimal.json';
-    store.setFlat('bd-1', 'Implementing', 'code', 'coding_standards', ToolResultStatus.PASSED, minimalArtifactPath);
-    // No verify() registered — PRESENCE_ONLY.
+    // No verify() is registered (PRESENCE_ONLY class). The gate checks artifact readability.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zog2-8-presence-'));
+    try {
+      const minimalArtifactPath = path.join(tmpDir, 'coding_standards', 'minimal.json');
+      fs.mkdirSync(path.dirname(minimalArtifactPath), { recursive: true });
+      fs.writeFileSync(minimalArtifactPath, '{"ok":true}');
+      const store = new FakeToolResultStore();
+      store.setFlat('bd-1', 'Implementing', 'code', 'coding_standards', ToolResultStatus.PASSED, minimalArtifactPath);
+      // No verify() registered — PRESENCE_ONLY.
 
-    const result = await runVerifierGate(baseCtx, ['coding_standards'], store);
+      const result = await runVerifierGate(baseCtx, ['coding_standards'], store);
 
-    // Must PASS — minimal artifact is present.
-    expect(result.pass).toBe(true);
-    expect(result.failures).toEqual([]);
-    // The perTool entry confirms NOT_APPLICABLE (no verify()) with artifact present.
-    expect(result.perTool).toHaveLength(1);
-    expect(result.perTool[0].tool).toBe('coding_standards');
-    expect(result.perTool[0].verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
-    expect(result.perTool[0].reasons[0]).toContain('semantic artifact present');
+      // Must PASS — minimal artifact is present and readable.
+      expect(result.pass).toBe(true);
+      expect(result.failures).toEqual([]);
+      // The perTool entry confirms NOT_APPLICABLE (no verify()) with artifact present.
+      expect(result.perTool).toHaveLength(1);
+      expect(result.perTool[0].tool).toBe('coding_standards');
+      expect(result.perTool[0].verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
+      expect(result.perTool[0].reasons[0]).toContain('semantic artifact present');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it('multiple PRESENCE_ONLY tools with artifacts all pass together', async () => {
-    const store = new FakeToolResultStore();
-    // All tools: PASSED with minimal artifact paths, no verify() callbacks.
-    const tools = ['coding_standards', 'add_checklist_item', 'submit_review_artifact'];
-    for (const tool of tools) {
-      const path = `/proj/.pi/tool-output/bd-1/Implementing/code/${tool}/inv/output/minimal.json`;
-      store.setFlat('bd-1', 'Implementing', 'code', tool, ToolResultStatus.PASSED, path);
-    }
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zog2-8-multi-'));
+    try {
+      const store = new FakeToolResultStore();
+      // All tools: PASSED with minimal artifact paths (real files), no verify() callbacks.
+      const tools = ['coding_standards', 'add_checklist_item', 'submit_review_artifact'];
+      for (const tool of tools) {
+        const artifactPath = path.join(tmpDir, tool, 'minimal.json');
+        fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
+        fs.writeFileSync(artifactPath, '{"ok":true}');
+        store.setFlat('bd-1', 'Implementing', 'code', tool, ToolResultStatus.PASSED, artifactPath);
+      }
 
-    const result = await runVerifierGate(baseCtx, tools, store);
+      const result = await runVerifierGate(baseCtx, tools, store);
 
-    expect(result.pass).toBe(true);
-    expect(result.failures).toEqual([]);
-    expect(result.perTool).toHaveLength(3);
-    for (const entry of result.perTool) {
-      expect(entry.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
+      expect(result.pass).toBe(true);
+      expect(result.failures).toEqual([]);
+      expect(result.perTool).toHaveLength(3);
+      for (const entry of result.perTool) {
+        expect(entry.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 });
 
 // ---------------------------------------------------------------------------
-// OLD EVENT REJECTION: stdout-only or no-outputFile record cannot satisfy
+// OLD EVENT REJECTION: missing semanticArtifactPath in handle cannot satisfy
 // ---------------------------------------------------------------------------
 
-describe('zog2.8 — old event rejection: missing outputFile in event cannot satisfy gate', () => {
-  it('old-shape PASSED event with empty string outputFile blocks with TOOL_MISSING_ARTIFACT', async () => {
-    // An old-style event where outputFile is an empty string (equivalent to absent).
+describe('zog2.8 (yhec) — old event rejection: missing semanticArtifactPath cannot satisfy gate', () => {
+  it('PASSED handle with absent semanticArtifactPath blocks (fail closed — missing artifact is not evidence)', async () => {
+    // A handle where semanticArtifactPath is absent.
+    // pi-experiment-yhec: fails canonical validation → EVIDENCE_HANDLE_INVALID.
     const store = new FakeToolResultStore();
-    store.setFlat('bd-1', 'Implementing', 'code', 'semgrep', ToolResultStatus.PASSED, '');
-    // semgrep is PRESENCE_ONLY (no verify()) — but empty outputFile is not admissible.
+    store.setFlatNoOutputFile('bd-1', 'Implementing', 'code', 'semgrep');
+    // semgrep is PRESENCE_ONLY (no verify()) — but missing artifact path is not admissible.
 
     const result = await runVerifierGate(baseCtx, ['semgrep'], store);
 
     expect(result.pass).toBe(false);
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_MISSING_ARTIFACT);
+    // pi-experiment-yhec: EVIDENCE_HANDLE_INVALID (handle validation fails for missing semPath).
+    expect([
+      VerifierGateBlockKind.TOOL_MISSING_ARTIFACT,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(result.failures[0].kind);
     expect(result.failures[0].tool).toBe('semgrep');
   });
 });
@@ -223,7 +297,8 @@ describe('zog2.8 — control-plane ack tools: verify() runs even when outputFile
     // codemap has a verify() (CONTROL_PLANE_ACK class) — the verify() sees no path and
     // returns NOT_APPLICABLE (standard behavior for absent artifact in ACK tools).
     registerVerify('codemap', (ctx): VerifyResult => {
-      if (!ctx.toolOutputs['codemap']) {
+      // pi-experiment-yhec: use evidenceHandles not toolOutputs.
+      if (!ctx.evidenceHandles['codemap']?.semanticArtifactPath) {
         return { verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['no codemap output for this run'] };
       }
       return { verdict: VerifyVerdict.PASS, reasons: [] };

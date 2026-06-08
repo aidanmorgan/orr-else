@@ -24,7 +24,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
-import { verifier, VerifyVerdict, type VerifyContext } from '../src/contract.js';
+import { verifier, VerifyVerdict, type VerifyContext, type VerifyEvidenceHandle } from '../src/contract.js';
 import {
   GIT_HISTORY_TOOL_NAME,
   gitHistoryVerify,
@@ -37,6 +37,7 @@ import {
 import {
   validateToolEvidenceHandle,
   TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  type ToolEvidenceHandle,
 } from '../src/core/ToolEvidenceHandle.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,14 +45,70 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 
-function ctxWith(toolOutputs: Record<string, string>): VerifyContext {
+/**
+ * Build a VerifyContext with a PASSED evidenceHandle for git_history.
+ * The semanticArtifactPath points to the file that will be checked for readability.
+ * pi-experiment-yhec: gitHistoryVerify reads ctx.evidenceHandles, not toolOutputs.
+ */
+function ctxWithPassedHandle(semanticArtifactPath: string, toolOutputRoot?: string): VerifyContext {
+  const root = toolOutputRoot ?? path.dirname(semanticArtifactPath);
+  const handle: VerifyEvidenceHandle = {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: GIT_HISTORY_TOOL_NAME,
+    invocationId: 'inv-test-001',
+    runStatus: 'PASSED',
+    semanticArtifactPath,
+    toolOutputRoot: root,
+    summaryMode: 'none',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bead-1/state:state-1/action:action-1',
+  };
   return {
     beadId: 'bead-1',
     stateId: 'state-1',
     actionId: 'action-1',
     writeSet: [],
     artifacts: {},
-    toolOutputs
+    evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle }
+  };
+}
+
+/**
+ * Build a VerifyContext with a REJECTED evidenceHandle for git_history.
+ */
+function ctxWithRejectedHandle(toolOutputRoot: string): VerifyContext {
+  const handle: VerifyEvidenceHandle = {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: GIT_HISTORY_TOOL_NAME,
+    invocationId: 'inv-test-rejected-001',
+    runStatus: 'REJECTED',
+    toolOutputRoot,
+    summaryMode: 'none',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bead-1/state:state-1/action:action-1',
+  };
+  return {
+    beadId: 'bead-1',
+    stateId: 'state-1',
+    actionId: 'action-1',
+    writeSet: [],
+    artifacts: {},
+    evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle }
+  };
+}
+
+/**
+ * Build a VerifyContext with NO evidenceHandle for git_history.
+ * gitHistoryVerify should return NOT_APPLICABLE.
+ */
+function ctxWithNoHandle(): VerifyContext {
+  return {
+    beadId: 'bead-1',
+    stateId: 'state-1',
+    actionId: 'action-1',
+    writeSet: [],
+    artifacts: {},
+    evidenceHandles: {}
   };
 }
 
@@ -236,53 +293,52 @@ describe('AC2 (new): missing harness-injected output identity → REJECTED/UNAVA
 
   it('REJECTED evidenceHandle cannot satisfy gitHistoryVerify (verifier returns FAIL)', async () => {
     await withTempDir(async (dir) => {
-      const repo = path.join(dir, 'repo');
-      fs.mkdirSync(repo);
-      const env = { cwd: repo };
-      await execFileAsync('git', ['init', '-q'], env);
-      await execFileAsync('git', ['config', 'user.email', 't@t.dev'], env);
-      await execFileAsync('git', ['config', 'user.name', 'Tester'], env);
-      fs.writeFileSync(path.join(repo, 'a.txt'), 'hello\n');
-      await execFileAsync('git', ['add', 'a.txt'], env);
-      await execFileAsync('git', ['commit', '-q', '-m', 'init'], env);
-
-      await withEnvVars({
-        PI_WORKTREE_PATH: repo,
-        PI_TOOL_OUTPUT_DIR: undefined,
-        PI_TOOL_OUTPUT_FILE: undefined,
-        PI_TOOL_TMP_DIR: undefined,
-      }, async () => {
-        const result = await runGitHistory(['log']);
-        expect(result.status).toBe('REJECTED');
-        // The outputFile (if any) from a REJECTED run must NOT pass the verifier.
-        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
-        expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
-      });
+      // pi-experiment-yhec: gitHistoryVerify reads ctx.evidenceHandles, not toolOutputs.
+      // Pass a REJECTED handle directly — the verifier must return FAIL.
+      const verifyResult = gitHistoryVerify(ctxWithRejectedHandle(dir));
+      expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBe('rejected git_history run');
     });
   });
 });
 
 // ---------------------------------------------------------------------------
-// AC3 (new, negative): tmp/cwd/outputFile-only/ToolResultBase-shaped artifacts CANNOT pass
+// AC3 (new, negative — yhec): non-canonical handle types cannot pass gitHistoryVerify
+// pi-experiment-yhec: gitHistoryVerify reads ctx.evidenceHandles, not toolOutputs.
+// The VerifierGate validates handles before calling verify(). These tests confirm:
+//  - A REJECTED handle → gitHistoryVerify returns FAIL.
+//  - No handle → gitHistoryVerify returns NOT_APPLICABLE.
+//  - A PASSED handle with a non-existent semanticArtifactPath → FAIL.
 // ---------------------------------------------------------------------------
 
-describe('AC3 (new, negative): non-canonical artifacts cannot pass gitHistoryVerify', () => {
-  it('NEGATIVE (real verifier): a tmp-dir raw git log file makes gitHistoryVerify return FAIL', async () => {
-    // A raw git log file (not a ToolEvidenceHandle JSON) written to a temp dir:
-    // gitHistoryVerify must return FAIL (fails JSON/handle validation), never PASS.
+describe('AC3 (new, negative — yhec): non-canonical evidence cannot pass gitHistoryVerify', () => {
+  it('NEGATIVE: no evidenceHandle in context → gitHistoryVerify returns NOT_APPLICABLE', () => {
+    // pi-experiment-yhec: gitHistoryVerify reads evidenceHandles, not toolOutputs.
+    // No handle = tool not in context → NOT_APPLICABLE.
+    const verifyResult = gitHistoryVerify(ctxWithNoHandle());
+    expect(verifyResult.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
+  });
+
+  it('NEGATIVE: REJECTED handle → gitHistoryVerify returns FAIL', async () => {
     await withTempDir(async (dir) => {
-      const rawLogFile = path.join(dir, 'git-history.stdout.log');
-      fs.writeFileSync(rawLogFile, '4c241a5 init\n');
-      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: rawLogFile }));
-      // Raw git text is not valid JSON → not a canonical handle → FAIL (not PASS).
+      const verifyResult = gitHistoryVerify(ctxWithRejectedHandle(dir));
       expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
-      expect(verifyResult.failureOutcome).toBeDefined();
+      expect(verifyResult.failureOutcome).toBe('rejected git_history run');
     });
   });
 
-  it('NEGATIVE (real verifier): a REJECTED run (no harness path) outputFile cannot produce PASS', async () => {
-    // When no harness-injected path is present, the run is REJECTED and outputFile is ''.
-    // gitHistoryVerify with an empty/absent path returns NOT_APPLICABLE (not PASS).
+  it('NEGATIVE: PASSED handle with non-existent semanticArtifactPath → gitHistoryVerify returns FAIL', async () => {
+    await withTempDir(async (dir) => {
+      // A PASSED handle where the artifact file does not exist on disk.
+      const verifyResult = gitHistoryVerify(ctxWithPassedHandle(path.join(dir, 'nonexistent.json'), dir));
+      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
+      expect(verifyResult.failureOutcome).toBe('unreadable git_history semantic artifact');
+    });
+  });
+
+  it('NEGATIVE: a REJECTED run (no harness path) produces a REJECTED evidenceHandle → verifier returns FAIL', async () => {
+    // When no harness-injected path is present, runGitHistory returns REJECTED with a REJECTED evidenceHandle.
     await withTempDir(async (dir) => {
       const repo = path.join(dir, 'repo');
       fs.mkdirSync(repo);
@@ -302,61 +358,32 @@ describe('AC3 (new, negative): non-canonical artifacts cannot pass gitHistoryVer
       }, async () => {
         const result = await runGitHistory(['log']);
         expect(result.status).toBe('REJECTED');
-        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
-        // A REJECTED run's outputFile (empty string) cannot produce PASS in the verifier.
+        expect(result.evidenceHandle).toBeDefined();
+        // Build a context from the evidenceHandle the run produced.
+        const handle = result.evidenceHandle!;
+        const ctx: VerifyContext = {
+          beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1',
+          writeSet: [], artifacts: {},
+          evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle as VerifyEvidenceHandle }
+        };
+        const verifyResult = gitHistoryVerify(ctx);
         expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+        expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
       });
     });
   });
 
-  it('NEGATIVE (real verifier): an outputFile-only record (ToolResultBase shape) written to disk makes gitHistoryVerify FAIL', async () => {
-    // A ToolResultBase-like JSON (missing invocationId, schemaVersion, etc.) written to disk:
-    // gitHistoryVerify must return FAIL when it reads this file (fails validateToolEvidenceHandle).
+  it('NEGATIVE: a near-valid handle with semanticArtifactPath outside toolOutputRoot is caught by gate (EVIDENCE_HANDLE_INVALID), not gitHistoryVerify', async () => {
+    // pi-experiment-yhec: the VerifierGate validates semanticArtifactPath containment BEFORE calling verify().
+    // If the gate somehow passes a handle with out-of-root path (shouldn't happen), gitHistoryVerify
+    // doesn't know — it just checks if the path exists. This test documents the gate-level protection.
     await withTempDir(async (dir) => {
-      const toolResultBaseLike = {
-        tool: GIT_HISTORY_TOOL_NAME,
-        status: 'PASSED',
-        outputFile: path.join(dir, 'git-history.stdout.log'),
-        outputFileBytes: 42,
-      };
-      const artifactFile = path.join(dir, 'git-history.json');
-      fs.writeFileSync(artifactFile, JSON.stringify(toolResultBaseLike, null, 2));
-
-      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
-      // ToolResultBase-shaped artifact fails handle validation → FAIL (not PASS).
-      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
-      expect(verifyResult.failureOutcome).toBeDefined();
-    });
-  });
-
-  it('NEGATIVE (real verifier): various ToolResultBase-shaped JSON files make gitHistoryVerify FAIL', async () => {
-    // Any JSON object missing canonical ToolEvidenceHandle fields must FAIL gitHistoryVerify.
-    const shapes = [
-      { tool: GIT_HISTORY_TOOL_NAME, status: 'PASSED', outputFile: '/tmp/a.log', outputFileBytes: 10 },
-      { toolName: GIT_HISTORY_TOOL_NAME, runStatus: 'PASSED', outputFile: '/tmp/a.log' },
-      { toolName: GIT_HISTORY_TOOL_NAME, runStatus: 'PASSED', toolOutputRoot: '/out', summaryMode: 'none' },
-    ];
-    await withTempDir(async (dir) => {
-      for (const shape of shapes) {
-        const artifactFile = path.join(dir, `shape-${Object.keys(shape).join('-')}.json`);
-        fs.writeFileSync(artifactFile, JSON.stringify(shape, null, 2));
-        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
-        expect(verifyResult.verdict, `expected FAIL for shape: ${JSON.stringify(shape)}`).toBe(VerifyVerdict.FAIL);
-      }
-    });
-  });
-
-  it('NEGATIVE (real verifier): a near-valid handle with semanticArtifactPath outside toolOutputRoot makes gitHistoryVerify FAIL', async () => {
-    // A handle JSON that has semanticArtifactPath outside toolOutputRoot fails
-    // validateToolEvidenceHandle → gitHistoryVerify returns FAIL.
-    await withTempDir(async (dir) => {
-      // The handle file lives inside harness-output, but semanticArtifactPath is outside.
+      // Validate the handle directly to confirm it fails.
       const harnessOutput = path.join(dir, 'harness-output');
-      fs.mkdirSync(harnessOutput);
       const outsideFile = path.join(dir, 'outside.log');
-      fs.writeFileSync(outsideFile, '4c241a5 init\n');
-
-      const nearValidHandle = {
+      fs.mkdirSync(harnessOutput);
+      fs.writeFileSync(outsideFile, 'test\n');
+      const result = validateToolEvidenceHandle({
         schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
         toolName: GIT_HISTORY_TOOL_NAME,
         invocationId: 'inv-test-001',
@@ -367,41 +394,17 @@ describe('AC3 (new, negative): non-canonical artifacts cannot pass gitHistoryVer
         admittedHarnessFingerprint: 'sha256:test',
         admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
         semanticArtifactPath: outsideFile, // OUTSIDE toolOutputRoot
-      };
-      const artifactFile = path.join(harnessOutput, 'git-history.json');
-      fs.writeFileSync(artifactFile, JSON.stringify(nearValidHandle, null, 2));
-
-      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: artifactFile }));
-      // Handle fails validateToolEvidenceHandle (semanticArtifactPath outside root) → FAIL.
-      expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
-      expect(verifyResult.failureOutcome).toBeDefined();
+      }, { expectedToolName: GIT_HISTORY_TOOL_NAME });
+      // Handle validation fails → gate would reject with EVIDENCE_HANDLE_INVALID.
+      expect(result.valid).toBe(false);
+      expect(result.errors.join(' ')).toContain('toolOutputRoot');
     });
   });
 
-  it('NEGATIVE (real verifier): a REJECTED-status handle JSON makes gitHistoryVerify FAIL', async () => {
-    // A valid ToolEvidenceHandle with runStatus: 'REJECTED' must make gitHistoryVerify FAIL.
+  it('NEGATIVE: a REJECTED-status canonical handle → gitHistoryVerify returns FAIL', async () => {
+    // A canonical REJECTED handle directly passed to gitHistoryVerify → FAIL.
     await withTempDir(async (dir) => {
-      const harnessOutput = path.join(dir, 'harness-output');
-      fs.mkdirSync(harnessOutput);
-      const handleFile = path.join(harnessOutput, 'git-history.json');
-
-      const rejectedHandle = {
-        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
-        toolName: GIT_HISTORY_TOOL_NAME,
-        invocationId: 'inv-rejected-001',
-        runStatus: 'REJECTED',
-        failureCategory: 'INFRA',
-        toolOutputRoot: harnessOutput,
-        summaryMode: 'none',
-        noSummaryReason: 'REJECTED: not a git repository',
-        admittedHarnessFingerprint: 'sha256:test',
-        admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
-        semanticArtifactPath: handleFile,
-      };
-      fs.writeFileSync(handleFile, JSON.stringify(rejectedHandle, null, 2));
-
-      const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: handleFile }));
-      // REJECTED runStatus → FAIL (not PASS).
+      const verifyResult = gitHistoryVerify(ctxWithRejectedHandle(dir));
       expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
       expect(verifyResult.failureOutcome).toBe('rejected git_history run');
     });
@@ -409,81 +412,69 @@ describe('AC3 (new, negative): non-canonical artifacts cannot pass gitHistoryVer
 });
 
 // ---------------------------------------------------------------------------
-// AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/FAIL otherwise
+// AC4 (yhec): gitHistoryVerify() — NOT_APPLICABLE when no handle, PASS/FAIL otherwise
+// pi-experiment-yhec: gitHistoryVerify reads ctx.evidenceHandles, not toolOutputs.
+// It checks handle.runStatus and whether semanticArtifactPath is readable.
 // ---------------------------------------------------------------------------
 
-describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/FAIL otherwise', () => {
-  it('NEGATIVE: NOT_APPLICABLE when no git_history output path is recorded', () => {
-    const result = gitHistoryVerify(ctxWith({}));
+describe('AC4 (yhec): gitHistoryVerify() — NOT_APPLICABLE when no handle, PASS/FAIL otherwise', () => {
+  it('NEGATIVE: NOT_APPLICABLE when no git_history handle is in evidenceHandles', () => {
+    const result = gitHistoryVerify(ctxWithNoHandle());
     expect(result.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
     expect(result.reasons.length).toBeGreaterThan(0);
   });
 
-  it('NEGATIVE: NOT_APPLICABLE when the recorded output path does not exist', () => {
-    const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: '/no/such/git-history.log' }));
-    expect(result.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
-  });
-
-  it('NEGATIVE: NOT_APPLICABLE when the archived output is an empty file', async () => {
+  it('NEGATIVE: FAIL when the semanticArtifactPath does not exist on disk', async () => {
     await withTempDir(async (dir) => {
-      const { outputFile } = await archiveOutput(dir, '');
-      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: outputFile }));
-      expect(result.verdict).toBe(VerifyVerdict.NOT_APPLICABLE);
+      // PASSED handle but the artifact file doesn't exist.
+      const result = gitHistoryVerify(ctxWithPassedHandle(path.join(dir, 'nonexistent.json'), dir));
+      expect(result.verdict).toBe(VerifyVerdict.FAIL);
+      expect(result.failureOutcome).toBe('unreadable git_history semantic artifact');
     });
   });
 
-  it('PASS: when the artifact is a canonical PASSED ToolEvidenceHandle JSON', async () => {
+  it('PASS: when a PASSED handle has a readable semanticArtifactPath', async () => {
     await withTempDir(async (dir) => {
-      // Write a valid canonical handle JSON with runStatus PASSED and a readable semanticArtifactPath.
-      const canonicalHandle = {
-        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
-        toolName: GIT_HISTORY_TOOL_NAME,
-        invocationId: 'inv-pass-001',
-        runStatus: 'PASSED',
-        semanticArtifactPath: path.join(dir, 'git-history.json'), // points to self (will be written below)
-        toolOutputRoot: dir,
-        summaryMode: 'summary' as const,
-        rtkSummary: {
-          schemaTypeName: 'GitHistoryRtkSummary',
-          owningFile: 'src/tools/git_history.ts',
-          summarySchemaVersion: '1.0.0',
-          schemaHash: 'sha256:' + 'a'.repeat(64),
-          deterministicSummaryVersion: '1.0.0',
-          inputArtifactSchemaId: 'git-stdout-log',
-          inputArtifactSchemaVersion: '1.0.0',
-          maximumCounts: { commits: 50, paths: 30 },
-          omissionSemantics: 'commits beyond maximumCounts.commits are omitted; outputLines reports total',
-          summary: { operation: 'log', repo: 'worktree', root: dir, outputLines: 2, outputFileBytes: 40, outputText: '4c241a5 some commit\n180355f another commit' },
-        },
-        admittedHarnessFingerprint: 'sha256:test',
-        admittedExecutionBoundary: 'bead:b1/state:s1/action:a1',
-      };
-      const handleFile = path.join(dir, 'git-history.json');
-      fs.writeFileSync(handleFile, JSON.stringify(canonicalHandle, null, 2));
-
-      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: handleFile }));
+      // Write any readable file — gitHistoryVerify just checks existence.
+      const artifactPath = path.join(dir, 'git-history.json');
+      fs.writeFileSync(artifactPath, '{"runStatus":"PASSED"}');
+      const result = gitHistoryVerify(ctxWithPassedHandle(artifactPath, dir));
       expect(result.verdict).toBe(VerifyVerdict.PASS);
       // The PASS reason references the canonical handle (invocationId / admittedExecutionBoundary).
       expect(result.reasons.some((r) => r.includes('canonical handle validated'))).toBe(true);
     });
   });
 
-  it('FAIL: when the archive holds a recorded REJECTED git_history payload', async () => {
+  it('FAIL: when the handle has REJECTED runStatus', async () => {
     await withTempDir(async (dir) => {
-      const payload = JSON.stringify({ tool: GIT_HISTORY_TOOL_NAME, status: 'REJECTED', error: 'not a git repo' });
-      const { outputFile } = await archiveOutput(dir, payload);
-      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: outputFile }));
+      const result = gitHistoryVerify(ctxWithRejectedHandle(dir));
       expect(result.verdict).toBe(VerifyVerdict.FAIL);
-      expect(result.failureOutcome).toBeDefined();
+      expect(result.failureOutcome).toBe('rejected git_history run');
     });
   });
 
-  it('FAIL: when the archive is whitespace-only despite a non-empty file', async () => {
+  it('FAIL: when the PASSED handle has no semanticArtifactPath', async () => {
+    // This tests what gitHistoryVerify does when the gate passes a handle without semPath.
     await withTempDir(async (dir) => {
-      const filePath = path.join(dir, 'ws.log');
-      fs.writeFileSync(filePath, '   \n  \t\n');
-      const result = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: filePath }));
+      const handle: VerifyEvidenceHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: GIT_HISTORY_TOOL_NAME,
+        invocationId: 'inv-nopath-001',
+        runStatus: 'PASSED',
+        // semanticArtifactPath intentionally absent
+        toolOutputRoot: dir,
+        summaryMode: 'none',
+        admittedHarnessFingerprint: 'sha256:test',
+        admittedExecutionBoundary: 'bead:bead-1/state:state-1/action:action-1',
+      };
+      const ctx: VerifyContext = {
+        beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1',
+        writeSet: [], artifacts: {},
+        evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle }
+      };
+      const result = gitHistoryVerify(ctx);
       expect(result.verdict).toBe(VerifyVerdict.FAIL);
+      expect(result.failureOutcome).toBe('missing git_history semantic artifact');
     });
   });
 
@@ -504,12 +495,24 @@ describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/F
         PI_WORKTREE_PATH: repo,
         PI_TOOL_OUTPUT_DIR: outDir,
         PI_TOOL_OUTPUT_FILE: undefined,
+        PI_BEAD_ID: 'bead-1',
+        PI_STATE_ID: 'state-1',
+        PI_ACTION_ID: 'action-1',
+        PI_TOOL_INVOCATION_ID: 'inv-e2e-001',
       }, async () => {
         const result = await runGitHistory(['log']);
         expect(result.status).toBe('PASSED');
-        // The verifier must return PASS when given the semantic artifact path.
-        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        expect(result.evidenceHandle).toBeDefined();
+        const handle = result.evidenceHandle!;
+        // Build a VerifyContext from the real evidenceHandle.
+        const ctx: VerifyContext = {
+          beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1',
+          writeSet: [], artifacts: {},
+          evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle as VerifyEvidenceHandle }
+        };
+        const verifyResult = gitHistoryVerify(ctx);
         expect(verifyResult.verdict).toBe(VerifyVerdict.PASS);
+        expect(verifyResult.reasons.some(r => r.includes('canonical handle validated'))).toBe(true);
       });
     });
   });
@@ -526,10 +529,16 @@ describe('AC4: gitHistoryVerify() — NOT_APPLICABLE when content absent, PASS/F
         const result = await runGitHistory(['status']);
         expect(result.status).toBe('REJECTED');
         expect(result.failureCategory).toBe('INFRA');
-        expect(fs.existsSync(result.outputFile)).toBe(true);
-        // REJECTED run's outputFile must not pass the verifier.
-        const verifyResult = gitHistoryVerify(ctxWith({ [GIT_HISTORY_TOOL_NAME]: result.outputFile }));
+        // Build context from the REJECTED evidenceHandle.
+        const handle = result.evidenceHandle!;
+        const ctx: VerifyContext = {
+          beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1',
+          writeSet: [], artifacts: {},
+          evidenceHandles: { [GIT_HISTORY_TOOL_NAME]: handle as VerifyEvidenceHandle }
+        };
+        const verifyResult = gitHistoryVerify(ctx);
         expect(verifyResult.verdict).not.toBe(VerifyVerdict.PASS);
+        expect(verifyResult.verdict).toBe(VerifyVerdict.FAIL);
       });
     });
   });

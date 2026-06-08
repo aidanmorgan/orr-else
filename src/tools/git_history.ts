@@ -25,7 +25,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, statSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path, { relative, resolve } from 'node:path';
 import { parseArgs as parseNodeArgs, promisify } from 'node:util';
@@ -38,8 +38,6 @@ import {
 } from '../contract.js';
 import {
   TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
-  validateToolEvidenceHandle,
-  validateToolEvidenceArtifact,
   type ToolEvidenceHandle,
 } from '../core/ToolEvidenceHandle.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
@@ -925,89 +923,36 @@ export async function runGitHistory(argv: string[], env: RuntimeEnvironment = no
 // ---------------------------------------------------------------------------
 // verify() — the harness-owned, deterministic semantic judgement.
 //
-// VerifyContext is PATHS-ONLY: the recorded git_history artifact path is read
-// from ctx.toolOutputs[GIT_HISTORY_TOOL_NAME]. The artifact MUST be a canonical
-// ToolEvidenceHandle JSON file (pi-experiment-oi48 review fix). The verdict is
-// decided purely from the handle's runStatus and semanticArtifactPath readability:
+// VerifyContext exposes validated canonical evidence handles via
+// ctx.evidenceHandles[GIT_HISTORY_TOOL_NAME] (pi-experiment-yhec). The
+// VerifierGate has already validated the handle before this callback runs:
+// the handle is structurally valid, toolName matches, runStatus is recognized,
+// and semanticArtifactPath (if present) is inside toolOutputRoot.
 //
-//   - NOT_APPLICABLE when no path is recorded, the path does not exist, or the
-//     file is empty / unreadable.
-//   - FAIL when the file exists but is NOT a valid ToolEvidenceHandle (not JSON,
-//     fails validateToolEvidenceHandle), OR the handle's runStatus is not PASSED,
-//     OR the semanticArtifactPath is not readable (validateToolEvidenceArtifact).
-//   - PASS when the handle validates, runStatus === 'PASSED', and the semantic
-//     artifact path is readable.
+// The verdict is decided from the already-validated handle's runStatus:
 //
-// A ToolResultBase-shaped file, a raw git-log file, a tmp/cwd artifact, or a
-// REJECTED-run handle all produce FAIL — only a canonical PASSED handle passes.
+//   - NOT_APPLICABLE when no handle is present (tool not in evidenceHandles).
+//   - FAIL when the handle's runStatus is not PASSED (REJECTED/UNAVAILABLE),
+//     or when the semanticArtifactPath is not readable.
+//   - PASS when runStatus === 'PASSED' and the semantic artifact path is readable.
+//
+// A callback that reads stdout, outputFile basename, logs, OTel, tmux transcripts
+// or model summaries instead of the canonical handle CANNOT produce PASS —
+// those sources are not exposed in VerifyContext.
 // ---------------------------------------------------------------------------
 
 export function gitHistoryVerify(ctx: VerifyContext): VerifyResult {
-  const outputPath = ctx.toolOutputs[GIT_HISTORY_TOOL_NAME];
+  const handle = ctx.evidenceHandles[GIT_HISTORY_TOOL_NAME];
 
-  if (!outputPath || !existsSync(outputPath)) {
+  if (!handle) {
     return {
       verdict: VerifyVerdict.NOT_APPLICABLE,
-      reasons: [`git_history produced no output for this transition (no readable ${GIT_HISTORY_TOOL_NAME} output path).`]
+      reasons: [`git_history produced no canonical evidence handle for this transition (tool not in evidenceHandles).`]
     };
   }
-
-  let stats;
-  try {
-    stats = statSync(outputPath);
-  } catch (error: unknown) {
-    return {
-      verdict: VerifyVerdict.NOT_APPLICABLE,
-      reasons: [`git_history output path is not readable: ${error instanceof Error ? error.message : String(error)}`]
-    };
-  }
-
-  if (!stats.isFile() || stats.size === 0) {
-    return {
-      verdict: VerifyVerdict.NOT_APPLICABLE,
-      reasons: ['git_history artifact is absent (empty file) — nothing to verify.']
-    };
-  }
-
-  // Read the artifact and parse it as a canonical ToolEvidenceHandle JSON.
-  let raw: string;
-  try {
-    raw = readFileSync(outputPath, 'utf8');
-  } catch (error: unknown) {
-    return {
-      verdict: VerifyVerdict.FAIL,
-      reasons: [`git_history artifact exists but could not be read: ${error instanceof Error ? error.message : String(error)}`],
-      failureOutcome: 'unreadable git_history artifact'
-    };
-  }
-
-  // Attempt JSON parse; non-JSON files (raw git text, whitespace) are not valid handles.
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return {
-      verdict: VerifyVerdict.FAIL,
-      reasons: [`git_history artifact at "${outputPath}" is not valid JSON — not a canonical ToolEvidenceHandle.`],
-      failureOutcome: 'non-canonical git_history artifact'
-    };
-  }
-
-  // Validate the parsed object as a canonical ToolEvidenceHandle.
-  const validation = validateToolEvidenceHandle(parsed, { expectedToolName: GIT_HISTORY_TOOL_NAME });
-  if (!validation.valid) {
-    return {
-      verdict: VerifyVerdict.FAIL,
-      reasons: [
-        `git_history artifact at "${outputPath}" failed ToolEvidenceHandle validation: ${validation.errors.join('; ')}`
-      ],
-      failureOutcome: 'non-canonical git_history artifact'
-    };
-  }
-
-  const handle = validation.handle;
 
   // Key verdict off runStatus: only PASSED runs can satisfy the gate.
+  // The handle has already been validated by VerifierGate — runStatus is canonical.
   if (handle.runStatus !== 'PASSED') {
     return {
       verdict: VerifyVerdict.FAIL,
@@ -1016,12 +961,21 @@ export function gitHistoryVerify(ctx: VerifyContext): VerifyResult {
     };
   }
 
-  // Validate that the semanticArtifactPath (the handle JSON file itself) is readable.
-  const artifactCheck = validateToolEvidenceArtifact(handle);
-  if (!artifactCheck.readable) {
+  // The semanticArtifactPath must be readable. VerifierGate already called
+  // validateToolEvidenceArtifact before invoking this callback, so this is a
+  // belt-and-suspenders check for correctness.
+  if (!handle.semanticArtifactPath) {
     return {
       verdict: VerifyVerdict.FAIL,
-      reasons: [artifactCheck.error],
+      reasons: ['git_history handle (PASSED) has no semanticArtifactPath — cannot verify artifact presence.'],
+      failureOutcome: 'missing git_history semantic artifact'
+    };
+  }
+
+  if (!existsSync(handle.semanticArtifactPath)) {
+    return {
+      verdict: VerifyVerdict.FAIL,
+      reasons: [`git_history semanticArtifactPath not found on disk: "${handle.semanticArtifactPath}".`],
       failureOutcome: 'unreadable git_history semantic artifact'
     };
   }

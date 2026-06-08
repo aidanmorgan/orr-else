@@ -80,13 +80,64 @@ export interface VerifyResult {
 }
 
 // ---------------------------------------------------------------------------
-// (3) VerifyContext — PATHS-ONLY raw input to every verify() callback.
+// (3) VerifyContext — canonical evidence handles exposed to every verify() callback.
 //
-// Both maps are paths only. `artifacts` maps a declared-artifact NAME to its
-// PATH; `toolOutputs` maps a tool NAME to its outputFile PATH. There are NO
-// bytes and NO status on the context — `status` is read elsewhere from the
-// persisted tool-result EVENT, not from here.
+// `artifacts` maps a declared-artifact NAME to its PATH.
+// `evidenceHandles` maps a tool NAME to its VALIDATED canonical evidence handle
+// (VerifyEvidenceHandle). The handle carries semanticArtifactPath, schema
+// id/version, hash, byte count, invocationId, toolName, state/action identity
+// (admittedExecutionBoundary), admitted fingerprint, and run status.
+//
+// Path-only toolOutputs is REMOVED. Verifiers read the semanticArtifactPath
+// from the handle (handle.semanticArtifactPath) instead of a raw top-level
+// path string. The gate validates every handle before it appears here: missing,
+// malformed, outputFile-only, command-envelope, child-ToolResultBase, stale-
+// fingerprint, hash-mismatch, and out-of-root handles never reach a callback.
 // ---------------------------------------------------------------------------
+
+/**
+ * Validated canonical evidence handle exposed to verifier callbacks.
+ *
+ * This is the verifier-facing subset of the full ToolEvidenceHandle shape
+ * (src/core/ToolEvidenceHandle.ts). It is defined inline here to keep
+ * contract.ts lean (no ./core imports). VerifierGate validates incoming
+ * ToolEvidenceHandle instances and casts them to this type before passing
+ * them into VerifyContext — the shapes are structurally identical for all
+ * verifier-visible fields.
+ *
+ * DO NOT add mutable fields or non-readonly properties. This is a read-only
+ * view of the validated evidence: a verifier callback MUST NOT modify handles.
+ */
+export interface VerifyEvidenceHandle {
+  /** Handle schema revision (= TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION). */
+  readonly schemaVersion: string;
+  /** The tool name as registered with Pi. */
+  readonly toolName: string;
+  /** Unique per-invocation id (from ToolCallPathAllocation). */
+  readonly invocationId: string;
+  /** Did the tool EXECUTE to completion? NOT a semantic verdict. */
+  readonly runStatus: 'PASSED' | 'REJECTED' | 'UNAVAILABLE';
+  /** Why it was REJECTED (present only when REJECTED). */
+  readonly failureCategory?: 'TRANSPORT' | 'TIMEOUT' | 'INPUT' | 'INFRA';
+  /**
+   * Absolute path to the primary semantic output file.
+   * Gate logic uses this path. REQUIRED for PASSED runs (zog2.8).
+   * May be absent for REJECTED/UNAVAILABLE runs.
+   */
+  readonly semanticArtifactPath?: string;
+  /** Byte count of semanticArtifactPath (for token accounting). */
+  readonly semanticArtifactBytes?: number;
+  /** Hex SHA-256 of semanticArtifactPath (for integrity checking). */
+  readonly semanticArtifactSha256?: string;
+  /** Absolute path to PI_TOOL_OUTPUT_DIR for this project. */
+  readonly toolOutputRoot: string;
+  /** 'summary' | 'none' — whether an RTK summary is present. */
+  readonly summaryMode: 'summary' | 'none';
+  /** Harness build fingerprint at the time this handle was produced. */
+  readonly admittedHarnessFingerprint: string;
+  /** The (bead, state, action) scope this handle was produced in. */
+  readonly admittedExecutionBoundary: string;
+}
 
 export interface VerifyContext {
   beadId: string;
@@ -96,8 +147,21 @@ export interface VerifyContext {
   writeSet: string[];
   /** Declared-artifact name → artifact PATH. */
   artifacts: Record<string, string>;
-  /** Tool name → that tool's outputFile PATH. */
-  toolOutputs: Record<string, string>;
+  /**
+   * Tool name → validated canonical evidence handle.
+   *
+   * Replaces the old path-only toolOutputs map (pi-experiment-yhec, no-backcompat).
+   * Every handle in this map has been validated by the gate:
+   *   - schemaVersion, toolName, invocationId, runStatus, toolOutputRoot,
+   *     admittedHarnessFingerprint, admittedExecutionBoundary are non-empty.
+   *   - semanticArtifactPath (when present) is inside toolOutputRoot.
+   *   - No rawOutput / modelFacingRawOutput fields.
+   *   - Missing/malformed/outputFile-only events never appear here.
+   *
+   * To read the artifact path: handle.semanticArtifactPath
+   * To check run status:       handle.runStatus
+   */
+  evidenceHandles: Record<string, VerifyEvidenceHandle>;
 }
 
 // ---------------------------------------------------------------------------

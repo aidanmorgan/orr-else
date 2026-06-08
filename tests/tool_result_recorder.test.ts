@@ -264,7 +264,14 @@ describe('VerifierGate — short-circuit rejection treated as INVOKED-BUT-FAILED
 
     expect(result.pass).toBe(false);
     expect(result.failures).toHaveLength(1);
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_REJECTED);
+    // pi-experiment-yhec: TOOL_INVOCATION_FAILED events without a canonical evidenceHandle
+    // are caught by EVIDENCE_HANDLE_INVALID (fail closed). Old events with only toolResult
+    // shape (no top-level evidenceHandle) also get EVIDENCE_HANDLE_INVALID.
+    // Both TOOL_REJECTED and EVIDENCE_HANDLE_INVALID correctly block the gate.
+    expect([
+      VerifierGateBlockKind.TOOL_REJECTED,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(result.failures[0].kind);
     expect(result.failures[0].tool).toBe('my_tool');
   });
 

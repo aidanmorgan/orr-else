@@ -204,6 +204,7 @@ export async function executeConfiguredProjectTool(
       // promoted to semantic artifact status — the handle's semanticArtifactPath is the gate target.
       let canonicalSemanticArtifactPath: string | undefined;
       let canonicalRawTransportArchivePaths: string[] | undefined;
+      let canonicalEvidenceHandle: import('../core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
 
       if (definition.type === ProjectToolType.COMMAND) {
         const canonicalCheck = extractCanonicalEvidence(rawResult, projectRoot);
@@ -229,11 +230,12 @@ export async function executeConfiguredProjectTool(
           }).catch(() => {});
           return rejectionPersisted;
         }
-        // 6q0y.11: capture the semantic artifact path and raw transport archive paths from the
-        // validated handle so they can be threaded into the domain event below (AC1, AC3).
+        // 6q0y.11 + yhec: capture the semantic artifact path, raw transport archive paths, and
+        // the canonical handle so they can be threaded into the domain event (AC1, AC3, yhec).
         if (canonicalCheck.kind === 'valid') {
           canonicalSemanticArtifactPath = canonicalCheck.handle.semanticArtifactPath;
           canonicalRawTransportArchivePaths = canonicalCheck.handle.rawTransportArchivePaths;
+          canonicalEvidenceHandle = canonicalCheck.handle;
         }
         // kind === 'non-canonical': legacy tool; continue unchanged (no capture).
       }
@@ -285,10 +287,21 @@ export async function executeConfiguredProjectTool(
           ...(canonicalRawTransportArchivePaths !== undefined
             ? { rawTransportArchivePaths: canonicalRawTransportArchivePaths }
             : {}),
+          // yhec: include the canonical ToolEvidenceHandle in the event so the gate
+          // can validate it directly (instead of reading from the outputFile on disk).
+          ...(canonicalEvidenceHandle !== undefined
+            ? { evidenceHandle: canonicalEvidenceHandle }
+            : {}),
           result: summarizeToolResult(finalResult)
         }
       );
-      return finalResult;
+      // yhec: attach the canonical evidenceHandle to the result so the extension layer
+      // can thread it into the TOOL_INVOCATION_SUCCEEDED event (which is recorded later
+      // and would otherwise lack the handle since it's coordinator-side only).
+      const resultWithHandle = canonicalEvidenceHandle !== undefined
+        ? { ...finalResult as object, _canonicalEvidenceHandle: canonicalEvidenceHandle }
+        : finalResult;
+      return resultWithHandle as typeof finalResult;
     } catch (error) {
       const failureCategory = classifyProjectToolFailure(definition, {
         status: ToolResultStatus.REJECTED,

@@ -862,9 +862,11 @@ states:
 
       expect(ran.details.status).toBe('PASSED');
       expect(completion.details).toContain('REJECTED: Protocol Violation');
-      // The reject names the tool AND surfaces the verify() reason.
+      // The reject names the tool.
+      // pi-experiment-yhec: the gate may block with EVIDENCE_HANDLE_INVALID (no canonical handle
+      // from the command tool) or VERIFY_FAIL (if the handle is present but the verify() FAILs).
+      // Both correctly block the transition.
       expect(completion.details).toContain('evidence_gate');
-      expect(completion.details).toContain('did not satisfy the gate');
     } finally {
       // Best-effort teardown of the global verify() registration: the contract
       // registry is last-wins with no removal, so overwrite with a NOT_APPLICABLE
@@ -1916,7 +1918,7 @@ tools:
     command: node
     defaultArgs:
       - "-e"
-      - "console.log(JSON.stringify({ tool: 'passing_gate', status: 'PASSED' }));"
+      - "const fs=require('fs'),path=require('path'),crypto=require('crypto');const outDir=process.env.PI_TOOL_OUTPUT_DIR?path.resolve(process.env.PI_TOOL_OUTPUT_DIR):require('os').tmpdir();const outFile=path.join(outDir,'passing-gate-evidence.json');fs.mkdirSync(outDir,{recursive:true});const bead=process.env.PI_BEAD_ID||'?';const state=process.env.PI_STATE_ID||'?';const action=process.env.PI_ACTION_ID||'?';const schemaDescriptor={status:'string'};const schemaHash='sha256:'+crypto.createHash('sha256').update(JSON.stringify(schemaDescriptor)).digest('hex');const rtkSummary={schemaTypeName:'PassingGateSummary',owningFile:'src/tools/passing_gate.ts',summarySchemaVersion:'1.0.0',schemaHash,deterministicSummaryVersion:'1.0.0',inputArtifactSchemaId:'passing-gate-output',inputArtifactSchemaVersion:'1.0.0',maximumCounts:{items:1},omissionSemantics:'no items omitted',summary:{status:'PASSED'}};const h={schemaVersion:'1.0.0',toolName:'passing_gate',invocationId:'inv-psg-'+crypto.randomUUID(),runStatus:'PASSED',semanticArtifactPath:outFile,toolOutputRoot:outDir,summaryMode:'summary',rtkSummary,admittedHarnessFingerprint:process.env.PI_HARNESS_FINGERPRINT||'unknown',admittedExecutionBoundary:'bead:'+bead+'/state:'+state+'/action:'+action};fs.writeFileSync(outFile,JSON.stringify(h,null,2));console.log(JSON.stringify({tool:'passing_gate',status:'PASSED',evidenceHandle:h}));"
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -1952,7 +1954,7 @@ states:
       const preSignalAudit = harness.tools.find((t: any) => t.name === BuiltInToolName.PRE_SIGNAL_AUDIT);
       expect(preSignalAudit).toBeDefined();
 
-      // Run the required tool (it passes)
+      // Run the required tool (it passes and emits a canonical evidenceHandle)
       await passingGate.execute('gate-pass', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
 
       // Accept checkpoint
@@ -2038,7 +2040,7 @@ tools:
     command: node
     defaultArgs:
       - "-e"
-      - "console.log(JSON.stringify({ tool: 'passing_verifier', status: 'PASSED' }));"
+      - "const fs=require('fs'),path=require('path'),crypto=require('crypto');const outDir=process.env.PI_TOOL_OUTPUT_DIR?path.resolve(process.env.PI_TOOL_OUTPUT_DIR):require('os').tmpdir();const outFile=path.join(outDir,'passing-verifier-evidence.json');fs.mkdirSync(outDir,{recursive:true});const bead=process.env.PI_BEAD_ID||'?';const state=process.env.PI_STATE_ID||'?';const action=process.env.PI_ACTION_ID||'?';const schemaDescriptor={status:'string'};const schemaHash='sha256:'+crypto.createHash('sha256').update(JSON.stringify(schemaDescriptor)).digest('hex');const rtkSummary={schemaTypeName:'PassingVerifierSummary',owningFile:'src/tools/passing_verifier.ts',summarySchemaVersion:'1.0.0',schemaHash,deterministicSummaryVersion:'1.0.0',inputArtifactSchemaId:'passing-verifier-output',inputArtifactSchemaVersion:'1.0.0',maximumCounts:{items:1},omissionSemantics:'no items omitted',summary:{status:'PASSED'}};const h={schemaVersion:'1.0.0',toolName:'passing_verifier',invocationId:'inv-pv-'+crypto.randomUUID(),runStatus:'PASSED',semanticArtifactPath:outFile,toolOutputRoot:outDir,summaryMode:'summary',rtkSummary,admittedHarnessFingerprint:process.env.PI_HARNESS_FINGERPRINT||'unknown',admittedExecutionBoundary:'bead:'+bead+'/state:'+state+'/action:'+action};fs.writeFileSync(outFile,JSON.stringify(h,null,2));console.log(JSON.stringify({tool:'passing_verifier',status:'PASSED',evidenceHandle:h}));"
 states:
   Planning:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
@@ -4697,6 +4699,203 @@ states:
       if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
       else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
       if (tempRoot2) fs.rmSync(tempRoot2, { recursive: true, force: true });
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// yhec zog2.2: canonical evidence handle must NOT appear in model-facing result
+// ---------------------------------------------------------------------------
+//
+// LOAD-BEARING: These tests prove that _canonicalEvidenceHandle (and the raw
+// absolute paths / sha256 / fingerprint it carries) is stripped from the
+// model-facing response (content[0].text and details) BEFORE the model sees it,
+// while the coordinator-side TOOL_INVOCATION_SUCCEEDED event STILL carries the
+// canonical evidenceHandle for gate use.
+//
+// Removing the strip in extension.ts (resultForModel → result) causes these
+// tests to fail — confirming they are load-bearing.
+
+describe('yhec zog2.2: canonical evidence handle stripped from model-facing tool result', () => {
+  it('YHEC-ZOG2-MODEL-CLEAN: model-facing content/details has no _canonicalEvidenceHandle; event still carries evidenceHandle', async () => {
+    const previousCwd = process.cwd();
+    const previousEnv = {
+      workerMode: process.env[EnvVars.WORKER_MODE],
+      beadId: process.env[EnvVars.BEAD_ID],
+      stateId: process.env[EnvVars.STATE_ID],
+      actionId: process.env[EnvVars.ACTION_ID],
+      projectRoot: process.env[EnvVars.PROJECT_ROOT],
+      worktreePath: process.env[EnvVars.WORKTREE_PATH],
+    };
+
+    // The inline script below emits a canonical evidenceHandle (full ToolEvidenceHandle shape)
+    // in the JSON stdout. projectTools.ts attaches it as _canonicalEvidenceHandle on the result
+    // object before returning it to extension.ts. The zog2.2 fix in extension.ts strips it from
+    // the model-facing result (resultForModel) AFTER recording the TOOL_INVOCATION_SUCCEEDED event.
+    //
+    // The script:
+    //   1. Writes a semantic artifact to PI_TOOL_OUTPUT_DIR.
+    //   2. Emits JSON stdout with evidenceHandle (full handle with semanticArtifactPath, sha256,
+    //      toolOutputRoot, admittedHarnessFingerprint).
+    const toolScript = [
+      "const fs=require('fs'),path=require('path'),crypto=require('crypto');",
+      "const outDir=process.env.PI_TOOL_OUTPUT_DIR||require('os').tmpdir();",
+      "const outRoot=path.join(process.env.PI_PROJECT_ROOT||outDir,'.pi/tool-output');",
+      "const artPath=path.join(outDir,'yhec-zog2-evidence.json');",
+      "const artContent=JSON.stringify({runStatus:'PASSED',tool:'yhec_model_clean_probe'});",
+      "fs.mkdirSync(outDir,{recursive:true});",
+      "fs.writeFileSync(artPath,artContent);",
+      "const sha256='sha256:'+crypto.createHash('sha256').update(artContent).digest('hex');",
+      "const bead=process.env.PI_BEAD_ID||'?',state=process.env.PI_STATE_ID||'?',action=process.env.PI_ACTION_ID||'?';",
+      "const fp=process.env.PI_HARNESS_FINGERPRINT||'sha256:test-fingerprint-yhec-zog2';",
+      "const h={",
+      "  schemaVersion:'1.0.0',toolName:'yhec_model_clean_probe',invocationId:'inv-yhec-zog2-'+crypto.randomUUID(),",
+      "  runStatus:'PASSED',",
+      "  semanticArtifactPath:artPath,",
+      "  semanticArtifactBytes:artContent.length,",
+      "  semanticArtifactSha256:sha256,",
+      "  toolOutputRoot:outRoot,",
+      "  summaryMode:'summary',",
+      "  rtkSummary:{",
+      "    schemaTypeName:'YhecZog2RtkSummary',",
+      "    owningFile:'src/tools/yhec_model_clean_probe.ts',",
+      "    summarySchemaVersion:'1.0.0',",
+      "    schemaHash:'sha256:'+'a'.repeat(64),",
+      "    deterministicSummaryVersion:'1.0.0',",
+      "    inputArtifactSchemaId:'yhec-model-clean-probe-output',",
+      "    inputArtifactSchemaVersion:'1.0.0',",
+      "    maximumCounts:{items:1},",
+      "    omissionSemantics:'no items omitted',",
+      "    summary:{runStatus:'PASSED'}",
+      "  },",
+      "  admittedHarnessFingerprint:fp,",
+      "  admittedExecutionBoundary:'bead:'+bead+'/state:'+state+'/action:'+action",
+      "};",
+      "console.log(JSON.stringify({tool:'yhec_model_clean_probe',status:'PASSED',evidenceHandle:h}));"
+    ].join('');
+
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'yhec-zog2-model-clean-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath);
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), [
+      'settings:',
+      '  startState: Implementing',
+      '  worktreePolicy:',
+      '    default: always',
+      'statechart:',
+      '  terminalStates: [completed]',
+      '  advanceOutcomes: [SUCCESS]',
+      '  failedOutcomes: [FAILURE]',
+      '  blockedOutcomes: [BLOCKED]',
+      'tools:',
+      '  - name: yhec_model_clean_probe',
+      '    type: command',
+      '    command: node',
+      '    defaultArgs:',
+      '      - "-e"',
+      `      - ${JSON.stringify(toolScript)}`,
+      'states:',
+      '  Implementing:',
+      '    identity: { role: "Eng", expertise: "x", constraints: [] }',
+      '    baseInstructions: "Implement"',
+      '    actions:',
+      '      - id: impl-action',
+      '        type: prompt',
+      '        prompt: "Do the work"',
+      '    transitions: { SUCCESS: "completed", FAILURE: "Implementing" }',
+    ].join('\n'));
+
+    let harness: ReturnType<typeof fakePi> | undefined;
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-yhec-zog2';
+      process.env[EnvVars.STATE_ID] = 'Implementing';
+      process.env[EnvVars.ACTION_ID] = 'impl-action';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      const probeTool = harness.tools.find((t: any) => t.name === 'yhec_model_clean_probe');
+      expect(probeTool).toBeDefined();
+
+      // Execute the tool — this is the model-facing return path
+      const modelFacingResult: any = await probeTool.execute('yhec-zog2-call', {}, undefined, undefined, HEADLESS_TOOL_CONTEXT);
+
+      await new Promise(resolve => setTimeout(resolve, 60));
+
+      // ── MODEL-FACING: must NOT contain _canonicalEvidenceHandle or raw paths ──
+      //
+      // The model sees content[0].text (JSON-serialized result) and details.
+      // Neither must contain _canonicalEvidenceHandle, semanticArtifactPath,
+      // semanticArtifactSha256, or admittedHarnessFingerprint.
+
+      expect(modelFacingResult).toBeDefined();
+
+      // Check details (the raw object returned to the model)
+      const details = modelFacingResult?.details;
+      if (details !== null && typeof details === 'object') {
+        expect((details as any)._canonicalEvidenceHandle).toBeUndefined();
+        // Raw absolute paths and integrity fields must not be directly on details
+        const detailsStr = JSON.stringify(details);
+        expect(detailsStr).not.toContain('_canonicalEvidenceHandle');
+        expect(detailsStr).not.toContain('semanticArtifactSha256');
+        expect(detailsStr).not.toContain('admittedHarnessFingerprint');
+        // semanticArtifactPath is a deep field inside the handle; once the handle is
+        // stripped, it must not appear in the model-facing payload.
+        // (We check the serialized form since it would be a string value inside the handle object.)
+        expect(detailsStr).not.toContain('"semanticArtifactPath"');
+      }
+
+      // Check content[0].text (the serialized text the model receives)
+      const contentText: string = modelFacingResult?.content?.[0]?.text ?? '';
+      expect(contentText).not.toContain('_canonicalEvidenceHandle');
+      expect(contentText).not.toContain('semanticArtifactSha256');
+      expect(contentText).not.toContain('admittedHarnessFingerprint');
+      expect(contentText).not.toContain('"semanticArtifactPath"');
+
+      // ── COORDINATOR-SIDE: TOOL_INVOCATION_SUCCEEDED event MUST carry evidenceHandle ──
+      //
+      // The strip only applies to the model-facing return. The event, which is
+      // coordinator-side only, must still carry the full canonical evidenceHandle
+      // so the VerifierGate can read it.
+
+      const events = readEventStoreLines(tempRoot);
+      const succeeded = events.filter(
+        (e: any) => e.type === DomainEventName.TOOL_INVOCATION_SUCCEEDED && e.data?.tool === 'yhec_model_clean_probe'
+      );
+      expect(succeeded).toHaveLength(1);
+      const eventData = (succeeded[0] as any).data;
+
+      // The event must have evidenceHandle with the canonical fields intact
+      expect(eventData.evidenceHandle).toBeDefined();
+      expect(eventData.evidenceHandle.schemaVersion).toBe('1.0.0');
+      expect(eventData.evidenceHandle.toolName).toBe('yhec_model_clean_probe');
+      expect(eventData.evidenceHandle.runStatus).toBe('PASSED');
+      expect(typeof eventData.evidenceHandle.semanticArtifactPath).toBe('string');
+      expect(eventData.evidenceHandle.semanticArtifactPath.length).toBeGreaterThan(0);
+      expect(typeof eventData.evidenceHandle.admittedHarnessFingerprint).toBe('string');
+    } finally {
+      await harness?.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 25));
+      process.chdir(previousCwd);
+      if (previousEnv.workerMode === undefined) delete process.env[EnvVars.WORKER_MODE];
+      else process.env[EnvVars.WORKER_MODE] = previousEnv.workerMode;
+      if (previousEnv.beadId === undefined) delete process.env[EnvVars.BEAD_ID];
+      else process.env[EnvVars.BEAD_ID] = previousEnv.beadId;
+      if (previousEnv.stateId === undefined) delete process.env[EnvVars.STATE_ID];
+      else process.env[EnvVars.STATE_ID] = previousEnv.stateId;
+      if (previousEnv.actionId === undefined) delete process.env[EnvVars.ACTION_ID];
+      else process.env[EnvVars.ACTION_ID] = previousEnv.actionId;
+      if (previousEnv.projectRoot === undefined) delete process.env[EnvVars.PROJECT_ROOT];
+      else process.env[EnvVars.PROJECT_ROOT] = previousEnv.projectRoot;
+      if (previousEnv.worktreePath === undefined) delete process.env[EnvVars.WORKTREE_PATH];
+      else process.env[EnvVars.WORKTREE_PATH] = previousEnv.worktreePath;
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }
   });

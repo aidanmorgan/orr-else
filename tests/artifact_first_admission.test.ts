@@ -45,6 +45,7 @@ import {
   type CoordinatorGateInput,
 } from '../src/core/CoordinatorVerifierGate.js';
 import { VerifierGateBlockKind } from '../src/core/VerifierGate.js';
+import { TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION, type ToolEvidenceHandle } from '../src/core/ToolEvidenceHandle.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
@@ -150,6 +151,40 @@ interface Harness {
   deps: CoordinatorVerifierGateDeps;
 }
 
+/** Build a canonical PASSED ToolEvidenceHandle for a test output file. */
+function makePassedHandle(tool: string, outputFile: string, projectRoot: string): ToolEvidenceHandle {
+  const toolOutputRoot = path.join(projectRoot, '.pi', 'tool-output');
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: tool,
+    invocationId: `inv-${tool}-6q0y46-test`,
+    runStatus: 'PASSED',
+    semanticArtifactPath: outputFile,
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'artifact_first_admission test fixture',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
+}
+
+/** Build a canonical REJECTED ToolEvidenceHandle for a test. */
+function makeRejectedHandle(tool: string, projectRoot: string): ToolEvidenceHandle {
+  const toolOutputRoot = path.join(projectRoot, '.pi', 'tool-output');
+  return {
+    schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+    toolName: tool,
+    invocationId: `inv-${tool}-6q0y46-rejected`,
+    runStatus: 'REJECTED',
+    failureCategory: 'INFRA',
+    toolOutputRoot,
+    summaryMode: 'none',
+    noSummaryReason: 'artifact_first_admission test fixture — REJECTED',
+    admittedHarnessFingerprint: 'sha256:test-fp',
+    admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+  };
+}
+
 function makeHarness(yaml?: string): Harness {
   const projectRoot = fs.realpathSync(
     fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-6q0y46-'))
@@ -212,9 +247,11 @@ describe('AC1 — missing artifact blocks advance/terminal route', () => {
       const outputFile = path.join(
         h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'evidence_tool', 'inv', 'o.json'
       );
+      const evidenceHandle = makeRejectedHandle('evidence_tool', h.projectRoot);
       await h.store.record(DomainEventName.PROJECT_TOOL_FAILED, {
         beadId: 'bd-1', stateId: 'Implementing', actionId: 'code',
         tool: 'evidence_tool', status: ToolResultStatus.REJECTED, outputFile,
+        evidenceHandle
       });
       registerVerify('evidence_tool', () => ({ verdict: VerifyVerdict.PASS, reasons: ['would pass'] }));
 
@@ -239,9 +276,13 @@ describe('AC1 — failed verifier blocks advance/terminal route', () => {
       const outputFile = path.join(
         h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'evidence_tool', 'inv', 'o.json'
       );
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      fs.writeFileSync(outputFile, '{}');
+      const evidenceHandle = makePassedHandle('evidence_tool', outputFile, h.projectRoot);
       await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
         beadId: 'bd-1', stateId: 'Implementing', actionId: 'code',
         tool: 'evidence_tool', status: ToolResultStatus.PASSED, outputFile,
+        evidenceHandle
       });
       registerVerify('evidence_tool', () => ({
         verdict: VerifyVerdict.FAIL,
@@ -266,13 +307,16 @@ describe('AC1 — failed verifier blocks advance/terminal route', () => {
       const outputFile = path.join(
         h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'evidence_tool', 'inv', 'MISSING.json'
       );
+      const evidenceHandle = makePassedHandle('evidence_tool', outputFile, h.projectRoot);
       await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
         beadId: 'bd-1', stateId: 'Implementing', actionId: 'code',
         tool: 'evidence_tool', status: ToolResultStatus.PASSED, outputFile,
+        evidenceHandle
       });
-      // verify() reads the path and returns FAIL when file is absent.
+      // verify() reads the handle's semanticArtifactPath and returns FAIL when absent.
+      // pi-experiment-yhec: use ctx.evidenceHandles not ctx.toolOutputs.
       registerVerify('evidence_tool', (ctx: VerifyContext) => {
-        const p = ctx.toolOutputs['evidence_tool'];
+        const p = ctx.evidenceHandles['evidence_tool']?.semanticArtifactPath;
         if (!p || !fs.existsSync(p)) {
           return { verdict: VerifyVerdict.FAIL, reasons: ['artifact file not found at declared path'] };
         }
@@ -300,9 +344,13 @@ describe('successful terminal route event passes when evidence is present', () =
       const outputFile = path.join(
         h.projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'evidence_tool', 'inv', 'o.json'
       );
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      fs.writeFileSync(outputFile, '{"ok":true}');
+      const evidenceHandle = makePassedHandle('evidence_tool', outputFile, h.projectRoot);
       await h.store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
         beadId: 'bd-1', stateId: 'Implementing', actionId: 'code',
         tool: 'evidence_tool', status: ToolResultStatus.PASSED, outputFile,
+        evidenceHandle
       });
       registerVerify('evidence_tool', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
 

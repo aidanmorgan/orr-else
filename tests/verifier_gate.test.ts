@@ -3,9 +3,14 @@
  *
  * The harness owns a generic verifier loop (`runVerifierGate`) that, for a
  * transition declaring `requiredTools: [t1, t2]`, resolves each tool's LATEST
- * tool-result event coordinator-side (recovering its outputFile + run status),
- * runs each tool's REGISTERED verify() callback (from the contract `verifier`
- * registry) with the full PATHS-ONLY VerifyContext, and aggregates by enum.
+ * tool-result event coordinator-side, validates the canonical ToolEvidenceHandle
+ * from the event, runs each tool's REGISTERED verify() callback with the full
+ * VerifyContext { evidenceHandles } carrying validated handles, and aggregates
+ * by enum.
+ *
+ * pi-experiment-yhec (no-backcompat): VerifyContext now exposes evidenceHandles
+ * (canonical validated handles) instead of the old path-only toolOutputs map.
+ * Events without a valid canonical evidenceHandle are REJECTED by the gate.
  *
  * These tests prove the loop MECHANISM + aggregate routing as a well-tested
  * unit. Two layers are exercised:
@@ -13,7 +18,7 @@
  *   - latestToolResultEvent against a REAL EventStore that recorded BOTH the
  *     FLAT (command/MCP) and NESTED (plugin) tool-result event shapes — proving
  *     the coordinator-side latest-event-per-(bead,state,action,tool) resolution
- *     handles both shapes (AC1/AC3 require coordinator-side outputFile+status).
+ *     handles both shapes (AC1/AC3 require coordinator-side handle+status).
  *
  * The full handleTeammateEvent call-site wiring (running this loop before
  * STATE_TRANSITION_APPLIED is committed) is bead 0yt5.20's deliverable.
@@ -41,6 +46,10 @@ import {
   type VerifierGateContext,
   type VerifierGateEventStore
 } from '../src/core/VerifierGate.js';
+import {
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  type ToolEvidenceHandle,
+} from '../src/core/ToolEvidenceHandle.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
@@ -54,14 +63,42 @@ class FakeToolResultStore implements VerifierGateEventStore {
     return [beadId, stateId, actionId, tool].join('\0');
   }
 
-  /** Record a FLAT-shape (command/MCP) latest tool-result event. */
+  /**
+   * Record a FLAT-shape (command/MCP) latest tool-result event WITH a canonical
+   * ToolEvidenceHandle (pi-experiment-yhec: events without handles are rejected).
+   */
   setFlat(beadId: string, stateId: string, actionId: string, tool: string, status: ToolResultStatus, outputFile: string): void {
+    const toolOutputRoot = path.dirname(path.dirname(outputFile)); // heuristic root
+    const evidenceHandle: ToolEvidenceHandle = status === ToolResultStatus.PASSED
+      ? {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: tool,
+        invocationId: `inv-${tool}-test`,
+        runStatus: 'PASSED',
+        semanticArtifactPath: outputFile,
+        toolOutputRoot,
+        summaryMode: 'none',
+        noSummaryReason: 'test fixture',
+        admittedHarnessFingerprint: 'sha256:test-fingerprint',
+        admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+      }
+      : {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: tool,
+        invocationId: `inv-${tool}-test`,
+        runStatus: 'REJECTED',
+        toolOutputRoot,
+        summaryMode: 'none',
+        noSummaryReason: `test fixture — REJECTED (status=${status})`,
+        admittedHarnessFingerprint: 'sha256:test-fingerprint',
+        admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+      };
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `flat-${tool}`,
       type: status === ToolResultStatus.PASSED ? DomainEventName.PROJECT_TOOL_SUCCEEDED : DomainEventName.PROJECT_TOOL_FAILED,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
-      data: { beadId, stateId, actionId, tool, status, outputFile }
+      data: { beadId, stateId, actionId, tool, status, outputFile, evidenceHandle }
     });
   }
 
@@ -95,11 +132,13 @@ afterEach(() => {
   }
 });
 
-describe('pi-experiment-0yt5.5: AC1 — loop resolves each tool outputFile and calls BOTH verify() with the full paths-only VerifyContext', () => {
-  it('runs both registered callbacks with the resolved toolOutputs + paths-only context', async () => {
+describe('pi-experiment-0yt5.5 (yhec): AC1 — loop resolves each tool canonical handle and calls BOTH verify() with the full VerifyContext', () => {
+  it('runs both registered callbacks with the resolved evidenceHandles context', async () => {
     const store = new FakeToolResultStore();
-    store.setFlat('bd-1', 'Implementing', 'code', 't1', ToolResultStatus.PASSED, '/proj/.pi/tool-output/bd-1/Implementing/code/t1/inv/output/o.json');
-    store.setFlat('bd-1', 'Implementing', 'code', 't2', ToolResultStatus.PASSED, '/proj/.pi/tool-output/bd-1/Implementing/code/t2/inv/output/o.json');
+    const t1Path = '/proj/.pi/tool-output/bd-1/Implementing/code/t1/inv/output/o.json';
+    const t2Path = '/proj/.pi/tool-output/bd-1/Implementing/code/t2/inv/output/o.json';
+    store.setFlat('bd-1', 'Implementing', 'code', 't1', ToolResultStatus.PASSED, t1Path);
+    store.setFlat('bd-1', 'Implementing', 'code', 't2', ToolResultStatus.PASSED, t2Path);
 
     const seen: VerifyContext[] = [];
     const capture = (verdict: VerifyVerdict) => (ctx: VerifyContext): VerifyResult => {
@@ -113,16 +152,20 @@ describe('pi-experiment-0yt5.5: AC1 — loop resolves each tool outputFile and c
 
     // BOTH callbacks ran.
     expect(seen.length).toBe(2);
-    // Each saw the full paths-only context: identity + writeSet + artifacts.
+    // Each saw the full context: identity + writeSet + artifacts.
     for (const ctx of seen) {
       expect(ctx.beadId).toBe('bd-1');
       expect(ctx.stateId).toBe('Implementing');
       expect(ctx.actionId).toBe('code');
       expect(ctx.writeSet).toEqual(['/w/src/a.ts']);
       expect(ctx.artifacts).toEqual({ plan: '/artifacts/plan.md' });
-      // toolOutputs maps EVERY required tool's resolved outputFile path.
-      expect(ctx.toolOutputs.t1).toBe('/proj/.pi/tool-output/bd-1/Implementing/code/t1/inv/output/o.json');
-      expect(ctx.toolOutputs.t2).toBe('/proj/.pi/tool-output/bd-1/Implementing/code/t2/inv/output/o.json');
+      // evidenceHandles maps EVERY required tool's canonical handle.
+      expect(ctx.evidenceHandles.t1).toBeDefined();
+      expect(ctx.evidenceHandles.t1.semanticArtifactPath).toBe(t1Path);
+      expect(ctx.evidenceHandles.t1.toolName).toBe('t1');
+      expect(ctx.evidenceHandles.t1.runStatus).toBe('PASSED');
+      expect(ctx.evidenceHandles.t2).toBeDefined();
+      expect(ctx.evidenceHandles.t2.semanticArtifactPath).toBe(t2Path);
     }
     expect(result.pass).toBe(true);
     expect(result.failures).toEqual([]);
@@ -187,8 +230,9 @@ describe('pi-experiment-0yt5.5: AC4 — NEGATIVE: an unrelated tool cannot force
 
     // The unrelated tool only PASSES content it OWNS; for anything else it must
     // return NOT_APPLICABLE — it can never force the transition through.
+    // Uses evidenceHandles (canonical handles) not toolOutputs (removed).
     registerVerify('unrelated', (ctx): VerifyResult => {
-      const ownsOutput = typeof ctx.toolOutputs['unrelated-owned-marker'] === 'string';
+      const ownsOutput = ctx.evidenceHandles['unrelated-owned-marker'] !== undefined;
       return ownsOutput
         ? { verdict: VerifyVerdict.PASS, reasons: ['owns it'] }
         : { verdict: VerifyVerdict.NOT_APPLICABLE, reasons: ['does not own this content'] };
@@ -300,13 +344,42 @@ states:
   it('a retry records a fresher event and the LATEST (REJECTED) wins over the stale PASS', async () => {
     const firstFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'flatTool', 'inv-1', 'output', 'o.json');
     const retryFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'flatTool', 'inv-2', 'output', 'o.json');
+    const toolOutputRoot = path.join(projectRoot, '.pi', 'tool-output');
+    // First event: PASSED with canonical handle.
+    const passedHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: 'flatTool',
+      invocationId: 'inv-1',
+      runStatus: 'PASSED',
+      semanticArtifactPath: firstFile,
+      toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 'test',
+      admittedHarnessFingerprint: 'sha256:fp',
+      admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+    };
     await store.record(DomainEventName.PROJECT_TOOL_SUCCEEDED, {
       beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'flatTool',
-      status: ToolResultStatus.PASSED, outputFile: firstFile
+      status: ToolResultStatus.PASSED, outputFile: firstFile,
+      evidenceHandle: passedHandle
     });
+    // Second event: REJECTED with canonical handle.
+    const rejectedHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: 'flatTool',
+      invocationId: 'inv-2',
+      runStatus: 'REJECTED',
+      failureCategory: 'INFRA',
+      toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 'REJECTED test',
+      admittedHarnessFingerprint: 'sha256:fp',
+      admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+    };
     await store.record(DomainEventName.PROJECT_TOOL_FAILED, {
       beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'flatTool',
-      status: ToolResultStatus.REJECTED, failureCategory: 'INFRA', outputFile: retryFile
+      status: ToolResultStatus.REJECTED, failureCategory: 'INFRA', outputFile: retryFile,
+      evidenceHandle: rejectedHandle
     });
 
     const event = await store.latestToolResultEvent('bd-1', 'Implementing', 'code', 'flatTool');
@@ -432,23 +505,37 @@ states:
     expect((event!.data as Record<string, unknown>).cached).toBe(true);
   });
 
-  // AC4: the verifier gate validates using the cache-hit event output.
+  // AC4: the verifier gate validates using the cache-hit event's evidenceHandle.
   it('AC4 — verifier gate validates cache-hit event output (PASS path)', async () => {
-    const outputFile = path.join(projectRoot, '.pi', 'tool-output', 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'plugin-raw.json');
+    const toolOutputRoot = path.join(projectRoot, '.pi', 'tool-output');
+    const outputFile = path.join(toolOutputRoot, 'bd-1', 'Implementing', 'code', 'cacheableTool', 'inv-1', 'builtin-evidence.json');
     fs.mkdirSync(path.dirname(outputFile), { recursive: true });
     fs.writeFileSync(outputFile, JSON.stringify({ verified: true }));
     const toolResult = { tool: 'cacheableTool', status: ToolResultStatus.PASSED, outputFile, outputFileBytes: 20 };
+    const evidenceHandle: ToolEvidenceHandle = {
+      schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+      toolName: 'cacheableTool',
+      invocationId: 'inv-cache-1',
+      runStatus: 'PASSED',
+      semanticArtifactPath: outputFile,
+      toolOutputRoot,
+      summaryMode: 'none',
+      noSummaryReason: 'test fixture',
+      admittedHarnessFingerprint: 'sha256:test-fp',
+      admittedExecutionBoundary: 'bead:bd-1/state:Implementing/action:code',
+    };
 
     // Only the cache-hit event is recorded (no prior non-cached event). Explicit identity (u7cl).
     await store.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
       beadId: 'bd-1', stateId: 'Implementing', actionId: 'code', tool: 'cacheableTool',
       result: { ok: true }, cached: true, cacheAgeMs: 0,
-      toolResult
+      toolResult,
+      evidenceHandle
     });
 
-    let verifyReadPath: string | undefined;
+    let verifySemanticPath: string | undefined;
     verifier.register('cacheableTool', (ctx): VerifyResult => {
-      verifyReadPath = ctx.toolOutputs['cacheableTool'];
+      verifySemanticPath = ctx.evidenceHandles['cacheableTool']?.semanticArtifactPath;
       return { verdict: VerifyVerdict.PASS, reasons: [] };
     });
 
@@ -458,9 +545,9 @@ states:
       store
     );
 
-    // Gate passes, and verify() received the correct outputFile path.
+    // Gate passes, and verify() received the correct semanticArtifactPath via evidenceHandle.
     expect(result.pass).toBe(true);
-    expect(verifyReadPath).toBe(outputFile);
+    expect(verifySemanticPath).toBe(outputFile);
 
     // Cleanup registry.
     verifier.register('cacheableTool', () => ({ verdict: VerifyVerdict.NOT_APPLICABLE, reasons: [] }));

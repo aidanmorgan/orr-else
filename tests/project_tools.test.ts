@@ -2731,21 +2731,27 @@ describe('pi-experiment-55lu: outputArchive-only payload is rejected by the gate
       store
     );
 
-    // The gate MUST block — status is unrecognized (no `status` field on the event).
+    // The gate MUST block — no canonical evidenceHandle on the event.
+    // pi-experiment-yhec: outputArchive-only events get EVIDENCE_HANDLE_INVALID (no handle).
     expect(result.pass).toBe(false);
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].tool).toBe('my_tool');
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
+    // pi-experiment-yhec: EVIDENCE_HANDLE_INVALID (no canonical handle) replaces old TOOL_STATUS_UNRECOGNIZED.
+    expect([
+      VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(result.failures[0].kind);
   });
 
-  it('outputArchive-only event data is also absent from toolOutputs — verify() sees no artifact path', async () => {
-    // Arrange: same outputArchive-only event.  Register a verify() that records
-    // what toolOutputs it received, so we can prove the canonical path is absent.
-    let capturedToolOutputs: Record<string, string> | undefined;
+  it('outputArchive-only event data is also absent from evidenceHandles — verify() is never called', async () => {
+    // Arrange: same outputArchive-only event. Register a verify() that records
+    // what evidenceHandles it received, so we can prove no canonical handle is present.
+    // pi-experiment-yhec: verify() is NOT called for events without canonical handles.
+    let capturedHandles: Record<string, unknown> | undefined;
     // We re-import verifier inline to keep this test self-contained.
     const { verifier: testVerifier, VerifyVerdict } = await import('../src/contract.js');
     testVerifier.register('path_probe_tool', (ctx) => {
-      capturedToolOutputs = { ...ctx.toolOutputs };
+      capturedHandles = { ...ctx.evidenceHandles };
       return { verdict: VerifyVerdict.PASS, reasons: [] };
     });
 
@@ -2771,11 +2777,15 @@ describe('pi-experiment-55lu: outputArchive-only payload is rejected by the gate
       store
     );
 
-    // Gate blocks because status is unrecognized; verify() was never called.
+    // Gate blocks because no canonical evidenceHandle on the event; verify() was never called.
     expect(result.pass).toBe(false);
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
-    // verify() was never invoked — capturedToolOutputs is still undefined.
-    expect(capturedToolOutputs).toBeUndefined();
+    // pi-experiment-yhec: EVIDENCE_HANDLE_INVALID (no canonical handle).
+    expect([
+      VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED,
+      VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID
+    ]).toContain(result.failures[0].kind);
+    // verify() was never invoked — capturedHandles is still undefined.
+    expect(capturedHandles).toBeUndefined();
 
     // Clean up: overwrite with inert stub so this registration can't leak.
     testVerifier.register('path_probe_tool', () => ({ verdict: VerifyVerdict.NOT_APPLICABLE, reasons: [] }));

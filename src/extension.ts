@@ -1166,8 +1166,24 @@ function wrapPluginTool(
             //               failure; replay/verifier must see REJECTED, not a PASSED summary handle).
             let succeededEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
             let failedEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
+            // yhec: for command tools that emit a canonical evidenceHandle in their
+            // stdout JSON, projectTools.ts attaches _canonicalEvidenceHandle to the
+            // result. Thread it into the TOOL_INVOCATION_SUCCEEDED event so the gate
+            // can find it regardless of which event is "latest".
+            if (!failed && isRecord(result) && isRecord(result['_canonicalEvidenceHandle'])) {
+              succeededEvidenceHandle = result['_canonicalEvidenceHandle'] as import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle;
+            }
+            // yhec zog2.2: strip _canonicalEvidenceHandle from the model-facing result
+            // AFTER extracting it into succeededEvidenceHandle above. The handle is
+            // recorded coordinator-side on the TOOL_INVOCATION_SUCCEEDED event; it must
+            // NOT appear in the model-facing response (content/details/serialized text),
+            // which would expose absolute semanticArtifactPath, toolOutputRoot,
+            // semanticArtifactSha256, and admittedHarnessFingerprint to the model.
+            const resultForModel = (isRecord(result) && '_canonicalEvidenceHandle' in result)
+              ? (() => { const { _canonicalEvidenceHandle: _s, ...rest } = result as Record<string, unknown>; return rest; })() as typeof result
+              : result;
             const rtkFactory = getBuiltInRtkSummaryFactory(tool.name);
-            if (rtkFactory) {
+            if (rtkFactory && !succeededEvidenceHandle) {
               try {
                 const outputDir = toolResultHandle.outputFile
                   ? path.dirname(toolResultHandle.outputFile)
@@ -1218,7 +1234,7 @@ function wrapPluginTool(
             } else {
               if (breakerEnabled) session.toolBreakerFailures.delete(key);
               if (cacheable && isWorkerMode()) {
-                session.toolResultCache.set(cacheKey, { result, recordedAt: Date.now(), toolResult: toolResultHandle });
+                session.toolResultCache.set(cacheKey, { result: resultForModel, recordedAt: Date.now(), toolResult: toolResultHandle });
               }
               await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
                 beadId,
@@ -1232,7 +1248,7 @@ function wrapPluginTool(
                 ...(succeededEvidenceHandle ? { evidenceHandle: succeededEvidenceHandle } : {}),
               });
             }
-            return result;
+            return resultForModel;
           },
           spanCompletionForToolResult
         );

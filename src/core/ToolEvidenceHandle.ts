@@ -11,7 +11,7 @@
  *   PROJECT_TOOL event fields  — FLAT shape in EventStore
  *   Wrapped plugin toolResult  — NESTED shape in EventStore
  *   ToolCallPathFactory paths  — raw output archive paths
- *   verifier ctx.toolOutputs   — paths-only map into VerifyContext
+ *   verifier ctx.evidenceHandles — canonical handles map into VerifyContext (toolOutputs removed)
  *   RTK inventory entries      — per-tool raw/compact contract (RtkContract.ts)
  *
  * CONTRACT LAYER ONLY

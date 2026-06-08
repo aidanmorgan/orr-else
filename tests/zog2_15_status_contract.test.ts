@@ -17,6 +17,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import * as nodePath from 'node:path';
 
 // ── AC1/AC2: import the single-source status union from contract.ts ────────────
 import {
@@ -36,6 +37,8 @@ import {
 
 // ToolEvidenceHandle re-exports ToolRunStatus from contract (AC2 — no local redefinition).
 import {
+  TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+  type ToolEvidenceHandle,
   type ToolEvidenceRunStatus,
   toolResultBaseToMigrationDebt,
 } from '../src/core/ToolEvidenceHandle.js';
@@ -44,7 +47,7 @@ import { ToolResultStatus, DomainEventName } from '../src/constants/index.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import type { ToolResultBase } from '../src/contract.js';
 
-// ── Fake store for gate tests ─────────────────────────────────────────────────
+// ── Fake store for gate tests (pi-experiment-yhec: includes canonical handles) ─
 
 class FakeStatusStore implements VerifierGateEventStore {
   private readonly events = new Map<string, DomainEvent>();
@@ -53,6 +56,11 @@ class FakeStatusStore implements VerifierGateEventStore {
     return [beadId, stateId, actionId, tool].join('\0');
   }
 
+  /**
+   * Record an event with a canonical ToolEvidenceHandle.
+   * status must be one of 'PASSED'|'REJECTED'|'UNAVAILABLE' (canonical values).
+   * For non-canonical statuses (testing TOOL_STATUS_UNRECOGNIZED) use setFlatNoHandle().
+   */
   setFlat(
     beadId: string,
     stateId: string,
@@ -64,29 +72,76 @@ class FakeStatusStore implements VerifierGateEventStore {
     const type = status === ToolResultStatus.PASSED
       ? DomainEventName.PROJECT_TOOL_SUCCEEDED
       : DomainEventName.PROJECT_TOOL_FAILED;
+    // Only include evidenceHandle for canonical status values (the validator rejects non-canonical).
+    const isCanonical = status === 'PASSED' || status === 'REJECTED' || status === 'UNAVAILABLE';
+    let evidenceHandle: ToolEvidenceHandle | undefined;
+    if (isCanonical) {
+      const canonicalStatus = status as ToolEvidenceHandle['runStatus'];
+      // toolOutputRoot must contain semanticArtifactPath for the validator to pass.
+      // Derive it from the dirname of the outputFile.
+      const toolOutputRoot = nodePath.dirname(outputFile);
+      evidenceHandle = {
+        schemaVersion: TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
+        toolName: tool,
+        invocationId: `inv-${tool}-zog2-15`,
+        runStatus: canonicalStatus,
+        ...(canonicalStatus === 'PASSED' ? { semanticArtifactPath: outputFile } : {}),
+        toolOutputRoot,
+        summaryMode: 'none',
+        noSummaryReason: `test fixture for zog2.15 (status=${status})`,
+        admittedHarnessFingerprint: 'sha256:test-fp',
+        admittedExecutionBoundary: `bead:${beadId}/state:${stateId}/action:${actionId}`,
+      };
+    }
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `flat-${tool}`,
       type,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
-      data: { beadId, stateId, actionId, tool, status, outputFile }
+      data: { beadId, stateId, actionId, tool, status, outputFile, ...(evidenceHandle ? { evidenceHandle } : {}) }
     });
   }
 
+  /**
+   * Record a PASSED event WITHOUT a canonical evidenceHandle (simulates an
+   * outputFile-only or malformed event for negative testing).
+   * pi-experiment-yhec: such events are blocked with EVIDENCE_HANDLE_INVALID.
+   */
+  setFlatNoHandle(
+    beadId: string,
+    stateId: string,
+    actionId: string,
+    tool: string,
+    status?: string
+  ): void {
+    this.events.set(this.key(beadId, stateId, actionId, tool), {
+      id: `nohandle-${tool}`,
+      type: DomainEventName.PROJECT_TOOL_FAILED,
+      timestamp: new Date().toISOString(),
+      sessionId: 'test',
+      data: { beadId, stateId, actionId, tool, status: status ?? 'PASSED', outputFile: '/some/file' }
+      // evidenceHandle intentionally absent
+    });
+  }
+
+  /**
+   * Record a PASSED event with NO status field AND no handle (malformed event).
+   * pi-experiment-yhec: blocked with EVIDENCE_HANDLE_INVALID.
+   */
   setFlatNoStatus(
     beadId: string,
     stateId: string,
     actionId: string,
     tool: string
   ): void {
-    // Simulates a malformed event: no status field at all.
+    // Simulates a malformed event: no status field, no handle.
     this.events.set(this.key(beadId, stateId, actionId, tool), {
       id: `malformed-${tool}`,
       type: DomainEventName.PROJECT_TOOL_FAILED,
       timestamp: new Date().toISOString(),
       sessionId: 'test',
       data: { beadId, stateId, actionId, tool, outputFile: '/some/file' }
-      // status field intentionally absent
+      // status + evidenceHandle intentionally absent
     });
   }
 
@@ -125,9 +180,14 @@ afterEach(() => {
 
 // ── AC5 path: PASSED ──────────────────────────────────────────────────────────
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 describe('zog2.15 AC5: PASSED status satisfies gate', () => {
   it('PASSED tool with registered PASS verify() advances', async () => {
     const store = new FakeStatusStore();
+    // verify() is registered, so no artifact readability check is needed.
     store.setFlat('bd-zog2-15', 'Implementing', 'code', 'my_tool',
       ToolResultStatus.PASSED, '/proj/.pi/tool-output/bd-1/Implementing/code/my_tool/inv/output/o.json');
     registerVerify('my_tool', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
@@ -137,14 +197,24 @@ describe('zog2.15 AC5: PASSED status satisfies gate', () => {
     expect(result.failures).toHaveLength(0);
   });
 
-  it('PASSED tool with no registered verify() advances (NOT_APPLICABLE)', async () => {
-    const store = new FakeStatusStore();
-    store.setFlat('bd-zog2-15', 'Implementing', 'code', 'no_verify_tool',
-      ToolResultStatus.PASSED, '/proj/.pi/tool-output/bd-1/Implementing/code/no_verify_tool/inv/output/o.json');
-    // No verify() registered.
+  it('PASSED tool with no registered verify() advances when artifact is readable (NOT_APPLICABLE)', async () => {
+    // For presence-only tools, the gate checks artifact readability.
+    // Write a real file so the check passes.
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zog2-15-'));
+    try {
+      const outputFile = path.join(tmpDir, 'no_verify_tool', 'o.json');
+      fs.mkdirSync(path.dirname(outputFile), { recursive: true });
+      fs.writeFileSync(outputFile, '{"ok":true}');
+      const store = new FakeStatusStore();
+      store.setFlat('bd-zog2-15', 'Implementing', 'code', 'no_verify_tool',
+        ToolResultStatus.PASSED, outputFile);
+      // No verify() registered.
 
-    const result = await runVerifierGate(baseCtx, ['no_verify_tool'], store);
-    expect(result.pass).toBe(true);
+      const result = await runVerifierGate(baseCtx, ['no_verify_tool'], store);
+      expect(result.pass).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -214,41 +284,46 @@ describe('zog2.15 AC3 + AC5: UNAVAILABLE status always blocks gate', () => {
   });
 });
 
-// ── AC4 + AC5: unknown/malformed/missing status fails closed ──────────────────
+// ── AC4 + AC5: unknown/malformed/missing handles fail closed ──────────────────
+// pi-experiment-yhec: events without a valid canonical ToolEvidenceHandle are
+// blocked with EVIDENCE_HANDLE_INVALID. Non-canonical statuses ('SOME_FUTURE_STATUS')
+// and missing status fields result in EVIDENCE_HANDLE_INVALID because the handle
+// validator rejects them before the gate reads runStatus.
 
-describe('zog2.15 AC4 + AC5: unknown status fails closed with structured diagnostics', () => {
-  it('unknown status string fails closed with structured diagnostic', async () => {
+describe('zog2.15 AC4 + AC5 (yhec): events without valid canonical handles fail closed with EVIDENCE_HANDLE_INVALID', () => {
+  it('event with no evidenceHandle (outputFile-only) fails closed with EVIDENCE_HANDLE_INVALID', async () => {
+    // pi-experiment-yhec: outputFile-only events (no evidenceHandle) are rejected.
     const store = new FakeStatusStore();
-    store.setFlat('bd-zog2-15', 'Implementing', 'code', 'unknown_tool',
-      'SOME_FUTURE_STATUS', '/proj/.pi/tool-output/bd-1/Implementing/code/unknown_tool/inv/output/o.json');
+    store.setFlatNoHandle('bd-zog2-15', 'Implementing', 'code', 'unknown_tool', 'SOME_FUTURE_STATUS');
 
     const result = await runVerifierGate(baseCtx, ['unknown_tool'], store);
     expect(result.pass).toBe(false);
     expect(result.failures).toHaveLength(1);
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
+    // pi-experiment-yhec: no handle → EVIDENCE_HANDLE_INVALID (not TOOL_STATUS_UNRECOGNIZED).
+    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID);
     expect(result.failures[0].tool).toBe('unknown_tool');
-    // Diagnostic must include the unknown status value for debugging.
+    // Diagnostic mentions the missing handle.
     const reason = result.failures[0].reasons.join(' ');
-    expect(reason).toContain('SOME_FUTURE_STATUS');
+    expect(reason).toMatch(/canonical|evidenceHandle|outputFile-only|admissible/i);
   });
 
-  it('missing (undefined) status fails closed with structured diagnostic', async () => {
+  it('missing (undefined) status AND no handle fails closed with EVIDENCE_HANDLE_INVALID', async () => {
     const store = new FakeStatusStore();
     store.setFlatNoStatus('bd-zog2-15', 'Implementing', 'code', 'malformed_tool');
 
     const result = await runVerifierGate(baseCtx, ['malformed_tool'], store);
     expect(result.pass).toBe(false);
     expect(result.failures).toHaveLength(1);
-    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_STATUS_UNRECOGNIZED);
+    expect(result.failures[0].kind).toBe(VerifierGateBlockKind.EVIDENCE_HANDLE_INVALID);
     expect(result.failures[0].tool).toBe('malformed_tool');
-    // Diagnostic must mention the missing/undefined status.
+    // Diagnostic mentions the missing canonical handle.
     const reason = result.failures[0].reasons.join(' ');
-    expect(reason).toMatch(/undefined|missing|unrecognized|malformed/i);
+    expect(reason).toMatch(/canonical|evidenceHandle|outputFile-only|admissible/i);
   });
 
-  it('missing status field does not invoke verify() callback', async () => {
+  it('missing handle does not invoke verify() callback', async () => {
     const store = new FakeStatusStore();
-    store.setFlatNoStatus('bd-zog2-15', 'Implementing', 'code', 'malformed_tool2');
+    store.setFlatNoHandle('bd-zog2-15', 'Implementing', 'code', 'malformed_tool2');
     let verifyCalled = false;
     registerVerify('malformed_tool2', () => {
       verifyCalled = true;
@@ -341,13 +416,13 @@ describe('zog2.15 AC4: perTool diagnostics populated for all block paths', () =>
     expect(result.perTool[0].reasons[0]).toMatch(/UNAVAILABLE/i);
   });
 
-  it('perTool carries reasons for unknown status block', async () => {
+  it('perTool carries reasons for missing-handle block (no canonical evidenceHandle on event)', async () => {
+    // pi-experiment-yhec: events without canonical handles → EVIDENCE_HANDLE_INVALID.
     const store = new FakeStatusStore();
-    store.setFlat('bd-zog2-15', 'Implementing', 'code', 'future_tool',
-      'FUTURE_STATUS', '/path/output.json');
+    store.setFlatNoHandle('bd-zog2-15', 'Implementing', 'code', 'future_tool', 'FUTURE_STATUS');
 
     const result = await runVerifierGate(baseCtx, ['future_tool'], store);
-    expect(result.perTool[0].reasons.join(' ')).toContain('FUTURE_STATUS');
+    expect(result.perTool[0].reasons.join(' ')).toMatch(/canonical|evidenceHandle|admissible/i);
   });
 
   it('rejectMessage names the tool and block kind for UNAVAILABLE', async () => {
@@ -360,13 +435,13 @@ describe('zog2.15 AC4: perTool diagnostics populated for all block paths', () =>
     expect(result.rejectMessage).toContain('TOOL_UNAVAILABLE');
   });
 
-  it('rejectMessage names the tool and block kind for unknown status', async () => {
+  it('rejectMessage names the tool and block kind for missing-handle (EVIDENCE_HANDLE_INVALID)', async () => {
+    // pi-experiment-yhec: events without canonical handles → EVIDENCE_HANDLE_INVALID.
     const store = new FakeStatusStore();
-    store.setFlat('bd-zog2-15', 'Implementing', 'code', 'mystery_tool',
-      'MYSTERY', '/path/output.json');
+    store.setFlatNoHandle('bd-zog2-15', 'Implementing', 'code', 'mystery_tool', 'MYSTERY');
 
     const result = await runVerifierGate(baseCtx, ['mystery_tool'], store);
     expect(result.rejectMessage).toContain('mystery_tool');
-    expect(result.rejectMessage).toContain('TOOL_STATUS_UNRECOGNIZED');
+    expect(result.rejectMessage).toContain('EVIDENCE_HANDLE_INVALID');
   });
 });
