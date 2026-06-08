@@ -175,8 +175,8 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     // previousRunId: optional — only worker-sourced restarts carry the prior
     //   session ID; supervisor-triggered restarts have no prior worker session.
     // actionId: optional — supervisor-triggered restarts have no actionId.
-    // handover: present on most signals; absent on supervisor-triggered ones.
-    optionalFields: ['previousRunId', 'handover', 'actionId']
+    // narrativeHandover: optional non-authoritative preview (6q0y.36).
+    optionalFields: ['previousRunId', 'narrativeHandover', 'actionId']
   },
   [DomainEventName.HARNESS_RESTART_REQUESTED]: {
     version: 2,
@@ -185,7 +185,8 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     // targetState: required — all writers now populate it explicitly.
     // previousRunId: optional — supervisor-triggered restarts have no prior session.
     // actionId: optional — supervisor-triggered restarts have no actionId.
-    optionalFields: ['previousRunId', 'handover', 'actionId']
+    // narrativeHandover: optional non-authoritative preview (6q0y.36).
+    optionalFields: ['previousRunId', 'narrativeHandover', 'actionId']
   },
 
   // ── Teammate / worktree ────────────────────────────────────────────────────
@@ -559,6 +560,17 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'CRITICAL',
     optionalFields: ['stateId']
   },
+
+  // pi-experiment-6q0y.36: Restart handoff rejection diagnostic.
+  // DIAGNOSTIC ONLY — emitted when a CONTEXT_RESTART_REQUESTED or
+  // HARNESS_RESTART_REQUESTED signal is rejected by evidence-aware handoff
+  // validation (AC1/AC3). No state mutation results from this event.
+  // actionId is optional (absent on auto-restart path).
+  [DomainEventName.RESTART_HANDOFF_REJECTED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['actionId']
+  },
 };
 
 /**
@@ -839,5 +851,15 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   [DomainEventName.COMPACTION_SUMMARY_RECORDED]: [
     'beadId', 'artifactPath', 'artifactBytes', 'artifactSha256',
     'sourceEventIds', 'nonAuthoritative'
+  ],
+
+  // pi-experiment-6q0y.36: Restart handoff rejection diagnostic.
+  // DIAGNOSTIC ONLY — no state mutation. Emitted when a CONTEXT_RESTART_REQUESTED
+  // or HARNESS_RESTART_REQUESTED signal is rejected by the evidence-aware handoff
+  // validation gate (AC1/AC3). replayImpact: INFORMATIONAL.
+  // Required: beadId, stateId, transitionEvent, idempotencyKey, rejections, diagnostic.
+  // Optional: actionId (may be absent on auto-restart path).
+  [DomainEventName.RESTART_HANDOFF_REJECTED]: [
+    'beadId', 'stateId', 'transitionEvent', 'idempotencyKey', 'rejections', 'diagnostic'
   ],
 };

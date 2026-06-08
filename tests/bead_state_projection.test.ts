@@ -195,7 +195,8 @@ describe('BeadStateProjection.projectBeadStateChartFromEvents', () => {
         stateId: 'Planning',
         targetState: 'Planning',
         transitionEvent: 'HARNESS_RESTART',
-        handover: noisy,
+        // 6q0y.36: restart events use narrativeHandover (no legacy .handover field).
+        narrativeHandover: noisy,
         restartId: 'restart-transient-1'
       })
     ];

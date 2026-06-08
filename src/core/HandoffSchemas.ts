@@ -65,7 +65,16 @@ export const HandoffSchemaId = {
   /** pi-experiment-6q0y.40: fan-out branch result payload (per-branch outcome + evidence). */
   FANOUT_BRANCH_RESULT:      'harness.fanout.branchResult',
   /** pi-experiment-6q0y.40: joined outcome after all fan-out branches complete. */
-  FANOUT_JOINED_OUTCOME:     'harness.fanout.joinedOutcome'
+  FANOUT_JOINED_OUTCOME:     'harness.fanout.joinedOutcome',
+  /**
+   * pi-experiment-6q0y.36: evidence-aware restart handoff contract.
+   *
+   * Registered for every CONTEXT_RESTART_REQUESTED / HARNESS_RESTART_REQUESTED
+   * handoff. Validates that a restart carries deterministic evidenceRefs plus
+   * either a handoverArtifactPath or a configured compaction-artifact pointer.
+   * Summary-only restarts (no evidenceRefs, no artifact) FAIL this schema.
+   */
+  RESTART_HANDOFF_CONTRACT:  'harness.restart.handoffContract'
 } as const;
 
 export type HandoffSchemaId = typeof HandoffSchemaId[keyof typeof HandoffSchemaId];
@@ -1032,6 +1041,190 @@ const fanoutJoinedOutcomeEntry: AnnotatedHandoffEntry = {
 };
 
 // ---------------------------------------------------------------------------
+// pi-experiment-6q0y.36: Evidence-aware restart handoff contract
+//
+// harness.restart.handoffContract — registered for every CONTEXT_RESTART_REQUESTED
+// / HARNESS_RESTART_REQUESTED boundary. Validates that a restart carries
+// deterministic evidenceRefs[] plus either a handoverArtifactPath (with bytes +
+// sha256) OR a configured compaction-artifact pointer.
+//
+// Summary-only restarts (no evidenceRefs, no artifact ref) FAIL this schema
+// and are rejected BEFORE signal/event admission (AC1/AC3).
+//
+// FIELD DISTINCTION:
+//   evidenceRefs[]          — deterministic evidence (authoritative)
+//   handoverArtifactPath    — explicit artifact path (with bytes+sha256)
+//   narrativeSummary        — non-authoritative preview (never used for progress)
+//   narrativeNonAuthoritative — always true when narrative is present
+// ---------------------------------------------------------------------------
+
+const restartHandoffContractEntry: AnnotatedHandoffEntry = {
+  id: HandoffSchemaId.RESTART_HANDOFF_CONTRACT,
+  version: '1.0.0',
+  owner: 'src/core/RestartHandoffValidation.ts',
+  replayPolicy: 'CRITICAL',
+  compatibilityPolicy: 'ADDITIVE_ONLY',
+  llmAuthoredFields: ['narrativeSummary', 'narrativeEvidence', 'narrativeHandover'],
+  deterministicEvidenceFields: [
+    'beadId', 'stateId', 'actionId', 'transitionEvent',
+    'restartId', 'targetState', 'evidenceRefs',
+    'handoverArtifactPath'
+  ],
+  jsonSchema: {
+    $schema: 'http://json-schema.org/draft-07/schema#',
+    type: 'object',
+    required: ['beadId', 'stateId', 'transitionEvent', 'restartId', 'targetState', 'evidenceRefs'],
+    additionalProperties: true,
+    properties: {
+      beadId:          { type: 'string', minLength: 1 },
+      stateId:         { type: 'string', minLength: 1 },
+      transitionEvent: { type: 'string', minLength: 1 },
+      restartId:       { type: 'string', minLength: 1 },
+      targetState:     { type: 'string', minLength: 1 },
+      // evidenceRefs: required array of deterministic artifact refs (AC1/AC2).
+      // May be empty when a compactionPointer is present (configured compaction-artifact path).
+      // Non-emptiness is enforced semantically by validateRestartHandoffContract,
+      // not structurally here (to allow the auto-restart/compaction-pointer path).
+      evidenceRefs: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['schemaId', 'semanticArtifactPath', 'bytes', 'sha256'],
+          additionalProperties: true,
+          properties: {
+            schemaId:             { type: 'string', minLength: 1 },
+            semanticArtifactPath: { type: 'string', minLength: 1 },
+            bytes:                { type: 'integer', minimum: 0 },
+            sha256:               { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' },
+            sourceEventIds:       { type: 'array', items: { type: 'string' } }
+          }
+        }
+      },
+      // handoverArtifactPath: optional explicit artifact path (AC1 path a).
+      handoverArtifactPath: { type: 'string', minLength: 1 },
+      // narrativeSummary: non-authoritative preview text (AC3/AC4). Structural type only.
+      narrativeSummary:         { type: 'string' },
+      narrativeEvidence:        { type: 'string' },
+      narrativeHandover:        { type: 'string' },
+      // narrativeNonAuthoritative: always true when narrative fields are present (AC4).
+      narrativeNonAuthoritative: { type: 'boolean', enum: [true] }
+    }
+  },
+  positiveFixtures: [
+    {
+      label: 'manual handoff with evidenceRefs + handoverArtifactPath',
+      value: {
+        beadId: 'pi-experiment-6q0y.36',
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'a'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: [
+          {
+            schemaId: 'harness.handoff.workerCompletion',
+            semanticArtifactPath: 'implementation/handoff.json',
+            bytes: 1024,
+            sha256: 'a'.repeat(64),
+            sourceEventIds: []
+          }
+        ],
+        handoverArtifactPath: 'implementation/handoff.json',
+        narrativeSummary: 'Context overflow — restarting with evidence.',
+        narrativeNonAuthoritative: true
+      }
+    },
+    {
+      label: 'configured compaction-artifact handoff (no explicit handoverArtifactPath)',
+      value: {
+        beadId: 'pi-experiment-6q0y.36',
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'b'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: [
+          {
+            schemaId: 'harness.handoff.workerCompletion',
+            semanticArtifactPath: '.pi/artifacts/pi-experiment-6q0y.36/compaction-summary.json',
+            bytes: 2048,
+            sha256: 'b'.repeat(64),
+            sourceEventIds: ['evt-abc']
+          }
+        ]
+      }
+    }
+  ],
+  negativeFixtures: [
+    {
+      // Note: summary-only (evidenceRefs: []) is SEMANTICALLY rejected by
+      // validateRestartHandoffContract, not STRUCTURALLY by this JSON schema.
+      // The JSON schema only enforces structural type constraints on evidenceRefs items.
+      // This fixture tests structural failure: evidenceRefs not an array.
+      label: 'evidenceRefs must be an array (not a string)',
+      value: {
+        beadId: 'pi-experiment-6q0y.36',
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'c'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: 'not-an-array'
+      }
+    },
+    {
+      label: 'evidenceRef missing sha256 (bad-hash)',
+      value: {
+        beadId: 'pi-experiment-6q0y.36',
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'd'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: [
+          {
+            schemaId: 'harness.handoff.workerCompletion',
+            semanticArtifactPath: 'implementation/handoff.json',
+            bytes: 1024
+          }
+        ]
+      }
+    },
+    {
+      label: 'evidenceRef sha256 wrong length (not 64 hex chars)',
+      value: {
+        beadId: 'pi-experiment-6q0y.36',
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'e'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: [
+          {
+            schemaId: 'harness.handoff.workerCompletion',
+            semanticArtifactPath: 'implementation/handoff.json',
+            bytes: 1024,
+            sha256: 'abc123'
+          }
+        ]
+      }
+    },
+    {
+      label: 'missing beadId',
+      value: {
+        stateId: 'Implementation',
+        transitionEvent: 'CONTEXT_RESTART',
+        restartId: 'f'.repeat(32),
+        targetState: 'Implementation',
+        evidenceRefs: [
+          {
+            schemaId: 'harness.handoff.workerCompletion',
+            semanticArtifactPath: 'implementation/handoff.json',
+            bytes: 1024,
+            sha256: 'a'.repeat(64)
+          }
+        ]
+      }
+    }
+  ]
+};
+
+// ---------------------------------------------------------------------------
 // Anti-drift boundary inventory for handoff schemas (dsm2.3)
 //
 // Every HandoffSchemaId value MUST be in HANDOFF_BOUNDARY_IDS and registered.
@@ -1059,6 +1252,7 @@ schemaRegistry.register(workerCommandEntry);
 schemaRegistry.register(workerCompletionEntry);
 schemaRegistry.register(fanoutBranchResultEntry);
 schemaRegistry.register(fanoutJoinedOutcomeEntry);
+schemaRegistry.register(restartHandoffContractEntry);
 
 // ---------------------------------------------------------------------------
 // validateHandoffPayload — the shared boundary validator

@@ -709,7 +709,8 @@ settings:
           targetState: 'Implementation',
           transitionEvent: 'CONTEXT_RESTART',
           actionKey: 'workflow=fixture-workflow-v1/state=Implementation/action=surgical-execution',
-          handover: noisyContextOverflow,
+          // 6q0y.36: restart events use narrativeHandover (no legacy .handover field).
+          narrativeHandover: noisyContextOverflow,
           restartId: 'restart-e2-lifecycle'
         }
       }
@@ -753,7 +754,8 @@ settings:
           targetState: 'Planning',
           transitionEvent: 'HARNESS_RESTART',
           actionKey: 'workflow=fixture-workflow-v1/state=Planning/action=formulate-plan',
-          handover: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
+          // 6q0y.36: restart events use narrativeHandover (no legacy .handover field).
+          narrativeHandover: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           summary: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           evidence: 'Agent lifecycle failure during turn_end: WebSocket closed 1000',
           restartId: 'restart-e2-transient'

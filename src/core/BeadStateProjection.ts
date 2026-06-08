@@ -232,8 +232,40 @@ export class BeadStateProjection {
       projection.restartTargetState = data.targetState;
       projection.currentState = data.targetState;
       if (includeDetails) completeAction(this.completedActionFromData(data, workflowVersion));
-      if (includeDetails && this.eventAppliesToWorkflow(data, workflowVersion) && typeof data.handover === 'string' && data.stateId) {
-        projection.handovers[data.stateId] = this.compactHandover(data.handover);
+      // pi-experiment-6q0y.36 AC4: narrative is stored separately as narrativeSummary/
+      // narrativeNonAuthoritative on the event. The projection uses narrativeSummary
+      // (non-authoritative) for the preview label, NEVER the legacy summary/handover
+      // fields for progress decisions.
+      // AC5: build compact handoff preview from evidenceRefs (authoritative pointers only).
+      if (includeDetails) {
+        const evidenceRefs = Array.isArray(data.evidenceRefs) ? (data.evidenceRefs as Array<Record<string, unknown>>) : [];
+        const evidenceArtifactPaths = evidenceRefs
+          .map(r => r.semanticArtifactPath)
+          .filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+        const handoverArtifactPath = typeof data.handoverArtifactPath === 'string' ? data.handoverArtifactPath : undefined;
+        if (handoverArtifactPath && !evidenceArtifactPaths.includes(handoverArtifactPath)) {
+          evidenceArtifactPaths.push(handoverArtifactPath);
+        }
+        const hasCompactionPointer =
+          data.compactionPointer !== undefined && data.compactionPointer !== null;
+        // Narrative preview: labelled non-authoritative; NEVER used for progress decisions (AC5).
+        const narrativeSummary = typeof data.narrativeSummary === 'string'
+          ? data.narrativeSummary
+          : undefined;
+        projection.restartHandoffPreview = {
+          evidenceRefCount: evidenceRefs.length,
+          evidenceArtifactPaths: [...new Set(evidenceArtifactPaths)],
+          hasCompactionPointer: Boolean(hasCompactionPointer),
+          ...(narrativeSummary !== undefined
+            ? { narrativePreview: `[non-authoritative preview] ${narrativeSummary}` }
+            : {})
+        };
+      }
+      // AC4/AC5: narrativeHandover is the canonical non-authoritative handover preview
+      // for restart events (6q0y.36: no legacy .handover field written).
+      // Written to the handovers map for display only — NEVER used for gate/routing decisions.
+      if (includeDetails && this.eventAppliesToWorkflow(data, workflowVersion) && typeof data.narrativeHandover === 'string' && data.stateId) {
+        projection.handovers[data.stateId] = this.compactHandover(data.narrativeHandover);
       }
     };
 

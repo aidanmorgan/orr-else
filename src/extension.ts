@@ -181,6 +181,13 @@ import {
   extractRestartCorrelation
 } from './core/RestartCorrelation.js';
 import {
+  validateRestartHandoffContract,
+  resolveCompactionPointer,
+  buildRestartEventPayload,
+  type RestartEvidenceRef,
+  type RestartHandoffContract
+} from './core/RestartHandoffValidation.js';
+import {
   nativeToolPath,
   toSlashPath,
   relativeOperationalPath,
@@ -3157,24 +3164,75 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
     const beadEventsForRestart = await services.eventStore.eventsForBead(beadId);
     const restartAttempt = computeRestartAttempt(beadEventsForRestart, beadId, event.stateId);
-    await services.eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, {
-      beadId,
-      workerId: event.workerId,
-      sessionStateId: event.sessionStateId,
-      idempotencyKey: event.idempotencyKey,
-      stateId: event.stateId,
-      targetState: nextState,
-      transitionEvent: event.transitionEvent,
-      actionId: event.actionId,
-      summary: event.summary,
-      evidence: event.evidence,
-      handover: event.handover,
-      // Restart lifecycle correlation fields (pi-experiment-nyug)
-      restartId: deriveRestartId(event.idempotencyKey),
-      previousRunId: event.sessionStateId,
-      reason: event.transitionEvent,
-      attempt: restartAttempt
-    });
+
+    // pi-experiment-6q0y.36: evidence-aware handoff validation before admission.
+    // A restart carrying ONLY narrative (no evidenceRefs, no handoff/compaction
+    // artifact) is REJECTED here — before signal/event admission (AC1/AC3).
+    // Validation is fail-closed: any rejection blocks the record write.
+    {
+      const anyEvent = event as unknown as Record<string, unknown>;
+      const evidenceRefs = Array.isArray(anyEvent.evidenceRefs)
+        ? (anyEvent.evidenceRefs as RestartEvidenceRef[])
+        : [];
+      const handoverArtifactPath =
+        typeof anyEvent.handoverArtifactPath === 'string'
+          ? anyEvent.handoverArtifactPath
+          : undefined;
+      const contract: RestartHandoffContract = {
+        evidenceRefs,
+        handoverArtifactPath,
+        narrativeSummary: event.summary
+      };
+      const validationResult = validateRestartHandoffContract(contract, beadEventsForRestart);
+      if (!validationResult.admitted) {
+        const reasons = validationResult.rejections.map(r => `${r.reason}: ${r.diagnostic}`).join(' | ');
+        Logger.warn(Component.ORR_ELSE, 'CONTEXT_RESTART_REQUESTED rejected: evidence-aware handoff validation failed', {
+          beadId,
+          stateId: event.stateId,
+          actionId: event.actionId,
+          rejections: validationResult.rejections.map(r => r.reason),
+          diagnostic: reasons
+        });
+        await services.eventStore.record(DomainEventName.RESTART_HANDOFF_REJECTED, {
+          beadId,
+          stateId: event.stateId,
+          actionId: event.actionId ?? undefined,
+          transitionEvent: event.transitionEvent,
+          idempotencyKey: event.idempotencyKey,
+          rejections: validationResult.rejections.map(r => ({ reason: r.reason, diagnostic: r.diagnostic })),
+          diagnostic: reasons
+        }).catch(() => {});
+        ack?.send();
+        await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+          Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after restart rejection', { beadId, error: String(error) });
+        });
+        currentSupervisor.markBeadExited(beadId);
+        return;
+      }
+
+      // Admitted: build evidence-aware event payload (AC4: narrative stored separately).
+      const compactionPointer = resolveCompactionPointer(beadEventsForRestart);
+      const restartPayload = buildRestartEventPayload({
+        beadId: String(beadId),
+        workerId: String(event.workerId),
+        sessionStateId: event.sessionStateId,
+        idempotencyKey: event.idempotencyKey,
+        stateId: event.stateId,
+        targetState: nextState,
+        transitionEvent: event.transitionEvent,
+        actionId: event.actionId,
+        narrativeSummary: event.summary,
+        narrativeHandover: event.handover,
+        evidenceRefs,
+        handoverArtifactPath,
+        compactionPointer,
+        restartId: deriveRestartId(event.idempotencyKey),
+        previousRunId: event.sessionStateId,
+        attempt: restartAttempt
+      });
+      await services.eventStore.record(DomainEventName.CONTEXT_RESTART_REQUESTED, restartPayload);
+      // Fall through to cleanup (ack?.send, releaseTool, markBeadExited).
+    }
   }
 
   if (event.type === TeammateEventType.HARNESS_RESTART_REQUESTED) {
@@ -3182,24 +3240,73 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     const nextState = services.flowManager.restartTargetState(state, event.stateId, event.transitionEvent);
     const beadEventsForRestart = await services.eventStore.eventsForBead(beadId);
     const restartAttempt = computeRestartAttempt(beadEventsForRestart, beadId, event.stateId);
-    await services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
-      beadId,
-      workerId: event.workerId,
-      sessionStateId: event.sessionStateId,
-      idempotencyKey: event.idempotencyKey,
-      stateId: event.stateId,
-      targetState: nextState,
-      transitionEvent: event.transitionEvent,
-      actionId: event.actionId,
-      summary: event.summary,
-      evidence: event.evidence,
-      handover: event.handover,
-      // Restart lifecycle correlation fields (pi-experiment-nyug)
-      restartId: deriveRestartId(event.idempotencyKey),
-      previousRunId: event.sessionStateId,
-      reason: event.transitionEvent,
-      attempt: restartAttempt
-    });
+
+    // pi-experiment-6q0y.36: evidence-aware handoff validation before admission.
+    // Same gate as CONTEXT_RESTART_REQUESTED (AC1/AC3).
+    {
+      const anyEvent = event as unknown as Record<string, unknown>;
+      const evidenceRefs = Array.isArray(anyEvent.evidenceRefs)
+        ? (anyEvent.evidenceRefs as RestartEvidenceRef[])
+        : [];
+      const handoverArtifactPath =
+        typeof anyEvent.handoverArtifactPath === 'string'
+          ? anyEvent.handoverArtifactPath
+          : undefined;
+      const contract: RestartHandoffContract = {
+        evidenceRefs,
+        handoverArtifactPath,
+        narrativeSummary: event.summary
+      };
+      const validationResult = validateRestartHandoffContract(contract, beadEventsForRestart);
+      if (!validationResult.admitted) {
+        const reasons = validationResult.rejections.map(r => `${r.reason}: ${r.diagnostic}`).join(' | ');
+        Logger.warn(Component.ORR_ELSE, 'HARNESS_RESTART_REQUESTED rejected: evidence-aware handoff validation failed', {
+          beadId,
+          stateId: event.stateId,
+          actionId: event.actionId,
+          rejections: validationResult.rejections.map(r => r.reason),
+          diagnostic: reasons
+        });
+        await services.eventStore.record(DomainEventName.RESTART_HANDOFF_REJECTED, {
+          beadId,
+          stateId: event.stateId,
+          actionId: event.actionId ?? undefined,
+          transitionEvent: event.transitionEvent,
+          idempotencyKey: event.idempotencyKey,
+          rejections: validationResult.rejections.map(r => ({ reason: r.reason, diagnostic: r.diagnostic })),
+          diagnostic: reasons
+        }).catch(() => {});
+        ack?.send();
+        await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+          Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after restart rejection', { beadId, error: String(error) });
+        });
+        currentSupervisor.markBeadExited(beadId);
+        return;
+      }
+
+      // Admitted: build evidence-aware event payload (AC4: narrative stored separately).
+      const compactionPointer = resolveCompactionPointer(beadEventsForRestart);
+      const restartPayload = buildRestartEventPayload({
+        beadId: String(beadId),
+        workerId: String(event.workerId),
+        sessionStateId: event.sessionStateId,
+        idempotencyKey: event.idempotencyKey,
+        stateId: event.stateId,
+        targetState: nextState,
+        transitionEvent: event.transitionEvent,
+        actionId: event.actionId,
+        narrativeSummary: event.summary,
+        narrativeHandover: event.handover,
+        evidenceRefs,
+        handoverArtifactPath,
+        compactionPointer,
+        restartId: deriveRestartId(event.idempotencyKey),
+        previousRunId: event.sessionStateId,
+        attempt: restartAttempt
+      });
+      await services.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, restartPayload);
+      // Fall through to cleanup (ack?.send, releaseTool, markBeadExited).
+    }
   }
 
   // pi-experiment-x0zh: release any held ack for STATE_FAILED/STATE_BLOCKED
@@ -4841,11 +4948,29 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.REQUEST_CONTEXT_RESTART,
-      description: 'Request a fresh Pi session with a dense handover to reset context pollution.',
+      // pi-experiment-6q0y.36: evidence-aware restart. Requires evidenceRefs[] plus
+      // either handoverArtifactPath OR a configured compaction-artifact pointer.
+      // summary-only requests are REJECTED before admission (AC1/AC3).
+      description: 'Request a fresh Pi session with an evidence-aware handoff to reset context pollution. Requires evidenceRefs[] (with schemaId, semanticArtifactPath, bytes, sha256) plus either handoverArtifactPath or a configured compaction-artifact pointer. Summary-only requests are rejected.',
       parameters: Type.Object({
-        summary: Type.String({ description: 'Handover summary for the next session' })
+        summary: Type.String({ description: 'Non-authoritative narrative preview for the next session (stored separately; never used for progress decisions)' }),
+        evidenceRefs: Type.Array(
+          Type.Object({
+            schemaId: Type.String({ description: 'Registered schema ID for this artifact' }),
+            semanticArtifactPath: Type.String({ description: 'Semantic path of the artifact' }),
+            bytes: Type.Number({ description: 'Artifact size in bytes' }),
+            sha256: Type.String({ description: 'SHA-256 hex digest of the artifact (64 chars)' }),
+            sourceEventIds: Type.Optional(Type.Array(Type.String(), { description: 'Domain event IDs this ref was derived from' }))
+          }),
+          { description: 'Deterministic evidence refs (required; non-empty for admitted restarts)' }
+        ),
+        handoverArtifactPath: Type.Optional(Type.String({ description: 'Explicit handoff artifact path (optional when compaction pointer available)' }))
       }),
-      execute: async ({ summary }: { summary: string }, ctx: ExtensionContext) => {
+      execute: async ({ summary, evidenceRefs, handoverArtifactPath }: {
+        summary: string;
+        evidenceRefs: RestartEvidenceRef[];
+        handoverArtifactPath?: string;
+      }, ctx: ExtensionContext) => {
         const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
         const config = await services.configLoader.load();
@@ -4857,7 +4982,10 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           transitionEvent: config.settings.contextRestartEvent || EventName.CONTEXT_RESTART,
           summary,
           evidence: summary,
-          handover: summary
+          handover: summary,
+          // pi-experiment-6q0y.36: carry evidence-aware handoff contract fields.
+          evidenceRefs,
+          ...(handoverArtifactPath !== undefined ? { handoverArtifactPath } : {})
         });
 
         await postWorkerSignal(services, event);

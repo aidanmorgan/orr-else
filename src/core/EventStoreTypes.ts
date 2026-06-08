@@ -139,6 +139,24 @@ export interface BeadStateChartProjection {
   restartEvent?: string;
   restartFromState?: string;
   restartTargetState?: string;
+  /**
+   * pi-experiment-6q0y.36 AC5: compact handoff preview for the most recent
+   * admitted restart. Shows evidence artifact pointers ONLY — narrative is
+   * labelled non-authoritative and never used for progress decisions.
+   */
+  restartHandoffPreview?: {
+    /** Count of evidenceRefs in the admitted handoff contract. */
+    evidenceRefCount: number;
+    /** Semantic artifact paths from evidenceRefs (deterministic). */
+    evidenceArtifactPaths: string[];
+    /** Whether the admission used a configured compaction-artifact pointer. */
+    hasCompactionPointer: boolean;
+    /**
+     * Non-authoritative narrative preview — labelled as preview only.
+     * NEVER used for progress projection, gate evaluation, or reconstruction.
+     */
+    narrativePreview?: string;
+  };
   mergeAndCommit?: {
     status: MergeAndCommitStatus;
     branchName?: string;

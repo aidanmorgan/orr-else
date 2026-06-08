@@ -460,6 +460,22 @@ export enum DomainEventName {
   ROUTE_ADMISSION_REJECTED = 'ROUTE_ADMISSION_REJECTED',
 
   /**
+   * Emitted when a CONTEXT_RESTART_REQUESTED or HARNESS_RESTART_REQUESTED signal
+   * is rejected by the evidence-aware handoff validation gate (pi-experiment-6q0y.36 AC1/AC3).
+   *
+   * Carries: { beadId, stateId, actionId?, transitionEvent, idempotencyKey,
+   *   rejections (array of {reason, diagnostic}), diagnostic (combined string) }.
+   *
+   * reason categories: SUMMARY_ONLY | BAD_HASH | UNREGISTERED_SCHEMA |
+   *   STALE_EVENT_IDS | INACCESSIBLE_PATH.
+   *
+   * DIAGNOSTIC ONLY — no state mutation. The restart signal is NOT recorded and
+   * the bead lease is released. The worker is signaled to ack + exit.
+   * replayImpact: INFORMATIONAL (no state change).
+   */
+  RESTART_HANDOFF_REJECTED = 'RESTART_HANDOFF_REJECTED',
+
+  /**
    * Emitted when a loop fingerprint counter reaches the configured maxLoops
    * threshold (pi-experiment-6q0y.49 AC5).
    *
