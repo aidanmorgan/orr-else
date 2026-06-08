@@ -2014,6 +2014,23 @@
               }
             ]
           },
+          "compactionSummary": {
+            "type": "object",
+            "description": "pi-experiment-6q0y.35: Optional per-state deterministic context compaction summary. DEFAULT DISABLED — when absent or enabled:false, Pi.dev autocompaction is unchanged and no Orr Else compaction artifact or pointer event is generated (AC1/AC2 no-op). When enabled:true, the harness generates a bounded (≤12KB) deterministic JSON summary artifact from schema-valid events and records a NON-AUTHORITATIVE replay-critical pointer event. The summary NEVER satisfies any artifact-first gate or route condition (AC7). Startup lint rejects invalid settings, unknown state IDs, and compaction routes not in the statechart vocabulary (AC8).",
+            "required": ["enabled"],
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Whether to generate a compaction summary artifact for this state. Default: false (Pi.dev autocompaction unchanged, no Orr Else injection)."
+              },
+              "compactionRoute": {
+                "type": "string",
+                "description": "The statechart outcome route event name to declare after writing the summary. Required when enabled:true. Must reference a declared event in the statechart vocabulary (startup lint rejects unknown routes, AC8).",
+                "minLength": 1
+              }
+            }
+          },
           "handoverTemplate": {
             "type": "string"
           },

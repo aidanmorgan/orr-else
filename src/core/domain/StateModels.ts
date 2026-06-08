@@ -966,6 +966,47 @@ export interface SDLCState {
    *   tool with expectsVerify:true has no registered verify() callback.
    */
   routeEvidence?: Record<string, RequiredTool[]>;
+  /**
+   * pi-experiment-6q0y.35: Optional per-state deterministic context compaction summary.
+   *
+   * DEFAULT DISABLED — when absent or enabled:false, Pi.dev autocompaction is the ONLY
+   * compaction behavior and no Orr Else compaction summary artifact or pointer event is
+   * generated (AC1/AC2 no-op).
+   *
+   * When enabled:true, the harness generates a deterministic JSON compaction summary
+   * artifact (≤12KB) from schema-valid events and writes a NON-AUTHORITATIVE replay-
+   * critical pointer event. The summary is NEVER authoritative gate evidence and CANNOT
+   * satisfy any artifact-first or route gate (AC7).
+   *
+   * compactionRoute: the statechart outcome to emit after writing the summary artifact.
+   *   Must be in the declared statechart vocabulary (AC8 startup lint).
+   *
+   * Example:
+   *   compactionSummary:
+   *     enabled: true
+   *     compactionRoute: CONTEXT_COMPACTED
+   */
+  compactionSummary?: CompactionSummaryConfig;
+}
+
+/**
+ * pi-experiment-6q0y.35: Per-state deterministic context compaction summary configuration.
+ *
+ * enabled: When true, generate a bounded JSON summary artifact from schema-valid events.
+ *          Default false (Pi.dev autocompaction unchanged, no Orr Else injection).
+ * compactionRoute: Statechart outcome to declare when the summary is written.
+ *          Must reference a declared event in the statechart vocabulary.
+ *          Required when enabled:true (startup lint rejects absent route, AC8).
+ */
+export interface CompactionSummaryConfig {
+  /** Whether to generate a compaction summary artifact for this state. Default: false. */
+  enabled: boolean;
+  /**
+   * The statechart outcome route event name to declare after writing the summary.
+   * Must be in the declared statechart vocabulary (AC8 startup lint rejects unknown routes).
+   * Required when enabled is true.
+   */
+  compactionRoute?: string;
 }
 
 export interface HarnessConfig {

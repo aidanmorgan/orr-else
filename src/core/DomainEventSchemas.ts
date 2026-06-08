@@ -546,6 +546,19 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'INFORMATIONAL',
     optionalFields: ['command', 'sanitizedStderr']
   },
+
+  // pi-experiment-6q0y.35: Compaction summary pointer event.
+  // REPLAY-CRITICAL: listed in REPLAY_CRITICAL_EVENT_TYPES; the pointer must
+  //   survive compaction so history reconstruction can locate the summary artifact.
+  // Only emitted when compactionSummary.enabled:true is configured for a state.
+  //   When the setting is absent or disabled (AC1/AC2), this event is NEVER emitted.
+  // nonAuthoritative is always true — the artifact is a digest only.
+  // stateId is optional: may be absent if the run context has no stateId (edge path).
+  [DomainEventName.COMPACTION_SUMMARY_RECORDED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['stateId']
+  },
 };
 
 /**
@@ -813,5 +826,18 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   // Optional: command (failed command string), sanitizedStderr (redacted stderr ≤500 chars).
   [DomainEventName.V2_SUBSTRATE_PREFLIGHT_FAILED]: [
     'substrate', 'projectRoot', 'diagnostic'
+  ],
+
+  // pi-experiment-6q0y.35: Compaction summary pointer event.
+  // REPLAY-CRITICAL: listed in REPLAY_CRITICAL_EVENT_TYPES.
+  // Required: beadId (bead identity), artifactPath (where the summary lives),
+  //   artifactBytes (file size), artifactSha256 (integrity hash),
+  //   sourceEventIds (IDs of schema-valid events the summary was derived from),
+  //   nonAuthoritative (always true — the summary NEVER satisfies any gate).
+  // stateId: optional — may be absent on edge paths where the run has no stateId.
+  // This event is NEVER emitted when compactionSummary is absent or disabled (AC1/AC2 no-op).
+  [DomainEventName.COMPACTION_SUMMARY_RECORDED]: [
+    'beadId', 'artifactPath', 'artifactBytes', 'artifactSha256',
+    'sourceEventIds', 'nonAuthoritative'
   ],
 };

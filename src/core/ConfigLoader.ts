@@ -2991,6 +2991,85 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.35 AC8: Validate per-state compaction summary declarations.
+   *
+   * Three startup-fatal checks:
+   *   (a) Invalid compaction settings: compactionSummary must be an object with a
+   *       boolean `enabled` field. Any non-object value is rejected.
+   *   (b) Unknown state IDs: not possible here (we iterate config.states which is
+   *       the authoritative state map); handled implicitly.
+   *   (c) compactionRoute absent from statechart vocabulary: when enabled:true AND
+   *       compactionRoute is declared, it must reference a declared outcome.
+   *       When enabled:true and compactionRoute is absent → startup rejects (required).
+   *
+   * Default DISABLED: absent compactionSummary → no-op (AC1/AC2).
+   */
+  private validateCompactionSummaryDeclarations(
+    config: HarnessConfig,
+    stateIds: Set<string>,
+    declaredOutcomes: Set<string>
+  ): void {
+    const configPath = this.getConfigPath();
+
+    for (const stateId of stateIds) {
+      const state = (config.states || {})[stateId] as { compactionSummary?: unknown };
+      if (!state) continue;
+      const cs = state.compactionSummary;
+      if (cs === undefined || cs === null) continue; // absent → disabled (AC1 no-op)
+
+      // (a) Invalid setting: must be an object.
+      if (typeof cs !== 'object' || Array.isArray(cs)) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionSummary must be an object ` +
+          `with { enabled: true|false, compactionRoute?: string }. ` +
+          `Got ${Array.isArray(cs) ? 'array' : typeof cs}.`
+        );
+      }
+
+      const csObj = cs as Record<string, unknown>;
+
+      // (a) `enabled` must be a boolean.
+      if (typeof csObj['enabled'] !== 'boolean') {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionSummary.enabled must be a boolean (true or false). ` +
+          `Got ${typeof csObj['enabled']}. Correct example: compactionSummary: { enabled: true, compactionRoute: "COMPACTED" }`
+        );
+      }
+
+      // disabled → no further checks needed (AC2 no-op).
+      if (!csObj['enabled']) continue;
+
+      // enabled:true — compactionRoute is required (AC8).
+      if (csObj['compactionRoute'] === undefined || csObj['compactionRoute'] === null || csObj['compactionRoute'] === '') {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionSummary.enabled is true but compactionRoute is missing. ` +
+          `When compactionSummary is enabled, compactionRoute must declare a statechart outcome event name. ` +
+          `Add compactionRoute: "<OUTCOME>" where <OUTCOME> is in the declared statechart vocabulary. ` +
+          `Declared outcomes: ${[...declaredOutcomes].join(', ')}.`
+        );
+      }
+
+      // (c) compactionRoute must be in the declared statechart vocabulary.
+      if (typeof csObj['compactionRoute'] !== 'string') {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionSummary.compactionRoute must be a string. ` +
+          `Got ${typeof csObj['compactionRoute']}.`
+        );
+      }
+
+      const route = csObj['compactionRoute'] as string;
+      if (!declaredOutcomes.has(route.toUpperCase())) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionSummary.compactionRoute "${route}" is absent ` +
+          `from the statechart outcome vocabulary. ` +
+          `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+          `Add "${route}" to the appropriate outcome list or correct the compactionRoute.`
+        );
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -3624,6 +3703,9 @@ export class ConfigLoader {
 
     // ── AC4 (pi-experiment-6q0y.49): loop detection config validation ─────────
     this.validateLoopDetectionConfig(config, declaredOutcomes);
+
+    // ── AC8 (pi-experiment-6q0y.35): compaction summary config validation ─────
+    this.validateCompactionSummaryDeclarations(config, stateIds, declaredOutcomes);
   }
 
   /**

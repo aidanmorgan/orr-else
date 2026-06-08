@@ -19,6 +19,12 @@ import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
 import { getConfiguredPiToolNames } from './PiIntegration.js';
 import { resolveActiveToolSet } from './ActiveToolSetResolver.js';
+import * as path from 'node:path';
+import {
+  buildCompactionSummary,
+  writeCompactionSummaryArtifact,
+  buildCompactionSummaryPointerPayload
+} from './CompactionSummary.js';
 
 /**
  * Port for resolving the names of configured project tools to activate in a
@@ -162,6 +168,16 @@ export class Teammate {
         Logger.warn(Component.TEAMMATE, 'Failed to record compaction event', { beadId, error: String(error) });
       });
 
+      // pi-experiment-6q0y.35: when compactionSummary is enabled for this state,
+      // generate the deterministic JSON artifact and record the pointer event.
+      // No-op when absent or disabled (AC1/AC2).
+      const stateConfig = config.states[stateId as string] as { compactionSummary?: { enabled: boolean; compactionRoute?: string } } | undefined;
+      if (stateConfig?.compactionSummary?.enabled === true) {
+        void this.generateCompactionSummary(beadId, stateId, stateConfig.compactionSummary.compactionRoute).catch(error => {
+          Logger.warn(Component.TEAMMATE, 'Failed to generate compaction summary', { beadId, stateId, error: String(error) });
+        });
+      }
+
       const thresholds = config.settings.contextMonitor || {
         autoRestartCompactionCount: WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT
       };
@@ -233,6 +249,41 @@ export class Teammate {
       beadId,
       stateId,
       pid: process.pid
+    });
+  }
+
+  /**
+   * pi-experiment-6q0y.35: Generate the deterministic compaction summary artifact
+   * and record the COMPACTION_SUMMARY_RECORDED pointer event (AC3–AC7).
+   *
+   * Called only when compactionSummary.enabled:true is configured for the state.
+   * Reads schema-valid events via eventsForBead (fail-closed, post-jxdk).
+   * Writes the artifact under <projectRoot>/.pi/artifacts/<beadId>/compaction-summary.json.
+   * Records COMPACTION_SUMMARY_RECORDED with nonAuthoritative:true (AC7).
+   * compactionRoute is included as metadata in the pointer event — no direct routing.
+   */
+  private async generateCompactionSummary(
+    beadId: string,
+    stateId: string,
+    compactionRoute: string | undefined
+  ): Promise<void> {
+    const events = await this.eventStore.eventsForBead(beadId as BeadId);
+    const summary = buildCompactionSummary({ beadId, stateId, events });
+    const artifactPath = path.join(
+      this.workerContext.projectRoot,
+      '.pi', 'artifacts', beadId, 'compaction-summary.json'
+    );
+    const written = writeCompactionSummaryArtifact(summary, artifactPath);
+    const payload = buildCompactionSummaryPointerPayload(beadId, stateId, written, summary.sourceEventIds);
+    await this.eventStore.record(DomainEventName.COMPACTION_SUMMARY_RECORDED, {
+      ...payload,
+      ...(compactionRoute !== undefined ? { compactionRoute } : {})
+    });
+    Logger.info(Component.TEAMMATE, 'Compaction summary written', {
+      beadId,
+      stateId,
+      artifactPath: written.artifactPath,
+      artifactBytes: written.artifactBytes
     });
   }
 

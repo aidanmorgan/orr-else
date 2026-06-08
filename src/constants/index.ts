@@ -582,6 +582,29 @@ export enum DomainEventName {
    * and cerdiwen are completely unaffected.
    */
   V2_SUBSTRATE_PREFLIGHT_FAILED = 'V2_SUBSTRATE_PREFLIGHT_FAILED',
+
+  /**
+   * pi-experiment-6q0y.35: Replay-critical pointer event for the deterministic
+   * context compaction summary artifact.
+   *
+   * Emitted ONLY when a state has compactionSummary.enabled:true configured.
+   * DEFAULT DISABLED — absent when no compaction config is declared (AC1/AC2 no-op).
+   *
+   * Carries: { beadId, stateId, artifactPath, artifactBytes, artifactSha256,
+   *   sourceEventIds, nonAuthoritative }.
+   *
+   * nonAuthoritative: ALWAYS true. The summary artifact is a digest only —
+   *   it NEVER satisfies any artifact-first or route gate (AC7).
+   *   A gate CANNOT use COMPACTION_SUMMARY_RECORDED as evidence.
+   *
+   * sourceEventIds: the event IDs of schema-valid events the summary was derived from.
+   * artifactPath/artifactBytes/artifactSha256: stable refs to the written artifact.
+   *
+   * DETERMINISTIC: no Date.now() or Math.random() in summary generation.
+   * REPLAY-CRITICAL: listed in REPLAY_CRITICAL_EVENT_TYPES so the pointer
+   *   survives compaction and history reconstruction can locate the artifact.
+   */
+  COMPACTION_SUMMARY_RECORDED = 'COMPACTION_SUMMARY_RECORDED',
 }
 
 export enum BeadsCliCommand {
@@ -1719,6 +1742,10 @@ export const REPLAY_CRITICAL_EVENT_TYPES = new Set<string>([
   // emitter decisions. Loss of these events means v2 replay cannot reconstruct
   // authoritative transition history.
   DomainEventName.ROUTE_EVENT_EMITTED,
+  // Compaction summary pointer (pi-experiment-6q0y.35): replay-critical so
+  // history reconstruction can locate the compaction summary artifact after
+  // compaction. Only emitted when compactionSummary.enabled:true is configured.
+  DomainEventName.COMPACTION_SUMMARY_RECORDED,
 ]);
 
 export const TelemetryDefaults = {
