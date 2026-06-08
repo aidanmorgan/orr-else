@@ -512,6 +512,33 @@ export enum DomainEventName {
    * version-gated: only emitted for configs with version === 2.
    */
   V2_MODEL_ROUTE_REJECTED = 'V2_MODEL_ROUTE_REJECTED',
+
+  /**
+   * pi-experiment-e8cm: v2 replay quarantine diagnostic.
+   *
+   * Emitted during replay/projection when a ROUTE_EVENT_EMITTED record is
+   * rejected for one of four deterministic reasons:
+   *   UNDECLARED_EVENT         — eventName is not in the declared v2 vocabulary.
+   *   SCHEMA_INVALID           — the record is missing required fields or has
+   *                              an invalid emitterType (anti-prose guard).
+   *   DUPLICATE_IDEMPOTENCY    — a route event with this routeEventId has
+   *                              already been applied in the current projection.
+   *   STALE_CONFIG_FINGERPRINT — the record's configFingerprint does not match
+   *                              the expected fingerprint for this projection run.
+   *
+   * Projection CONTINUES from the last valid workflow state after quarantine.
+   * The invalid event CANNOT advance, fail, block, or terminate progress.
+   *
+   * Carries: { routeEventId, schemaId, schemaVersion, configFingerprint,
+   *   reason, lastValidState, eventName?, beadId? }.
+   *
+   * NO raw event bodies — only identity fields + quarantine reason + last-valid-state.
+   * DETERMINISTIC: no Date.now() or Math.random() in quarantine logic.
+   * DIAGNOSTIC ONLY — replayImpact: INFORMATIONAL.
+   *
+   * version-gated: only produced during v2 config replay.
+   */
+  V2_ROUTE_EVENT_QUARANTINED = 'V2_ROUTE_EVENT_QUARANTINED',
 }
 
 export enum BeadsCliCommand {

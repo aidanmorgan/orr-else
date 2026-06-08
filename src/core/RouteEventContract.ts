@@ -440,6 +440,105 @@ export async function applyV2RouteEvent(
 }
 
 // ---------------------------------------------------------------------------
+// Quarantine types (pi-experiment-e8cm)
+// ---------------------------------------------------------------------------
+
+/**
+ * The deterministic reason a route event was quarantined during replay.
+ *
+ * UNDECLARED_EVENT         — eventName is not in the declared v2 vocabulary.
+ * SCHEMA_INVALID           — record is missing required fields or has an
+ *                            invalid emitterType (anti-prose guard).
+ * DUPLICATE_IDEMPOTENCY    — a route event with this routeEventId has already
+ *                            been applied in the current projection.
+ * STALE_CONFIG_FINGERPRINT — configFingerprint does not match the expected
+ *                            fingerprint for this projection run.
+ */
+export type QuarantineReason =
+  | 'UNDECLARED_EVENT'
+  | 'SCHEMA_INVALID'
+  | 'DUPLICATE_IDEMPOTENCY'
+  | 'STALE_CONFIG_FINGERPRINT';
+
+/**
+ * Payload for a V2_ROUTE_EVENT_QUARANTINED diagnostic event.
+ *
+ * Carries only identity fields + quarantine reason + last-valid-state.
+ * NO raw event bodies (AC1 anti-prose principle extended to quarantine).
+ * DETERMINISTIC: no Date.now() or Math.random().
+ */
+export interface RouteEventQuarantinedPayload {
+  /** The routeEventId from the rejected ROUTE_EVENT_EMITTED record. */
+  readonly routeEventId: string;
+  /** schemaId from the rejected record (identity field, no raw body). */
+  readonly schemaId: string;
+  /** schemaVersion from the rejected record. */
+  readonly schemaVersion?: string;
+  /** configFingerprint from the rejected record. */
+  readonly configFingerprint: string;
+  /** Deterministic reason for quarantine. */
+  readonly reason: QuarantineReason;
+  /** The last valid workflow state before this event was encountered. */
+  readonly lastValidState: string;
+  /** eventName from the rejected record (stripped identity, not a body). */
+  readonly eventName?: string;
+  /** beadId from the rejected record. */
+  readonly beadId?: string;
+}
+
+/**
+ * A per-event projection snapshot produced by replayProjectV2Transitions.
+ *
+ * AC3: replay produces stable PER-EVENT snapshots, not only final-state comparison.
+ * Each snapshot captures the full projection state AFTER processing one event.
+ */
+export interface V2ReplayProjectionSnapshot {
+  /** Sequential index of this snapshot in the replay (0-based). */
+  readonly snapshotIndex: number;
+  /** The source event that triggered this snapshot. */
+  readonly sourceEventType: string;
+  /** The current workflow state after processing this event. */
+  readonly currentState: string;
+  /** All applied transitions up to and including this event. */
+  readonly appliedTransitions: readonly V2AppliedTransition[];
+  /** All quarantine diagnostics up to and including this event. */
+  readonly quarantineDiagnostics: readonly RouteEventQuarantinedPayload[];
+  /** Whether the current state is a declared terminal state. */
+  readonly isTerminal: boolean;
+  /**
+   * The routeEventId of the transition that reached terminal state.
+   * Only set when isTerminal is true and terminal was reached via a
+   * valid STATE_TRANSITION_APPLIED referencing a declared terminal event.
+   * Undefined otherwise (AC4 terminal enforcement).
+   */
+  readonly terminalRouteEventId?: string;
+}
+
+/**
+ * Result of replayProjectV2Transitions.
+ */
+export interface V2ReplayProjectionResult {
+  /** Per-event snapshots in replay order (AC3 determinism proof). */
+  readonly snapshots: readonly V2ReplayProjectionSnapshot[];
+  /** Final workflow state after replaying all events. */
+  readonly finalState: string;
+  /** All applied transitions from the replay. */
+  readonly appliedTransitions: readonly V2AppliedTransition[];
+  /** All quarantine diagnostics produced during replay. */
+  readonly quarantineDiagnostics: readonly RouteEventQuarantinedPayload[];
+  /** Whether the final state is a declared terminal state (AC4). */
+  readonly isTerminal: boolean;
+  /**
+   * The routeEventId of the transition that reached terminal state.
+   * Undefined when terminal was NOT reached via a valid declared transition.
+   * AC4: terminal requires a valid STATE_TRANSITION_APPLIED referencing a
+   * declared terminal transition event. Old SUCCESS / model-authored outcome /
+   * undeclared event → does NOT mark terminal.
+   */
+  readonly terminalRouteEventId?: string;
+}
+
+// ---------------------------------------------------------------------------
 // v2 read-side projection reducer (AC2)
 // ---------------------------------------------------------------------------
 
@@ -575,4 +674,225 @@ export function projectV2Transitions(
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Quarantining replay projection (pi-experiment-e8cm)
+// ---------------------------------------------------------------------------
+
+/**
+ * Options for replayProjectV2Transitions.
+ */
+export interface V2ReplayProjectionOptions {
+  /**
+   * The initial workflow state for the projection.
+   * Required — projection starts here and transitions forward.
+   */
+  readonly initialState: string;
+  /**
+   * Optional: expected config fingerprint for this projection run.
+   * When provided, any ROUTE_EVENT_EMITTED record whose configFingerprint
+   * differs is QUARANTINED with reason STALE_CONFIG_FINGERPRINT.
+   * When absent, no fingerprint check is performed.
+   */
+  readonly expectedConfigFingerprint?: string;
+  /**
+   * Returns true if the given stateId is a declared terminal state.
+   * Used for AC4: terminal requires a valid declared transition event.
+   * When absent, no terminal detection is performed.
+   */
+  readonly isTerminalState?: (stateId: string) => boolean;
+}
+
+/**
+ * v2 quarantining replay projection (pi-experiment-e8cm AC1–AC4).
+ *
+ * Replays a list of recorded domain events and produces:
+ *   - Per-event projection snapshots (AC3 determinism proof).
+ *   - Applied transitions from valid ROUTE_EVENT_EMITTED records only.
+ *   - Quarantine diagnostics for all invalid/undeclared/stale/duplicate events.
+ *   - Terminal state detection (AC4): terminal requires a valid applied
+ *     STATE_TRANSITION_APPLIED referencing a declared terminal transition event.
+ *
+ * QUARANTINE POLICY (AC2):
+ *   A ROUTE_EVENT_EMITTED record is quarantined (and projection continues from
+ *   the last valid state) when:
+ *     - SCHEMA_INVALID: emitterType is not a valid deterministic emitter type,
+ *       or routeEventId is absent, or eventName is missing/empty.
+ *     - UNDECLARED_EVENT: normalized eventName is not in the declared v2 vocab.
+ *     - STALE_CONFIG_FINGERPRINT: configFingerprint does not match expectedConfigFingerprint.
+ *     - DUPLICATE_IDEMPOTENCY: routeEventId has already been applied.
+ *   Quarantined events CANNOT advance, fail, block, or terminate progress.
+ *
+ * AC1 ANTI-PROSE: model-authored fields, old outcome events, and non-ROUTE_EVENT_EMITTED
+ *   records are unconditionally skipped (not quarantined — they are invisible to projection).
+ *   Only ROUTE_EVENT_EMITTED records encounter the quarantine logic.
+ *
+ * AC4 TERMINAL: terminal state is reached ONLY via a valid V2AppliedTransition whose
+ *   nextState is a declared terminal state. Old SUCCESS / undeclared events / model-authored
+ *   route fields → do NOT mark terminal, even if they appear in the event log.
+ *
+ * DETERMINISTIC: pure function of the event log. No Date.now() or Math.random().
+ *
+ * @param events     - Recorded domain events (from event store or fixture).
+ * @param v2Vocab    - Pre-built v2 vocabulary (normalized UPPER_SNAKE → category).
+ * @param stateFor   - Returns a state's transitions map by stateId.
+ * @param options    - initialState + optional expectedConfigFingerprint + isTerminalState.
+ * @returns V2ReplayProjectionResult with snapshots, transitions, quarantine diagnostics.
+ */
+export function replayProjectV2Transitions(
+  events: readonly ProjectableEvent[],
+  v2Vocab: ReadonlyMap<string, string>,
+  stateFor: (stateId: string) => ProjectableState | undefined,
+  options: V2ReplayProjectionOptions
+): V2ReplayProjectionResult {
+  const VALID_EMITTER_TYPES = new Set<string>(['tool', 'verifier', 'gate', 'systemPrecondition']);
+
+  let currentState = options.initialState;
+  const appliedTransitions: V2AppliedTransition[] = [];
+  const quarantineDiagnostics: RouteEventQuarantinedPayload[] = [];
+  const seenRouteEventIds = new Set<string>();
+  const snapshots: V2ReplayProjectionSnapshot[] = [];
+  let isTerminal = false;
+  let terminalRouteEventId: string | undefined;
+  let snapshotIndex = 0;
+
+  for (const event of events) {
+    // AC1: non-ROUTE_EVENT_EMITTED records are INVISIBLE to quarantine logic.
+    // They are silently skipped — they carry no route authority and do not
+    // represent "bad" route events. Only ROUTE_EVENT_EMITTED records may be quarantined.
+    if (event.type !== DomainEventName.ROUTE_EVENT_EMITTED) {
+      continue;
+    }
+
+    const d = event.data;
+
+    // Extract identity fields used for quarantine diagnostics (no raw bodies).
+    const rawRouteEventId = d['routeEventId'];
+    const rawSchemaId = d['schemaId'];
+    const rawConfigFingerprint = d['configFingerprint'];
+    const rawEventName = d['eventName'];
+    const rawBeadId = d['beadId'];
+    const rawSchemaVersion = d['schemaVersion'];
+
+    const routeEventId = typeof rawRouteEventId === 'string' && rawRouteEventId.length > 0
+      ? rawRouteEventId : '';
+    const schemaId = typeof rawSchemaId === 'string' ? rawSchemaId : '';
+    const configFingerprint = typeof rawConfigFingerprint === 'string' ? rawConfigFingerprint : '';
+    const eventNameRaw = typeof rawEventName === 'string' ? rawEventName : '';
+    const beadId = typeof rawBeadId === 'string' ? rawBeadId : undefined;
+    const schemaVersion = typeof rawSchemaVersion === 'string' ? rawSchemaVersion : undefined;
+
+    // Helper to record a quarantine diagnostic and emit a snapshot.
+    const quarantine = (reason: QuarantineReason): void => {
+      const diagnostic: RouteEventQuarantinedPayload = {
+        routeEventId: routeEventId || '(missing)',
+        schemaId,
+        schemaVersion,
+        configFingerprint,
+        reason,
+        lastValidState: currentState,
+        eventName: eventNameRaw || undefined,
+        beadId
+      };
+      quarantineDiagnostics.push(diagnostic);
+      // Emit a per-event snapshot for the quarantine (currentState does NOT change).
+      snapshots.push({
+        snapshotIndex: snapshotIndex++,
+        sourceEventType: event.type,
+        currentState,
+        appliedTransitions: [...appliedTransitions],
+        quarantineDiagnostics: [...quarantineDiagnostics],
+        isTerminal,
+        terminalRouteEventId
+      });
+    };
+
+    // QUARANTINE GATE 1: schema validity — emitterType must be a valid deterministic
+    // emitter type (anti-prose guard), routeEventId must be present, eventName non-empty.
+    const emitterType = d['emitterType'];
+    if (
+      typeof emitterType !== 'string' || !VALID_EMITTER_TYPES.has(emitterType) ||
+      routeEventId.length === 0 ||
+      eventNameRaw.length === 0
+    ) {
+      quarantine('SCHEMA_INVALID');
+      continue;
+    }
+
+    // QUARANTINE GATE 2: eventName must be in the declared v2 vocabulary.
+    const normalized = eventNameRaw.toUpperCase();
+    const category = v2Vocab.get(normalized);
+    if (!category) {
+      quarantine('UNDECLARED_EVENT');
+      continue;
+    }
+
+    // QUARANTINE GATE 3: stale config fingerprint check.
+    if (options.expectedConfigFingerprint !== undefined && configFingerprint !== options.expectedConfigFingerprint) {
+      quarantine('STALE_CONFIG_FINGERPRINT');
+      continue;
+    }
+
+    // QUARANTINE GATE 4: duplicate idempotency — routeEventId already applied.
+    if (seenRouteEventIds.has(routeEventId)) {
+      quarantine('DUPLICATE_IDEMPOTENCY');
+      continue;
+    }
+
+    // Valid event — apply the transition.
+    seenRouteEventIds.add(routeEventId);
+
+    const emitterId = typeof d['emitterId'] === 'string' ? d['emitterId'] : '';
+    const stateId = typeof d['stateId'] === 'string' ? d['stateId'] : currentState;
+
+    // Transition lookup: exact key in the current state's transitions table.
+    const state = stateFor(stateId);
+    const rawNextState = state?.transitions?.[normalized];
+    const nextState = typeof rawNextState === 'string' ? rawNextState : undefined;
+    const transitionKey = nextState ? normalized : undefined;
+
+    const transition: V2AppliedTransition = {
+      routeEventId,
+      eventName: normalized,
+      category,
+      emitterType: emitterType as EmitterType,
+      emitterId,
+      nextState,
+      beadId: typeof d['beadId'] === 'string' ? d['beadId'] : '',
+      transitionKey
+    };
+    appliedTransitions.push(transition);
+
+    // Advance current state (AC4: only valid transitions advance state).
+    if (nextState) {
+      currentState = nextState;
+    }
+
+    // AC4 terminal detection: terminal requires a valid transition to a declared terminal state.
+    if (nextState && options.isTerminalState && options.isTerminalState(nextState)) {
+      isTerminal = true;
+      terminalRouteEventId = routeEventId;
+    }
+
+    // Emit per-event snapshot after valid transition.
+    snapshots.push({
+      snapshotIndex: snapshotIndex++,
+      sourceEventType: event.type,
+      currentState,
+      appliedTransitions: [...appliedTransitions],
+      quarantineDiagnostics: [...quarantineDiagnostics],
+      isTerminal,
+      terminalRouteEventId
+    });
+  }
+
+  return {
+    snapshots,
+    finalState: currentState,
+    appliedTransitions,
+    quarantineDiagnostics,
+    isTerminal,
+    terminalRouteEventId
+  };
 }

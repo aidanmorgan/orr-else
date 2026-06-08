@@ -509,6 +509,18 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'INFORMATIONAL',
     optionalFields: ['actionId', 'rejectedRoute']
   },
+
+  // pi-experiment-e8cm: v2 replay quarantine diagnostic.
+  // Produced when replayProjectV2Transitions encounters an invalid/undeclared/
+  // stale-config/duplicate-idempotency ROUTE_EVENT_EMITTED record during replay.
+  // Projection continues from the last valid state; the quarantined event has
+  // NO effect on progress, terminal status, or transition history.
+  // DIAGNOSTIC ONLY — no state mutation. replayImpact: INFORMATIONAL.
+  [DomainEventName.V2_ROUTE_EVENT_QUARANTINED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['eventName', 'beadId', 'schemaVersion']
+  },
 };
 
 /**
@@ -750,4 +762,12 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
 
   // pi-experiment-x0zh: v2 model-supplied route authority rejection diagnostic.
   [DomainEventName.V2_MODEL_ROUTE_REJECTED]: ['beadId', 'stateId', 'surface', 'reason'],
+
+  // pi-experiment-e8cm: v2 replay quarantine diagnostic.
+  // Required: routeEventId (event being quarantined), schemaId, configFingerprint,
+  //   reason (QuarantineReason string), lastValidState (state before the bad event).
+  // Optional: eventName, beadId, schemaVersion.
+  [DomainEventName.V2_ROUTE_EVENT_QUARANTINED]: [
+    'routeEventId', 'schemaId', 'configFingerprint', 'reason', 'lastValidState'
+  ],
 };
