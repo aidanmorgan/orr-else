@@ -25,6 +25,8 @@ import {
   writeCompactionSummaryArtifact,
   buildCompactionSummaryPointerPayload
 } from './CompactionSummary.js';
+import type { CompactionFallbackConfig } from './domain/StateModels.js';
+import { resolveCompactionPointer } from './RestartHandoffValidation.js';
 
 /**
  * Port for resolving the names of configured project tools to activate in a
@@ -154,6 +156,8 @@ export class Teammate {
     // still record a durable CONTEXT_COMPACTION_RECORDED event (evidence preserved)
     // but do NOT post another remote signal (r06o AC4).
     let restartSignalSent = false;
+    // Guard: emit at most one CONTEXT_COMPACTION_WARNING per worker lifecycle.
+    let warningSent = false;
 
     this.pi.on(PiEventName.SESSION_COMPACT, () => {
       if (!active) return;
@@ -171,42 +175,70 @@ export class Teammate {
       // pi-experiment-6q0y.35: when compactionSummary is enabled for this state,
       // generate the deterministic JSON artifact and record the pointer event.
       // No-op when absent or disabled (AC1/AC2).
-      const stateConfig = config.states[stateId as string] as { compactionSummary?: { enabled: boolean; compactionRoute?: string } } | undefined;
+      const stateConfig = config.states[stateId as string] as {
+        compactionSummary?: { enabled: boolean; compactionRoute?: string };
+        compactionFallback?: CompactionFallbackConfig;
+      } | undefined;
       if (stateConfig?.compactionSummary?.enabled === true) {
         void this.generateCompactionSummary(beadId, stateId, stateConfig.compactionSummary.compactionRoute).catch(error => {
           Logger.warn(Component.TEAMMATE, 'Failed to generate compaction summary', { beadId, stateId, error: String(error) });
         });
       }
 
-      const thresholds = config.settings.contextMonitor || {
-        autoRestartCompactionCount: WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT
-      };
-      if (compactionCount >= (thresholds.autoRestartCompactionCount || WorkerDefaults.AUTO_RESTART_COMPACTION_COUNT)) {
-        if (restartSignalSent) {
-          // Remote restart already in flight — record the compaction observation
-          // above (durable evidence) but suppress the redundant remote signal.
-          Logger.info(Component.TEAMMATE, 'Compaction threshold exceeded again; remote restart already requested', {
+      // pi-experiment-6q0y.37: optional per-state compaction warning + fallback restart.
+      // DEFAULT DISABLED — no-op when compactionFallback is absent or enabled:false (AC1/AC6).
+      const fallbackCfg = stateConfig?.compactionFallback;
+      if (fallbackCfg?.enabled === true) {
+        const warnThreshold = fallbackCfg.warnThreshold ?? 1;
+        const autoThreshold = fallbackCfg.autoThreshold ?? (warnThreshold + 1);
+
+        // AC2: first warning threshold — record CONTEXT_COMPACTION_WARNING, NO restart.
+        if (!warningSent && compactionCount >= warnThreshold && compactionCount < autoThreshold) {
+          warningSent = true;
+          Logger.info(Component.TEAMMATE, 'Compaction warning threshold reached', { beadId, compactionCount, warnThreshold });
+          void this.eventStore.record(DomainEventName.CONTEXT_COMPACTION_WARNING, {
             beadId,
-            compactionCount
+            stateId,
+            compactionCount,
+            warnThreshold
+          }).catch(error => {
+            Logger.warn(Component.TEAMMATE, 'Failed to record compaction warning', { beadId, error: String(error) });
+          });
+        }
+
+        // AC3/AC4: auto threshold — post exactly one evidence-aware restart per lifecycle.
+        // AC5: duplicate suppression — restartSignalSent guards subsequent compactions.
+        if (compactionCount >= autoThreshold) {
+          if (restartSignalSent) {
+            // Duplicate suppression: diagnostic evidence already recorded above (CONTEXT_COMPACTION_RECORDED).
+            Logger.info(Component.TEAMMATE, 'Compaction fallback threshold exceeded again; restart already requested', {
+              beadId,
+              compactionCount
+            });
+            return;
+          }
+
+          restartSignalSent = true;
+          Logger.info(Component.TEAMMATE, 'Compaction fallback threshold reached. Triggering evidence-aware fallback restart.', {
+            beadId,
+            compactionCount,
+            autoThreshold
+          });
+
+          if (this.ctx.hasUI) {
+            this.ctx.ui.notify('Compaction fallback threshold reached. Harness is posting a deterministic restart request.', 'warning');
+          }
+
+          // Trigger evidence-aware fallback restart (AC3/AC4: carries compaction-artifact pointer + evidence refs).
+          this.triggerFallbackRestart(beadId, stateId, compactionCount).catch(error => {
+            Logger.error(Component.TEAMMATE, 'Failed to trigger compaction fallback restart', { error: String(error) });
           });
           return;
         }
-
-        restartSignalSent = true;
-        Logger.info(Component.TEAMMATE, 'Compaction threshold reached. Programmatically triggering auto-restart to prevent implementation rot.', {
-          beadId,
-          compactionCount
-        });
-
-        if (this.ctx.hasUI) {
-          this.ctx.ui.notify('Context rot detected (too many compactions). Harness is programmatically recycling session.', 'warning');
-        }
-
-        // Trigger auto-restart handover logic
-        this.triggerAutoRestart(beadId, stateId, compactionCount).catch(error => {
-          Logger.error(Component.TEAMMATE, 'Failed to trigger programmatic auto-restart', { error: String(error) });
-        });
       }
+
+      // AC1/AC6: states without compactionFallback.enabled:true receive NO harness-forced
+      // compaction restart. Pi.dev autocompaction is the only behavior (default).
     });
 
     return () => { active = false; };
@@ -287,9 +319,55 @@ export class Teammate {
     });
   }
 
-  private async triggerAutoRestart(beadId: string, stateId: string, compactionCount: number) {
+  /**
+   * pi-experiment-6q0y.37: Trigger a deterministic evidence-aware fallback restart.
+   *
+   * AC3/AC4: posts EXACTLY ONE evidence-aware restart per worker lifecycle,
+   * carrying the 6q0y.35 compaction-artifact pointer + evidence refs.
+   * NEVER a generic one-line summary.
+   *
+   * The compaction pointer is resolved from the bead's prior events
+   * (COMPACTION_SUMMARY_RECORDED written by generateCompactionSummary).
+   * ConfigLoader lint guarantees compactionSummary.enabled:true is co-declared
+   * whenever compactionFallback.enabled:true — so a pointer is always present.
+   * If absent at runtime despite the lint, records a diagnostic and does NOT
+   * post any restart (fail-closed; never a generic one-line summary).
+   *
+   * AC5: duplicate suppression is enforced by the restartSignalSent guard in
+   * setupCompactionMonitor — this method is called at most once per lifecycle.
+   */
+  private async triggerFallbackRestart(beadId: string, stateId: string, compactionCount: number) {
     const config = await this.configLoader.load();
-    const summary = `PROGRAMMATIC AUTO-RESTART: Compaction threshold reached (Count: ${compactionCount}). Teammate process was automatically recycled by the harness to prevent implementation rot caused by context pollution.`;
+    const priorEvents = await this.eventStore.eventsForBead(beadId as BeadId);
+    const compactionPointer = resolveCompactionPointer(priorEvents);
+
+    if (!compactionPointer) {
+      // No compaction pointer available — AC4: never post a generic one-line restart.
+      // ConfigLoader lint (validateCompactionFallbackDeclarations) guarantees that
+      // compactionSummary.enabled:true is co-declared, so this branch is unreachable
+      // in valid configs. Record a diagnostic and do NOT post any restart signal.
+      Logger.error(Component.TEAMMATE, 'Compaction fallback: no COMPACTION_SUMMARY_RECORDED found; skipping restart (lint should have prevented this)', {
+        beadId,
+        stateId,
+        compactionCount
+      });
+      return;
+    }
+
+    // Build evidence refs from the compaction pointer (AC4: deterministic + non-generic).
+    const evidenceRefs = [{
+      schemaId: 'compaction-summary',
+      semanticArtifactPath: compactionPointer.artifactPath,
+      bytes: compactionPointer.artifactBytes,
+      sha256: compactionPointer.artifactSha256,
+      sourceEventIds: compactionPointer.sourceEventIds
+    }];
+
+    const narrativeSummary =
+      `COMPACTION FALLBACK RESTART: Auto-threshold reached (Count: ${compactionCount}). ` +
+      `Evidence-aware restart triggered by harness compaction policy. ` +
+      `Compaction artifact: ${compactionPointer.artifactPath}`;
+
     const event = {
       type: TeammateEventType.CONTEXT_RESTART_REQUESTED,
       beadId: beadId as BeadId,
@@ -298,14 +376,15 @@ export class Teammate {
       timestamp: Date.now(),
       actionId: this.workerContext.actionId,
       transitionEvent: config.settings.contextRestartEvent || EventName.CONTEXT_RESTART,
-      summary,
-      evidence: summary,
-      handover: `AUTO-RESTART: Too many compactions (${compactionCount}). Fresh session required for quality.`
+      summary: narrativeSummary,
+      evidence: narrativeSummary,
+      handover: narrativeSummary
     } satisfies Omit<ContextRestartRequestedEvent, 'idempotencyKey'>;
 
-    const signal: ContextRestartRequestedEvent = {
+    const signal: ContextRestartRequestedEvent & { evidenceRefs: typeof evidenceRefs } = {
       ...event,
-      idempotencyKey: createTeammateEventIdempotencyKey(event)
+      idempotencyKey: createTeammateEventIdempotencyKey(event),
+      evidenceRefs
     };
     await this.eventStore.record(DomainEventName.SIGNAL_INTENT_RECORDED, signal);
     try {
@@ -318,8 +397,9 @@ export class Teammate {
       }).catch(() => {});
       throw error;
     }
-    
-    // Allow a moment for the signal to propagate before shutting down
+
+    // Allow a moment for the signal to propagate before shutting down.
     setTimeout(() => this.ctx.shutdown(), WorkerDefaults.SHUTDOWN_AFTER_RESTART_MS);
   }
+
 }

@@ -987,6 +987,26 @@ export interface SDLCState {
    *     compactionRoute: CONTEXT_COMPACTED
    */
   compactionSummary?: CompactionSummaryConfig;
+  /**
+   * pi-experiment-6q0y.37: Optional per-state compaction warning and deterministic
+   * fallback restart configuration.
+   *
+   * DEFAULT DISABLED — when absent or enabled:false, Pi.dev autocompaction is the ONLY
+   * compaction behavior (AC1/AC6 no-op). No Orr Else compaction warning or restart.
+   *
+   * When enabled:true, the harness records a CONTEXT_COMPACTION_WARNING at
+   * warnThreshold and posts EXACTLY ONE evidence-aware restart at autoThreshold
+   * per worker lifecycle. Duplicate suppression for later compactions (AC5).
+   * The fallback restart MUST carry the compaction-artifact pointer + evidence refs
+   * (never a generic summary).
+   *
+   * Example:
+   *   compactionFallback:
+   *     enabled: true
+   *     warnThreshold: 1
+   *     autoThreshold: 2
+   */
+  compactionFallback?: CompactionFallbackConfig;
 }
 
 /**
@@ -1007,6 +1027,45 @@ export interface CompactionSummaryConfig {
    * Required when enabled is true.
    */
   compactionRoute?: string;
+}
+
+/**
+ * pi-experiment-6q0y.37: Per-state optional compaction warning and deterministic
+ * fallback restart configuration.
+ *
+ * DEFAULT DISABLED — when absent or enabled:false, Pi.dev autocompaction is the
+ * ONLY compaction behavior and no Orr Else compaction warning or restart request is
+ * generated (AC1/AC6 no-op).
+ *
+ * When enabled:true, the harness:
+ *   1. Records a CONTEXT_COMPACTION_WARNING event when compactionCount reaches
+ *      warnThreshold (AC2 — warning only, no restart).
+ *   2. Posts EXACTLY ONE evidence-aware restart request per worker lifecycle when
+ *      compactionCount reaches autoThreshold (AC3/AC4).
+ *   3. Suppresses duplicate restart signals for subsequent compactions in the same
+ *      worker lifecycle (AC5 — diagnostic evidence still recorded).
+ *
+ * The fallback restart MUST carry the 6q0y.35 compaction-artifact pointer +
+ * evidence refs (via 6q0y.36's evidence-aware contract). NEVER a generic summary.
+ *
+ * warnThreshold: compactionCount at which a warning event is recorded. Required
+ *   when enabled:true. Must be >= 1 and < autoThreshold (startup lint rejects).
+ * autoThreshold: compactionCount at which the fallback restart is triggered.
+ *   Required when enabled:true. Must be > warnThreshold (startup lint rejects).
+ */
+export interface CompactionFallbackConfig {
+  /** Whether to enable compaction warning and fallback restart for this state. Default: false. */
+  enabled: boolean;
+  /**
+   * Compaction count at which a CONTEXT_COMPACTION_WARNING event is recorded.
+   * Required when enabled:true. Must be >= 1 and < autoThreshold.
+   */
+  warnThreshold?: number;
+  /**
+   * Compaction count at which the fallback restart is triggered.
+   * Required when enabled:true. Must be > warnThreshold.
+   */
+  autoThreshold?: number;
 }
 
 export interface HarnessConfig {
@@ -1195,9 +1254,6 @@ export interface HarnessConfig {
     stateContextRotThreshold: number;
     harnessContextRotThreshold: number;
     cycleCap?: number;
-    contextMonitor?: {
-      autoRestartCompactionCount?: number;
-    };
     observability?: {
       enabled: boolean;
       dir?: string;

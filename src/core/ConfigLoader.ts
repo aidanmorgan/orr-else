@@ -3070,6 +3070,107 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.37 AC7: Validate per-state compactionFallback declarations.
+   *
+   * Startup-fatal checks:
+   *   (a) compactionFallback must be an object when present.
+   *   (b) enabled must be a boolean.
+   *   (c) When enabled:true, warnThreshold must be a positive integer (>= 1).
+   *   (d) When enabled:true, autoThreshold must be a positive integer > warnThreshold.
+   *   (e) Unknown state IDs: not possible (iterating config.states — authoritative map).
+   *
+   * Default DISABLED: absent compactionFallback → no-op (AC1/AC6).
+   */
+  private validateCompactionFallbackDeclarations(
+    config: HarnessConfig,
+    stateIds: Set<string>
+  ): void {
+    const configPath = this.getConfigPath();
+
+    for (const stateId of stateIds) {
+      const state = (config.states || {})[stateId] as { compactionFallback?: unknown };
+      if (!state) continue;
+      const cf = state.compactionFallback;
+      if (cf === undefined || cf === null) continue; // absent → disabled (AC1 no-op)
+
+      // (a) Must be an object.
+      if (typeof cf !== 'object' || Array.isArray(cf)) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback must be an object ` +
+          `with { enabled: true|false, warnThreshold: number, autoThreshold: number }. ` +
+          `Got ${Array.isArray(cf) ? 'array' : typeof cf}.`
+        );
+      }
+
+      const cfObj = cf as Record<string, unknown>;
+
+      // (b) enabled must be a boolean.
+      if (typeof cfObj['enabled'] !== 'boolean') {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.enabled must be a boolean (true or false). ` +
+          `Got ${typeof cfObj['enabled']}. Example: compactionFallback: { enabled: true, warnThreshold: 1, autoThreshold: 2 }`
+        );
+      }
+
+      // disabled → no further checks needed.
+      if (!cfObj['enabled']) continue;
+
+      // (e) compactionFallback.enabled:true requires compactionSummary.enabled:true.
+      // The evidence-aware fallback restart needs the deterministic compaction artifact
+      // produced by compactionSummary — fail-closed at startup (AC4 / DEFECT2 fix).
+      const stateForSummary = (config.states || {})[stateId] as { compactionSummary?: unknown } | undefined;
+      const cs = stateForSummary?.compactionSummary as Record<string, unknown> | undefined;
+      if (!cs || cs['enabled'] !== true) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.enabled is true but compactionSummary.enabled is not true. ` +
+          `The evidence-aware fallback restart requires the deterministic compaction artifact produced by compactionSummary. ` +
+          `Add compactionSummary: { enabled: true, compactionRoute: "<OUTCOME>" } to state "${stateId}".`
+        );
+      }
+
+      // (c) warnThreshold: required when enabled:true, must be integer >= 1.
+      if (cfObj['warnThreshold'] === undefined || cfObj['warnThreshold'] === null) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.enabled is true but warnThreshold is missing. ` +
+          `When compactionFallback is enabled, warnThreshold must be a positive integer (>= 1). ` +
+          `Add warnThreshold: <N> where N >= 1.`
+        );
+      }
+      const warnThreshold = cfObj['warnThreshold'];
+      if (
+        typeof warnThreshold !== 'number' ||
+        !Number.isInteger(warnThreshold) ||
+        warnThreshold < 1
+      ) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.warnThreshold must be a positive integer (>= 1). ` +
+          `Got ${JSON.stringify(warnThreshold)}.`
+        );
+      }
+
+      // (d) autoThreshold: required when enabled:true, must be integer > warnThreshold.
+      if (cfObj['autoThreshold'] === undefined || cfObj['autoThreshold'] === null) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.enabled is true but autoThreshold is missing. ` +
+          `When compactionFallback is enabled, autoThreshold must be a positive integer greater than warnThreshold (${warnThreshold}). ` +
+          `Add autoThreshold: <N> where N > ${warnThreshold}.`
+        );
+      }
+      const autoThreshold = cfObj['autoThreshold'];
+      if (
+        typeof autoThreshold !== 'number' ||
+        !Number.isInteger(autoThreshold) ||
+        autoThreshold <= (warnThreshold as number)
+      ) {
+        throw new Error(
+          `state "${stateId}" (${configPath}): compactionFallback.autoThreshold must be a positive integer ` +
+          `greater than warnThreshold (${warnThreshold}). Got ${JSON.stringify(autoThreshold)}.`
+        );
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -3706,6 +3807,9 @@ export class ConfigLoader {
 
     // ── AC8 (pi-experiment-6q0y.35): compaction summary config validation ─────
     this.validateCompactionSummaryDeclarations(config, stateIds, declaredOutcomes);
+
+    // ── AC7 (pi-experiment-6q0y.37): compaction fallback config validation ─────
+    this.validateCompactionFallbackDeclarations(config, stateIds);
   }
 
   /**

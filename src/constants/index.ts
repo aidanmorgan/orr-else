@@ -621,6 +621,22 @@ export enum DomainEventName {
    *   survives compaction and history reconstruction can locate the artifact.
    */
   COMPACTION_SUMMARY_RECORDED = 'COMPACTION_SUMMARY_RECORDED',
+
+  /**
+   * pi-experiment-6q0y.37: Compaction warning event — first warning threshold reached.
+   *
+   * Emitted ONLY when a state has compactionFallback.enabled:true AND
+   * compactionCount reaches the configured warnThreshold. NO restart request is
+   * posted at this point (AC2 — warning only, no restart).
+   *
+   * DEFAULT DISABLED — absent when no compactionFallback config is declared (AC1/AC6 no-op).
+   *
+   * Carries: { beadId, stateId, compactionCount, warnThreshold }.
+   *
+   * DETERMINISTIC: no Date.now() or Math.random() in the decision.
+   * replayImpact: INFORMATIONAL — diagnostic only, no state mutation.
+   */
+  CONTEXT_COMPACTION_WARNING = 'CONTEXT_COMPACTION_WARNING',
 }
 
 export enum BeadsCliCommand {
@@ -1578,10 +1594,6 @@ export const HandoverRequiredDefaults = {
 } as const;
 
 export const WorkerDefaults = {
-  // Safety net only. Telemetry shows this gate has not fired in real runs —
-  // LLM-initiated `request_context_restart` is the actual restart driver.
-  // Override per project via `settings.contextMonitor.autoRestartCompactionCount`.
-  AUTO_RESTART_COMPACTION_COUNT: 2,
   HEARTBEAT_INTERVAL_MS: 10 * TimeMs.SECOND,
   // The signaling server keeps an in-memory liveness snapshot fresh on every
   // heartbeat, but only persists a HEARTBEAT_RECORDED event this often per

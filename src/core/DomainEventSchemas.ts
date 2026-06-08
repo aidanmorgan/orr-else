@@ -571,6 +571,18 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'INFORMATIONAL',
     optionalFields: ['actionId']
   },
+
+  // pi-experiment-6q0y.37: Compaction warning event.
+  // DIAGNOSTIC ONLY — emitted when the first warning threshold is reached for a
+  // state with compactionFallback.enabled:true. NO restart request is posted at
+  // this point (AC2 — warning only). Default DISABLED (AC1/AC6 no-op).
+  // Required: beadId, stateId, compactionCount, warnThreshold.
+  // replayImpact: INFORMATIONAL — no state mutation.
+  [DomainEventName.CONTEXT_COMPACTION_WARNING]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: []
+  },
 };
 
 /**
@@ -861,5 +873,12 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   // Optional: actionId (may be absent on auto-restart path).
   [DomainEventName.RESTART_HANDOFF_REJECTED]: [
     'beadId', 'stateId', 'transitionEvent', 'idempotencyKey', 'rejections', 'diagnostic'
+  ],
+
+  // pi-experiment-6q0y.37: Compaction warning event.
+  // Required: beadId, stateId, compactionCount, warnThreshold.
+  // DIAGNOSTIC ONLY — no state mutation (AC2 — warning only, no restart).
+  [DomainEventName.CONTEXT_COMPACTION_WARNING]: [
+    'beadId', 'stateId', 'compactionCount', 'warnThreshold'
   ],
 };

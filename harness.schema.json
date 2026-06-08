@@ -2031,6 +2031,28 @@
               }
             }
           },
+          "compactionFallback": {
+            "type": "object",
+            "description": "pi-experiment-6q0y.37: Optional per-state compaction warning and deterministic fallback restart. DEFAULT DISABLED — when absent or enabled:false, Pi.dev autocompaction is the only behavior (AC1/AC6 no-op). When enabled:true, records a CONTEXT_COMPACTION_WARNING at warnThreshold (AC2) and posts exactly one evidence-aware restart at autoThreshold per worker lifecycle (AC3/AC4). Duplicate suppression for later compactions (AC5). Startup lint rejects invalid settings and invalid thresholds (AC7).",
+            "required": ["enabled"],
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {
+                "type": "boolean",
+                "description": "Whether to enable compaction warning and fallback restart for this state. Default: false."
+              },
+              "warnThreshold": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Compaction count at which a CONTEXT_COMPACTION_WARNING event is recorded. Required when enabled:true. Must be >= 1 and < autoThreshold."
+              },
+              "autoThreshold": {
+                "type": "integer",
+                "minimum": 2,
+                "description": "Compaction count at which the fallback restart is triggered. Required when enabled:true. Must be > warnThreshold."
+              }
+            }
+          },
           "handoverTemplate": {
             "type": "string"
           },

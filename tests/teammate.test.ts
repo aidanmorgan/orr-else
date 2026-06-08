@@ -440,22 +440,22 @@ describe('Teammate — WI-6: WorkerContext injection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// r06o AC4: auto-restart signal deduplication
+// AC1/AC6: No Orr Else restart from compaction policy (no-backcompat)
 //
-// After the first accepted CONTEXT_RESTART_REQUESTED remote signal, subsequent
-// compactions in the same worker process must NOT emit additional remote restart
-// signals. The durable CONTEXT_COMPACTION_RECORDED event-store record IS still
-// written for every compaction (durable evidence preserved).
+// After removing the legacy default auto-restart (triggerAutoRestart), states
+// without compactionFallback.enabled:true produce NO CONTEXT_RESTART_REQUESTED
+// on SESSION_COMPACT. Pi.dev autocompaction is the only compaction behavior
+// (AC1). CONTEXT_COMPACTION_RECORDED is still recorded for every compaction
+// (durable evidence preserved).
 // ---------------------------------------------------------------------------
 
 vi.mock('../src/core/HarnessApiClient.js', () => ({
   postHarnessSignal: vi.fn().mockResolvedValue({ ok: true })
 }));
 
-describe('Teammate — r06o AC4: auto-restart signal deduplication', () => {
+describe('Teammate — AC1/AC6: no harness-forced restart for states without compactionFallback', () => {
   beforeEach(async () => {
     vi.useFakeTimers();
-    // Clear mock call history between tests so restartCalls counts are fresh.
     const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
     vi.mocked(postHarnessSignal).mockClear();
   });
@@ -465,38 +465,34 @@ describe('Teammate — r06o AC4: auto-restart signal deduplication', () => {
     vi.restoreAllMocks();
   });
 
-  it('AC4: only one remote restart signal after first threshold; subsequent compactions record locally only', async () => {
+  it('AC1/AC6: SESSION_COMPACT on state without compactionFallback posts NO restart signal (Pi.dev-only default)', async () => {
     const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
     const mockPostHarnessSignal = vi.mocked(postHarnessSignal);
-    mockPostHarnessSignal.mockResolvedValue({ ok: true });
 
     const { pi, fire } = fakePi();
     const controller = fakeAbortController();
     const record = vi.fn(async () => {});
 
-    // autoRestartCompactionCount = 1 so the first compaction triggers auto-restart
-    const config = minimalConfig({ contextMonitor: { autoRestartCompactionCount: 1 } } as any);
+    // No compactionFallback config — even if contextMonitor was previously set,
+    // the legacy auto-restart path is gone. Pi.dev handles compaction natively.
+    const config = minimalConfig();
     const { teammate } = buildTeammate(pi, controller.signal, config, record);
 
     await teammate.start();
 
-    // First compaction: reaches threshold → triggers auto-restart signal
+    // Fire multiple compactions — no restart should ever be posted
     fire(PiEventName.SESSION_COMPACT);
-    // Flush only the microtask queue (Promise resolutions from triggerAutoRestart)
-    // without running the heartbeat setInterval to avoid infinite-timer error.
     await Promise.resolve();
     await Promise.resolve();
-
-    // Second and third compactions: beyond threshold — local record only, no new remote signal
     fire(PiEventName.SESSION_COMPACT);
     fire(PiEventName.SESSION_COMPACT);
     await Promise.resolve();
 
-    // Exactly ONE remote postHarnessSignal call for CONTEXT_RESTART_REQUESTED
+    // NO remote restart signal (AC1: Pi.dev autocompaction is the only behavior)
     const restartCalls = mockPostHarnessSignal.mock.calls.filter(
       args => (args[0] as any).type === 'CONTEXT_RESTART_REQUESTED'
     );
-    expect(restartCalls).toHaveLength(1);
+    expect(restartCalls).toHaveLength(0);
 
     // All three compactions must have durable CONTEXT_COMPACTION_RECORDED records
     const compactionRecords = record.mock.calls.filter(
@@ -508,34 +504,28 @@ describe('Teammate — r06o AC4: auto-restart signal deduplication', () => {
     vi.clearAllTimers();
   });
 
-  it('AC4: SIGNAL_INTENT_RECORDED is written for first auto-restart; not for subsequent compactions', async () => {
-    const { postHarnessSignal } = await import('../src/core/HarnessApiClient.js');
-    vi.mocked(postHarnessSignal).mockResolvedValue({ ok: true });
-
+  it('AC1/AC6: NO SIGNAL_INTENT_RECORDED for states without compactionFallback (legacy path removed)', async () => {
     const { pi, fire } = fakePi();
     const controller = fakeAbortController();
     const record = vi.fn(async () => {});
 
-    const config = minimalConfig({ contextMonitor: { autoRestartCompactionCount: 1 } } as any);
+    const config = minimalConfig();
     const { teammate } = buildTeammate(pi, controller.signal, config, record);
 
     await teammate.start();
 
-    // First compaction at threshold
     fire(PiEventName.SESSION_COMPACT);
     await Promise.resolve();
     await Promise.resolve();
-
-    // Extra compactions beyond threshold
     fire(PiEventName.SESSION_COMPACT);
     fire(PiEventName.SESSION_COMPACT);
     await Promise.resolve();
 
-    // SIGNAL_INTENT_RECORDED: only once (from first triggerAutoRestart)
+    // NO SIGNAL_INTENT_RECORDED — legacy triggerAutoRestart is removed
     const intentRecords = record.mock.calls.filter(
       ([name]) => name === DomainEventName.SIGNAL_INTENT_RECORDED
     );
-    expect(intentRecords).toHaveLength(1);
+    expect(intentRecords).toHaveLength(0);
 
     controller.abort();
     vi.clearAllTimers();
