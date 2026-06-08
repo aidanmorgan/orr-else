@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { program } from 'commander';
+import { registerConfigExplainCommand } from './config-explain.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -164,10 +165,13 @@ program
     await runInit(projectRoot, { force: opts.force });
   });
 
-// If called with no arguments or only "init" is the first arg, run init by default.
+// pi-experiment-vzp7: register `config explain` subcommand.
+registerConfigExplainCommand(program);
+
+// Parse known subcommands; show help when no args or unrecognized first arg.
 const args = process.argv.slice(2);
-if (args.length === 0 || (args[0] !== 'init' && !args[0]?.startsWith('-'))) {
-  // Show help when called with no subcommand.
+const knownTopLevel = new Set(['init', 'config']);
+if (args.length === 0 || (!knownTopLevel.has(args[0] ?? '') && !args[0]?.startsWith('-'))) {
   program.help();
 } else {
   program.parse(process.argv);
