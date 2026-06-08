@@ -929,7 +929,7 @@ export function createBdPlugin(eventStore: EventStore, env: RuntimeEnvironment =
         workerId: Type.String({ description: 'The worker identifier' }),
         beadId: Type.String({ description: 'The assigned Bead ID' }),
         stateId: Type.String({ description: 'The current state ID' }),
-        pid: Type.Optional(Type.Number({ description: 'The teammate process ID' })),
+        pid: Type.Optional(Type.Number({ description: 'The worker process ID' })),
         sessionStateId: Type.Optional(Type.String({ description: 'The current session state ID' }))
       }),
       execute: async (rawParams: unknown) => {

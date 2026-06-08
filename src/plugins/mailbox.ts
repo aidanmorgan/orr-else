@@ -16,9 +16,9 @@ export function createMailboxPlugin(
   tools: [
     {
       name: PluginToolName.SEND_MAILBOX_MESSAGE,
-      description: "Send an asynchronous message to the Team Lead or another teammate. Returns a minimal ack with the new message ID.",
+      description: "Send an asynchronous message to the coordinator or another worker. Returns a minimal ack with the new message ID.",
       parameters: Type.Object({
-        to: Type.String({ description: "Target recipient (e.g., 'TeamLead')" }),
+        to: Type.String({ description: "Target recipient identifier (e.g., the coordinator or a configured worker ID)" }),
         beadId: Type.String(),
         type: Type.String({ enum: Object.values(MailboxMessageType) }),
         content: Type.String()
@@ -34,7 +34,7 @@ export function createMailboxPlugin(
       name: PluginToolName.CHECK_MAILBOX,
       description: "List pending messages addressed to you. Returns message IDs, routing metadata (from/to/subject/timestamp), and count — no inline bodies. Use fetch_mailbox_message to retrieve a specific body.",
       parameters: Type.Object({
-        recipient: Type.String({ description: "Your name (e.g., 'TeamLead')" })
+        recipient: Type.String({ description: "Your worker identifier (the configured ID this process is running as)" })
       }),
       execute: async (params: unknown) => {
         const { recipient } = (params && typeof params === 'object' ? params : {}) as { recipient?: string };

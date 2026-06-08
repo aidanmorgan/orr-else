@@ -641,16 +641,18 @@ export class ConfigLoader {
 
   /**
    * pi-experiment-ux5e: Reject adapter/worktree fields in v2 configs.
+   * pi-experiment-isjk: Reject stale role-named fields in v2 configs (no-backcompat).
    *
    * In v2, tmux workers and isolated git worktrees are MANDATORY framework behavior.
    * They are NOT configurable. Any field that tries to configure:
    *   - runtime.adapters.worker / workspace / backlog — rejected
    *   - runtime.worktreePolicy — rejected
+   *   - runtime.teammates — rejected (renamed to runtime.workers in v2; no alias)
    *   - states.*.provisionWorktree — rejected (per-state override is not configurable)
    *   - settings.pi.workerArgs — rejected (provider-specific worker process alternative)
    *   - settings.pi.workerExtensions — rejected (provider-specific worker process alternative)
    *
-   * Admitted (AC1): runtime.teammates — numeric concurrency setting; no adapter knobs.
+   * Admitted (AC1): runtime.workers — numeric concurrency setting; no adapter knobs.
    *
    * Each rejection names the field + states that tmux workers and isolated git worktrees
    * are mandatory/non-configurable in v2 (AC3).
@@ -668,7 +670,7 @@ export class ConfigLoader {
 
     // ── runtime block ────────────────────────────────────────────────────────
     // runtime.adapters.* and runtime.worktreePolicy are forbidden.
-    // runtime.teammates is the ONLY admitted runtime key.
+    // runtime.workers is the ONLY admitted runtime concurrency key.
     const runtimeRaw = config['runtime'];
     if (isRecord(runtimeRaw)) {
       const runtime = runtimeRaw as Record<string, unknown>;
@@ -719,6 +721,15 @@ export class ConfigLoader {
         forbidden.push({
           path: 'runtime.worktreePolicy',
           hint: 'In v2, isolated git worktrees are mandatory for every worker — worktree policy is not configurable. Remove runtime.worktreePolicy.'
+        });
+      }
+
+      // pi-experiment-isjk: runtime.teammates — renamed to runtime.workers in v2 (no alias).
+      // The v2 public field is runtime.workers; runtime.teammates is a stale role-specific name.
+      if ('teammates' in runtime) {
+        forbidden.push({
+          path: 'runtime.teammates',
+          hint: 'Use runtime.workers instead — v2 uses generic framework terminology. runtime.teammates has been renamed to runtime.workers; no alias is provided.'
         });
       }
     }

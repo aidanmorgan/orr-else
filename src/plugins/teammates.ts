@@ -952,11 +952,11 @@ export const teammatePlugin = (factory: TeammateFactory): RuntimePlugin => ({
   tools: [
     {
       name: PluginToolName.SPAWN_TEAMMATE,
-      description: 'Spawn an Orr Else teammate Pi process in a tmux pane.',
+      description: 'Spawn an Orr Else state worker Pi process in a tmux pane.',
       parameters: Type.Object({
         beadId: Type.String({ description: 'The Bead ID to assign' }),
         stateId: Type.String({ description: 'The statechart state to execute' }),
-        worktreePath: Type.String({ description: 'Mandatory dedicated worktree path for the teammate.' })
+        worktreePath: Type.String({ description: 'Mandatory dedicated worktree path for the state worker.' })
       }),
       execute: async (params: unknown, ctx?: unknown) => {
         const { beadId, stateId, worktreePath } = (params && typeof params === 'object' ? params : {}) as { beadId: string; stateId: string; worktreePath: string };

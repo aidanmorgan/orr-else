@@ -579,7 +579,7 @@
                       },
                       "writable": {
                         "type": "boolean",
-                        "description": "Permit the teammate to write this artifact's exact resolved path outside the plan write set."
+                        "description": "Permit the state worker to write this artifact's exact resolved path outside the plan write set."
                       },
                       "ensureDir": {
                         "type": "boolean",
@@ -694,7 +694,7 @@
         "worktreePolicy": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Harness-wide worktree allocation policy. Controls which states receive an isolated git worktree before the teammate is spawned. When absent, defaults to { default: 'always' }, preserving pre-existing behavior. Per-state provisionWorktree overrides this policy for individual states.",
+          "description": "Harness-wide worktree allocation policy. Controls which states receive an isolated git worktree before the state worker is spawned. When absent, defaults to { default: 'always' }, preserving pre-existing behavior. Per-state provisionWorktree overrides this policy for individual states.",
           "properties": {
             "default": {
               "type": "string",
@@ -753,7 +753,7 @@
         "cycleCap": {
           "type": "integer",
           "minimum": 1,
-          "description": "Maximum consecutive self-loop cycles before a blocked bead is escalated to the Team Lead."
+          "description": "Maximum consecutive self-loop cycles before a blocked bead is escalated to the coordinator."
         },
         "stateContextRotThreshold": {
           "type": "integer",
@@ -1004,7 +1004,7 @@
               },
               "serialize": {
                 "type": "boolean",
-                "description": "Serialize invocations of this command tool across teammates via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)."
+                "description": "Serialize invocations of this command tool across state workers via the same generic cross-process lock that serializes MCP tools (for stateful tools that must not run concurrently)."
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
@@ -1131,7 +1131,7 @@
               },
               "serialize": {
                 "type": "boolean",
-                "description": "Serialize calls to this MCP tool across teammates via a cross-process lock (for stateful/non-concurrent-safe MCP servers)."
+                "description": "Serialize calls to this MCP tool across state workers via a cross-process lock (for stateful/non-concurrent-safe MCP servers)."
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
@@ -1447,7 +1447,7 @@
               },
               "serialize": {
                 "type": "boolean",
-                "description": "Serialize invocations of this tsProjectTool across teammates via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)."
+                "description": "Serialize invocations of this tsProjectTool across state workers via the same generic cross-process lock that serializes MCP tools (survives the tsProjectTool to command expansion)."
               },
               "sideEffectContract": {
                 "$ref": "#/definitions/sideEffectContract"
@@ -1907,7 +1907,7 @@
           },
           "provisionWorktree": {
             "type": "boolean",
-            "description": "Whether to provision an isolated git worktree for this state. When true, the Supervisor creates a per-bead worktree before spawning the teammate. When false, the teammate runs at the project root. When absent, falls back to settings.worktreePolicy.default ('always' if not set)."
+            "description": "Whether to provision an isolated git worktree for this state. When true, the Supervisor creates a per-bead worktree before spawning the state worker. When false, the state worker runs at the project root. When absent, falls back to settings.worktreePolicy.default ('always' if not set)."
           },
           "activeTools": {
             "type": "array",
@@ -2295,13 +2295,13 @@
     },
     "runtime": {
       "type": "object",
-      "description": "pi-experiment-ux5e: v2 runtime block. In v2, tmux workers and isolated git worktrees are mandatory — adapter selection and worktree policy are not configurable. Only teammates (numeric concurrency) is admitted here. Adapter/worktree fields are rejected by preValidateV2Admission before schema validation.",
+      "description": "pi-experiment-ux5e: v2 runtime block. In v2, tmux workers and isolated git worktrees are mandatory — adapter selection and worktree policy are not configurable. Only workers (numeric concurrency) is admitted here. Adapter/worktree fields are rejected by preValidateV2Admission before schema validation.",
       "additionalProperties": true,
       "properties": {
-        "teammates": {
+        "workers": {
           "type": "integer",
           "minimum": 1,
-          "description": "Number of concurrent teammate workers. The only admitted runtime setting — no adapter or worktree policy is configurable in v2."
+          "description": "Number of concurrent state workers. The only admitted runtime setting — no adapter or worktree policy is configurable in v2."
         }
       }
     },

@@ -8,7 +8,7 @@
  * adapters, worktree policy, or per-state worktree overrides MUST be rejected at
  * config load time with a clear diagnostic.
  *
- * AC1: v2 schema admits teammate concurrency (runtime.teammates) but no
+ * AC1: v2 schema admits worker concurrency (runtime.workers) but no
  *      worker/workspace/backlog adapter selection fields.
  * AC2: v2 schema rejects harness-wide worktree policy (runtime.worktreePolicy)
  *      and per-state worktree override fields (states.*.provisionWorktree).
@@ -308,16 +308,16 @@ states:
 });
 
 // ---------------------------------------------------------------------------
-// AC1 / Scenario 3: runtime.teammates admitted; no adapter knobs in resolved config
+// AC1 / Scenario 3: runtime.workers admitted; no adapter knobs in resolved config
 // ---------------------------------------------------------------------------
-describe('pi-experiment-ux5e: AC1 — runtime.teammates concurrency admitted without adapter rejection', () => {
-  it('admits runtime.teammates: 6 without rejecting', () => {
-    // Scenario: configure only runtime.teammates — no adapter fields — should load.
+describe('pi-experiment-ux5e: AC1 — runtime.workers concurrency admitted without adapter rejection', () => {
+  it('admits runtime.workers: 6 without rejecting', () => {
+    // Scenario: configure only runtime.workers — no adapter fields — should load.
     const yaml = MINIMAL_V2_BASE + `
 runtime:
-  teammates: 6
+  workers: 6
 `;
-    const p = writeYaml('runtime_teammates.yaml', yaml);
+    const p = writeYaml('runtime_workers.yaml', yaml);
     const loader = new ConfigLoader(undefined, TEST_DIR);
 
     let config: ReturnType<typeof loader.load> | undefined;
