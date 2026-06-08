@@ -51,6 +51,7 @@ import { buildQueryArtifactRtkSummary } from './query_artifact.js';
 import { buildReadPathContextRtkSummary } from './read_path_context.js';
 import { buildQueryHarnessEventsRtkSummary } from './query_harness_events.js';
 import { buildQueryToolOutputRtkSummary } from './query_tool_output.js';
+import { buildSubmitActionEvidenceRtkSummary } from './submit_action_evidence.js';
 
 // ---------------------------------------------------------------------------
 // Factory type
@@ -170,7 +171,14 @@ export const BUILTIN_RTK_SUMMARY_REGISTRY: ReadonlyMap<string, BuiltInRtkSummary
     return buildAddChecklistItemRtkSummary({ result, text, mandatory });
   }],
 
-  // ── Checkpoint/review tools ──────────────────────────────────────────────
+  // ── Checkpoint/review/evidence tools ─────────────────────────────────────
+
+  [BuiltInToolName.SUBMIT_ACTION_EVIDENCE, (result: unknown, params: unknown): ToolEvidenceRtkSummary => {
+    const p = params !== null && typeof params === 'object' ? params as Record<string, unknown> : {};
+    const summaryText = typeof p.summary === 'string' ? p.summary : '';
+    const artifactPaths = Array.isArray(p.artifactPaths) ? p.artifactPaths : [];
+    return buildSubmitActionEvidenceRtkSummary({ result, summaryText, artifactPathCount: artifactPaths.length });
+  }],
 
   [BuiltInToolName.SUBMIT_CHECKPOINT, (result: unknown, params: unknown): ToolEvidenceRtkSummary => {
     const p = params !== null && typeof params === 'object' ? params as Record<string, unknown> : {};

@@ -500,6 +500,15 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     // referenced artifact has no schema registration — e.g. raw text artifacts).
     optionalFields: ['routeEventId']
   },
+
+  // pi-experiment-x0zh: v2 model-supplied route authority rejection diagnostic.
+  // DIAGNOSTIC ONLY — no state mutation may result.  replayImpact: INFORMATIONAL
+  // because these events are observability-only and not consumed by any projection.
+  [DomainEventName.V2_MODEL_ROUTE_REJECTED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['actionId', 'rejectedRoute']
+  },
 };
 
 /**
@@ -738,4 +747,7 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
     'eventName', 'category',
     'evidenceRefs'
   ],
+
+  // pi-experiment-x0zh: v2 model-supplied route authority rejection diagnostic.
+  [DomainEventName.V2_MODEL_ROUTE_REJECTED]: ['beadId', 'stateId', 'surface', 'reason'],
 };

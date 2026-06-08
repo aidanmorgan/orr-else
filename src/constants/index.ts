@@ -494,6 +494,24 @@ export enum DomainEventName {
    * are completely unaffected.
    */
   ROUTE_EVENT_EMITTED = 'ROUTE_EVENT_EMITTED',
+
+  /**
+   * pi-experiment-x0zh: v2 model-supplied route authority rejection diagnostic.
+   *
+   * Emitted (at most once per attempt) when a worker/model supplies a route
+   * field on any surface in a v2 config and the coordinator rejects it before
+   * projection.  Carries enough context for operators to identify the attempted
+   * surface (signal_completion/submit_checkpoint/typed signal/state event/
+   * failure-limit/review-artifact) and the rejected route label.
+   *
+   * NO workflow state transition or bead status mutation may result from these
+   * rejected attempts — this event is DIAGNOSTIC ONLY.
+   *
+   * Carries: { beadId, stateId, actionId, surface, rejectedRoute, reason }.
+   *
+   * version-gated: only emitted for configs with version === 2.
+   */
+  V2_MODEL_ROUTE_REJECTED = 'V2_MODEL_ROUTE_REJECTED',
 }
 
 export enum BeadsCliCommand {
@@ -721,7 +739,16 @@ export enum TeammateEventType {
   CONTEXT_RESTART_REQUESTED = 'CONTEXT_RESTART_REQUESTED',
   HARNESS_RESTART_REQUESTED = 'HARNESS_RESTART_REQUESTED',
   HEARTBEAT = 'HEARTBEAT',
-  TEAMMATE_EXITED = 'TEAMMATE_EXITED'
+  TEAMMATE_EXITED = 'TEAMMATE_EXITED',
+  /**
+   * pi-experiment-x0zh: v2 evidence-submitted signal.
+   *
+   * Posted by submit_action_evidence (worker side) in v2 configs after recording
+   * evidence. Triggers the coordinator's deterministic gate (evaluateCoordinatorGate)
+   * + emits mapping + route event + STATE_TRANSITION_APPLIED — no model-supplied
+   * route authority. Only meaningful in v2 configs; ignored (no-op) in v1.
+   */
+  ACTION_EVIDENCE_SUBMITTED = 'ACTION_EVIDENCE_SUBMITTED'
 }
 
 export enum TeammateEventDecisionAction {
@@ -951,7 +978,16 @@ export enum BuiltInToolName {
   HARNESS_STATUS = 'harness_status',
   PRE_SIGNAL_AUDIT = 'pre_signal_audit',
   QUERY_HARNESS_EVENTS = 'query_harness_events',
-  QUERY_TOOL_OUTPUT = 'query_tool_output'
+  QUERY_TOOL_OUTPUT = 'query_tool_output',
+  /**
+   * pi-experiment-x0zh: v2 evidence-only completion surface.
+   *
+   * Workers in v2 configs submit artifact/evidence references with no
+   * outcome/route field.  No workflow state transition results from this
+   * call alone — transition requires a schema-valid deterministic route
+   * event (ROUTE_EVENT_EMITTED) from a configured emitter.
+   */
+  SUBMIT_ACTION_EVIDENCE = 'submit_action_evidence'
 }
 
 /**

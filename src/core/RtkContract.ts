@@ -259,6 +259,23 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     safeForReadinessProbe: false
   },
 
+  // pi-experiment-x0zh: v2 evidence-only completion surface (no route field).
+  {
+    toolName: BuiltInToolName.SUBMIT_ACTION_EVIDENCE,
+    toolClass: 'built_in',
+    owningFile: 'src/extension.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'none_minimal',
+    deterministicCompaction: false,
+    mutating: true,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: false,
+    safeForReadinessProbe: false
+  },
+
   {
     toolName: BuiltInToolName.SIGNAL_COMPLETION,
     toolClass: 'built_in',

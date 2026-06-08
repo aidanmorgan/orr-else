@@ -111,7 +111,22 @@ export interface TeammateExitedEvent extends TeammateEventBase {
   capacityLimited?: boolean;
 }
 
-export type TeammateEvent = 
+/**
+ * pi-experiment-x0zh: v2 evidence-submitted coordinator gate trigger.
+ *
+ * Posted by submit_action_evidence (worker side) in v2 configs after recording
+ * the evidence checkpoint. The coordinator's handleTeammateEvent processes this
+ * by running evaluateCoordinatorGate + the action's emits mapping + route event
+ * + STATE_TRANSITION_APPLIED. Not a model-supplied route — purely harness-owned.
+ */
+export interface ActionEvidenceSubmittedEvent extends TeammateEventBase {
+  type: TeammateEventType.ACTION_EVIDENCE_SUBMITTED;
+  actionId: string;
+  summary: string;
+  sessionStateId?: string;
+}
+
+export type TeammateEvent =
   | TeammateStartedEvent
   | StateStartedEvent
   | CheckpointAcceptedEvent
@@ -121,7 +136,8 @@ export type TeammateEvent =
   | ContextRestartRequestedEvent
   | HarnessRestartRequestedEvent
   | HeartbeatEvent
-  | TeammateExitedEvent;
+  | TeammateExitedEvent
+  | ActionEvidenceSubmittedEvent;
 
 function hashText(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value ?? null)).digest('hex').slice(0, 16);
@@ -306,6 +322,12 @@ export function validateTeammateEvent(value: unknown, allowedCustomEvents?: Read
       const paths = schemaResult.diagnostic.failurePath.join('; ');
       return { ok: false, error: `Schema validation failed for CHECKPOINT_ACCEPTED: ${paths}` };
     }
+  }
+
+  // pi-experiment-x0zh: v2 evidence-submitted gate trigger validation.
+  if (type === TeammateEventType.ACTION_EVIDENCE_SUBMITTED) {
+    const error = requireStrings(obj, ['actionId', 'summary']);
+    if (error) return { ok: false, error };
   }
 
   if (

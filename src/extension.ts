@@ -139,7 +139,9 @@ import { LoopDetector } from './core/LoopDetector.js';
 import { computeRequestSizing } from './core/ProviderBudgetPreflight.js';
 import { systemClock } from './core/Clock.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
-import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
+import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState, buildV2EventVocabulary, v2ApplyTransition } from './core/FlowManager.js';
+import { emitActionRouteEvent } from './core/ActionRouteEventEmitter.js';
+import { computeConfigFingerprint } from './core/RouteEventContract.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { HarnessEventQuery } from './core/HarnessEventQuery.js';
 import { ToolOutputQuery } from './core/ToolOutputQuery.js';
@@ -418,6 +420,7 @@ const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
   BuiltInToolName.TICK_ITEMS,
   BuiltInToolName.GET_OUTSTANDING_TASKS,
   BuiltInToolName.SUBMIT_CHECKPOINT,
+  BuiltInToolName.SUBMIT_ACTION_EVIDENCE,
   BuiltInToolName.SUBMIT_REVIEW_ARTIFACT,
   BuiltInToolName.SIGNAL_COMPLETION,
   BuiltInToolName.REQUEST_CONTEXT_RESTART,
@@ -2120,6 +2123,151 @@ async function latestWorktreePathForBead(services: RuntimeServices, beadId: stri
   return undefined;
 }
 
+/**
+ * pi-experiment-x0zh: v2 deterministic positive transition path.
+ *
+ * Called by handleTeammateEvent when an ACTION_EVIDENCE_SUBMITTED signal arrives
+ * and config.version === 2.  Runs the coordinator's deterministic gate, maps the
+ * verdict through the action's emits mapping, emits ROUTE_EVENT_EMITTED, and
+ * writes STATE_TRANSITION_APPLIED — all harness-owned, no model-supplied routing.
+ *
+ * DETERMINISM: no Date.now()/Math.random() in route/verdict/event selection.
+ * uuidv7() runtime IDs inside applyV2RouteEvent are correct (not a hash input).
+ */
+async function applyV2EvidenceDrivenTransition(
+  beadId: string,
+  event: TeammateEvent,
+  config: HarnessConfig,
+  services: RuntimeServices,
+  session: ExtensionSession,
+  ctx: ExtensionContext,
+  releaseTool: { execute: (params: unknown) => unknown | Promise<unknown> },
+  ack: import('./core/SignalingServer.js').SignalAck | undefined
+): Promise<void> {
+  const stateId = event.stateId;
+  const actionId = (event as unknown as Record<string, unknown>)['actionId'] as string | undefined;
+  const state = config.states[stateId];
+  const action = actionId ? (state?.actions || []).find(a => a.id === actionId) : undefined;
+
+  // No emits mapping → v2 action has no deterministic route; log and release.
+  if (!action?.emits) {
+    Logger.warn(Component.ORR_ELSE, 'v2 ACTION_EVIDENCE_SUBMITTED: action has no emits mapping; cannot route', {
+      beadId, stateId, actionId
+    });
+    ack?.send({ pass: false, failures: [], rejectMessage: `v2 action "${actionId}" has no emits mapping; cannot apply deterministic transition` });
+    await Promise.resolve(releaseTool.execute({ id: beadId })).catch(() => {});
+    session.supervisor?.markBeadExited(beadId as import('./types/ids.js').BeadId);
+    return;
+  }
+
+  // Resolve required tools for the gate (state + action requiredTools).
+  const gateRequiredTools = coordinatorGateRequiredTools(config, stateId, actionId, undefined);
+
+  // Run the deterministic gate.
+  let gateOutcome: import('./core/CoordinatorVerifierGate.js').CoordinatorGateOutcome;
+  try {
+    const worktreePath = await latestWorktreePathForBead(services, beadId);
+    gateOutcome = await evaluateCoordinatorGate(
+      {
+        eventStore: services.eventStore,
+        artifactPaths: services.artifactPaths,
+        requiredToolResolver: services.requiredToolResolver,
+        planWriteSet: services.planWriteSet,
+        projectRoot: services.projectRoot,
+        config
+      },
+      {
+        beadId,
+        stateId,
+        actionId: actionId || '',
+        requiredTools: gateRequiredTools,
+        worktreePath
+      }
+    );
+  } catch (gateError) {
+    Logger.error(Component.ORR_ELSE, 'v2 evidence gate threw; treating as fail', { beadId, stateId, actionId, error: String(gateError) });
+    gateOutcome = { ran: true, pass: false, failures: [], rejectMessage: String(gateError), perTool: [], evaluatedTools: [] };
+  }
+
+  // Map gate verdict to action emits verdict.
+  const verdict: import('./core/ActionRouteEventEmitter.js').ActionVerdict =
+    (!gateOutcome.ran || gateOutcome.pass) ? 'pass' : 'fail';
+
+  // Build v2 vocabulary + compute next state.
+  const v2Vocab = buildV2EventVocabulary(config);
+  const emitsEventName = verdict === 'pass' ? action.emits.pass : action.emits.fail;
+  const v2NextState = state ? v2ApplyTransition(state, emitsEventName, v2Vocab) : null;
+
+  // Emit ROUTE_EVENT_EMITTED via the hutg contract.
+  const configFingerprint = computeConfigFingerprint(services.configLoader.getConfigPath() || 'v2-config');
+  const runId = (event as unknown as Record<string, unknown>)['sessionStateId'] as string || uuidv7();
+  const routeResult = await emitActionRouteEvent({
+    emits: action.emits,
+    verdict,
+    emitterType: 'gate',
+    emitterId: 'evaluateCoordinatorGate',
+    beadId,
+    stateId,
+    actionId: actionId || '',
+    runId,
+    configFingerprint,
+    v2Vocab,
+    v2NextState,
+    evidenceRefs: [],   // coordinator gate produces no artifact refs; evidence is in the event store
+    store: services.eventStore
+  });
+
+  if (!routeResult.emitted) {
+    Logger.warn(Component.ORR_ELSE, 'v2 evidence gate: emitActionRouteEvent rejected emit', {
+      beadId, stateId, actionId, rejectReason: routeResult.rejectReason, verdict
+    });
+    ack?.send({ pass: false, failures: [], rejectMessage: `v2 route event not emitted: ${routeResult.rejectReason}` });
+    await Promise.resolve(releaseTool.execute({ id: beadId })).catch(() => {});
+    session.supervisor?.markBeadExited(beadId as import('./types/ids.js').BeadId);
+    return;
+  }
+
+  // Write STATE_TRANSITION_APPLIED referencing the routeEventId.
+  const nextState = routeResult.nextState ?? stateId;
+  await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
+    beadId,
+    workerId: event.workerId,
+    sessionStateId: (event as unknown as Record<string, unknown>)['sessionStateId'] as string | undefined,
+    idempotencyKey: event.idempotencyKey,
+    fromState: stateId,
+    nextState,
+    transitionEvent: routeResult.transitionKey ?? emitsEventName,
+    actionId,
+    actionKey: actionId ? actionCompletionKey(config, stateId, actionId) : undefined,
+    routeEventId: routeResult.routeEventId,
+    v2Driven: true
+  });
+
+  Logger.info(Component.ORR_ELSE, 'v2 deterministic transition applied', {
+    beadId, stateId, actionId, verdict, nextState, routeEventId: routeResult.routeEventId
+  });
+
+  ack?.send({ pass: verdict === 'pass', failures: gateOutcome.failures ?? [], rejectMessage: gateOutcome.rejectMessage ?? '' });
+
+  // Terminal state handling for v2 advance transitions.
+  if (verdict === 'pass' && nextState !== stateId && isTerminalState(nextState, config)) {
+    const mergeTool = requireTool(services.plugins.git, PluginToolName.MERGE_AND_COMMIT);
+    const mergeResult = await mergeTool.execute({ beadId, closeAfterMerge: true, closeReason: 'v2 evidence-driven terminal transition' }, ctx) as MergeResult;
+    if (mergeResult.success !== true) {
+      await requireTool(services.plugins.bd, PluginToolName.BD_UPDATE_STATUS).execute({
+        id: beadId,
+        status: BeadStatus.BLOCKED,
+        notes: `Harness-owned terminal merge failed (v2): ${JSON.stringify(mergeResult)}`
+      }, ctx);
+    } else {
+      await requireTool(services.plugins.git, PluginToolName.REMOVE_WORKTREE).execute({ beadId, force: true }, ctx);
+    }
+  }
+
+  await Promise.resolve(releaseTool.execute({ id: beadId })).catch(() => {});
+  session.supervisor?.markBeadExited(beadId as import('./types/ids.js').BeadId);
+}
+
 async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, event: TeammateEvent, services: RuntimeServices, session: ExtensionSession, ack?: SignalAck) {
   const currentSupervisor = session.supervisor;
   if (!currentSupervisor) return;
@@ -2136,7 +2284,18 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   // gate. Hold the HTTP response SYNCHRONOUSLY (before any await) so the gate's
   // structured verdict round-trips back to the caller instead of a fire-and-forget
   // {ok:true}. Every other signal leaves the response on its immediate path.
-  if (ack && event.type === TeammateEventType.STATE_TRANSITIONED) {
+  //
+  // pi-experiment-x0zh: also hold for STATE_FAILED/STATE_BLOCKED and
+  // ACTION_EVIDENCE_SUBMITTED in v2 configs so the v2 rejection and gate verdict
+  // round-trips back to the caller synchronously. The config check (version===2)
+  // cannot happen here (it requires an await), so we hold pre-emptively for
+  // these event types. The ack is released in the appropriate handler branch.
+  if (ack && (
+    event.type === TeammateEventType.STATE_TRANSITIONED ||
+    event.type === TeammateEventType.STATE_FAILED ||
+    event.type === TeammateEventType.STATE_BLOCKED ||
+    event.type === TeammateEventType.ACTION_EVIDENCE_SUBMITTED
+  )) {
     ack.hold();
   }
 
@@ -2284,6 +2443,10 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         }
       }
     }
+    // Release any held ack for the held event types (STATE_FAILED/STATE_BLOCKED
+    // held above for v2 verdict round-trip). On the duplicate/ignore path, no
+    // verdict → fire-and-forget {ok:true} response equivalent.
+    ack?.send();
     return;
   }
 
@@ -2304,6 +2467,30 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     return;
   }
 
+  // ── pi-experiment-x0zh: v2 positive transition path ─────────────────────
+  // ACTION_EVIDENCE_SUBMITTED signals are the v2 coordinator gate trigger:
+  // worker calls submit_action_evidence → coordinator runs its deterministic
+  // gate (evaluateCoordinatorGate) → maps verdict through action emits mapping
+  // → emitActionRouteEvent → ROUTE_EVENT_EMITTED → STATE_TRANSITION_APPLIED.
+  // No model-supplied route authority.  Version-gated: v1 configs unaffected.
+  if (event.type === TeammateEventType.ACTION_EVIDENCE_SUBMITTED) {
+    const v2Config = await services.configLoader.load();
+    const v2ReleaseTool = requireTool(services.plugins.bd, PluginToolName.BD_RELEASE);
+    if (v2Config.version === 2) {
+      // ack was already held synchronously at the prelude above.
+      await applyV2EvidenceDrivenTransition(
+        beadId as string, event, v2Config, services, session, ctx, v2ReleaseTool, ack
+      );
+    } else {
+      // v1: evidence-submitted signal is a no-op at the coordinator level.
+      // Release the held ack with no verdict ({ok:true}).
+      ack?.send();
+      await Promise.resolve(v2ReleaseTool.execute({ id: beadId })).catch(() => {});
+      currentSupervisor.markBeadExited(beadId);
+    }
+    return;
+  }
+
   if (!isStatusMutatingTeammateEvent(event)) return;
 
   if (ctx.hasUI) {
@@ -2314,6 +2501,50 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
   const config = await services.configLoader.load();
   const releaseTool = requireTool(services.plugins.bd, PluginToolName.BD_RELEASE);
+
+  // ── pi-experiment-x0zh: v2 route-authority stripping for status-mutating signals ──
+  // In v2 configs (version === 2) any worker/model-supplied route field on
+  // STATE_TRANSITIONED, STATE_FAILED, or STATE_BLOCKED signals is rejected as
+  // route authority before projection.  The signal has already been recorded as
+  // a TEAMMATE_EVENT (dedup) above — this gate fires AFTER recording to preserve
+  // the event log, but BEFORE any workflow state transition or bead status
+  // mutation.  A V2_MODEL_ROUTE_REJECTED diagnostic is appended (at most once
+  // per attempt).  Only a schema-valid deterministic ROUTE_EVENT_EMITTED may
+  // trigger a STATE_TRANSITION_APPLIED in v2.
+  //
+  // v1 configs (incl. real cerdiwen harness.yaml, no version field) are
+  // COMPLETELY UNAFFECTED — this branch only runs when version === 2.
+  if (
+    config.version === 2 &&
+    (event.type === TeammateEventType.STATE_TRANSITIONED ||
+     event.type === TeammateEventType.STATE_FAILED ||
+     event.type === TeammateEventType.STATE_BLOCKED)
+  ) {
+    const anyEvent = event as unknown as Record<string, unknown>;
+    const rejectedRoute = typeof anyEvent['transitionEvent'] === 'string' ? anyEvent['transitionEvent'] : undefined;
+    const surface = event.type === TeammateEventType.STATE_TRANSITIONED
+      ? 'STATE_TRANSITIONED'
+      : event.type === TeammateEventType.STATE_FAILED
+        ? 'STATE_FAILED'
+        : 'STATE_BLOCKED';
+    Logger.warn(Component.ORR_ELSE, `v2: ${surface} route authority rejected before projection`, {
+      beadId, stateId: event.stateId, rejectedRoute
+    });
+    await services.eventStore.record(DomainEventName.V2_MODEL_ROUTE_REJECTED, {
+      beadId,
+      stateId: event.stateId,
+      actionId: event.actionId || undefined,
+      surface,
+      rejectedRoute,
+      reason: `v2 configs do not permit model-selected route authority via ${surface} signals; routing requires a schema-valid deterministic ROUTE_EVENT_EMITTED`
+    }).catch(() => {});
+    await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+      Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after v2 route rejection', { beadId, error: String(error) });
+    });
+    currentSupervisor.markBeadExited(beadId);
+    ack?.send({ pass: false, failures: [], rejectMessage: `v2 route authority rejected: ${surface} signal does not drive state transitions in v2 configs` });
+    return;
+  }
 
   if (event.type === TeammateEventType.STATE_TRANSITIONED) {
     const state = config.states[event.stateId];
@@ -2969,6 +3200,12 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       attempt: restartAttempt
     });
   }
+
+  // pi-experiment-x0zh: release any held ack for STATE_FAILED/STATE_BLOCKED
+  // (now held synchronously for v2 verdict round-trip). In v1 configs this is
+  // a no-op send (no verdict = {ok:true} response, preserving existing behavior).
+  // In v2 configs the ack was already sent by the stripping block (returns early).
+  ack?.send();
 
   await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
     Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after event', { beadId: beadId, error: String(error) });
@@ -4256,6 +4493,101 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }
     }));
 
+    // ── pi-experiment-x0zh: v2 evidence-only completion surface ─────────────
+    // submit_action_evidence is the v2 completion surface for worker/LLM action
+    // completion.  Workers submit artifact/evidence references with no
+    // outcome/route field.  No workflow state transition results from this call
+    // alone — transition requires a schema-valid deterministic ROUTE_EVENT_EMITTED
+    // from a configured emitter (e.g. a tool verifier with an emits block).
+    //
+    // This tool is always registered (so workers can discover it regardless of
+    // config version) but only meaningful in v2 configs.  In v1 configs workers
+    // should continue to use signal_completion.
+    pi.registerTool(wrapRuntimeTool({
+      name: BuiltInToolName.SUBMIT_ACTION_EVIDENCE,
+      description:
+        'v2 only: Submit action evidence and artifact references for this phase. ' +
+        'Does NOT trigger a state transition — routing is driven solely by a ' +
+        'deterministic route event from a configured emitter. ' +
+        'In v2 configs, use this tool instead of signal_completion to record ' +
+        'that your action work is complete and artifacts are ready for evaluation.',
+      parameters: Type.Object({
+        summary: Type.String({ description: 'A dense summary of what was produced or accomplished.' }),
+        artifactPaths: Type.Optional(Type.Array(Type.String(), { description: 'Paths to produced artifacts (evidence references).' })),
+        evidence: Type.Optional(Type.String({ description: 'Inline evidence text (logs, test output, etc.).' }))
+      }),
+      execute: async ({ summary, artifactPaths, evidence }: { summary: string; artifactPaths?: string[]; evidence?: string }) => {
+        const activeRun = session.activeRun;
+        if (!activeRun) return { status: ToolResultStatus.REJECTED, message: 'No active run.' };
+
+        const config = await services.configLoader.load();
+
+        // Record the evidence submission — no route authority, no state mutation.
+        await services.eventStore.record(DomainEventName.CHECKPOINT_SUBMITTED, {
+          beadId: activeRun.beadId,
+          workerId: process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`,
+          sessionStateId: process.env[EnvVars.SESSION_STATE_ID],
+          stateId: activeRun.stateId,
+          actionId: activeRun.action.id,
+          actionKey: actionCompletionKey(config, activeRun.stateId, activeRun.action.id),
+          idempotencyKey: `${activeRun.beadId}:${activeRun.stateId}:${activeRun.action.id}:evidence:${Date.now()}`,
+          summary,
+          evidence: evidence ?? summary,
+          artifactPaths: artifactPaths ?? [],
+          evidenceOnly: true
+        });
+
+        // Mark checkpoint accepted so signal_completion gate passes in v1 compat
+        // flows; in v2 signal_completion is already blocked.
+        activeRun.checkpointAccepted = true;
+        activeRun.handoverSummary = summary;
+
+        await activeRun.worklogManager.appendEntry(
+          activeRun.beadId,
+          activeRun.stateId,
+          `Evidence submitted: ${summary.slice(0, WorkerDefaults.CHECKLIST_EVIDENCE_PREVIEW_CHARS)}`,
+          [
+            evidence ?? summary,
+            ...(artifactPaths ?? []).map(p => `artifact: ${p}`)
+          ].join('\n')
+        );
+
+        if (activeRun.progressManager) {
+          await activeRun.progressManager.appendLog(`Evidence: ${summary.slice(0, WorkerDefaults.CHECKLIST_EVIDENCE_PREVIEW_CHARS)}...`);
+        }
+
+        // ── pi-experiment-x0zh: v2 coordinator gate trigger ────────────────
+        // In v2 configs, post ACTION_EVIDENCE_SUBMITTED to the coordinator so
+        // it can run its deterministic gate + emits mapping → ROUTE_EVENT_EMITTED
+        // → STATE_TRANSITION_APPLIED. This is the ONLY path to a transition in v2.
+        // v1 configs are completely unaffected (no signal posted).
+        if (config.version === 2) {
+          const workerId = process.env[EnvVars.WORKER_ID] || `worker-${process.pid}`;
+          const evidenceSignal = {
+            type: TeammateEventType.ACTION_EVIDENCE_SUBMITTED,
+            beadId: activeRun.beadId,
+            workerId,
+            sessionStateId: process.env[EnvVars.SESSION_STATE_ID],
+            stateId: activeRun.stateId,
+            actionId: activeRun.action.id,
+            summary,
+            timestamp: Date.now(),
+            idempotencyKey: `${activeRun.beadId}:${activeRun.stateId}:${activeRun.action.id}:evidence-gate:${uuidv7()}`
+          };
+          await postWorkerSignal(services, evidenceSignal as import('./core/TeammateEvents.js').TeammateEvent).catch((err: unknown) => {
+            Logger.warn(Component.ORR_ELSE, 'v2: failed to post ACTION_EVIDENCE_SUBMITTED to coordinator', {
+              beadId: activeRun.beadId, error: String(err)
+            });
+          });
+        }
+
+        return {
+          status: ToolResultStatus.PASSED,
+          message: 'Evidence recorded. Coordinator gate will now evaluate deterministic transition via route event.'
+        };
+      }
+    }));
+
     pi.registerTool(wrapRuntimeTool({
       name: BuiltInToolName.SUBMIT_REVIEW_ARTIFACT,
       description: 'Persist the configured ship/post-review artifact to the Orr Else event store. Use this instead of native writes for event-store-backed review artifacts.',
@@ -4287,6 +4619,23 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           };
         }
 
+        // ── pi-experiment-x0zh: v2 route-authority stripping ─────────────────
+        // In v2 configs the review artifact `outcome` field is IGNORED as route
+        // authority before projection — only a schema-valid ROUTE_EVENT_EMITTED
+        // from a deterministic emitter may drive transitions.  The artifact itself
+        // is still recorded as evidence (non-routing).
+        const effectiveOutcome = config.version === 2 ? undefined : outcome;
+        if (config.version === 2 && outcome) {
+          await services.eventStore.record(DomainEventName.V2_MODEL_ROUTE_REJECTED, {
+            beadId: activeRun.beadId,
+            stateId: activeRun.stateId,
+            actionId: activeRun.action.id,
+            surface: 'submit_review_artifact.outcome',
+            rejectedRoute: outcome,
+            reason: 'v2 configs do not permit review-artifact outcome fields as route authority; routing requires a deterministic ROUTE_EVENT_EMITTED'
+          }).catch(() => {});
+        }
+
         const actionKey = actionCompletionKey(config, activeRun.stateId, activeRun.action.id);
         const eventType = reviewArtifactConfig?.eventType || DomainEventName.SHIP_POST_REVIEW;
         await services.eventStore.record(eventType, {
@@ -4298,7 +4647,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           store,
           summary,
           verdict,
-          outcome,
+          outcome: effectiveOutcome,
           artifact
         });
         await activeRun.worklogManager.appendEntry(activeRun.beadId, activeRun.stateId, 'Ship/post-review artifact recorded', summary);
@@ -4323,6 +4672,31 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       execute: async ({ outcome, summary }: { outcome: string, summary: string }, ctx: ExtensionContext) => {
         const activeRun = session.activeRun;
         if (!activeRun) return 'Error: No active run.';
+
+        // ── pi-experiment-x0zh: v2 route-authority stripping (FIRST CHECK) ──
+        // In v2 configs (version === 2) the worker/model MUST NOT drive routing
+        // via signal_completion(outcome). Reject immediately — before ALL gate
+        // readiness checks — so the v2 rejection is unambiguous regardless of
+        // checkpoint, checklist, or failure-limit state.  A V2_MODEL_ROUTE_REJECTED
+        // diagnostic is appended; no workflow state mutation occurs.
+        // v1 configs are completely unaffected.
+        {
+          const cfgForV2Check = await services.configLoader.load();
+          if (cfgForV2Check.version === 2) {
+            Logger.warn(Component.ORR_ELSE, 'v2: signal_completion outcome rejected as route authority', {
+              beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id, outcome
+            });
+            await services.eventStore.record(DomainEventName.V2_MODEL_ROUTE_REJECTED, {
+              beadId: activeRun.beadId,
+              stateId: activeRun.stateId,
+              actionId: activeRun.action.id,
+              surface: 'signal_completion',
+              rejectedRoute: outcome,
+              reason: 'v2 configs do not permit worker/model-supplied route authority via signal_completion; use submit_action_evidence and await a deterministic ROUTE_EVENT_EMITTED'
+            }).catch(() => {});
+            return `REJECTED: In v2 configs the \`outcome\` field of \`${BuiltInToolName.SIGNAL_COMPLETION}\` is not accepted as route authority. Use \`${BuiltInToolName.SUBMIT_ACTION_EVIDENCE}\` to record evidence; routing is driven solely by deterministic route events.`;
+          }
+        }
 
         // ── Gate evaluation (shared predicate) ─────────────────────────────
         // evaluateGateReadiness is the single source of truth for whether this
