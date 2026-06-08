@@ -16,6 +16,49 @@ import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.
  */
 
 /**
+ * Per-scope loop detection configuration (pi-experiment-6q0y.49).
+ *
+ * Each supported loop scope may have its own maxLoops and routeEvent.
+ * When absent, the parent loopDetection.maxLoops / defaultRouteEvent apply.
+ *
+ * Supported scope keys: toolCall | toolCallSemantic | failedRoute | verifierFail | blocker.
+ */
+export interface LoopScopeConfig {
+  /** Override maxLoops for this scope. */
+  maxLoops?: number;
+  /** Route event to emit when this scope exceeds its limit. */
+  routeEvent?: string;
+}
+
+/**
+ * Optional loop-detection configuration (pi-experiment-6q0y.49).
+ *
+ * ALWAYS ON — this config only adjusts thresholds; it cannot disable detection.
+ * When absent, all scopes use maxLoops=10 and route=FAILURE (AC2).
+ *
+ * YAML: settings.loopDetection.maxLoops (global), plus per-scope overrides.
+ */
+export interface LoopDetectionConfig {
+  /**
+   * Global maxLoops ceiling applied to all scopes that don't declare their own.
+   * Default: 10. Must be >= 1 (startup lint rejects 0 or negative).
+   */
+  maxLoops?: number;
+  /**
+   * Default route event emitted when any scope exceeds its limit.
+   * Must be a declared statechart outcome (startup lint AC4).
+   * Default: 'FAILURE'.
+   */
+  defaultRouteEvent?: string;
+  /** Per-scope overrides keyed by LoopScope name. */
+  toolCall?: LoopScopeConfig;
+  toolCallSemantic?: LoopScopeConfig;
+  failedRoute?: LoopScopeConfig;
+  verifierFail?: LoopScopeConfig;
+  blocker?: LoopScopeConfig;
+}
+
+/**
  * Optional hard prompt-budget policy (pi-experiment-6q0y.17).
  *
  * Opt-in: absent = no rejection (true no-op when unconfigured, AC1).
@@ -896,6 +939,15 @@ export interface HarnessConfig {
      * than settings.promptBudgetStateOverrides and settings.promptBudget.
      */
     promptBudgetActionOverrides?: Record<string, PromptBudgetPolicy>;
+    /**
+     * Always-on structural loop detection (pi-experiment-6q0y.49).
+     *
+     * Detection cannot be disabled; this config only adjusts thresholds.
+     * When absent, all scopes use maxLoops=10 and route=FAILURE.
+     * Startup lint (AC4) rejects: maxLoops<1, unknown scopes, unknown route
+     * events, and route events absent from the declared statechart vocabulary.
+     */
+    loopDetection?: LoopDetectionConfig;
     /**
      * Default tool-payload budget applied to all tools that do not declare an
      * explicit per-tool budget (pi-experiment-6q0y.18).

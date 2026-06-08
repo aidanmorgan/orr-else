@@ -452,6 +452,23 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['beadId', 'stateId', 'actionId']
   },
+
+  // ── Loop detection (pi-experiment-6q0y.49) ────────────────────────────────
+  // Always-on: events fired when the structural loop detector fires.
+  // REPLAY-CRITICAL: rebuildFromEvents() uses these to reconstruct counter
+  //   state after harness/context restart (AC7).
+  // Required: scope, fingerprint (sha256 prefix — no raw bodies), count, max,
+  //   routeEvent. Optional: beadId/stateId/actionId (absent when no active run).
+  [DomainEventName.LOOP_DETECTED]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['beadId', 'stateId', 'actionId']
+  },
+  [DomainEventName.LOOP_WARNING_DIAGNOSTIC]: {
+    version: 1,
+    replayImpact: 'CRITICAL',
+    optionalFields: ['beadId', 'stateId', 'actionId']
+  },
 };
 
 /**
@@ -651,5 +668,18 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   // NO prompt body or raw tool output: only structured identity + numeric fields.
   [DomainEventName.RUNTIME_BUDGET_EXCEEDED]: [
     'budgetId', 'dimension', 'currentValue', 'limit', 'nextRoute'
+  ],
+
+  // ── Loop detection (pi-experiment-6q0y.49) ────────────────────────────────
+  // Required: scope (LoopScope), fingerprint (sha256 prefix — no raw bodies,
+  //   AC1), count (current counter), max (configured limit), routeEvent.
+  // Optional: beadId / stateId / actionId (context — absent when no active run).
+  // Both events are REPLAY-CRITICAL (AC7): LoopDetector.rebuildFromEvents()
+  // reads them to reconstruct counter state after harness/context restart.
+  [DomainEventName.LOOP_DETECTED]: [
+    'scope', 'fingerprint', 'count', 'max', 'routeEvent'
+  ],
+  [DomainEventName.LOOP_WARNING_DIAGNOSTIC]: [
+    'scope', 'fingerprint', 'count', 'max', 'routeEvent'
   ],
 };

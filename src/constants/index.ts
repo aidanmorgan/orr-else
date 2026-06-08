@@ -435,7 +435,40 @@ export enum DomainEventName {
    * missingIds     — array of tool/artifact names that are absent or FAIL.
    * remediationHint — deterministic guidance: which tools to invoke / artifacts to produce.
    */
-  ROUTE_ADMISSION_REJECTED = 'ROUTE_ADMISSION_REJECTED'
+  ROUTE_ADMISSION_REJECTED = 'ROUTE_ADMISSION_REJECTED',
+
+  /**
+   * Emitted when a loop fingerprint counter reaches the configured maxLoops
+   * threshold (pi-experiment-6q0y.49 AC5).
+   *
+   * Carries: { scope, fingerprint, count, max, routeEvent,
+   *   beadId?, stateId?, actionId? }.
+   *
+   * scope      — LoopScope: toolCall | toolCallSemantic | failedRoute |
+   *              verifierFail | blocker.
+   * fingerprint — deterministic SHA-256 prefix of the normalized loop key
+   *              (no raw prompt/tool bodies — AC1).
+   * count      — current counter value at exceed time.
+   * max        — configured maxLoops for this scope.
+   * routeEvent — the route event that will be emitted to route the bead.
+   *
+   * Replay-critical: used by LoopDetector.rebuildFromEvents() to reconstruct
+   * counter state after harness/context restart (AC7).
+   */
+  LOOP_DETECTED = 'LOOP_DETECTED',
+
+  /**
+   * Emitted at most ONCE per fingerprint when the counter reaches maxLoops-1
+   * (one before the hard limit) — the single warning diagnostic allowed by
+   * AC6. Carries the same fields as LOOP_DETECTED.
+   *
+   * A LOOP_WARNING_DIAGNOSTIC event means: "the harness noticed this pattern
+   * is recurring; if it recurs once more, a route event will fire."
+   *
+   * Replay-critical (same as LOOP_DETECTED): LoopDetector.rebuildFromEvents()
+   * reads these to re-mark warnedFingerprints on restart (AC7).
+   */
+  LOOP_WARNING_DIAGNOSTIC = 'LOOP_WARNING_DIAGNOSTIC'
 }
 
 export enum BeadsCliCommand {
@@ -1662,6 +1695,16 @@ export enum PromptProvenanceKind {
 /**
  * Named constants for the prompt provenance subsystem.
  */
+/**
+ * Defaults for the always-on structural loop detection (pi-experiment-6q0y.49).
+ */
+export const LoopDetectionDefaults = {
+  /** Default max loop repetitions before routing (YAML loopDetection.maxLoops overrides). */
+  MAX_LOOPS: 10,
+  /** Default route event emitted when a loop exceeds its max. */
+  DEFAULT_ROUTE_EVENT: 'FAILURE',
+} as const;
+
 export const PromptProvenanceDefaults = {
   /** Hash algorithm used for all provenance sha256 entries. */
   HASH_ALGORITHM: 'sha256',

@@ -1112,6 +1112,89 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * AC4 (pi-experiment-6q0y.49): Startup lint for loop detection config.
+   *
+   * Rejects:
+   *   (a) maxLoops < 1 (global or per-scope).
+   *   (b) Unknown loop scopes (keys other than the supported LoopScope values).
+   *   (c) Unknown routeEvent/defaultRouteEvent (absent from statechart vocabulary).
+   *   (d) A configured route event absent from the declared v2 event vocabulary.
+   */
+  private validateLoopDetectionConfig(
+    config: HarnessConfig,
+    declaredOutcomes: Set<string>
+  ): void {
+    const settings = config.settings as typeof config.settings & {
+      loopDetection?: Record<string, unknown>
+    };
+    const ld = settings.loopDetection;
+    if (!ld) return; // no loopDetection config → always-on defaults, nothing to validate
+
+    const configPath = this.getConfigPath();
+
+    const SUPPORTED_SCOPES = new Set([
+      'toolCall', 'toolCallSemantic', 'failedRoute', 'verifierFail', 'blocker'
+    ]);
+
+    // (a) global maxLoops < 1
+    if (typeof ld['maxLoops'] === 'number' && ld['maxLoops'] < 1) {
+      throw new Error(
+        `loopDetection.maxLoops: ${ld['maxLoops']} is invalid (${configPath}). ` +
+        `maxLoops must be >= 1. The default is 10.`
+      );
+    }
+
+    // (c) global defaultRouteEvent absent from vocabulary
+    if (typeof ld['defaultRouteEvent'] === 'string') {
+      const route = ld['defaultRouteEvent'] as string;
+      if (!declaredOutcomes.has(route.toUpperCase())) {
+        throw new Error(
+          `loopDetection.defaultRouteEvent: "${route}" is absent from the statechart outcome vocabulary (${configPath}). ` +
+          `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+          `Add "${route}" to the appropriate outcome list or correct the route.`
+        );
+      }
+    }
+
+    // Check each key: (b) unknown scopes; (a)+(c) per-scope limits/routes.
+    for (const [key, val] of Object.entries(ld)) {
+      if (key === 'maxLoops' || key === 'defaultRouteEvent') continue; // already validated above
+
+      // (b) Unknown scope key
+      if (!SUPPORTED_SCOPES.has(key)) {
+        throw new Error(
+          `loopDetection.${key} is an unknown loop scope (${configPath}). ` +
+          `Supported scopes: ${[...SUPPORTED_SCOPES].join(', ')}.`
+        );
+      }
+
+      // Per-scope config
+      const scopeVal = val as Record<string, unknown> | undefined;
+      if (!scopeVal || typeof scopeVal !== 'object') continue;
+
+      // (a) per-scope maxLoops < 1
+      if (typeof scopeVal['maxLoops'] === 'number' && scopeVal['maxLoops'] < 1) {
+        throw new Error(
+          `loopDetection.${key}.maxLoops: ${scopeVal['maxLoops']} is invalid (${configPath}). ` +
+          `maxLoops must be >= 1.`
+        );
+      }
+
+      // (c)/(d) per-scope routeEvent absent from vocabulary
+      if (typeof scopeVal['routeEvent'] === 'string') {
+        const route = scopeVal['routeEvent'] as string;
+        if (!declaredOutcomes.has(route.toUpperCase())) {
+          throw new Error(
+            `loopDetection.${key}.routeEvent: "${route}" is absent from the statechart outcome vocabulary (${configPath}). ` +
+            `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+            `Add "${route}" to the appropriate outcome list or correct the route.`
+          );
+        }
+      }
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1710,6 +1793,9 @@ export class ConfigLoader {
     // A zero-evidence advance/terminal route is a configuration error — it means the
     // artifact-first invariant would be silently bypassed at runtime. Fail at load().
     this.validateEmptyAdvanceEvidence(config, sc.advanceOutcomes ?? ['SUCCESS'], terminalStates);
+
+    // ── AC4 (pi-experiment-6q0y.49): loop detection config validation ─────────
+    this.validateLoopDetectionConfig(config, declaredOutcomes);
   }
 
   /**

@@ -135,6 +135,7 @@ import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmi
 import { computePromptSizing, evaluatePromptBudgetAdmission } from './core/PromptBudgetAdmission.js';
 import { evaluateToolPayloadBudget } from './core/ToolPayloadBudget.js';
 import { RuntimeBudgetTracker, createRuntimeBudgetTracker, resolveRuntimeBudgetPolicy } from './core/RuntimeBudgetTracker.js';
+import { LoopDetector } from './core/LoopDetector.js';
 import { computeRequestSizing } from './core/ProviderBudgetPreflight.js';
 import { systemClock } from './core/Clock.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
@@ -281,6 +282,14 @@ interface ExtensionSession {
    * as all other runtime budget dimensions.
    */
   verifierBudgetTrackers: Map<string, RuntimeBudgetTracker>;
+  /**
+   * Always-on structural loop detector (pi-experiment-6q0y.49).
+   *
+   * Created lazily on the first coordinator or worker spend that needs it.
+   * Null before services are available; set at SESSION_START.
+   * Fingerprint state is rebuilt from the event store on restart (AC7).
+   */
+  loopDetector: LoopDetector | null;
   // ── tool execution ────────────────────────────────────────────────────────
   /**
    * Per-(bead, tool) consecutive-failure counter.  Worker mode only.
@@ -366,6 +375,7 @@ function createExtensionSession(): ExtensionSession {
     currentTurnStartMs: undefined,
     stateCycleCounter: new Map(),
     verifierBudgetTrackers: new Map(),
+    loopDetector: null,
     toolBreakerFailures: new Map(),
     toolResultCache: new Map(),
     recordedPromptDigestIds: new Set(),
@@ -990,6 +1000,61 @@ function wrapPluginTool(
         toolInvocationId,
         params: summarizeForEvent(params)
       });
+
+      // pi-experiment-6q0y.49: always-on loop detection for tool calls (AC2/AC3).
+      // Fires BEFORE the tool executes — stops repeated spend at the point of call.
+      // Checks both identical (exact args) and semantic (structural args) fingerprints.
+      {
+        const loopDetector = session.loopDetector;
+        if (loopDetector) {
+          const loopCtx = { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist };
+          const loopArgs = { toolName: tool.name, args: params, ...loopCtx };
+
+          // Check identical fingerprint (AC3 class 1)
+          const identicalCheck = loopDetector.checkToolCall(loopArgs);
+          if (identicalCheck.exceeded) {
+            // AC5: emit route exactly once per fingerprint (routed-once guard).
+            const firstRoute = await loopDetector.emitLoopDetected(identicalCheck, loopCtx);
+            if (firstRoute) {
+              const activeRun = session.activeRun;
+              if (activeRun && identicalCheck.routeEvent) {
+                const summary = `Loop detected (${identicalCheck.scope}): repeated identical tool call "${tool.name}" (${identicalCheck.count}/${identicalCheck.max}). Route: ${identicalCheck.routeEvent}`;
+                const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(identicalCheck.routeEvent, config), {
+                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+                  transitionEvent: identicalCheck.routeEvent, summary, evidence: summary, handover: summary,
+                });
+                await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+              }
+            }
+            // Still BLOCK the repeated call to the model (return LOOP_DETECTED) even after first route.
+            return toolResult(`LOOP_DETECTED: repeated identical tool call "${tool.name}" (${identicalCheck.count}/${identicalCheck.max}). Route: ${identicalCheck.routeEvent}`);
+          } else if (identicalCheck.fingerprint && !identicalCheck.warningEmitted && identicalCheck.count !== undefined && identicalCheck.max !== undefined && identicalCheck.count >= identicalCheck.max - 1 && identicalCheck.max > 1) {
+            await loopDetector.emitWarning(identicalCheck, loopCtx);
+          }
+
+          // Check semantic fingerprint (AC3 class 2)
+          const semanticCheck = loopDetector.checkToolCallSemantic(loopArgs);
+          if (semanticCheck.exceeded) {
+            // AC5: emit route exactly once per fingerprint (routed-once guard).
+            const firstRoute = await loopDetector.emitLoopDetected(semanticCheck, loopCtx);
+            if (firstRoute) {
+              const activeRun = session.activeRun;
+              if (activeRun && semanticCheck.routeEvent) {
+                const summary = `Loop detected (${semanticCheck.scope}): repeated semantically-equivalent tool call "${tool.name}" (${semanticCheck.count}/${semanticCheck.max}). Route: ${semanticCheck.routeEvent}`;
+                const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(semanticCheck.routeEvent, config), {
+                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
+                  transitionEvent: semanticCheck.routeEvent, summary, evidence: summary, handover: summary,
+                });
+                await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+              }
+            }
+            // Still BLOCK the repeated call to the model (return LOOP_DETECTED) even after first route.
+            return toolResult(`LOOP_DETECTED: repeated semantically-equivalent tool call "${tool.name}" (${semanticCheck.count}/${semanticCheck.max}). Route: ${semanticCheck.routeEvent}`);
+          } else if (semanticCheck.fingerprint && !semanticCheck.warningEmitted && semanticCheck.count !== undefined && semanticCheck.max !== undefined && semanticCheck.count >= semanticCheck.max - 1 && semanticCheck.max > 1) {
+            await loopDetector.emitWarning(semanticCheck, loopCtx);
+          }
+        }
+      }
 
       const terminalRejection = await terminalFailureLimitRejection(tool.name, services, session, isWorkerMode(), TERMINAL_FAILURE_ALLOWED_TOOLS);
       if (terminalRejection) {
@@ -2076,6 +2141,15 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
   }
 
   const priorEvents = await services.eventStore.eventsForBead(beadId);
+
+  // pi-experiment-6q0y.49 AC7: rebuild loop detector counters from the event
+  // store so fingerprint state survives harness/context restart. Called once
+  // per bead per event (idempotent: rebuildFromEvents takes the MAX seen count
+  // per fingerprint, so re-calling with the same events is safe).
+  if (session.loopDetector) {
+    session.loopDetector.rebuildFromEvents(priorEvents);
+  }
+
   const appliedEvent = findAppliedTeammateSignal(priorEvents, event);
   const beadProjection = await services.eventStore.projectBead(beadId, { includeDetails: false }).catch((error: unknown) => {
     Logger.warn(Component.ORR_ELSE, 'Failed to project bead during teammate event handling', { beadId, error: String(error) });
@@ -2124,6 +2198,91 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         appliedEventType: appliedEvent?.type,
         ...(suppressedCount > 0 ? { suppressedCount } : {})
       });
+    }
+
+    // pi-experiment-6q0y.49: loop detection for repeated coordinator-side DUPLICATE signals.
+    // Duplicates still represent the model repeatedly attempting the same failed transition,
+    // so loop counters must accumulate even when the coordinator deduplicates the transition.
+    if (
+      decision.action === TeammateEventDecisionAction.DUPLICATE &&
+      session.loopDetector &&
+      (event as unknown as Record<string, unknown>).transitionEvent &&
+      (event.type === TeammateEventType.STATE_TRANSITIONED ||
+       event.type === TeammateEventType.STATE_FAILED ||
+       event.type === TeammateEventType.STATE_BLOCKED)
+    ) {
+      let dupConfig: ReturnType<typeof services.configLoader.load> | undefined;
+      try { dupConfig = services.configLoader.load(); } catch { dupConfig = undefined; }
+      if (dupConfig) {
+        const loopDetector = session.loopDetector;
+        const loopCtx = { beadId: beadId as string, stateId: event.stateId, actionId: event.actionId || undefined };
+        // For STATE_TRANSITIONED duplicates previously gate-blocked: verifier loop detection.
+        if (event.type === TeammateEventType.STATE_TRANSITIONED) {
+          const gateBlockedApplied = (appliedEvent?.data as Record<string, unknown> | undefined)?.gateBlocked === true;
+          if (gateBlockedApplied) {
+            const gateFailures = (appliedEvent?.data as Record<string, unknown> | undefined)?.gateFailures;
+            const verifierIds = Array.isArray(gateFailures)
+              ? (gateFailures as Array<Record<string, unknown>>).map(f => f.tool).filter(Boolean).sort().join(',')
+              : undefined;
+            const verifierCheck = loopDetector.checkVerifierFail({
+              beadId: beadId as string, stateId: event.stateId, verifierId: verifierIds || undefined,
+            });
+            if (verifierCheck.exceeded) {
+              const firstRoute = await loopDetector.emitLoopDetected(verifierCheck, loopCtx);
+              if (firstRoute && verifierCheck.routeEvent) {
+                const vfSummary = `Loop detected (${verifierCheck.scope}): repeated verifier failures for "${event.stateId}" (${verifierCheck.count}/${verifierCheck.max}). Route: ${verifierCheck.routeEvent}`;
+                const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(verifierCheck.routeEvent, dupConfig), {
+                  beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+                  transitionEvent: verifierCheck.routeEvent, summary: vfSummary, evidence: vfSummary, handover: vfSummary,
+                });
+                await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+              }
+            } else if (verifierCheck.fingerprint && !verifierCheck.warningEmitted && verifierCheck.count !== undefined && verifierCheck.max !== undefined && verifierCheck.count >= verifierCheck.max - 1 && verifierCheck.max > 1) {
+              await loopDetector.emitWarning(verifierCheck, loopCtx);
+            }
+          }
+        }
+        // For STATE_BLOCKED: check blocker FIRST (summary fingerprint), then failedRoute.
+        if (event.type === TeammateEventType.STATE_BLOCKED) {
+          const anySignal = event as unknown as Record<string, unknown>;
+          const blockerCheck = loopDetector.checkBlocker({
+            beadId: beadId as string, stateId: event.stateId,
+            summary: (anySignal.summary as string | undefined) || (anySignal.evidence as string | undefined),
+          });
+          if (blockerCheck.exceeded) {
+            const firstRoute = await loopDetector.emitLoopDetected(blockerCheck, loopCtx);
+            if (firstRoute && blockerCheck.routeEvent) {
+              const bkSummary = `Loop detected (${blockerCheck.scope}): repeated same-state blocker in "${event.stateId}" (${blockerCheck.count}/${blockerCheck.max}). Route: ${blockerCheck.routeEvent}`;
+              const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(blockerCheck.routeEvent, dupConfig), {
+                beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+                transitionEvent: blockerCheck.routeEvent, summary: bkSummary, evidence: bkSummary, handover: bkSummary,
+              });
+              await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+            }
+          } else if (blockerCheck.fingerprint && !blockerCheck.warningEmitted && blockerCheck.count !== undefined && blockerCheck.max !== undefined && blockerCheck.count >= blockerCheck.max - 1 && blockerCheck.max > 1) {
+            await loopDetector.emitWarning(blockerCheck, loopCtx);
+          }
+        }
+        // For STATE_FAILED/STATE_BLOCKED: failedRoute detection (after blocker for BLOCKED).
+        if (event.type === TeammateEventType.STATE_FAILED || event.type === TeammateEventType.STATE_BLOCKED) {
+          const failedRouteCheck = loopDetector.checkFailedRoute({
+            beadId: beadId as string, stateId: event.stateId, routeEvent: event.transitionEvent,
+          });
+          if (failedRouteCheck.exceeded) {
+            const firstRoute = await loopDetector.emitLoopDetected(failedRouteCheck, loopCtx);
+            if (firstRoute && failedRouteCheck.routeEvent) {
+              const frSummary = `Loop detected (${failedRouteCheck.scope}): repeated failed route "${event.transitionEvent}" from "${event.stateId}" (${failedRouteCheck.count}/${failedRouteCheck.max}). Route: ${failedRouteCheck.routeEvent}`;
+              const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(failedRouteCheck.routeEvent, dupConfig), {
+                beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+                transitionEvent: failedRouteCheck.routeEvent, summary: frSummary, evidence: frSummary, handover: frSummary,
+              });
+              await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+            }
+          } else if (failedRouteCheck.fingerprint && !failedRouteCheck.warningEmitted && failedRouteCheck.count !== undefined && failedRouteCheck.max !== undefined && failedRouteCheck.count >= failedRouteCheck.max - 1 && failedRouteCheck.max > 1) {
+            await loopDetector.emitWarning(failedRouteCheck, loopCtx);
+          }
+        }
+      }
     }
     return;
   }
@@ -2316,6 +2475,32 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
                   transitionEvent: budgetRoute, summary, evidence: summary, handover: summary,
                 });
                 await postWorkerSignal(services, routeEvent).catch(() => {});
+              }
+            }
+          }
+
+          // pi-experiment-6q0y.49: always-on loop detection for verifier failures (AC3 class 4).
+          {
+            const loopDetector = session.loopDetector;
+            if (loopDetector) {
+              const verifierIds = gateOutcome.failures.map(f => f.tool).sort().join(',');
+              const loopCtx = { beadId: beadId as string, stateId: event.stateId, actionId: event.actionId || undefined };
+              const verifierCheck = loopDetector.checkVerifierFail({
+                beadId: beadId as string, stateId: event.stateId, verifierId: verifierIds || undefined,
+              });
+              if (verifierCheck.exceeded) {
+                // AC5: emit route exactly once per fingerprint (routed-once guard).
+                const firstRoute = await loopDetector.emitLoopDetected(verifierCheck, loopCtx);
+                if (firstRoute && verifierCheck.routeEvent) {
+                  const summary = `Loop detected (${verifierCheck.scope}): repeated verifier failures for "${event.stateId}" (${verifierCheck.count}/${verifierCheck.max}). Route: ${verifierCheck.routeEvent}`;
+                  const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(verifierCheck.routeEvent, config), {
+                    beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+                    transitionEvent: verifierCheck.routeEvent, summary, evidence: summary, handover: summary,
+                  });
+                  await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+                }
+              } else if (verifierCheck.fingerprint && !verifierCheck.warningEmitted && verifierCheck.count !== undefined && verifierCheck.max !== undefined && verifierCheck.count >= verifierCheck.max - 1 && verifierCheck.max > 1) {
+                await loopDetector.emitWarning(verifierCheck, loopCtx);
               }
             }
           }
@@ -2563,6 +2748,13 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
 
     await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, transitionEventData);
 
+    // pi-experiment-6q0y.49 AC3b: reset loop counters on genuine state progress.
+    // A loop is "stuck repeating within a state without progressing"; once the bead
+    // advances to a new state, all prior loop accumulators are stale.
+    if (isAdvanceOutcome(event.transitionEvent, config) && nextState !== event.stateId) {
+      session.loopDetector?.resetOnAdvance(beadId as string);
+    }
+
     if (isTerminalState(nextState, config) && isAdvanceOutcome(event.transitionEvent, config)) {
       const mergeTool = requireTool(services.plugins.git, PluginToolName.MERGE_AND_COMMIT);
       const mergeResult = await mergeTool.execute({
@@ -2607,6 +2799,33 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       handover: event.handover
     });
 
+    // pi-experiment-6q0y.49: always-on loop detection for failed route events (AC3 class 3).
+    // A STATE_FAILED/STATE_BLOCKED that keeps re-entering the SAME route from the SAME state
+    // is a structural loop — the model/worker is stuck on the same failure pattern.
+    {
+      const loopDetector = session.loopDetector;
+      if (loopDetector && event.transitionEvent) {
+        const loopCtx = { beadId: beadId as string, stateId: event.stateId, actionId: event.actionId || undefined };
+        const failedRouteCheck = loopDetector.checkFailedRoute({
+          beadId: beadId as string, stateId: event.stateId, routeEvent: event.transitionEvent,
+        });
+        if (failedRouteCheck.exceeded) {
+          // AC5: emit route exactly once per fingerprint (routed-once guard).
+          const firstRoute = await loopDetector.emitLoopDetected(failedRouteCheck, loopCtx);
+          if (firstRoute && failedRouteCheck.routeEvent) {
+            const summary = `Loop detected (${failedRouteCheck.scope}): repeated failed route "${event.transitionEvent}" from "${event.stateId}" (${failedRouteCheck.count}/${failedRouteCheck.max}). Route: ${failedRouteCheck.routeEvent}`;
+            const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(failedRouteCheck.routeEvent, config), {
+              beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+              transitionEvent: failedRouteCheck.routeEvent, summary, evidence: summary, handover: summary,
+            });
+            await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+          }
+        } else if (failedRouteCheck.fingerprint && !failedRouteCheck.warningEmitted && failedRouteCheck.count !== undefined && failedRouteCheck.max !== undefined && failedRouteCheck.count >= failedRouteCheck.max - 1 && failedRouteCheck.max > 1) {
+          await loopDetector.emitWarning(failedRouteCheck, loopCtx);
+        }
+      }
+    }
+
     if (shouldPersistBlockedBeadStatus(event.type, nextState, config)) {
       const updateStatus = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
       if (updateStatus) {
@@ -2622,6 +2841,32 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             error: String(error)
           });
         });
+      }
+    }
+
+    // pi-experiment-6q0y.49: always-on blocker loop detection (AC3 class 5).
+    // Self-loops with the same blocker summary fingerprint are structural loops.
+    if (nextState === event.stateId) {
+      const loopDetector = session.loopDetector;
+      if (loopDetector) {
+        const loopCtx = { beadId: beadId as string, stateId: event.stateId, actionId: event.actionId || undefined };
+        const blockerCheck = loopDetector.checkBlocker({
+          beadId: beadId as string, stateId: event.stateId, summary: event.summary || event.evidence,
+        });
+        if (blockerCheck.exceeded) {
+          // AC5: emit route exactly once per fingerprint (routed-once guard).
+          const firstRoute = await loopDetector.emitLoopDetected(blockerCheck, loopCtx);
+          if (firstRoute && blockerCheck.routeEvent) {
+            const summary = `Loop detected (${blockerCheck.scope}): repeated same-state blocker in "${event.stateId}" (${blockerCheck.count}/${blockerCheck.max}). Route: ${blockerCheck.routeEvent}`;
+            const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(blockerCheck.routeEvent, config), {
+              beadId: beadId as string, stateId: event.stateId, actionId: event.actionId,
+              transitionEvent: blockerCheck.routeEvent, summary, evidence: summary, handover: summary,
+            });
+            await postWorkerSignal(services, loopRouteEvent).catch(() => {});
+          }
+        } else if (blockerCheck.fingerprint && !blockerCheck.warningEmitted && blockerCheck.count !== undefined && blockerCheck.max !== undefined && blockerCheck.count >= blockerCheck.max - 1 && blockerCheck.max > 1) {
+          await loopDetector.emitWarning(blockerCheck, loopCtx);
+        }
       }
     }
 
@@ -3466,6 +3711,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const config = await services.configLoader.load();
     const runtimeObservability = await initializeObservability(services);
     session.piToolObservability = runtimeObservability;
+
+    // pi-experiment-6q0y.49: create the always-on loop detector (AC2).
+    // One detector per session, shared across tool-call + coordinator paths.
+    // No-op for normal runs — detection only fires when a loop threshold is exceeded.
+    session.loopDetector = new LoopDetector(config, services.eventStore);
 
     // Host-SDK fingerprint: best-effort, recorded once at SESSION_START for all modes.
     const hostSdkFingerprint = resolveHostSdkFingerprint();
