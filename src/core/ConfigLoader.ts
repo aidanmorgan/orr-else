@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
-import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig, V2PromptFileProvenance } from './domain/StateModels.js';
+import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig, V2PromptFileProvenance, ALLOWLISTED_STATE_FIELDS, ALLOWLISTED_TOOL_FIELDS, NON_COMPRESSIBLE_STATE_FIELDS, NON_COMPRESSIBLE_TOOL_FIELDS } from './domain/StateModels.js';
 import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
@@ -589,6 +589,13 @@ export class ConfigLoader {
         );
       }
     }
+
+    // pi-experiment-w2tz: v2 defaults/profiles expansion.
+    // Runs BEFORE map-form collection validation so that allowlist/non-compressible
+    // rejection fires before key-grammar checks. Expands defaults.state, defaults.tool,
+    // profiles.states, and profiles.tools onto each state/tool with precedence
+    // defaults < profile < local. Version-gated (only when version === 2).
+    this.expandV2DefaultsAndProfiles(config);
 
     // pi-experiment-0dgy: v2 map-form collection validation.
     // Validates tools, validationGates, and states.<state>.actions:
@@ -1552,6 +1559,201 @@ export class ConfigLoader {
         // Store provenance on the action (AC3). Body is never stored (AC4).
         (action as unknown as Record<string, unknown>)['v2PromptProvenance'] = provenance;
       }
+    }
+  }
+
+  /**
+   * pi-experiment-w2tz: Expand v2 same-file defaults and profiles.
+   *
+   * Called from preValidateV2Admission, BEFORE normalizeV2MapCollections and
+   * BEFORE AJV validation. Operates on the RAW parsed document (map-form states
+   * and tools). Mutates `parsed` in place.
+   *
+   * Processing order (version-gated: only when version === 2):
+   *   1. Validate non-compressible field rejection for defaults.state, defaults.tool,
+   *      and every profiles.states / profiles.tools entry.
+   *   2. Validate unknown-allowlist-field rejection for the same blocks.
+   *   3. Validate unknown-profile references and cycle detection for each state
+   *      and tool that declares a `profile` field.
+   *   4. Expand: for each state, merge defaults.state < profile < local (state wins).
+   *              for each tool, merge defaults.tool < profile < local (tool wins).
+   *
+   * Precedence rule (AC2): defaults < one selected profile < local override.
+   *   A field set at all three levels resolves to the LOCAL value.
+   *   defaults-only: inherited. profile: overrides defaults. local: overrides profile.
+   *
+   * All errors are startup-fatal with source-path diagnostics (AC5).
+   */
+  private expandV2DefaultsAndProfiles(parsed: unknown): void {
+    if (!isRecord(parsed) || parsed['version'] !== 2) return;
+
+    const defaultsRaw = parsed['defaults'];
+    const profilesRaw = parsed['profiles'];
+
+    // Extract defaults blocks (may be absent).
+    const defaultState: Record<string, unknown> = isRecord(defaultsRaw) && isRecord((defaultsRaw as Record<string, unknown>)['state'])
+      ? (defaultsRaw as Record<string, unknown>)['state'] as Record<string, unknown>
+      : {};
+    const defaultTool: Record<string, unknown> = isRecord(defaultsRaw) && isRecord((defaultsRaw as Record<string, unknown>)['tool'])
+      ? (defaultsRaw as Record<string, unknown>)['tool'] as Record<string, unknown>
+      : {};
+
+    // Extract profiles maps (may be absent).
+    const stateProfilesMap: Record<string, unknown> = isRecord(profilesRaw) && isRecord((profilesRaw as Record<string, unknown>)['states'])
+      ? (profilesRaw as Record<string, unknown>)['states'] as Record<string, unknown>
+      : {};
+    const toolProfilesMap: Record<string, unknown> = isRecord(profilesRaw) && isRecord((profilesRaw as Record<string, unknown>)['tools'])
+      ? (profilesRaw as Record<string, unknown>)['tools'] as Record<string, unknown>
+      : {};
+
+    // ── 1+2: Validate defaults blocks ────────────────────────────────────────
+    if (Object.keys(defaultState).length > 0) {
+      this.validateDefaultsOrProfileBlock(defaultState, 'defaults.state', 'state');
+    }
+    if (Object.keys(defaultTool).length > 0) {
+      this.validateDefaultsOrProfileBlock(defaultTool, 'defaults.tool', 'tool');
+    }
+
+    // ── 1+2: Validate profiles blocks ────────────────────────────────────────
+    for (const [profileId, profileEntry] of Object.entries(stateProfilesMap)) {
+      if (!isRecord(profileEntry)) continue;
+      this.validateDefaultsOrProfileBlock(profileEntry as Record<string, unknown>, `profiles.states.${profileId}`, 'state');
+    }
+    for (const [profileId, profileEntry] of Object.entries(toolProfilesMap)) {
+      if (!isRecord(profileEntry)) continue;
+      this.validateDefaultsOrProfileBlock(profileEntry as Record<string, unknown>, `profiles.tools.${profileId}`, 'tool');
+    }
+
+    // ── 3+4: Expand states ────────────────────────────────────────────────────
+    const statesRaw = parsed['states'];
+    if (isRecord(statesRaw)) {
+      for (const [stateId, stateRaw] of Object.entries(statesRaw as Record<string, unknown>)) {
+        if (!isRecord(stateRaw)) continue;
+        const state = stateRaw as Record<string, unknown>;
+        const profileId = typeof state['profile'] === 'string' ? state['profile'] : undefined;
+
+        // Resolve selected profile for this state.
+        let selectedProfile: Record<string, unknown> = {};
+        if (profileId !== undefined) {
+          if (!(profileId in stateProfilesMap)) {
+            const available = Object.keys(stateProfilesMap).sort().join(', ') || '(none)';
+            throw new Error(
+              `v2 state "${stateId}" references unknown profile "${profileId}" in profiles.states. ` +
+              `Available state profiles: ${available}. ` +
+              `Define the profile in profiles.states or correct the profile name.`
+            );
+          }
+          const entry = stateProfilesMap[profileId];
+          selectedProfile = isRecord(entry) ? entry as Record<string, unknown> : {};
+        }
+
+        // Merge: defaults < profile < local (only ALLOWLISTED fields; routing fields already rejected above).
+        for (const field of ALLOWLISTED_STATE_FIELDS) {
+          if (state[field] === undefined) {
+            // Local not set — try profile then default.
+            if (selectedProfile[field] !== undefined) {
+              state[field] = selectedProfile[field];
+            } else if (defaultState[field] !== undefined) {
+              state[field] = defaultState[field];
+            }
+          }
+          // If local is set, it wins (no change needed).
+        }
+      }
+    }
+
+    // ── 3+4: Expand tools ────────────────────────────────────────────────────
+    const toolsRaw = parsed['tools'];
+    if (isRecord(toolsRaw)) {
+      // tools is still map-form at this point (before normalizeV2MapCollections).
+      for (const [toolId, toolRaw] of Object.entries(toolsRaw as Record<string, unknown>)) {
+        if (!isRecord(toolRaw)) continue;
+        const tool = toolRaw as Record<string, unknown>;
+        const profileId = typeof tool['profile'] === 'string' ? tool['profile'] : undefined;
+
+        let selectedProfile: Record<string, unknown> = {};
+        if (profileId !== undefined) {
+          if (!(profileId in toolProfilesMap)) {
+            const available = Object.keys(toolProfilesMap).sort().join(', ') || '(none)';
+            throw new Error(
+              `v2 tool "${toolId}" references unknown profile "${profileId}" in profiles.tools. ` +
+              `Available tool profiles: ${available}. ` +
+              `Define the profile in profiles.tools or correct the profile name.`
+            );
+          }
+          const entry = toolProfilesMap[profileId];
+          selectedProfile = isRecord(entry) ? entry as Record<string, unknown> : {};
+        }
+
+        // Merge allowlisted fields: defaults < profile < local.
+        for (const field of ALLOWLISTED_TOOL_FIELDS) {
+          if (tool[field] === undefined) {
+            if (selectedProfile[field] !== undefined) {
+              tool[field] = selectedProfile[field];
+            } else if (defaultTool[field] !== undefined) {
+              tool[field] = defaultTool[field];
+            }
+          }
+        }
+
+        // Strip the v2 `profile` reference from the tool map entry so that
+        // expandToolProfiles (which handles v1 settings.toolProfiles) does not
+        // try to look it up there and throw an unknown-profile error.
+        if (profileId !== undefined) {
+          delete tool['profile'];
+        }
+      }
+    }
+  }
+
+  /**
+   * Validate a single defaults or profiles block for non-compressible field
+   * rejection (AC4) and unknown-allowlist-field rejection (AC3/AC5).
+   *
+   * @param block       The raw block record to validate.
+   * @param sourcePath  Source path for diagnostic messages (e.g. "defaults.state").
+   * @param kind        'state' or 'tool' — selects the correct field sets.
+   */
+  private validateDefaultsOrProfileBlock(
+    block: Record<string, unknown>,
+    sourcePath: string,
+    kind: 'state' | 'tool'
+  ): void {
+    const nonCompressible = kind === 'state' ? NON_COMPRESSIBLE_STATE_FIELDS : NON_COMPRESSIBLE_TOOL_FIELDS;
+    const allowlisted = kind === 'state' ? ALLOWLISTED_STATE_FIELDS : ALLOWLISTED_TOOL_FIELDS;
+
+    const nonCompressibleViolations: string[] = [];
+    const unknownAllowlistViolations: string[] = [];
+
+    for (const field of Object.keys(block)) {
+      if (nonCompressible.has(field)) {
+        nonCompressibleViolations.push(field);
+      } else if (!allowlisted.has(field)) {
+        unknownAllowlistViolations.push(field);
+      }
+    }
+
+    if (nonCompressibleViolations.length > 0) {
+      const fieldList = nonCompressibleViolations.map(f => `"${f}"`).join(', ');
+      throw new Error(
+        `v2 config: ${sourcePath} declares non-compressible workflow field(s): ${fieldList}. ` +
+        `Non-compressible fields must remain LOCAL to their owning ${kind} definition — ` +
+        `they cannot be inherited via defaults or profiles because hiding routing/workflow ` +
+        `semantics behind inheritance would make the statechart illegible. ` +
+        `Remove ${fieldList} from ${sourcePath} and declare ${fieldList.length > 1 ? 'them' : 'it'} ` +
+        `directly in each ${kind} that needs ${fieldList.length > 1 ? 'them' : 'it'}.`
+      );
+    }
+
+    if (unknownAllowlistViolations.length > 0) {
+      const fieldList = unknownAllowlistViolations.map(f => `"${f}"`).join(', ');
+      const allowedList = [...allowlisted].sort().join(', ');
+      throw new Error(
+        `v2 config: ${sourcePath} declares unknown allowlist field(s): ${fieldList}. ` +
+        `Only allowlisted non-routing fields may appear in defaults or profiles. ` +
+        `Allowed fields for ${kind}: ${allowedList}. ` +
+        `Remove ${fieldList} from ${sourcePath} or add the field to the allowlist if it is a new ergonomic default.`
+      );
     }
   }
 

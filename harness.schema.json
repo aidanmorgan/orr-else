@@ -2020,6 +2020,10 @@
           "qualityCheckCommand": {
             "type": "string"
           },
+          "profile": {
+            "type": "string",
+            "description": "pi-experiment-w2tz: Optional reference to a named state profile in profiles.states. When set, the named profile's allowlisted fields are applied after defaults.state and before local overrides. Precedence: defaults < profile < local. Only valid in v2 configs (version: 2). Startup fails if the profile is unknown or contains non-compressible fields."
+          },
           "checklist": {
             "oneOf": [
               {
@@ -2259,6 +2263,46 @@
           "type": "integer",
           "minimum": 1,
           "description": "Number of concurrent teammate workers. The only admitted runtime setting — no adapter or worktree policy is configurable in v2."
+        }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "description": "pi-experiment-w2tz: v2 same-file defaults block. defaults.state applies allowlisted non-routing fields to every state as the lowest-priority base. defaults.tool applies allowlisted non-routing fields to every tool. Only ergonomic execution and prompt-surface defaults are permitted; routing fields (transitions, actions, routeEvidence, etc.) cause startup rejection. Version-gated: only processed when version: 2.",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "object",
+          "description": "Allowlisted non-routing state fields applied to every state before profile and local overrides. Non-compressible routing fields are rejected at startup.",
+          "additionalProperties": true
+        },
+        "tool": {
+          "type": "object",
+          "description": "Allowlisted non-routing tool fields applied to every tool before profile and local overrides. Non-compressible fields (name, type, command, etc.) are rejected at startup.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "profiles": {
+      "type": "object",
+      "description": "pi-experiment-w2tz: v2 same-file profiles block. profiles.states is a map of named state profiles keyed by profile ID; profiles.tools is a map of named tool profiles keyed by profile ID. A state/tool references one profile via its profile field. Expansion precedence: defaults < profile < local. Only allowlisted non-routing fields are permitted. Unknown profiles, cycles, and non-compressible fields cause startup failures. Version-gated: only processed when version: 2.",
+      "additionalProperties": false,
+      "properties": {
+        "states": {
+          "type": "object",
+          "description": "Map of named state profiles keyed by profile ID. Each profile supplies allowlisted non-routing fields applied after defaults and before local overrides.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "tools": {
+          "type": "object",
+          "description": "Map of named tool profiles keyed by profile ID. Each profile supplies allowlisted non-routing fields applied after defaults and before local overrides.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": true
+          }
         }
       }
     }

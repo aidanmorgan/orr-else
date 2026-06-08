@@ -847,6 +847,14 @@ export interface WorktreePolicyConfig {
 export interface SDLCState {
   id: string;
   identity: AgentIdentity;
+  /**
+   * pi-experiment-w2tz: Optional reference to a named state profile in
+   * profiles.states. When set, the named profile's allowlisted fields are
+   * applied after defaults and before local overrides.
+   * Precedence: defaults < profile < local.
+   * Only valid in v2 configs (version: 2). Startup fails if the profile is unknown.
+   */
+  profile?: string;
   baseInstructions?: string;
   harnessRestartPrompt?: string;
   contextRestartPrompt?: string;
@@ -977,6 +985,32 @@ export interface HarnessConfig {
    * Absent (v1 configs) → unaffected; v1 outcome/transition resolution is unchanged.
    */
   events?: V2EventsConfig;
+  /**
+   * pi-experiment-w2tz: v2 same-file defaults block.
+   *
+   * defaults.state — applied to every state as the lowest-priority base before
+   *   any profile or local override.
+   * defaults.tool  — applied to every tool as the lowest-priority base.
+   *
+   * Only allowlisted non-routing fields are permitted in defaults blocks.
+   * Routing fields (transitions, actions, routeEvidence, etc.) are rejected at startup.
+   * Version-gated: only processed when version: 2.
+   */
+  defaults?: V2DefaultsConfig;
+  /**
+   * pi-experiment-w2tz: v2 same-file profiles block.
+   *
+   * profiles.states — named state profiles keyed by profile ID. A state can
+   *   reference one profile via its `profile` field (string). The profile is
+   *   expanded with precedence: defaults < profile < local override.
+   * profiles.tools  — named tool profiles keyed by profile ID. A tool can
+   *   reference one profile via its `profile` field (string, existing tool field).
+   *
+   * Only allowlisted non-routing fields are permitted in profile entries.
+   * Unknown profiles, cycles, and non-compressible fields cause startup failures.
+   * Version-gated: only processed when version: 2.
+   */
+  profiles?: V2ProfilesConfig;
   settings: {
     maxConcurrentSlots: number;
     handoverTemplate: string;
@@ -1320,6 +1354,196 @@ export interface RetentionConfig {
    * Defaults to RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN (10,000).
    */
   maxToolCallDirsPerRun?: number;
+}
+
+// ── pi-experiment-w2tz: v2 defaults/profiles ─────────────────────────────────
+
+/**
+ * Allowlisted non-routing fields that may be supplied via defaults or profiles
+ * for STATES (AC3). Any field name outside this set is rejected at startup
+ * (unknown-allowlist-field diagnostic).
+ *
+ * Policy: ergonomic execution + prompt-surface defaults ONLY.
+ * Routing fields (transitions, emitters, gate selection, etc.) are
+ * explicitly excluded — see NON_COMPRESSIBLE_STATE_FIELDS below.
+ */
+export const ALLOWLISTED_STATE_FIELDS = new Set<string>([
+  // Execution timeouts
+  'thinking',
+  'llmProvider',
+  'model',
+  // Context policy (how a state's worker context is handled)
+  'contextPolicy',
+  // Prompt-surface: prompt profile selection
+  'toolPromptProfile',
+  // Runtime budget
+  'runtimeBudget',
+  // Prompt budget
+  'promptBudget',
+  // Default action context mode
+  'defaultActionContextMode',
+  // Context rotation threshold
+  'contextRotThreshold',
+  // Max context tokens
+  'maxContextTokens',
+  // Handover required
+  'handoverRequired',
+]);
+
+/**
+ * Allowlisted non-routing fields that may be supplied via defaults or profiles
+ * for TOOLS (AC3). Any field outside this set is rejected at startup.
+ */
+export const ALLOWLISTED_TOOL_FIELDS = new Set<string>([
+  // Execution configuration
+  'cwd',
+  'allowCwdOverride',
+  'timeoutMs',
+  'wrapperTimeoutMs',
+  'argsMode',
+  'allowArgs',
+  'acceptMaxBuffer',
+  'successExitCodes',
+  'env',
+  // Serialization
+  'serialize',
+  // Failure limit
+  'failureLimit',
+  // Argument path scope
+  'argumentPathScope',
+]);
+
+/**
+ * Non-compressible workflow fields for STATES that must NEVER appear in
+ * defaults.state or profiles.states entries (AC4). Presence of any of these
+ * in a default/profile block causes a startup-fatal rejection with source-path
+ * diagnostics naming the offending field.
+ *
+ * These are the routing/statechart fields whose visibility must remain LOCAL
+ * to each state definition — hiding them behind inheritance would make the
+ * workflow semantics invisible.
+ */
+export const NON_COMPRESSIBLE_STATE_FIELDS = new Set<string>([
+  // Transition routing table
+  'transitions',
+  'on', // v1 transition map (also non-compressible)
+  // Route evidence (verifier route mappings)
+  'routeEvidence',
+  // Prompt file paths (must be locally visible per 0njv)
+  // NOTE: promptFile is an llm sub-field; we check for the llm block itself
+  // Terminal state declaration is a statechart concern, not a state field
+  // Gate selection / guard
+  // Actions block (statechart execution graph)
+  'actions',
+  // Required tools (artifact gate — route affects workflow)
+  'requiredTools',
+  // Identity is structurally required per state
+  'identity',
+  // Skills (per-state required skill set)
+  'requiredSkills',
+  // Active tools (route-affecting tool set)
+  'activeTools',
+  // llm block contains promptFile — must stay local per 0njv
+  'llm',
+]);
+
+/**
+ * Non-compressible fields for TOOLS (AC4). Must stay LOCAL to each tool def.
+ */
+export const NON_COMPRESSIBLE_TOOL_FIELDS = new Set<string>([
+  // Tool identity / type
+  'name',
+  'type',
+  'command',
+  'defaultArgs',
+  // Validation rules (tool-specific gate logic)
+  'validationRules',
+  // Optional (tool presence contract)
+  'optional',
+  // Side effect contract (safety contract — must be explicitly stated)
+  'sideEffectContract',
+  // Retry policy (tool-specific)
+  'retryPolicy',
+  // Profile reference (resolved by expandToolProfiles — not inheritable via defaults/profiles)
+  'profile',
+  // Probe context (safety-critical, must be explicit)
+  'probeContext',
+  // Observe only (tool type contract)
+  'observeOnly',
+  // Cacheable
+  'cacheable',
+  // Max consecutive failures
+  'maxConsecutiveFailures',
+  // Description (tool identity surface)
+  'description',
+  // Usage notes
+  'usageNotes',
+]);
+
+/**
+ * pi-experiment-w2tz: v2 state-level defaults block.
+ *
+ * Fields declared here are applied to every state as the lowest-priority
+ * base before profile and local overrides.
+ * Only allowlisted non-routing fields are permitted.
+ */
+export type V2StateDefaults = Record<string, unknown>;
+
+/**
+ * pi-experiment-w2tz: v2 tool-level defaults block.
+ *
+ * Fields declared here are applied to every tool as the lowest-priority base.
+ * Only allowlisted non-routing fields are permitted.
+ */
+export type V2ToolDefaults = Record<string, unknown>;
+
+/**
+ * pi-experiment-w2tz: v2 defaults block (top-level in harness.yaml).
+ *
+ * defaults.state — applies to every state.
+ * defaults.tool  — applies to every tool.
+ */
+export interface V2DefaultsConfig {
+  state?: V2StateDefaults;
+  tool?: V2ToolDefaults;
+}
+
+/**
+ * pi-experiment-w2tz: a single state profile entry.
+ *
+ * Keyed by profile ID in profiles.states.<id>.
+ * Only allowlisted non-routing fields are permitted.
+ */
+export type V2StateProfile = Record<string, unknown>;
+
+/**
+ * pi-experiment-w2tz: a single tool profile entry.
+ *
+ * Keyed by profile ID in profiles.tools.<id>.
+ * Only allowlisted non-routing fields are permitted.
+ */
+export type V2ToolProfile = Record<string, unknown>;
+
+/**
+ * pi-experiment-w2tz: v2 profiles block (top-level in harness.yaml).
+ *
+ * profiles.states — map of named state profile objects keyed by profile ID.
+ * profiles.tools  — map of named tool profile objects keyed by profile ID.
+ */
+export interface V2ProfilesConfig {
+  states?: Record<string, V2StateProfile>;
+  tools?: Record<string, V2ToolProfile>;
+}
+
+/**
+ * Source-path record for a single resolved field.
+ * Used by config-explain diagnostics to name WHERE each field came from.
+ */
+export interface V2FieldSource {
+  /** Field name. */
+  field: string;
+  /** Where the resolved value came from: 'default' | 'profile:<id>' | 'local'. */
+  source: string;
 }
 
 /**
