@@ -1,0 +1,878 @@
+[
+  {
+    "beadId": "6q0y.17",
+    "title": "Add optional hard prompt budget admission disabled by default",
+    "impactAreas": ["budgets", "startup-lint"],
+    "cerdiwenSurface": "harness.yaml budget policy + 6q0y.53 cerdiwen consumer",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.53"
+  },
+  {
+    "beadId": "6q0y.18",
+    "title": "Measure exact model-facing tool result bytes and optionally enforce payload budgets",
+    "impactAreas": ["budgets", "tool-evidence"],
+    "cerdiwenSurface": "harness.yaml budget policy + 6q0y.53 cerdiwen consumer",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.53"
+  },
+  {
+    "beadId": "6q0y.35",
+    "title": "Add optional per-state deterministic context compaction summary artifact",
+    "impactAreas": ["context-policy", "statechart"],
+    "cerdiwenSurface": "harness.yaml compaction settings + cerdiwen.ts extension restart prompt",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.38"
+  },
+  {
+    "beadId": "6q0y.36",
+    "title": "Make context restart handoff evidence-aware",
+    "impactAreas": ["context-policy", "tool-evidence"],
+    "cerdiwenSurface": "cerdiwen.ts extension restart prompt + harness.yaml evidence-aware handoff",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.38"
+  },
+  {
+    "beadId": "6q0y.37",
+    "title": "Add optional compaction warning and deterministic fallback restart flow",
+    "impactAreas": ["context-policy", "statechart"],
+    "cerdiwenSurface": "harness.yaml compaction warning settings + cerdiwen.ts extension restart flow",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.38"
+  },
+  {
+    "beadId": "6q0y.39",
+    "title": "Add deterministic statechart fan-out and route-event join execution",
+    "impactAreas": ["fan-out-join", "statechart"],
+    "cerdiwenSurface": "harness.yaml fan-out/join blocks + cerdiwen statechart fan-out configuration",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.41"
+  },
+  {
+    "beadId": "6q0y.40",
+    "title": "Schema-validate fan-out branch handoff artifacts and joined route events",
+    "impactAreas": ["fan-out-join", "schemas"],
+    "cerdiwenSurface": "harness.yaml fan-out schema registry + cerdiwen branch handoff artifacts",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.41"
+  },
+  {
+    "beadId": "6q0y.46",
+    "title": "Enforce artifact-first terminal and advance route events in code",
+    "impactAreas": ["terminal-transition-admission", "tool-evidence"],
+    "cerdiwenSurface": "cerdiwen statechart terminal/advance transitions + verifier registration",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.51"
+  },
+  {
+    "beadId": "6q0y.47",
+    "title": "Formalize Orr Else harness middleware pipeline boundaries",
+    "impactAreas": ["statechart", "schemas", "startup-lint"],
+    "cerdiwenSurface": "harness.yaml pipeline stage config + cerdiwen middleware ordering",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.52"
+  },
+  {
+    "beadId": "6q0y.48",
+    "title": "Add optional per-state runtime budget policies disabled by default",
+    "impactAreas": ["budgets", "statechart"],
+    "cerdiwenSurface": "harness.yaml per-state budget policy + cerdiwen.ts budget config",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.53"
+  },
+  {
+    "beadId": "6q0y.49",
+    "title": "Add always-on structural loop detection with route-event routing",
+    "impactAreas": ["loop-detection", "statechart"],
+    "cerdiwenSurface": "harness.yaml maxLoops config + cerdiwen loop-route event handling",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.54"
+  },
+  {
+    "beadId": "6q0y.50",
+    "title": "Require graph-enforced Cerdiwen usage follow-through for Orr Else harness changes",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Governance and audit bead; adds no new harness runtime surface; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "l3sw",
+    "title": "Remove global skillPaths fallback and legacy resolvePiSkillPaths API",
+    "impactAreas": ["prompt-profiles", "active-tools"],
+    "cerdiwenSurface": "harness.yaml skill profiles + cerdiwen.ts state/action skill resolution",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.10"
+  },
+  {
+    "beadId": "t6gw",
+    "title": "Add harness-owned tool retry pipeline for idempotency enforcement",
+    "impactAreas": ["project-tool-contracts"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Cerdiwen declares no retryPolicy on any tool; the harness retry pipeline defaults to zero retries and is a verified no-op for Cerdiwen. If Cerdiwen later adopts retryPolicy, a new follow-through bead is required."
+  },
+  {
+    "beadId": "85bl",
+    "title": "Add project-tool readiness-probe execution path for startup admission",
+    "impactAreas": ["readiness-probes", "startup-lint"],
+    "cerdiwenSurface": "harness.yaml readiness probe declarations + cerdiwen backend manifest wiring",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.34"
+  },
+  {
+    "beadId": "0ipk",
+    "title": "Wire probeContext and idempotency enforcement into project-tool probes and retries",
+    "impactAreas": ["readiness-probes", "project-tool-contracts"],
+    "cerdiwenSurface": "harness.yaml readiness probe enforcement + cerdiwen backend readiness manifest",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.34"
+  },
+  {
+    "beadId": "amq0.1",
+    "title": "Refactor extension bootstrap into injectable Pi lifecycle and tool services",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.2",
+    "title": "Split Supervisor into scheduling, spawning, recovery, and retention services",
+    "impactAreas": ["scheduler"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.3",
+    "title": "Instance-scope logger, contract registries, and MCP health state",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.4",
+    "title": "Centralize path scope, filesystem, git, process, and tmux adapters",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.5",
+    "title": "Decompose ConfigLoader into source, parser, normalizer, validator, and reference resolver",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.6",
+    "title": "Replace broad RuntimeServices consumers with narrow dependency interfaces",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.7",
+    "title": "Add strict TypeScript, lint, architecture, and dead-code quality gates",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal quality gate; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.8",
+    "title": "Prevent duplicate Orr Else extension activation on one Pi host",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal lifecycle guard; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.9",
+    "title": "Gate spawn_teammate on active coordinator signaling state",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal lifecycle guard; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.10",
+    "title": "Unify worker prompt identity and skill injection paths",
+    "impactAreas": ["prompt-profiles", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor unifying prompt identity paths; cerdiwen skill/tool profile config is unchanged."
+  },
+  {
+    "beadId": "amq0.11",
+    "title": "Centralize harness vocabularies into typed enums and discriminated unions",
+    "impactAreas": ["schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal type system refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.12",
+    "title": "Stop widening resolved config enums after validation",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal config validation fix; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.13",
+    "title": "Split PiIntegration into template, worker-resource, and prompt-provenance services",
+    "impactAreas": ["prompt-profiles"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal service decomposition; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.14",
+    "title": "Split domain vocabulary from infrastructure constants",
+    "impactAreas": ["schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal vocabulary layering refactor; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "1elr.1",
+    "title": "Run startup lint before HARNESS_STARTED, API bind, tmux, and supervisor work",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds startup lint ordering gate; Cerdiwen harness.yaml already conforms to startup admission rules; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.3",
+    "title": "Add required-tool callability and evidence-contract lint rules",
+    "impactAreas": ["startup-lint", "tool-evidence"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds startup lint rules for tool callability; Cerdiwen required-tool declarations already use canonical evidence handles; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.4",
+    "title": "Add project asset and runtime readiness lint rules before worker spawn",
+    "impactAreas": ["startup-lint", "readiness-probes"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds startup asset/runtime readiness lint; Cerdiwen asset paths are already resolvable; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.5",
+    "title": "Expose startup lint as a deterministic report and lint-only command",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds lint-only CLI mode; uses Cerdiwen as an observed fixture only; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "1elr.6",
+    "title": "Fingerprint admitted config, statechart, tools, and schemas for every run",
+    "impactAreas": ["startup-lint", "schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds harness fingerprinting; Cerdiwen config, statechart, and schemas are stable inputs; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.7",
+    "title": "Define an admitted Pi API registration manifest and lifecycle idempotency check",
+    "impactAreas": ["startup-lint", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds Pi API registration manifest; Cerdiwen tool registrations are already correct; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.10",
+    "title": "Define a deterministic Pi lifecycle state machine for Orr Else extension events",
+    "impactAreas": ["startup-lint", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds Pi lifecycle state machine; Cerdiwen extension event handling follows normal Pi lifecycle; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.11",
+    "title": "Admit Pi project trust, package, and active-tool policy into the harness fingerprint",
+    "impactAreas": ["startup-lint", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds Pi trust/package fingerprinting; Cerdiwen uses trusted project settings and pinned packages; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "1elr.12",
+    "title": "Admit Pi sandbox, permission, and host-side execution policy before worker start",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds Pi sandbox/permission admission; Cerdiwen tool side-effect contracts are already declared; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "6k8e",
+    "title": "Define v2 route-event domain schema and transition application contract",
+    "impactAreas": ["schemas", "statechart"],
+    "cerdiwenSurface": "harness.yaml v2 route-event schema + cerdiwen event vocabulary conformance",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl (cerdiwen consumer) already depends on 6k8e in the bd graph (6k8e blocks ojxl). Cannot add governance reverse without cycle. The existing edge ensures cerdiwen cannot migrate until 6k8e is done."
+  },
+  {
+    "beadId": "cfzu",
+    "title": "Implement category-first v2 event vocabulary validation",
+    "impactAreas": ["schemas", "startup-lint", "statechart"],
+    "cerdiwenSurface": "cerdiwen harness.yaml event category/vocabulary + startup rejection of old v1 outcome fields",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on cfzu in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "0njv",
+    "title": "Require safe promptFile paths for every v2 LLM action",
+    "impactAreas": ["schemas", "startup-lint", "prompt-profiles"],
+    "cerdiwenSurface": "cerdiwen harness.yaml promptFile declarations must be resolvable safe paths",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on 0njv in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "0dgy",
+    "title": "Use canonical map-form collections in v2 config",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "cerdiwen harness.yaml collections must use v2 map form; array-form collections rejected at load",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on 0dgy in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "afdz",
+    "title": "Add v2 toolSets expansion for required tool composition only",
+    "impactAreas": ["schemas", "startup-lint", "active-tools"],
+    "cerdiwenSurface": "cerdiwen harness.yaml toolSets declarations must use v2 composition-only form",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on afdz in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "hutg",
+    "title": "Define deterministic v2 action event emission contracts",
+    "impactAreas": ["schemas", "statechart", "tool-evidence"],
+    "cerdiwenSurface": "cerdiwen action events must conform to v2 emission contracts",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on hutg in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "ne2w",
+    "title": "Add deterministic v2 gate aggregation with explicit precedence",
+    "impactAreas": ["schemas", "statechart"],
+    "cerdiwenSurface": "cerdiwen harness.yaml gate declarations must conform to v2 explicit precedence model",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on ne2w in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "w2tz",
+    "title": "Add v2 state and tool defaults/profile expansion with a non-routing allowlist",
+    "impactAreas": ["schemas", "startup-lint", "prompt-profiles"],
+    "cerdiwenSurface": "cerdiwen harness.yaml state/tool profile expansion must use v2 non-routing allowlist form",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on w2tz in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "x0zh",
+    "title": "Replace all model-selected outcome routing surfaces in v2",
+    "impactAreas": ["schemas", "statechart"],
+    "cerdiwenSurface": "cerdiwen harness.yaml model-selected routing must be replaced with v2 deterministic routing",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on x0zh in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "ux5e",
+    "title": "Reject configurable worker/workspace/worktree options in v2 config",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "cerdiwen harness.yaml must not use configurable worker/workspace/worktree options rejected in v2",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on ux5e in the bd graph. Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "94u7",
+    "title": "Enable v2-only default config discovery after self and example migration",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "cerdiwen harness.yaml must be v2-valid before 94u7 enables v2-only discovery",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl"
+  },
+  {
+    "beadId": "ek2j",
+    "title": "Preflight tmux and git worktree substrate for every v2 harness start",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds tmux/git substrate preflight checks; Cerdiwen already relies on valid tmux and git worktree substrate; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "e8cm",
+    "title": "Add v2 route-event replay quarantine and projection tests",
+    "impactAreas": ["schemas", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Adds harness-side route-event replay and projection test infrastructure; Cerdiwen v2 migration is covered by ojxl; no additional Cerdiwen config change required from this test bead."
+  },
+  {
+    "beadId": "jxdk",
+    "title": "Remove synthetic-event compatibility filters from production EventStore",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Owner-held bead. Internal EventStore synthetic-filter removal; Cerdiwen does not configure or rely on synthetic event filtering; no Cerdiwen config or extension change required."
+  },
+  {
+    "beadId": "w8rz",
+    "title": "Delete ToolResultBase migration-debt adapter and require full ToolEvidenceHandle",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "cerdiwen project-tool wrappers must emit full ToolEvidenceHandle; legacy ToolResultBase adapter removed",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc"
+  },
+  {
+    "beadId": "yhec",
+    "title": "Replace path-only VerifyContext toolOutputs with canonical evidence handles",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "cerdiwen verifier callbacks must consume canonical evidence handles not path-only toolOutputs",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc",
+    "notes": "Edge exists in the reverse direction: e6dc already depends on yhec in the bd graph (yhec blocks e6dc). Cannot add governance reverse without cycle. The existing edge ensures cerdiwen cannot update until yhec is done."
+  },
+  {
+    "beadId": "6q0y.5",
+    "title": "Add zero-net-token Pi tool snippets and promptGuidelines passthrough",
+    "impactAreas": ["prompt-profiles", "active-tools"],
+    "cerdiwenSurface": "cerdiwen promptSnippet/promptGuidelines accounting + Cerdiwen pilot fixture",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.10"
+  },
+  {
+    "beadId": "6q0y.9",
+    "title": "Add cache-hit observability keyed by prompt digest",
+    "impactAreas": ["prompt-profiles"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Cache-hit observability is harness-internal infrastructure; Cerdiwen does not configure or declare prompt digest identity; bead note explicitly permits no-impact classification under pi-experiment-6q0y.50."
+  },
+  {
+    "beadId": "6q0y.19",
+    "title": "Persist compact budget ledger rollups that survive retention compaction",
+    "impactAreas": ["budgets"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal retention infrastructure; Cerdiwen does not configure retention or budget ledger rollup behavior; bead note explicitly permits no-impact classification under pi-experiment-6q0y.50."
+  },
+  {
+    "beadId": "6q0y.24",
+    "title": "Add query_harness_logs progressive-disclosure tool",
+    "impactAreas": ["query-tool-usage"],
+    "cerdiwenSurface": "cerdiwen runtime query presets + advertised projection coverage for query_harness_logs",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.28",
+    "notes": "Edge exists in the reverse direction: 6q0y.28 (cerdiwen consumer) already depends on 6q0y.24 in the bd graph (6q0y.24 blocks 6q0y.28). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "6q0y.25",
+    "title": "Add query_tmux_transcripts progressive-disclosure tool",
+    "impactAreas": ["query-tool-usage"],
+    "cerdiwenSurface": "cerdiwen runtime query presets + advertised projection coverage for query_tmux_transcripts",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.28",
+    "notes": "Edge exists in the reverse direction: 6q0y.28 (cerdiwen consumer) already depends on 6q0y.25 in the bd graph (6q0y.25 blocks 6q0y.28). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "6q0y.26",
+    "title": "Add query_otel_spans progressive-disclosure tool",
+    "impactAreas": ["query-tool-usage"],
+    "cerdiwenSurface": "cerdiwen runtime query presets + advertised projection coverage for query_otel_spans",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.28",
+    "notes": "Edge exists in the reverse direction: 6q0y.28 (cerdiwen consumer) already depends on 6q0y.26 in the bd graph (6q0y.26 blocks 6q0y.28). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "6q0y.32",
+    "title": "Delete deprecated project-tool runtime guards and stale compatibility prompt wording",
+    "impactAreas": ["prompt-profiles", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Cerdiwen-facing cleanup is covered by pi-experiment-6q0y.29 and pi-experiment-6q0y.30; this bead removes harness-internal deprecated runtime branches and stale compatibility prompt text with no additional Cerdiwen config or extension change required."
+  },
+  {
+    "beadId": "amq0.15",
+    "title": "Create a single tool-surface catalog for registration, prompt, and admission",
+    "impactAreas": ["active-tools", "startup-lint", "project-tool-contracts"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal tool-surface catalog; Cerdiwen project-tool and extension registrations are validated as an observed fixture without requiring Cerdiwen harness.yaml or extension changes."
+  },
+  {
+    "beadId": "amq0.16",
+    "title": "Separate project-tool registration adapter from execution pipeline",
+    "impactAreas": ["project-tool-contracts"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal refactor separating ProjectToolRegistrar from ProjectToolRunner; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.17",
+    "title": "Decompose retention cleanup into planners, adapters, and reporter",
+    "impactAreas": ["scheduler"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal retention service decomposition; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.18",
+    "title": "Classify Knip-reported entrypoints and remove stale dead-code shims",
+    "impactAreas": ["startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Internal dead-code classification and CI gate; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "amq0.19",
+    "title": "Centralize project-tool root and path-scope type model",
+    "impactAreas": ["project-tool-contracts", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Centralizes harness path-scope type model; Cerdiwen artifact/root templates are used as test fixtures proving conformance, not requiring Cerdiwen config changes."
+  },
+  {
+    "beadId": "amq0.20",
+    "title": "Add Cerdiwen extension projection and idempotency fixture",
+    "impactAreas": ["statechart", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-side fixture that loads Cerdiwen extension code through Orr Else registration surfaces; proves idempotency without requiring Cerdiwen harness.yaml or extension changes."
+  },
+  {
+    "beadId": "zog2.4",
+    "title": "Consume canonical tool evidence handles in verifier gate contexts",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "cerdiwen verifier callbacks must receive canonical evidence handles",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc",
+    "notes": "Edge exists in the reverse direction: e6dc already depends on zog2.4 in the bd graph (zog2.4 blocks e6dc). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "zog2.5",
+    "title": "Add tool evidence conformance tests for every registered tool",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness conformance test framework; Cerdiwen-specific tool conformance is tracked by zog2.6 (cerdiwen-observed conformance bead); this bead adds the inventory-driven framework without requiring Cerdiwen config changes."
+  },
+  {
+    "beadId": "zog2.6",
+    "title": "Validate Cerdiwen project tools against the canonical Orr Else evidence pattern",
+    "impactAreas": ["tool-evidence", "project-tool-contracts"],
+    "cerdiwenSurface": "cerdiwen project-tool wrappers + verifier callbacks must conform to canonical evidence pattern",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc",
+    "notes": "Edge exists in the reverse direction: e6dc already depends on zog2.6 in the bd graph (zog2.6 blocks e6dc). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "zog2.10",
+    "title": "Define gate semantics for native Pi extension project tools",
+    "impactAreas": ["project-tool-contracts", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Defines harness semantics for native Pi extension tools (observeOnly vs gateSatisfying); Cerdiwen extension tools follow standard Pi extension semantics with no additional config required."
+  },
+  {
+    "beadId": "zog2.11",
+    "title": "Fail closed when verifier evidence handles cannot be validated",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "cerdiwen verifier gates must pass validation of canonical evidence handles",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc",
+    "notes": "Edge exists in the reverse direction: e6dc transitively depends on zog2.11 in the bd graph (zog2.11 is a transitive block). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "zog2.13",
+    "title": "Constrain Pi tool prompt surface and canonical schemas for token-efficient determinism",
+    "impactAreas": ["prompt-profiles", "schemas", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness prompt-surface lint and conformance policy; Cerdiwen tool conformance is captured by zog2.6 and zog2.5; no additional Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "zog2.14",
+    "title": "Control Pi MCP direct-tool exposure and metadata-cache readiness deterministically",
+    "impactAreas": ["project-tool-contracts", "startup-lint", "active-tools"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness MCP exposure policy for project-tool wrappers; Cerdiwen MCP-backed tools (codemap, sonarqube, etc.) are already declared as proxied wrappers; no additional Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "zog2.17",
+    "title": "Replace Cerdiwen legacy contract bridge with canonical evidence contract fixture",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "cerdiwen .pi/project-tools/_contract.ts must migrate from legacy ToolResultBase bridge to canonical evidence contract",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc"
+  },
+  {
+    "beadId": "zog2.20",
+    "title": "Surface canonical tool evidence in audit and status projections",
+    "impactAreas": ["tool-evidence", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal audit/status projection update to consume canonical evidence handles; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "zog2.21",
+    "title": "Replay and retain canonical tool evidence handles as replay-critical data",
+    "impactAreas": ["tool-evidence", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal replay and retention consumer update; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "zog2.22",
+    "title": "Quarantine legacy tool-evidence consumer inputs in production paths",
+    "impactAreas": ["tool-evidence", "schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal production quarantine for legacy evidence shapes; Cerdiwen evidence migration is covered by e6dc; no additional Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "6iae",
+    "title": "Build a replayable deterministic progress projection for gate eligibility",
+    "impactAreas": ["statechart", "tool-evidence"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal deterministic progress projection; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "a9eq",
+    "title": "Reject command child-artifact legacy payloads and require direct canonical evidence",
+    "impactAreas": ["tool-evidence", "project-tool-contracts"],
+    "cerdiwenSurface": "cerdiwen command/tsProjectTool wrappers must emit canonical evidence; child ToolResultBase payloads rejected",
+    "coverage": "edge",
+    "followThroughBeadId": "e6dc"
+  },
+  {
+    "beadId": "4ub5",
+    "title": "Report configured MCP-backed project-tool backend readiness separately from native Pi MCP counts",
+    "impactAreas": ["readiness-probes"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness adds MCP backend readiness surface; Cerdiwen configured backends (codemap, python_lsp, sonarqube, reference_docs) are auto-detected without Cerdiwen harness.yaml config changes."
+  },
+  {
+    "beadId": "cim5",
+    "title": "Register git_history as a callable built-in tool for requiredTools gates",
+    "impactAreas": ["active-tools", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness registers git_history as callable built-in; Cerdiwen harness.yaml already requires git_history in Planning and AdversarialPreReview and will pass startup admission once the registration is added; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "ixtf",
+    "title": "Reject project-tool operation aliases with canonical diagnostics",
+    "impactAreas": ["project-tool-contracts", "active-tools"],
+    "cerdiwenSurface": "cerdiwen project-tool wrappers must use canonical operation names; aliases rejected",
+    "coverage": "edge",
+    "followThroughBeadId": "6q0y.30",
+    "notes": "Edge exists in the reverse direction: 6q0y.30 (cerdiwen consumer) already depends on ixtf in the bd graph (ixtf blocks 6q0y.30). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "yp1w",
+    "title": "Make prelude tool actions explicitly satisfy or not satisfy prompt requiredTools",
+    "impactAreas": ["statechart", "project-tool-contracts"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Cerdiwen uses fresh sub-agent context per state (pi-experiment-6q0y.44 closed); prelude tool evidence does not carry over to later prompt actions; no ambiguous prelude/requiredTool reuse exists in Cerdiwen config."
+  },
+  {
+    "beadId": "2tb1",
+    "title": "Validate project-tool rule catalogs so missing rule documents cannot silently reduce guidance",
+    "impactAreas": ["project-tool-contracts", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness adds catalog/file validation for rule-selecting project tools (startup lint + CI tests); the Cerdiwen-observed coding_standards catalog drift (missing search-and-refactor.md, refactoring.md, backwards-compatibility.md) is resolved as part of 2tb1's own acceptance criteria without requiring a Cerdiwen harness.yaml config change; no separate cerdiwen follow-through bead exists; same class as amq0.15 (harness-internal tool-surface catalog enforcement)."
+  },
+  {
+    "beadId": "se6g",
+    "title": "Update v2 model-facing protocol for evidence-only completion and deterministic routing",
+    "impactAreas": ["schemas", "statechart"],
+    "cerdiwenSurface": "cerdiwen harness.yaml model-facing protocol must conform to v2 evidence-only completion",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl"
+  },
+  {
+    "beadId": "7ypp",
+    "title": "Move opinionated Orr Else examples and init templates out of runtime defaults",
+    "impactAreas": ["startup-lint", "schemas"],
+    "cerdiwenSurface": "cerdiwen harness.yaml must be an explicit v2 config rather than relying on runtime-discoverable defaults",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on 7ypp in the bd graph (7ypp blocks ojxl). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "vzp7",
+    "title": "Add static orr-else config explain for resolved v2 config",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness adds a config explain CLI command; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "ebzz",
+    "title": "Delete deprecated project-tool runtime guard after config admission proves unreachable",
+    "impactAreas": ["project-tool-contracts"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness dead-code removal of deprecated project-tool runtime guards; Cerdiwen does not rely on deprecated guard behavior; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "ejv1",
+    "title": "Flush deferred STATE_RUN_INITIALIZED on failure/shutdown and restart-gap failure counting",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness bug fix for deferred event flushing on failure path; Cerdiwen behavior on failure/restart is unchanged; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "isjk",
+    "title": "Rename v2 public schema terminology to generic framework language",
+    "impactAreas": ["schemas"],
+    "cerdiwenSurface": "cerdiwen harness.yaml must use updated v2 terminology after rename",
+    "coverage": "edge",
+    "followThroughBeadId": "ojxl",
+    "notes": "Edge exists in the reverse direction: ojxl already depends on isjk in the bd graph (isjk blocks ojxl). Cannot add governance reverse without cycle."
+  },
+  {
+    "beadId": "jfms",
+    "title": "Remove Orr Else tests that preserve legacy projection fallback semantics",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness test cleanup removing legacy projection fallback test pairs; Cerdiwen extension tests remain responsible for current Cerdiwen projection names; no Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "migrated-hmp53.1",
+    "title": "Build a Pi JSON/RPC/SDK replay fixture for lifecycle and tool-event contracts",
+    "impactAreas": ["statechart", "schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness replay fixture for Pi lifecycle and tool-event contracts; migrated from cerdiwen as a harness-side test asset; no Cerdiwen harness.yaml or extension change required."
+  },
+  {
+    "beadId": "nkiq",
+    "title": "Reject explicit legacy-v1 statechart configs missing terminalStates",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness v1 validation fix for missing terminalStates; Cerdiwen uses v2 config (covered by ojxl); no Cerdiwen config change required."
+  },
+  {
+    "beadId": "rm9x",
+    "title": "Make EventStore.scanTail use a bounded byte-offset read and handle oversized events",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness EventStore bounded read fix; internal I/O correctness improvement; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "0iyt",
+    "title": "Remove RuntimeServices and ToolRegistry backward-compatible constructor shims",
+    "impactAreas": ["statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness dead-code removal of backward-compatible constructor shims; no cerdiwen-facing contract or config surface change."
+  },
+  {
+    "beadId": "dsm2.2",
+    "title": "Require per-tool JSON Schemas for calls, results, summaries, and artifacts",
+    "impactAreas": ["schemas", "project-tool-contracts", "tool-evidence"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness enforcement mechanism for per-tool JSON Schemas; Cerdiwen tool conformance is covered by zog2.6 and zog2.5; no additional Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "dsm2.4",
+    "title": "Schema-validate semantic artifact manifests before gates, replay, and retention",
+    "impactAreas": ["schemas", "tool-evidence"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal schema validation for semantic artifact manifests; Cerdiwen artifact conformance is covered by zog2.6 and e6dc; no additional Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "dsm2.5",
+    "title": "Add boundary schema conformance inventory and fail-closed startup lint",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal boundary schema conformance inventory and startup lint; no Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "dsm2.6",
+    "title": "Schema-validate structured logs and OTel payloads without making telemetry authoritative",
+    "impactAreas": ["schemas", "startup-lint"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal structured log and OTel schema validation; Cerdiwen does not configure log or OTel schemas in harness.yaml; telemetry is operator-facing observability validated internally by the harness; same class as all dsm2 siblings (all no-impact); no Cerdiwen harness.yaml change required."
+  },
+  {
+    "beadId": "dsm2.7",
+    "title": "Persist tool evidence, artifact manifests, and progress events atomically",
+    "impactAreas": ["tool-evidence", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal atomic persistence for tool evidence and manifests; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "dsm2.8",
+    "title": "Revalidate Pi tool_call mutations before recording or executing harness policy decisions",
+    "impactAreas": ["project-tool-contracts", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal tool_call mutation revalidation; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "dsm2.9",
+    "title": "Persist durable evidence handles for tmux transcript based recovery decisions",
+    "impactAreas": ["tool-evidence", "statechart"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal durable evidence handle persistence for tmux recovery; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "dsm2.10",
+    "title": "Keep Pi compaction and branch summaries non-authoritative for harness progress",
+    "impactAreas": ["statechart", "context-policy"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal policy ensuring Pi compaction summaries are not authoritative for progress; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "dsm2.11",
+    "title": "Define Pi subagent child-session boundaries and artifact handoff contracts",
+    "impactAreas": ["statechart", "schemas", "tool-evidence"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal subagent session boundary and artifact handoff contract definition; no Cerdiwen config change required."
+  },
+  {
+    "beadId": "jvx3",
+    "title": "Define and enforce the deterministic LLM responsibility boundary",
+    "impactAreas": ["statechart", "schemas"],
+    "cerdiwenSurface": "none",
+    "coverage": "no-impact",
+    "noImpactReason": "Harness-internal LLM responsibility boundary enforcement; Cerdiwen already follows deterministic routing; no Cerdiwen config change required."
+  }
+]
