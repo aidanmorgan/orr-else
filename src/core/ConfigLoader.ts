@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
-import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig, V2PromptFileProvenance, ALLOWLISTED_STATE_FIELDS, ALLOWLISTED_TOOL_FIELDS, NON_COMPRESSIBLE_STATE_FIELDS, NON_COMPRESSIBLE_TOOL_FIELDS } from './domain/StateModels.js';
+import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig, V2PromptFileProvenance, ALLOWLISTED_STATE_FIELDS, ALLOWLISTED_TOOL_FIELDS, NON_COMPRESSIBLE_STATE_FIELDS, NON_COMPRESSIBLE_TOOL_FIELDS, V2ToolSetsConfig } from './domain/StateModels.js';
 import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
@@ -596,6 +596,12 @@ export class ConfigLoader {
     // profiles.states, and profiles.tools onto each state/tool with precedence
     // defaults < profile < local. Version-gated (only when version === 2).
     this.expandV2DefaultsAndProfiles(config);
+
+    // pi-experiment-afdz: v2 toolSets validation and expansion.
+    // Runs AFTER expandV2DefaultsAndProfiles (toolSets are independent of defaults)
+    // and BEFORE validateV2MapCollections (expansion produces final tool name lists).
+    // Version-gated (only when version === 2).
+    this.validateAndExpandV2ToolSets(config);
 
     // pi-experiment-0dgy: v2 map-form collection validation.
     // Validates tools, validationGates, and states.<state>.actions:
@@ -1755,6 +1761,362 @@ export class ConfigLoader {
         `Remove ${fieldList} from ${sourcePath} or add the field to the allowlist if it is a new ergonomic default.`
       );
     }
+  }
+
+  /**
+   * pi-experiment-afdz: Validate and expand v2 toolSets declarations.
+   *
+   * Called from preValidateV2Admission AFTER expandV2DefaultsAndProfiles and
+   * BEFORE validateV2MapCollections. Operates on the raw parsed document and
+   * mutates it in place by expanding toolSet references in requiredTools and
+   * activeTools.
+   *
+   * Version-gated: only runs when version === 2. No-op for v1 configs.
+   *
+   * Validation (all startup-fatal):
+   *   1. Each toolSet value must be an array of strings (tool names).
+   *      An object with routing fields (transitions, emitters, gates, promptFiles,
+   *      verifier routing) is REJECTED — each disallowed kind gets its own error.
+   *   2. All tool names referenced inside a toolSet must be declared in the
+   *      config's tools map (unknown tool → startup fail).
+   *   3. toolSet references in requiredTools/activeTools that name an unknown
+   *      toolSet → startup fail.
+   *
+   * Expansion:
+   *   - References to toolSet names in requiredTools/activeTools are replaced
+   *     with the toolSet's tool list, de-duplicated (case-insensitive) and
+   *     sorted (deterministic, stable, mirrors 0dgy/w2tz sorted order).
+   *   - Direct tool names are preserved in position; toolSet expansions follow.
+   *   - The final list is de-duplicated case-insensitively. Sorted by tool name
+   *     for determinism.
+   *   - Source metadata: expanded entries are annotated with a
+   *     v2ToolSetSource comment on the resolved list (for config explain).
+   *
+   * @param parsed Raw parsed document (version: 2 already verified).
+   */
+  private validateAndExpandV2ToolSets(parsed: unknown): void {
+    if (!isRecord(parsed) || parsed['version'] !== 2) return;
+
+    const toolSetsRaw = parsed['toolSets'];
+
+    // toolSets must be a record (map of name → value) if declared.
+    if (toolSetsRaw !== undefined && toolSetsRaw !== null && !isRecord(toolSetsRaw)) {
+      throw new Error(
+        `v2 config toolSets must be a map of toolSet names to tool-name arrays, ` +
+        `but got ${typeof toolSetsRaw}. ` +
+        `Declare toolSets as an object: toolSets:\n  reviewEvidence:\n    - coding_standards\n    - codemap`
+      );
+    }
+
+    const toolSetsMap: Record<string, unknown> = isRecord(toolSetsRaw) ? toolSetsRaw as Record<string, unknown> : {};
+
+    // ── Forbidden routing fields inside toolSet definitions ──────────────────
+    // toolSets are NAME-composition only. Objects with routing fields are REJECTED.
+    const FORBIDDEN_TOOLSET_FIELDS = new Set<string>([
+      'transitions',
+      'emitters',
+      'gates',
+      'promptFile',
+      'promptFiles',
+      'emits',
+      'routeEvidence',
+      'actions',
+      'on', // v1 transition map
+    ]);
+
+    // Build the set of declared tool names for unknown-tool-name checks.
+    // Tools may be in map-form (record) or array-form at this point (array-form
+    // is rejected by validateV2MapCollections which runs after us; we handle both
+    // for graceful error ordering — map-form is expected for v2 configs).
+    const toolsRaw = parsed['tools'];
+    const declaredToolNames = new Set<string>();
+    if (isRecord(toolsRaw)) {
+      // Map-form tools (expected in v2).
+      for (const key of Object.keys(toolsRaw as Record<string, unknown>)) {
+        declaredToolNames.add(key.toLowerCase());
+      }
+    } else if (Array.isArray(toolsRaw)) {
+      // Array-form tools (v1 / will be rejected later; build names defensively).
+      for (const t of toolsRaw as unknown[]) {
+        if (isRecord(t)) {
+          const name = (t as Record<string, unknown>)['name'];
+          if (typeof name === 'string') declaredToolNames.add(name.toLowerCase());
+        }
+      }
+    }
+
+    // Validate each toolSet entry.
+    const validatedToolSets = new Map<string, string[]>(); // name → sorted tool names
+    for (const [toolSetName, toolSetValue] of Object.entries(toolSetsMap)) {
+      // If the toolSet value is an object (not an array), check for forbidden fields.
+      if (isRecord(toolSetValue)) {
+        const record = toolSetValue as Record<string, unknown>;
+        const presentForbidden: string[] = [];
+        for (const field of FORBIDDEN_TOOLSET_FIELDS) {
+          if (field in record) presentForbidden.push(field);
+        }
+        if (presentForbidden.length > 0) {
+          const fieldList = presentForbidden.map(f => `"${f}"`).join(', ');
+          throw new Error(
+            `v2 toolSets.${toolSetName} declares non-tool workflow field(s): ${fieldList}. ` +
+            `toolSets are a tool-NAME composition mechanism only — they cannot define ` +
+            `route events, transitions, emitters, gates, promptFiles, or verifier routing. ` +
+            `Remove ${fieldList} from toolSets.${toolSetName} and declare ` +
+            `${presentForbidden.length > 1 ? 'them' : 'it'} directly in the state or action.`
+          );
+        }
+        // Object with no forbidden fields — still not a valid array of tool names.
+        throw new Error(
+          `v2 toolSets.${toolSetName} must be an array of tool-name strings, but got an object. ` +
+          `Declare toolSets as: toolSets:\n  ${toolSetName}:\n    - toolName1\n    - toolName2`
+        );
+      }
+
+      if (!Array.isArray(toolSetValue)) {
+        throw new Error(
+          `v2 toolSets.${toolSetName} must be an array of tool-name strings, ` +
+          `but got ${typeof toolSetValue}. ` +
+          `Declare toolSets as: toolSets:\n  ${toolSetName}:\n    - toolName1\n    - toolName2`
+        );
+      }
+
+      // Validate each entry is a non-empty string (tool name).
+      const toolNames: string[] = [];
+      const seenLower = new Set<string>(); // for within-toolSet duplicate detection
+
+      for (let i = 0; i < (toolSetValue as unknown[]).length; i++) {
+        const entry = (toolSetValue as unknown[])[i];
+        if (typeof entry !== 'string' || !entry.trim()) {
+          throw new Error(
+            `v2 toolSets.${toolSetName}[${i}] must be a non-empty tool-name string, ` +
+            `but got ${JSON.stringify(entry)}. ` +
+            `Each toolSet entry must be a declared tool name.`
+          );
+        }
+        const trimmed = entry.trim();
+        const lower = trimmed.toLowerCase();
+
+        // Within-toolSet duplicate detection (case-insensitive).
+        if (seenLower.has(lower)) {
+          throw new Error(
+            `v2 toolSets.${toolSetName} contains duplicate tool name "${trimmed}" ` +
+            `(case-insensitive). Each tool may appear at most once within a toolSet. ` +
+            `Remove the duplicate from toolSets.${toolSetName}.`
+          );
+        }
+        seenLower.add(lower);
+
+        // Unknown tool name: must be declared in the config's tools map.
+        if (declaredToolNames.size > 0 && !declaredToolNames.has(lower)) {
+          const knownList = [...declaredToolNames].sort().join(', ') || '(none declared)';
+          throw new Error(
+            `v2 toolSets.${toolSetName} references unknown tool "${trimmed}". ` +
+            `Tool names in a toolSet must be declared in config.tools. ` +
+            `Known tools: ${knownList}. ` +
+            `Declare the tool in config.tools or correct the tool name.`
+          );
+        }
+
+        toolNames.push(trimmed);
+      }
+
+      // Store sorted tool names for deterministic expansion.
+      validatedToolSets.set(toolSetName, [...toolNames].sort());
+    }
+
+    // ── Expand toolSet references in states.*.requiredTools and activeTools ─
+    const statesRaw = parsed['states'];
+    if (!isRecord(statesRaw)) return;
+
+    for (const [stateId, stateRaw] of Object.entries(statesRaw as Record<string, unknown>)) {
+      if (!isRecord(stateRaw)) continue;
+      const state = stateRaw as Record<string, unknown>;
+
+      // Expand state-level requiredTools.
+      if (Array.isArray(state['requiredTools'])) {
+        state['requiredTools'] = this.expandToolSetRefs(
+          state['requiredTools'] as unknown[],
+          validatedToolSets,
+          `states.${stateId}.requiredTools`,
+          declaredToolNames
+        );
+      }
+
+      // Expand state-level activeTools.
+      if (Array.isArray(state['activeTools'])) {
+        state['activeTools'] = this.expandToolSetRefsStringOnly(
+          state['activeTools'] as unknown[],
+          validatedToolSets,
+          `states.${stateId}.activeTools`,
+          declaredToolNames
+        );
+      }
+
+      // Expand action-level requiredTools and activeTools.
+      const actionsRaw = state['actions'];
+      if (!actionsRaw) continue;
+
+      // Actions may be map-form (record) or array-form (array) at this point.
+      const actionEntries: Array<[string, unknown]> = isRecord(actionsRaw)
+        ? Object.entries(actionsRaw as Record<string, unknown>)
+        : Array.isArray(actionsRaw)
+          ? (actionsRaw as unknown[]).map((a, i) => {
+              const id = isRecord(a)
+                ? ((a as Record<string, unknown>)['id'] as string ?? `action_${i}`)
+                : `action_${i}`;
+              return [id, a] as [string, unknown];
+            })
+          : [];
+
+      for (const [actionId, actionRaw] of actionEntries) {
+        if (!isRecord(actionRaw)) continue;
+        const action = actionRaw as Record<string, unknown>;
+
+        if (Array.isArray(action['requiredTools'])) {
+          action['requiredTools'] = this.expandToolSetRefs(
+            action['requiredTools'] as unknown[],
+            validatedToolSets,
+            `states.${stateId}.actions.${actionId}.requiredTools`,
+            declaredToolNames
+          );
+        }
+
+        if (Array.isArray(action['activeTools'])) {
+          action['activeTools'] = this.expandToolSetRefsStringOnly(
+            action['activeTools'] as unknown[],
+            validatedToolSets,
+            `states.${stateId}.actions.${actionId}.activeTools`,
+            declaredToolNames
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Expand toolSet references in a requiredTools array (which may contain
+   * strings or ConditionalRequiredTool objects). Returns the expanded list
+   * with toolSet names replaced by their tool lists, de-duplicated and sorted.
+   *
+   * A string entry that matches a toolSet name is replaced by the toolSet's
+   * sorted tool list. A ConditionalRequiredTool entry (object form) is passed
+   * through as-is — conditional tools cannot be grouped into toolSets.
+   *
+   * Unknown toolSet references (string entries that are neither declared tool
+   * names nor declared toolSet names) fail startup when we know the tool set.
+   */
+  private expandToolSetRefs(
+    entries: unknown[],
+    toolSets: Map<string, string[]>,
+    sourcePath: string,
+    declaredToolNames: Set<string>
+  ): unknown[] {
+    const expanded: unknown[] = [];
+    const seenLower = new Set<string>(); // for de-duplication (case-insensitive)
+
+    for (const entry of entries) {
+      if (isRecord(entry)) {
+        // ConditionalRequiredTool (object form) — pass through unchanged.
+        // De-duplicate by name field (case-insensitive).
+        const name = (entry as Record<string, unknown>)['name'];
+        if (typeof name === 'string') {
+          const lower = name.toLowerCase();
+          if (!seenLower.has(lower)) {
+            seenLower.add(lower);
+            expanded.push(entry);
+          }
+        } else {
+          expanded.push(entry);
+        }
+        continue;
+      }
+
+      if (typeof entry !== 'string') continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+
+      if (toolSets.has(trimmed)) {
+        // This entry is a toolSet name — expand it.
+        for (const toolName of toolSets.get(trimmed)!) {
+          const lower = toolName.toLowerCase();
+          if (!seenLower.has(lower)) {
+            seenLower.add(lower);
+            expanded.push(toolName);
+          }
+        }
+      } else {
+        // Not a toolSet name — treat as a direct tool name.
+        // If we have a declared tool set, validate the reference.
+        if (declaredToolNames.size > 0 && !declaredToolNames.has(trimmed.toLowerCase())) {
+          // Could be an unknown toolSet reference — surface a useful error.
+          const knownSets = [...toolSets.keys()].sort().join(', ') || '(none)';
+          const knownTools = [...declaredToolNames].sort().join(', ') || '(none declared)';
+          throw new Error(
+            `${sourcePath} references "${trimmed}" which is neither a declared tool name ` +
+            `nor a declared toolSet name. ` +
+            `Known toolSet names: ${knownSets}. ` +
+            `Known tools: ${knownTools}. ` +
+            `Declare the tool in config.tools or define a toolSet with that name.`
+          );
+        }
+        const lower = trimmed.toLowerCase();
+        if (!seenLower.has(lower)) {
+          seenLower.add(lower);
+          expanded.push(trimmed);
+        }
+      }
+    }
+
+    return expanded;
+  }
+
+  /**
+   * Expand toolSet references in an activeTools array (string-only list).
+   * activeTools entries are always plain strings — no ConditionalRequiredTool form.
+   */
+  private expandToolSetRefsStringOnly(
+    entries: unknown[],
+    toolSets: Map<string, string[]>,
+    sourcePath: string,
+    declaredToolNames: Set<string>
+  ): string[] {
+    const expanded: string[] = [];
+    const seenLower = new Set<string>();
+
+    for (const entry of entries) {
+      if (typeof entry !== 'string') continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+
+      if (toolSets.has(trimmed)) {
+        for (const toolName of toolSets.get(trimmed)!) {
+          const lower = toolName.toLowerCase();
+          if (!seenLower.has(lower)) {
+            seenLower.add(lower);
+            expanded.push(toolName);
+          }
+        }
+      } else {
+        if (declaredToolNames.size > 0 && !declaredToolNames.has(trimmed.toLowerCase())) {
+          const knownSets = [...toolSets.keys()].sort().join(', ') || '(none)';
+          const knownTools = [...declaredToolNames].sort().join(', ') || '(none declared)';
+          throw new Error(
+            `${sourcePath} references "${trimmed}" which is neither a declared tool name ` +
+            `nor a declared toolSet name. ` +
+            `Known toolSet names: ${knownSets}. ` +
+            `Known tools: ${knownTools}. ` +
+            `Declare the tool in config.tools or define a toolSet with that name.`
+          );
+        }
+        const lower = trimmed.toLowerCase();
+        if (!seenLower.has(lower)) {
+          seenLower.add(lower);
+          expanded.push(trimmed);
+        }
+      }
+    }
+
+    return expanded;
   }
 
   /**

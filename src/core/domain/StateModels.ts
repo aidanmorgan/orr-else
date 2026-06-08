@@ -1011,6 +1011,24 @@ export interface HarnessConfig {
    * Version-gated: only processed when version: 2.
    */
   profiles?: V2ProfilesConfig;
+  /**
+   * pi-experiment-afdz: v2 same-file toolSets block.
+   *
+   * toolSets reduce repeated required-tool lists by naming reusable lists of
+   * declared tool names. A state/action requiredTools (or activeTools) may
+   * reference a toolSet name; the loader expands it to the tool list before
+   * required-tool and active-tool validation.
+   *
+   * toolSets are a tool-NAME composition mechanism ONLY:
+   *   - Each toolSet value must be an array of declared tool-name strings.
+   *   - Routing fields (transitions, emitters, gates, promptFiles, verifier
+   *     routing) inside a toolSet are REJECTED at startup.
+   *   - Unknown tool names or unknown toolSet references fail startup.
+   *   - Expansion is deterministic: sorted, de-duplicated, source-path annotated.
+   *
+   * Version-gated: only processed when version: 2. v1 configs are unaffected.
+   */
+  toolSets?: V2ToolSetsConfig;
   settings: {
     maxConcurrentSlots: number;
     handoverTemplate: string;
@@ -1534,6 +1552,23 @@ export interface V2ProfilesConfig {
   states?: Record<string, V2StateProfile>;
   tools?: Record<string, V2ToolProfile>;
 }
+
+/**
+ * pi-experiment-afdz: v2 toolSets block (top-level in harness.yaml).
+ *
+ * toolSets is a NAME-composition mechanism for required/active tool lists.
+ * Each entry maps a toolSet name to an ordered list of declared tool names.
+ *
+ * Constraints (all startup-fatal):
+ *   - Each toolSet value must be an array of tool-name strings only.
+ *   - A toolSet that contains routing fields (transitions, emitters, gates,
+ *     promptFiles, verifier routing) is REJECTED.
+ *   - Tool names in a toolSet must be declared in the config's tools map.
+ *   - Unknown toolSet references in requiredTools/activeTools fail startup.
+ *
+ * toolSets are version-gated: only processed when version: 2.
+ */
+export type V2ToolSetsConfig = Record<string, string[]>;
 
 /**
  * Source-path record for a single resolved field.

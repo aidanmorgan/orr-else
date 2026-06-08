@@ -2266,6 +2266,19 @@
         }
       }
     },
+    "toolSets": {
+      "type": "object",
+      "description": "pi-experiment-afdz: v2 same-file toolSets block. toolSets reduce repeated required-tool lists by naming reusable arrays of declared tool names. A state/action requiredTools (or activeTools) may reference a toolSet name; the loader expands it to the tool list before required-tool validation. toolSets are a tool-NAME composition mechanism only — routing fields (transitions, emitters, gates, promptFiles, verifier routing) inside a toolSet cause startup rejection. Version-gated: only processed when version: 2.",
+      "additionalProperties": {
+        "type": "array",
+        "description": "Ordered list of declared tool names in this toolSet. Each entry must be a non-empty string naming a declared config.tools entry.",
+        "items": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A declared tool name. Must match a key in the config.tools map."
+        }
+      }
+    },
     "defaults": {
       "type": "object",
       "description": "pi-experiment-w2tz: v2 same-file defaults block. defaults.state applies allowlisted non-routing fields to every state as the lowest-priority base. defaults.tool applies allowlisted non-routing fields to every tool. Only ergonomic execution and prompt-surface defaults are permitted; routing fields (transitions, actions, routeEvidence, etc.) cause startup rejection. Version-gated: only processed when version: 2.",
