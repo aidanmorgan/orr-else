@@ -689,3 +689,328 @@ tools:
     expect(() => loader.load(tempYamlPath)).not.toThrow();
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 85bl-AC5: Required vs optional backend distinction (headline delta)
+//
+// LOAD-BEARING: these tests FAIL if the required/optional distinction is
+// removed from runStartupProbeAdmission. required-down MUST block startup;
+// optional-down MUST NOT block startup.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('85bl-AC5: required vs optional backend distinction — required-down blocks, optional-down does not', () => {
+  let env: ReturnType<typeof makeTestEnv>;
+  beforeEach(() => { env = makeTestEnv(); });
+  afterEach(() => env.cleanup());
+
+  it('REQUIRED backend down (no optional flag) — runStartupProbeAdmission THROWS and blocks startup', async () => {
+    // A required backend (no optional:true) whose probe exits non-zero must block.
+    const tools: ProjectToolConfig[] = [
+      {
+        name: 'required_backend',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        probeContext: true,
+        // optional is absent → required
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig
+    ];
+    await expect(
+      runStartupProbeAdmission(tools, env.tempRoot + '/harness.yaml', env.eventStore)
+    ).rejects.toThrow(/required_backend/);
+  });
+
+  it('OPTIONAL backend down (optional:true) — runStartupProbeAdmission resolves (does NOT block startup)', async () => {
+    // An optional backend (optional:true) whose probe exits non-zero must NOT block.
+    // The failure is recorded as a diagnostic result but admitted is true.
+    const tools: ProjectToolConfig[] = [
+      {
+        name: 'optional_backend',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        probeContext: true,
+        optional: true, // ← the key: optional backend
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig
+    ];
+    const { admitted, results } = await runStartupProbeAdmission(
+      tools, env.tempRoot + '/harness.yaml', env.eventStore
+    );
+    // MUST NOT block startup
+    expect(admitted).toBe(true);
+    // MUST record the failure as a diagnostic
+    expect(results).toHaveLength(1);
+    expect(results[0].probeStatus).toBe('REJECTED');
+    // gateDec for optional is ADMIT even though probe failed
+    expect(results[0].gateDec).toBe('ADMIT');
+  });
+
+  it('mix of required (passing) + optional (failing) — startup proceeds, optional failure in results', async () => {
+    const tools: ProjectToolConfig[] = [
+      {
+        name: 'required_passing',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(0)'],
+        probeContext: true,
+        // required (no optional flag)
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig,
+      {
+        name: 'optional_failing',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        probeContext: true,
+        optional: true,
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig
+    ];
+    const { admitted, results } = await runStartupProbeAdmission(
+      tools, env.tempRoot + '/harness.yaml', env.eventStore
+    );
+    expect(admitted).toBe(true);
+    expect(results).toHaveLength(2);
+    const req = results.find(r => r.tool === 'required_passing')!;
+    const opt = results.find(r => r.tool === 'optional_failing')!;
+    expect(req.probeStatus).toBe('PASSED');
+    expect(req.gateDec).toBe('ADMIT');
+    expect(opt.probeStatus).toBe('REJECTED');
+    expect(opt.gateDec).toBe('ADMIT'); // optional — admitted despite failure
+  });
+
+  it('mix of required (failing) + optional (failing) — startup BLOCKED by required failure', async () => {
+    const tools: ProjectToolConfig[] = [
+      {
+        name: 'required_failing',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        probeContext: true,
+        // required
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig,
+      {
+        name: 'optional_also_failing',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.exit(1)'],
+        probeContext: true,
+        optional: true,
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig
+    ];
+    await expect(
+      runStartupProbeAdmission(tools, env.tempRoot + '/harness.yaml', env.eventStore)
+    ).rejects.toThrow(/required_failing/);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 85bl-AC4: Failure taxonomy field
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('85bl-AC4: failure taxonomy — non-PASSED probes emit structured failureTaxonomy field', () => {
+  let env: ReturnType<typeof makeTestEnv>;
+  beforeEach(() => { env = makeTestEnv(); });
+  afterEach(() => env.cleanup());
+
+  it('PASSED probe has no failureTaxonomy field', async () => {
+    const tool = safeProbeTool('passing_tax_tool', 'process.exit(0)');
+    const result = await runReadinessProbe(tool, env.tempRoot + '/harness.yaml', true, env.eventStore);
+    expect(result.probeStatus).toBe('PASSED');
+    expect(result.failureTaxonomy).toBeUndefined();
+  });
+
+  it('REJECTED probe emits failureTaxonomy PROBE_NONZERO_EXIT', async () => {
+    const tool = safeProbeTool('rejected_tax_tool', 'process.exit(1)');
+    const result = await runReadinessProbe(tool, env.tempRoot + '/harness.yaml', true, env.eventStore);
+    expect(result.probeStatus).toBe('REJECTED');
+    expect(result.failureTaxonomy).toBe('PROBE_NONZERO_EXIT');
+  });
+
+  it('UNSAFE probe (no contract) emits failureTaxonomy PROBE_UNSAFE', async () => {
+    const tool = noContractTool('unsafe_tax_tool');
+    const result = await runReadinessProbe(tool, env.tempRoot + '/harness.yaml', true, env.eventStore);
+    expect(result.probeStatus).toBe('UNSAFE');
+    expect(result.failureTaxonomy).toBe('PROBE_UNSAFE');
+  });
+
+  it('OVERSIZE probe emits failureTaxonomy PROBE_OVERSIZE', async () => {
+    const tool = safeProbeTool('oversize_tax_tool', `process.stdout.write('x'.repeat(2048))`);
+    const result = await runReadinessProbe(
+      tool, env.tempRoot + '/harness.yaml', true, env.eventStore,
+      undefined,
+      { maxOutputBytes: 512 }
+    );
+    expect(result.probeStatus).toBe('OVERSIZE');
+    expect(result.failureTaxonomy).toBe('PROBE_OVERSIZE');
+  });
+
+  it('TIMEOUT probe emits failureTaxonomy PROBE_TIMEOUT', async () => {
+    const tool = safeProbeTool('timeout_tax_tool', 'setTimeout(()=>{},5000)');
+    const result = await runReadinessProbe(
+      tool, env.tempRoot + '/harness.yaml', true, env.eventStore,
+      undefined,
+      { timeoutMs: 200 }
+    );
+    expect(result.probeStatus).toBe('TIMEOUT');
+    expect(result.failureTaxonomy).toBe('PROBE_TIMEOUT');
+  }, 10_000);
+
+  it('failureTaxonomy appears in the emitted PROJECT_TOOL_PROBE_COMPLETED event for failed probes', async () => {
+    const tool = safeProbeTool('event_tax_tool', 'process.exit(1)');
+    const configPath = env.tempRoot + '/harness.yaml';
+    const recorded: Record<string, unknown>[] = [];
+    const origRecord = env.eventStore.record.bind(env.eventStore);
+    vi.spyOn(env.eventStore, 'record').mockImplementation(async (eventType, data) => {
+      if (eventType === DomainEventName.PROJECT_TOOL_PROBE_COMPLETED) {
+        recorded.push(data as Record<string, unknown>);
+      }
+      return origRecord(eventType, data);
+    });
+
+    await runReadinessProbe(tool, configPath, true, env.eventStore);
+
+    expect(recorded.length).toBe(1);
+    expect(recorded[0].failureTaxonomy).toBe('PROBE_NONZERO_EXIT');
+    vi.restoreAllMocks();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 85bl-AC6: Malformed result schema rejection + replay equivalence
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('85bl-AC6: malformed result schema rejected + replay-equivalent probe events', () => {
+  let env: ReturnType<typeof makeTestEnv>;
+  beforeEach(() => { env = makeTestEnv(); });
+  afterEach(() => env.cleanup());
+
+  it('EventStore rejects a probe event with an unknown required field omitted (malformed schema)', async () => {
+    // A probe event missing "elapsedMs" must be rejected by EventStoreValidationError.
+    await expect(
+      env.eventStore.record(DomainEventName.PROJECT_TOOL_PROBE_COMPLETED, {
+        // elapsedMs intentionally omitted — schema requires it
+        tool: 'malformed_probe',
+        configPath: '/path/harness.yaml',
+        probeStatus: 'PASSED',
+        gateDec: 'ADMIT'
+      })
+    ).rejects.toThrow(); // EventStoreValidationError — missing required field
+  });
+
+  it('replay-equivalent: two identical probe runs emit events with identical required field values', async () => {
+    // Two separate runs of the same deterministic probe (fixed clock + fixed input)
+    // must produce identical required field values — ensuring replay equivalence.
+    const fakeClock = makeFakeClock(5000);
+    const tool = safeProbeTool('replay_probe', 'process.exit(0)');
+    const configPath = env.tempRoot + '/harness.yaml';
+
+    const recorded: Record<string, unknown>[] = [];
+    vi.spyOn(env.eventStore, 'record').mockImplementation(async (eventType, data) => {
+      if (eventType === DomainEventName.PROJECT_TOOL_PROBE_COMPLETED) {
+        recorded.push(data as Record<string, unknown>);
+      }
+    });
+
+    // Run the probe twice with the same injected clock (both calls will see the
+    // same clock.now() sequence since we advance it the same way each time).
+    await runReadinessProbe(tool, configPath, true, env.eventStore, fakeClock);
+    await runReadinessProbe(tool, configPath, true, env.eventStore, fakeClock);
+
+    expect(recorded.length).toBe(2);
+    const [first, second] = recorded;
+
+    // These fields must be identical across runs for replay equivalence
+    expect(first.tool).toBe(second.tool);
+    expect(first.configPath).toBe(second.configPath);
+    expect(first.probeStatus).toBe(second.probeStatus);
+    expect(first.gateDec).toBe(second.gateDec);
+    expect(first.probeStatus).toBe('PASSED');
+    // failureTaxonomy absent for PASSED
+    expect(first.failureTaxonomy).toBeUndefined();
+    expect(second.failureTaxonomy).toBeUndefined();
+
+    vi.restoreAllMocks();
+  });
+
+  it('optional-backend diagnostic is recorded in results but does not contain raw log bodies', async () => {
+    // An optional backend probe that fails must not inline raw output in the event.
+    const tools: ProjectToolConfig[] = [
+      {
+        name: 'optional_norawbody',
+        type: ProjectToolType.COMMAND,
+        command: process.execPath,
+        defaultArgs: ['-e', 'process.stdout.write("SECRET_BODY"); process.exit(1)'],
+        probeContext: true,
+        optional: true,
+        sideEffectContract: {
+          cancellationPolicy: 'not_supported',
+          idempotencyClass: 'idempotent',
+          serializationKey: null,
+          allowedInReadOnlyContext: true,
+          safeForReadinessProbe: true
+        }
+      } as unknown as ProjectToolConfig
+    ];
+
+    const recorded: Record<string, unknown>[] = [];
+    vi.spyOn(env.eventStore, 'record').mockImplementation(async (eventType, data) => {
+      if (eventType === DomainEventName.PROJECT_TOOL_PROBE_COMPLETED) {
+        recorded.push(data as Record<string, unknown>);
+      }
+    });
+
+    const { admitted } = await runStartupProbeAdmission(
+      tools, env.tempRoot + '/harness.yaml', env.eventStore
+    );
+    // Optional backend — must not block startup
+    expect(admitted).toBe(true);
+    // The event must NOT contain the raw output body
+    expect(recorded.length).toBe(1);
+    const evt = recorded[0];
+    const serialized = JSON.stringify(evt);
+    expect(serialized).not.toContain('SECRET_BODY');
+
+    vi.restoreAllMocks();
+  });
+});

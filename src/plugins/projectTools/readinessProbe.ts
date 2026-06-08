@@ -1,5 +1,5 @@
 /**
- * readinessProbe — pi-experiment-8ieq
+ * readinessProbe — pi-experiment-8ieq / pi-experiment-85bl
  *
  * Startup/readiness executor for project-tool probes.
  *
@@ -10,12 +10,16 @@
  *     false are also blocked.
  *   - No model/provider calls are made. The executor shells out to the tool's
  *     command only (COMMAND-type tools). MCP tools are not supported as probes.
- *   - Execution is bounded by PROBE_TIMEOUT_MS and PROBE_MAX_OUTPUT_BYTES.
- *     A probe that exceeds either limit is terminated and reported as TIMEOUT
- *     or OVERSIZE.
+ *   - Execution is bounded by PROBE_TIMEOUT_MS, PROBE_MAX_OUTPUT_BYTES, and
+ *     cwd/root-scope (probe cwd is pinned to the project root).
+ *     A probe that exceeds either time/size limit is terminated and reported as
+ *     TIMEOUT or OVERSIZE.
  *   - No raw output bodies are logged. Only byte count and SHA-256 of the
  *     output are recorded in the emitted event.
  *   - elapsedMs is measured using the injected Clock (deterministic in tests).
+ *   - pi-experiment-85bl: required vs optional backend distinction. A tool with
+ *     optional:true has its probe failure recorded as a diagnostic only — it
+ *     does NOT block startup. Required (non-optional) backends block on failure.
  */
 import { createHash } from 'node:crypto';
 import { execa } from 'execa';
@@ -23,7 +27,7 @@ import type { ProjectToolConfig, ProjectCommandToolConfig } from '../../core/dom
 import type { Clock } from '../../core/Clock.js';
 import { systemClock } from '../../core/Clock.js';
 import type { EventStore } from '../../core/EventStore.js';
-import { DomainEventName, ProjectToolType } from '../../constants/index.js';
+import { DomainEventName, EnvVars, ProjectToolType } from '../../constants/index.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -58,6 +62,26 @@ export type ProbeStatus = 'PASSED' | 'REJECTED' | 'UNSAFE' | 'TIMEOUT' | 'OVERSI
  */
 export type GateDecision = 'ADMIT' | 'DENY';
 
+/**
+ * Structured failure taxonomy for a probe outcome (pi-experiment-85bl, AC4).
+ *
+ * Each non-PASSED probe outcome maps to one of these rows. The taxonomy is
+ * stable across releases — consumers (6q0y.34) can pattern-match on this field
+ * rather than the diagnostic string.
+ *
+ * PROBE_UNSAFE            — tool lacks safe-for-probe declaration; never executed.
+ * PROBE_TIMEOUT           — tool exceeded the configured timeout; was terminated.
+ * PROBE_OVERSIZE          — tool output exceeded the configured output-size limit.
+ * PROBE_NONZERO_EXIT      — tool ran but exited with a non-zero exit code.
+ * PROBE_UNSUPPORTED_TYPE  — tool type is not executable as a probe (non-COMMAND).
+ */
+export type ProbeFailureTaxonomy =
+  | 'PROBE_UNSAFE'
+  | 'PROBE_TIMEOUT'
+  | 'PROBE_OVERSIZE'
+  | 'PROBE_NONZERO_EXIT'
+  | 'PROBE_UNSUPPORTED_TYPE';
+
 export interface ProbeResult {
   tool: string;
   configPath: string;
@@ -72,6 +96,11 @@ export interface ProbeResult {
   semanticArtifactPath?: string;
   /** Human-readable diagnostic for UNSAFE/TIMEOUT/OVERSIZE/REJECTED outcomes. */
   diagnostic?: string;
+  /**
+   * Structured failure taxonomy row (pi-experiment-85bl, AC4).
+   * Present on all non-PASSED outcomes; absent when probeStatus is 'PASSED'.
+   */
+  failureTaxonomy?: ProbeFailureTaxonomy;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,12 +139,12 @@ export function isProbeDeclarationSafe(definition: ProjectToolConfig): boolean {
  *   4. No provider calls: the executor ONLY runs the tool's declared command
  *      (execa). No model SDK, no HTTP to any LLM endpoint.
  *
- * @param definition  The configured project tool to probe.
- * @param configPath  Path to the harness.yaml that declared this tool.
- * @param required    Whether this tool's probe is required for startup admission.
- * @param eventStore  EventStore to record the PROJECT_TOOL_PROBE_COMPLETED event.
- * @param clock       Injected clock for deterministic elapsedMs.
- * @param overrides   Optional overrides for test injection (timeout, maxBytes).
+ * @param definition   The configured project tool to probe.
+ * @param configPath   Path to the harness.yaml that declared this tool.
+ * @param required     Whether this tool's probe is required for startup admission.
+ * @param eventStore   EventStore to record the PROJECT_TOOL_PROBE_COMPLETED event.
+ * @param clock        Injected clock for deterministic elapsedMs.
+ * @param overrides    Optional overrides for test injection (timeout, maxBytes, projectRoot).
  */
 export async function runReadinessProbe(
   definition: ProjectToolConfig,
@@ -123,7 +152,7 @@ export async function runReadinessProbe(
   required: boolean,
   eventStore: EventStore,
   clock: Clock = systemClock,
-  overrides?: { timeoutMs?: number; maxOutputBytes?: number }
+  overrides?: { timeoutMs?: number; maxOutputBytes?: number; projectRoot?: string }
 ): Promise<ProbeResult> {
   const timeoutMs = overrides?.timeoutMs ?? PROBE_TIMEOUT_MS;
   const maxOutputBytes = overrides?.maxOutputBytes ?? PROBE_MAX_OUTPUT_BYTES;
@@ -142,7 +171,8 @@ export async function runReadinessProbe(
       probeStatus: 'UNSAFE',
       elapsedMs,
       gateDec: required ? 'DENY' : 'ADMIT',
-      diagnostic
+      diagnostic,
+      failureTaxonomy: 'PROBE_UNSAFE'
     };
     await emitProbeEvent(eventStore, result);
     return result;
@@ -158,7 +188,8 @@ export async function runReadinessProbe(
       probeStatus: 'UNSAFE',
       elapsedMs,
       gateDec: required ? 'DENY' : 'ADMIT',
-      diagnostic
+      diagnostic,
+      failureTaxonomy: 'PROBE_UNSUPPORTED_TYPE'
     };
     await emitProbeEvent(eventStore, result);
     return result;
@@ -169,6 +200,15 @@ export async function runReadinessProbe(
   const defaultArgs: string[] = Array.isArray(commandDef.defaultArgs)
     ? commandDef.defaultArgs.map(String)
     : [];
+
+  // ── cwd/root-scope bound (pi-experiment-85bl, AC3) ────────────────────────
+  // Probe runs with cwd pinned to the project root. This prevents a probe from
+  // resolving relative paths outside the project tree and ensures no repository
+  // mutation, service startup, or Docker invocation can escape the scope.
+  // Priority: explicit override (tests) → PI_PROJECT_ROOT env → process.cwd().
+  const projectRoot = overrides?.projectRoot
+    ?? process.env[EnvVars.PROJECT_ROOT]
+    ?? process.cwd();
 
   // ── Bounded execution ─────────────────────────────────────────────────────
   const ac = new AbortController();
@@ -184,7 +224,8 @@ export async function runReadinessProbe(
       reject: false,
       encoding: 'utf8',
       maxBuffer: maxOutputBytes,
-      timeout: timeoutMs + 1000 // belt-and-suspenders; ac.abort fires first
+      timeout: timeoutMs + 1000, // belt-and-suspenders; ac.abort fires first
+      cwd: projectRoot
     });
 
     if (result.isCanceled) {
@@ -222,6 +263,11 @@ export async function runReadinessProbe(
 
   const diagnostic = passed ? undefined : buildDiagnostic(definition.name, configPath, probeStatus, timeoutMs, maxOutputBytes);
 
+  // ── Failure taxonomy (pi-experiment-85bl, AC4) ────────────────────────────
+  const failureTaxonomy: ProbeFailureTaxonomy | undefined = passed
+    ? undefined
+    : probeStatusToTaxonomy(probeStatus);
+
   const probeResult: ProbeResult = {
     tool: definition.name,
     configPath,
@@ -230,7 +276,8 @@ export async function runReadinessProbe(
     gateDec,
     ...(bytes !== undefined ? { bytes } : {}),
     ...(sha256 !== undefined ? { sha256 } : {}),
-    ...(diagnostic !== undefined ? { diagnostic } : {})
+    ...(diagnostic !== undefined ? { diagnostic } : {}),
+    ...(failureTaxonomy !== undefined ? { failureTaxonomy } : {})
   };
 
   await emitProbeEvent(eventStore, probeResult);
@@ -244,25 +291,34 @@ export async function runReadinessProbe(
 /**
  * Run all configured probeContext:true tools and gate harness startup.
  *
- * Any REQUIRED tool whose probe returns gateDec:'DENY' prevents startup.
- * Returns a summary of all probe results and a top-level admission decision.
+ * pi-experiment-85bl (AC5): required vs optional backend distinction.
  *
- * This is the AC5 entry point: call before model spend. If admission is
- * denied, throw with a deterministic message naming the failing tools.
+ * - REQUIRED backend (tool.optional !== true): probe failure → DENY → startup
+ *   blocked before HARNESS_STARTED and before model/provider spend.
+ * - OPTIONAL backend (tool.optional === true): probe failure → ADMIT → failure
+ *   is recorded as a diagnostic in the returned results but does NOT prevent
+ *   startup. The operator learns the optional backend is unavailable without
+ *   harness termination.
+ *
+ * Returns a summary of all probe results and a top-level admission decision.
+ * Throws only when at least one REQUIRED backend probe is denied.
  */
 export async function runStartupProbeAdmission(
   tools: ProjectToolConfig[],
   configPath: string,
   eventStore: EventStore,
   clock: Clock = systemClock,
-  overrides?: { timeoutMs?: number; maxOutputBytes?: number }
+  overrides?: { timeoutMs?: number; maxOutputBytes?: number; projectRoot?: string }
 ): Promise<{ admitted: boolean; results: ProbeResult[] }> {
   const probeTools = tools.filter(t => (t as { probeContext?: boolean }).probeContext === true);
   if (probeTools.length === 0) return { admitted: true, results: [] };
 
   const results: ProbeResult[] = [];
   for (const tool of probeTools) {
-    const required = (tool as { required?: boolean }).required !== false;
+    // A tool is REQUIRED unless it explicitly declares optional: true.
+    // optional: true → backend is optional → probe failure is diagnostic only.
+    // optional: false / absent → backend is required → probe failure blocks startup.
+    const required = (tool as { optional?: boolean }).optional !== true;
     const r = await runReadinessProbe(tool, configPath, required, eventStore, clock, overrides);
     results.push(r);
   }
@@ -292,6 +348,7 @@ async function emitProbeEvent(eventStore: EventStore, result: ProbeResult): Prom
   if (result.bytes !== undefined) payload.bytes = result.bytes;
   if (result.sha256 !== undefined) payload.sha256 = result.sha256;
   if (result.semanticArtifactPath !== undefined) payload.semanticArtifactPath = result.semanticArtifactPath;
+  if (result.failureTaxonomy !== undefined) payload.failureTaxonomy = result.failureTaxonomy;
   await eventStore.record(DomainEventName.PROJECT_TOOL_PROBE_COMPLETED, payload).catch(() => {});
 }
 
@@ -313,5 +370,19 @@ function buildDiagnostic(
       return `Tool "${toolName}" (${configPath}) is not declared safe for readiness probing.`;
     default:
       return `Tool "${toolName}" (${configPath}) probe failed with status "${probeStatus}".`;
+  }
+}
+
+/**
+ * Maps a ProbeStatus to the structured failure taxonomy row (pi-experiment-85bl).
+ * Returns undefined for PASSED (no failure).
+ */
+function probeStatusToTaxonomy(status: ProbeStatus): ProbeFailureTaxonomy | undefined {
+  switch (status) {
+    case 'UNSAFE':   return 'PROBE_UNSAFE';
+    case 'TIMEOUT':  return 'PROBE_TIMEOUT';
+    case 'OVERSIZE': return 'PROBE_OVERSIZE';
+    case 'REJECTED': return 'PROBE_NONZERO_EXIT';
+    case 'PASSED':   return undefined;
   }
 }

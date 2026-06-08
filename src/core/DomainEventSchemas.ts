@@ -410,14 +410,15 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     optionalFields: ['beadId', 'requestedBeadId', 'reason', 'exitCode']
   },
 
-  // ── Readiness probe (pi-experiment-8ieq) ──────────────────────────────────
+  // ── Readiness probe (pi-experiment-8ieq / pi-experiment-85bl) ───────────────
   // Required: tool, configPath, probeStatus, elapsedMs, gateDec.
   // Optional: bytes, sha256, semanticArtifactPath (absent when probe did not
   //   produce an output artifact — e.g. UNSAFE / TIMEOUT / OVERSIZE probes).
+  //   failureTaxonomy (pi-experiment-85bl, AC4) — absent when probeStatus=PASSED.
   [DomainEventName.PROJECT_TOOL_PROBE_COMPLETED]: {
     version: 1,
     replayImpact: 'AUDIT',
-    optionalFields: ['bytes', 'sha256', 'semanticArtifactPath']
+    optionalFields: ['bytes', 'sha256', 'semanticArtifactPath', 'failureTaxonomy']
   },
 
   // ── Retry pipeline decision (pi-experiment-t6gw) ──────────────────────────

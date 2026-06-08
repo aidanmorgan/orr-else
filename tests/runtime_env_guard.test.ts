@@ -73,6 +73,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     file: 'src/tools/builtin_handles.ts',
     reason: 'resolveBuiltInExecutionIdentity() reads PI_PROJECT_ROOT, PI_BEAD_ID, PI_STATE_ID, PI_ACTION_ID, and PI_HARNESS_FINGERPRINT at tool invocation time to assemble canonical ToolEvidenceHandle provenance fields. This is a best-effort, late-binding identity read — the same pattern as git_history.ts uses via RuntimeEnvironment. The tool module cannot inject RuntimeEnvironment without breaking the self-contained tool module pattern (zog2.2). Defer RuntimeEnvironment injection to a follow-up bead.',
     deferredWI: undefined
+  },
+  {
+    file: 'src/plugins/projectTools/readinessProbe.ts',
+    reason: 'pi-experiment-85bl AC3: cwd/root-scope bound pins the probe subprocess cwd to the project root (PI_PROJECT_ROOT). This is a child-process launch boundary read — the env var is used as the cwd argument to execa, not for branching logic. Tests inject the root via the overrides.projectRoot parameter, bypassing the env read entirely. Same pattern as PathContext.ts and ArtifactQuery.ts.',
+    deferredWI: undefined
   }
 ];
 
