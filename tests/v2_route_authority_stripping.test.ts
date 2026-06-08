@@ -69,6 +69,7 @@ import { applyV2RouteEvent, computeConfigFingerprint } from '../src/core/RouteEv
 import { buildV2EventVocabulary, v2ApplyTransition } from '../src/core/FlowManager.js';
 import orrElseExtension from '../src/extension.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
+import { setSubstrateProbesForTest, resetSubstrateProbes } from '../src/core/V2SubstratePreflight.js';
 
 /** Pi tool execute signature: (toolCallId, params, signal, onUpdate, ctx). */
 const HEADLESS_CTX = { hasUI: false, shutdown: () => {} } as any;
@@ -312,6 +313,13 @@ async function bootRealCoordinator(yaml: string, extraSetup?: (projectRoot: stri
   apiPort: number;
   sessionShutdown: () => unknown;
 }> {
+  // ek2j: inject passing substrate probes so v2 startup preflight succeeds
+  // in the test environment (no real tmux session or git repo required).
+  setSubstrateProbesForTest({
+    tmux: async () => ({ ok: true }),
+    git: async () => ({ ok: true })
+  });
+
   const projectRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-x0zh-integ-')));
   fs.mkdirSync(path.join(projectRoot, '.pi', 'events'), { recursive: true });
   fs.mkdirSync(path.join(projectRoot, '.pi', 'logs'), { recursive: true });
@@ -341,6 +349,9 @@ async function bootRealCoordinator(yaml: string, extraSetup?: (projectRoot: stri
   const commandHandler = commands['orr-else']?.handler;
   if (!commandHandler) throw new Error('/orr-else command not registered');
   await commandHandler('', { hasUI: false, ui: { notify: () => {}, setStatus: () => {} } } as any);
+  // Reset substrate probes after startup completes — they are only needed during the
+  // /orr-else command execution (the preflight runs synchronously during startup).
+  resetSubstrateProbes();
 
   // Find the real bound port from the HARNESS_API_BOUND event.
   const allEvents = readEventStoreLines(projectRoot);

@@ -143,6 +143,13 @@ export enum QuarantineReason {
   WORKTREE_PATH_TAKEN = 'WORKTREE_PATH_TAKEN',
   /** Restart would respawn into the same non-routable terminal tool failure. */
   NON_ROUTABLE_TERMINAL_FAILURE_LIMIT = 'NON_ROUTABLE_TERMINAL_FAILURE_LIMIT',
+  /**
+   * pi-experiment-ek2j: v2 spawn invariant — isolated worktree is mandatory.
+   * A v2 state was configured with provisionWorktree: false (no-worktree path)
+   * but v2 forbids running at the project root. Fail-closed: the worker must
+   * NOT run without an isolated worktree.
+   */
+  V2_ISOLATED_WORKTREE_REQUIRED = 'V2_ISOLATED_WORKTREE_REQUIRED',
   /** Worktree creation failed for an unclassified reason. */
   UNKNOWN = 'UNKNOWN'
 }
@@ -554,6 +561,27 @@ export enum DomainEventName {
    * version-gated: only produced during v2 config replay.
    */
   V2_ROUTE_EVENT_QUARANTINED = 'V2_ROUTE_EVENT_QUARANTINED',
+
+  /**
+   * pi-experiment-ek2j: v2 runtime substrate preflight failure.
+   *
+   * Emitted ONCE at v2 coordinator startup when the tmux or git worktree
+   * substrate check fails. Startup aborts immediately after this event —
+   * no SignalingServer, Supervisor, or worker spawn may occur.
+   *
+   * Carries: { substrate, projectRoot, command?, sanitizedStderr?, diagnostic }.
+   *
+   * substrate    — 'tmux' | 'git-worktree'
+   * projectRoot  — the project root under which the worktree probe ran
+   * command      — the failed command string (tmux/git), if applicable
+   * sanitizedStderr — redacted stderr (no secrets; max 500 chars), if captured
+   * diagnostic   — human-readable deterministic failure description
+   *
+   * DETERMINISTIC: no Date.now() or Math.random() in the check or event.
+   * VERSION-GATED: only emitted for configs with version === 2. v1 configs
+   * and cerdiwen are completely unaffected.
+   */
+  V2_SUBSTRATE_PREFLIGHT_FAILED = 'V2_SUBSTRATE_PREFLIGHT_FAILED',
 }
 
 export enum BeadsCliCommand {

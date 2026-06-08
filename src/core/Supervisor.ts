@@ -1053,8 +1053,27 @@ export class Supervisor {
       }
       await this.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
     } else {
-      // No worktree for this state: use the project root so the teammate runs
-      // in the shared checked-out tree (read-only states such as Planning/Review).
+      // pi-experiment-ek2j: v2 spawn invariant — NO project-root fallback.
+      // v2 configs forbid running workers at the project root: every v2 worker
+      // MUST have an isolated git worktree. If the state is configured with
+      // provisionWorktree: false on a v2 config, fail-closed (quarantine the
+      // bead) instead of silently falling back to the shared checkout.
+      if (config.version === 2) {
+        await beadsPort.release(claimed.id).catch(() => {});
+        this.startedBeads.delete(claimed.id);
+        this.startedBeadAtMs.delete(claimed.id);
+        await this.quarantineBead(bead, QuarantineReason.V2_ISOLATED_WORKTREE_REQUIRED, {
+          ...this.taxonomyFields(FailureClass.STARTUP_SUBSTRATE, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE),
+          stateId: bead.stateId,
+          diagnostic:
+            `v2 spawn invariant violated: state "${bead.stateId}" has provisionWorktree: false ` +
+            `but v2 harness forbids running workers at the project root. ` +
+            `Either set provisionWorktree: true on this state or remove it to use the v2 default (isolated worktree).`
+        });
+        return 'quarantined';
+      }
+      // v1: project-root fallback is valid for non-worktree states (read-only
+      // states such as Planning/Review configured with worktreePolicy.default = 'never').
       worktreePath = this.services.projectRoot;
       Logger.info(Component.SUPERVISOR, `Worktree provisioning skipped for state ${bead.stateId}; teammate will run at project root`, {
         beadId: claimed.id,

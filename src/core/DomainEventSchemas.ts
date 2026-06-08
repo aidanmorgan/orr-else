@@ -536,6 +536,16 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'INFORMATIONAL',
     optionalFields: ['eventName', 'beadId', 'schemaVersion']
   },
+
+  // pi-experiment-ek2j: v2 runtime substrate preflight failure.
+  // Emitted ONCE at v2 startup when tmux or git-worktree substrate cannot be
+  // verified. Startup aborts immediately after this event (fail-closed).
+  // DIAGNOSTIC ONLY — no state mutation. replayImpact: INFORMATIONAL.
+  [DomainEventName.V2_SUBSTRATE_PREFLIGHT_FAILED]: {
+    version: 1,
+    replayImpact: 'INFORMATIONAL',
+    optionalFields: ['command', 'sanitizedStderr']
+  },
 };
 
 /**
@@ -796,5 +806,12 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
   // Optional: eventName, beadId, schemaVersion.
   [DomainEventName.V2_ROUTE_EVENT_QUARANTINED]: [
     'routeEventId', 'schemaId', 'configFingerprint', 'reason', 'lastValidState'
+  ],
+
+  // pi-experiment-ek2j: v2 substrate preflight failure.
+  // Required: substrate ('tmux' | 'git-worktree'), projectRoot, diagnostic.
+  // Optional: command (failed command string), sanitizedStderr (redacted stderr ≤500 chars).
+  [DomainEventName.V2_SUBSTRATE_PREFLIGHT_FAILED]: [
+    'substrate', 'projectRoot', 'diagnostic'
   ],
 };

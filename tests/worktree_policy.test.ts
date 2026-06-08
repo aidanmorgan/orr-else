@@ -309,3 +309,150 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     expect(records.some(r => r.event === DomainEventName.BEAD_QUARANTINED)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// LOAD-BEARING: pi-experiment-ek2j v2 spawn invariants (AC3 + AC4)
+// ---------------------------------------------------------------------------
+
+describe('ek2j v2 spawn invariants — isolated worktree mandatory, no project-root fallback', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /**
+   * LOAD-BEARING (AC3): A v2 worker spawn provisions an isolated worktree and
+   * records a WORKTREE_PROVISIONED event carrying the isolated worktree path.
+   *
+   * This test FAILS if the WORKTREE_PROVISIONED record is removed or if the
+   * worktreePath is absent from the WORKTREE_PROVISIONED payload.
+   */
+  it('(AC3 load-bearing) v2 spawn provisions isolated worktree and records WORKTREE_PROVISIONED with path', async () => {
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      { id: 'bead-v2-spawn', stateId: 'Implementation', score: 1, status: 'ready' }
+    ]);
+
+    const { supervisor, createWorktree, spawnTeammateInTmux, records } = buildSupervisor({
+      version: 2,
+      settings: { maxConcurrentSlots: 1 },
+      states: { Implementation: {} }
+    });
+
+    await (supervisor as any).scanAndSpawn();
+
+    // Isolated worktree must be provisioned.
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+
+    // WORKTREE_PROVISIONED event must be recorded with the isolated worktree path.
+    const provisionedEvent = records.find(r => r.event === DomainEventName.WORKTREE_PROVISIONED);
+    expect(provisionedEvent).toBeDefined();
+    expect((provisionedEvent!.data as any).worktreePath).toBe('/tmp/worktree');
+    expect((provisionedEvent!.data as any).beadId).toBe('bead-v2-spawn');
+
+    // Teammate must be spawned at the isolated path (NOT project root).
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith(
+      'bead-v2-spawn', 'Implementation', '/tmp/worktree', expect.anything(), undefined
+    );
+  });
+
+  /**
+   * LOAD-BEARING (AC4): When worktree creation FAILS for a v2 worker spawn,
+   * the spawn FAILS CLOSED — the worker must NOT run at the project root.
+   *
+   * This test FAILS if the v2 fail-closed guard is removed (the bead would
+   * instead be spawned at /project/root, violating AC4).
+   */
+  it('(AC4 load-bearing) v2 spawn: worktree creation failure → fail-closed, no project-root fallback', async () => {
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      { id: 'bead-v2-fail', stateId: 'Implementation', score: 1, status: 'ready' }
+    ]);
+
+    const failingCreateWorktree = vi.fn(async () => ({
+      success: false,
+      error: 'fatal: worktree creation failed'
+    }));
+    const release = vi.fn(async () => {});
+
+    const { supervisor, spawnTeammateInTmux, records } = buildSupervisor(
+      {
+        version: 2,
+        settings: { maxConcurrentSlots: 1 },
+        states: { Implementation: {} }
+      },
+      { createWorktree: failingCreateWorktree, release }
+    );
+
+    await (supervisor as any).scanAndSpawn();
+
+    // Worktree creation was attempted.
+    expect(failingCreateWorktree).toHaveBeenCalledTimes(1);
+
+    // Fail-closed: NO teammate spawned (especially not at project root).
+    expect(spawnTeammateInTmux).not.toHaveBeenCalled();
+
+    // Bead must be quarantined with a structured diagnostic.
+    expect(records.some(r => r.event === DomainEventName.BEAD_QUARANTINED)).toBe(true);
+
+    // Lease must be released.
+    expect(release).toHaveBeenCalledWith('bead-v2-fail');
+  });
+
+  /**
+   * v1 spawn: project-root fallback is preserved for states with
+   * worktreePolicy.default = 'never' (existing behavior, unregressed).
+   */
+  it('v1 spawn: project-root fallback preserved (version-gated, v1 unaffected)', async () => {
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      { id: 'bead-v1', stateId: 'Planning', score: 1, status: 'ready' }
+    ]);
+
+    const { supervisor, createWorktree, spawnTeammateInTmux } = buildSupervisor({
+      // No version field → v1 behavior.
+      settings: { worktreePolicy: { default: 'never' } },
+      states: { Planning: {} }
+    });
+
+    await (supervisor as any).scanAndSpawn();
+
+    // No worktree created for v1 never-policy state.
+    expect(createWorktree).not.toHaveBeenCalled();
+    // Teammate runs at project root — v1 behavior preserved.
+    expect(spawnTeammateInTmux).toHaveBeenCalledWith(
+      'bead-v1', 'Planning', '/project/root', expect.anything(), undefined
+    );
+  });
+
+  /**
+   * v2 spawn: state with provisionWorktree: false is fail-closed (no project-root fallback).
+   * Version-gated: this path only triggers for version: 2 configs.
+   */
+  it('(AC4 load-bearing) v2 spawn: state provisionWorktree: false → fail-closed, quarantined with V2_ISOLATED_WORKTREE_REQUIRED', async () => {
+    orchestratorMock.selectAssignments.mockResolvedValue([
+      { id: 'bead-v2-no-wt', stateId: 'Review', score: 1, status: 'ready' }
+    ]);
+
+    const createWorktree = vi.fn(async () => ({ success: true, path: '/tmp/worktree' }));
+    const release = vi.fn(async () => {});
+
+    const { supervisor, spawnTeammateInTmux, records } = buildSupervisor(
+      {
+        version: 2,
+        settings: { maxConcurrentSlots: 1 },
+        states: { Review: { provisionWorktree: false } }
+      },
+      { createWorktree, release }
+    );
+
+    await (supervisor as any).scanAndSpawn();
+
+    // createWorktree must NOT be called — the fail-closed fires before provisioning.
+    expect(createWorktree).not.toHaveBeenCalled();
+    // Teammate must NOT be spawned (at project root or anywhere else).
+    expect(spawnTeammateInTmux).not.toHaveBeenCalled();
+    // Lease released.
+    expect(release).toHaveBeenCalledWith('bead-v2-no-wt');
+    // Bead quarantined with V2_ISOLATED_WORKTREE_REQUIRED reason.
+    const quarantineEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);
+    expect(quarantineEvent).toBeDefined();
+    expect((quarantineEvent!.data as any).reason).toBe('V2_ISOLATED_WORKTREE_REQUIRED');
+  });
+});

@@ -123,6 +123,7 @@ import {
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
+import { runV2SubstratePreflight } from './core/V2SubstratePreflight.js';
 import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
 import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
 import { requireTool } from './core/ToolRegistry.js';
@@ -3523,6 +3524,17 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     services.configLoader.getConfigPath(),
     services.eventStore
   );
+
+  // ── pi-experiment-ek2j: v2 runtime substrate preflight ────────────────────
+  // VERSION-GATED: only runs for version===2 configs. v1 startup and cerdiwen
+  // are completely unaffected by this block.
+  // Verifies tmux and git-worktree substrates are usable BEFORE SignalingServer
+  // start, Supervisor creation, and any worker spawn. Throws + records a
+  // V2_SUBSTRATE_PREFLIGHT_FAILED event if either substrate is missing/unusable,
+  // aborting startup fail-closed before any model spend.
+  if (startupConfig.version === 2) {
+    await runV2SubstratePreflight(services.projectRoot, services.eventStore);
+  }
 
   const server = new SignalingServer((event, ack) => handleTeammateEvent(pi, ctx, event, services, session, ack), runtimeObservability, services.eventStore, {
     allowedCustomEvents: startupConfig.statechart?.customEvents
