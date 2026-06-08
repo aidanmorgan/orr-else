@@ -513,6 +513,94 @@ export interface ValidationGateConfig {
 }
 
 /**
+ * pi-experiment-ne2w: v2 gate operator.
+ *
+ * allOf — pass only when ALL listed checks pass.
+ * anyOf — pass when AT LEAST ONE check passes.
+ * noneOf — explicitly out of scope for this bead.
+ */
+export type V2GateOperator = 'allOf' | 'anyOf';
+
+/**
+ * pi-experiment-ne2w: one check entry inside a v2 gate.
+ *
+ * checkId   — stable ID of the tool or verifier to evaluate (matches a configured tool name).
+ * emits     — the route-event names this check can emit (pass, fail, blocked).
+ *
+ * The pass event is always in emits.pass. fail and blocked are optional.
+ */
+export interface V2GateCheckEntry {
+  /** Stable ID of the tool or verifier this check evaluates. */
+  readonly checkId: string;
+  /** Route-event name emitted when this check passes. Must be in the v2 vocab. */
+  readonly passEvent: string;
+  /** Route-event name emitted when this check fails. Must be in the v2 vocab. */
+  readonly failEvent: string;
+  /** Route-event name emitted when this check is blocked. Optional. Must be in the v2 vocab if present. */
+  readonly blockedEvent?: string;
+}
+
+/**
+ * pi-experiment-ne2w: Result of evaluating a single check inside a v2 gate.
+ *
+ * verdict    — 'pass' | 'fail' | 'blocked'
+ * eventName  — the normalized UPPER_SNAKE event name chosen by the verdict
+ * evidenceRef— the artifact evidence produced by this check (required by AC4)
+ */
+export interface V2GateCheckResult {
+  /** ID of the check (tool or verifier name). */
+  readonly checkId: string;
+  /** Deterministic verdict produced by the check. */
+  readonly verdict: 'pass' | 'fail' | 'blocked';
+  /**
+   * The UPPER_SNAKE event name that corresponds to this verdict.
+   * Chosen from V2GateCheckEntry.passEvent / failEvent / blockedEvent.
+   */
+  readonly eventName: string;
+  /** All artifact evidence produced by this check. Required by AC4. */
+  readonly evidenceRefs: readonly import('../RouteEventContract.js').RouteEvidenceRef[];
+}
+
+/**
+ * pi-experiment-ne2w: v2 gate configuration.
+ *
+ * Extends ValidationGateConfig with the operator + checks + precedence fields
+ * needed for aggregated deterministic gate evaluation.
+ *
+ * operator        — 'allOf' | 'anyOf' (noneOf out of scope).
+ * checks          — ordered list of check entries; evaluated in configured order.
+ * passEvent       — single event emitted when the operator resolves to pass.
+ * failPrecedence  — ordered list of failure-category event names; first entry wins.
+ *                   REQUIRED when two or more checks can emit different failure events.
+ * blockPrecedence — ordered list of blocked-category event names; first entry wins.
+ *                   REQUIRED when two or more checks can emit different blocked events.
+ *
+ * VERSION-GATED: only applies to v2 configs (config.version === 2).
+ */
+export interface V2GateConfig extends ValidationGateConfig {
+  /** Gate operator: 'allOf' or 'anyOf'. */
+  readonly operator: V2GateOperator;
+  /** Ordered list of check entries to evaluate. */
+  readonly checks: readonly V2GateCheckEntry[];
+  /** Event name emitted when the gate resolves to pass. Must be in the v2 vocab. */
+  readonly passEvent: string;
+  /**
+   * Ordered precedence list for failure-category events (highest priority first).
+   * Must reference each possible failure event name exactly once.
+   * REQUIRED when any two checks can emit different failure events.
+   * Startup fails as ambiguous if this list is missing or incomplete.
+   */
+  readonly failPrecedence?: readonly string[];
+  /**
+   * Ordered precedence list for blocked-category events (highest priority first).
+   * Must reference each possible blocked event name exactly once.
+   * REQUIRED when any two checks can emit different blocked events.
+   * Startup fails as ambiguous if this list is missing or incomplete.
+   */
+  readonly blockPrecedence?: readonly string[];
+}
+
+/**
  * pi-experiment-hutg: v2 action route-event emits mapping.
  *
  * Config-owned mapping from deterministic TypeScript verdicts to declared v2 event names.

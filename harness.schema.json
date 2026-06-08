@@ -1715,6 +1715,57 @@
                 }
               }
             ]
+          },
+          "operator": {
+            "type": "string",
+            "enum": ["allOf", "anyOf"],
+            "description": "pi-experiment-ne2w: v2 gate aggregation operator. allOf = pass only if all checks pass. anyOf = pass if at least one check passes. noneOf is out of scope."
+          },
+          "checks": {
+            "type": "array",
+            "description": "pi-experiment-ne2w: ordered list of checks evaluated by this gate (no short-circuit).",
+            "items": {
+              "type": "object",
+              "required": ["checkId", "passEvent", "failEvent"],
+              "additionalProperties": false,
+              "properties": {
+                "checkId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Stable ID of the tool or verifier to evaluate."
+                },
+                "passEvent": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Event name emitted when this check passes. Must be in the v2 vocabulary."
+                },
+                "failEvent": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Event name emitted when this check fails. Must be in the v2 vocabulary."
+                },
+                "blockedEvent": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Event name emitted when this check is blocked. Optional. Must be in the v2 vocabulary if present."
+                }
+              }
+            }
+          },
+          "passEvent": {
+            "type": "string",
+            "minLength": 1,
+            "description": "pi-experiment-ne2w: event name emitted when the gate resolves to pass (operator succeeds). Must be in the v2 vocabulary."
+          },
+          "failPrecedence": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "description": "pi-experiment-ne2w: ordered precedence list for failure-category events (highest priority first). Required when two or more checks can emit different failure events. Each possible failure event must appear exactly once."
+          },
+          "blockPrecedence": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 },
+            "description": "pi-experiment-ne2w: ordered precedence list for blocked-category events (highest priority first). Required when two or more checks can emit different blocked events. Each possible blocked event must appear exactly once."
           }
         }
       }

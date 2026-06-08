@@ -610,6 +610,14 @@ export class ConfigLoader {
       ? this.buildV2EventVocabulary(eventsRaw)
       : new Map<string, string>();
     this.validateV2ActionEmits(states, emitsVocab);
+
+    // pi-experiment-ne2w: v2 gate aggregation ambiguity validation.
+    // Runs after event vocabulary is built. Checks that every v2 gate with allOf/anyOf
+    // operator has non-ambiguous precedence lists (AC3: startup fails if ambiguous).
+    const gatesRawForV2 = config['validationGates'];
+    if (gatesRawForV2 !== undefined && !Array.isArray(gatesRawForV2) && isRecord(gatesRawForV2)) {
+      this.validateV2GateAmbiguity(gatesRawForV2 as Record<string, unknown>, emitsVocab);
+    }
   }
 
   /**
@@ -1123,6 +1131,235 @@ export class ConfigLoader {
               `emits.preconditionFailed so the harness can emit a configured route event when an ` +
               `artifact is missing — before the tool/verifier body runs. ` +
               `Add emits.preconditionFailed: "<eventName>" to the action, or remove requiredTools if no artifacts are required.`
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-ne2w AC3: Validate v2 gate aggregation precedence lists for ambiguity.
+   *
+   * A gate that declares allOf or anyOf MUST have unambiguous precedence lists:
+   *   - If two or more checks can emit different failure-category events, failPrecedence
+   *     must reference each possible failure event EXACTLY ONCE.
+   *   - If two or more checks can emit different blocked-category events, blockPrecedence
+   *     must reference each possible blocked event EXACTLY ONCE.
+   *   - A missing precedence list when multiple distinct events exist → STARTUP FAILS.
+   *   - A precedence list that references an event more than once → STARTUP FAILS.
+   *   - A precedence list that references an event NOT declared in the v2 vocab → STARTUP FAILS.
+   *
+   * Runs on the map-form gates (before normalization to array).
+   * Version-gated: only called when version === 2.
+   *
+   * @param gatesMap — raw map-form validationGates (Record<gateId, gateEntry>).
+   * @param vocab    — pre-built v2 event vocabulary (normalized UPPER_SNAKE → category).
+   */
+  private validateV2GateAmbiguity(
+    gatesMap: Record<string, unknown>,
+    vocab: Map<string, string>
+  ): void {
+    for (const [gateId, gateRaw] of Object.entries(gatesMap)) {
+      if (!isRecord(gateRaw)) continue;
+      const gate = gateRaw as Record<string, unknown>;
+
+      // Only validate gates that declare an operator (v2 aggregation gates).
+      const operator = gate['operator'];
+      if (operator === undefined || operator === null) continue;
+
+      // Operator must be 'allOf' or 'anyOf' (noneOf is out of scope for ne2w).
+      if (operator !== 'allOf' && operator !== 'anyOf') {
+        throw new Error(
+          `v2 gate "${gateId}" declares an unsupported operator: "${operator}". ` +
+          `Only "allOf" and "anyOf" are supported. ` +
+          `noneOf is explicitly out of scope. Remove or correct the operator field.`
+        );
+      }
+
+      // checks must be an array.
+      const checksRaw = gate['checks'];
+      if (!Array.isArray(checksRaw)) {
+        throw new Error(
+          `v2 gate "${gateId}" declares operator "${operator}" but is missing the "checks" array. ` +
+          `A gate with an operator must declare checks: [{ checkId, passEvent, failEvent, blockedEvent? }, ...]`
+        );
+      }
+      const checks = checksRaw as unknown[];
+
+      // passEvent must be a non-empty string in the vocab.
+      const passEventRaw = gate['passEvent'];
+      if (typeof passEventRaw !== 'string' || !passEventRaw.trim()) {
+        throw new Error(
+          `v2 gate "${gateId}" declares operator "${operator}" but is missing passEvent. ` +
+          `A gate with an operator must declare passEvent: "<eventName>" (the event emitted when the gate passes). ` +
+          `Example: passEvent: QUALITY_PASSED`
+        );
+      }
+      const passEvent = passEventRaw.trim().toUpperCase();
+      if (vocab.size > 0 && !vocab.has(passEvent)) {
+        const declared = [...vocab.keys()].sort().join(', ') || '(none)';
+        throw new Error(
+          `v2 gate "${gateId}" declares passEvent: "${passEventRaw}" which is not in the declared v2 vocabulary. ` +
+          `Declared events: ${declared}. ` +
+          `Add "${passEventRaw}" to the appropriate category in the events block, or correct the name.`
+        );
+      }
+
+      // Collect all possible failure and blocked events from the checks.
+      const possibleFailEvents = new Set<string>();
+      const possibleBlockedEvents = new Set<string>();
+
+      for (let i = 0; i < checks.length; i++) {
+        const checkRaw = checks[i];
+        if (!isRecord(checkRaw)) continue;
+        const check = checkRaw as Record<string, unknown>;
+
+        // checkId is required.
+        const checkId = check['checkId'];
+        if (typeof checkId !== 'string' || !checkId.trim()) {
+          throw new Error(
+            `v2 gate "${gateId}" check at index ${i} is missing a non-empty checkId. ` +
+            `Each check entry must declare checkId: "<toolOrVerifierId>".`
+          );
+        }
+
+        // passEvent on check is required.
+        const checkPassEvent = check['passEvent'];
+        if (typeof checkPassEvent !== 'string' || !checkPassEvent.trim()) {
+          throw new Error(
+            `v2 gate "${gateId}" check "${checkId}" is missing passEvent. ` +
+            `Each check must declare passEvent: "<eventName>". ` +
+            `Example: passEvent: QUALITY_PASSED`
+          );
+        }
+        // failEvent on check is required.
+        const checkFailEvent = check['failEvent'];
+        if (typeof checkFailEvent !== 'string' || !checkFailEvent.trim()) {
+          throw new Error(
+            `v2 gate "${gateId}" check "${checkId}" is missing failEvent. ` +
+            `Each check must declare failEvent: "<eventName>". ` +
+            `Example: failEvent: QUALITY_FAILED`
+          );
+        }
+
+        // Validate vocab refs.
+        if (vocab.size > 0) {
+          for (const [field, eventName] of [
+            ['passEvent', checkPassEvent],
+            ['failEvent', checkFailEvent],
+          ] as Array<[string, string]>) {
+            const normalized = eventName.trim().toUpperCase();
+            if (!vocab.has(normalized)) {
+              const declared = [...vocab.keys()].sort().join(', ') || '(none)';
+              throw new Error(
+                `v2 gate "${gateId}" check "${checkId}" declares ${field}: "${eventName}" ` +
+                `which is not in the declared v2 vocabulary. ` +
+                `Declared events: ${declared}. ` +
+                `Add "${eventName}" to the appropriate category in the events block, or correct the name.`
+              );
+            }
+          }
+        }
+
+        possibleFailEvents.add(checkFailEvent.trim().toUpperCase());
+
+        const checkBlockedEvent = check['blockedEvent'];
+        if (typeof checkBlockedEvent === 'string' && checkBlockedEvent.trim()) {
+          const normalized = checkBlockedEvent.trim().toUpperCase();
+          if (vocab.size > 0 && !vocab.has(normalized)) {
+            const declared = [...vocab.keys()].sort().join(', ') || '(none)';
+            throw new Error(
+              `v2 gate "${gateId}" check "${checkId}" declares blockedEvent: "${checkBlockedEvent}" ` +
+              `which is not in the declared v2 vocabulary. ` +
+              `Declared events: ${declared}. ` +
+              `Add "${checkBlockedEvent}" to the appropriate category in the events block, or correct the name.`
+            );
+          }
+          possibleBlockedEvents.add(normalized);
+        }
+      }
+
+      // AC3: Ambiguity check — if multiple distinct failure events exist, failPrecedence
+      // must cover each exactly once.
+      if (possibleFailEvents.size > 1) {
+        const failPrecedenceRaw = gate['failPrecedence'];
+        if (!Array.isArray(failPrecedenceRaw)) {
+          throw new Error(
+            `v2 gate "${gateId}" (operator: ${operator}) can emit multiple failure events: ` +
+            `${[...possibleFailEvents].sort().join(', ')}. ` +
+            `A failPrecedence list is required to resolve ambiguity at startup. ` +
+            `Add failPrecedence: [${[...possibleFailEvents].sort().map(e => `"${e}"`).join(', ')}] ` +
+            `(highest priority first) to the gate config.`
+          );
+        }
+        const failPrecedence = failPrecedenceRaw as unknown[];
+        const failPrecedenceNormalized = failPrecedence
+          .filter((e): e is string => typeof e === 'string')
+          .map(e => e.trim().toUpperCase());
+
+        // Each possible failure event must appear exactly once in failPrecedence.
+        const seenInPrec = new Map<string, number>(); // event → count
+        for (const e of failPrecedenceNormalized) {
+          seenInPrec.set(e, (seenInPrec.get(e) ?? 0) + 1);
+        }
+        for (const evt of possibleFailEvents) {
+          const count = seenInPrec.get(evt) ?? 0;
+          if (count === 0) {
+            throw new Error(
+              `v2 gate "${gateId}" failPrecedence is missing event "${evt}". ` +
+              `Every possible failure event must appear exactly once in failPrecedence. ` +
+              `Possible failure events: ${[...possibleFailEvents].sort().join(', ')}. ` +
+              `Current failPrecedence: ${failPrecedenceNormalized.join(', ') || '(empty)'}.`
+            );
+          }
+          if (count > 1) {
+            throw new Error(
+              `v2 gate "${gateId}" failPrecedence references event "${evt}" ${count} times. ` +
+              `Each event must appear exactly once in failPrecedence. ` +
+              `Remove the duplicate "${evt}" entry from failPrecedence.`
+            );
+          }
+        }
+      }
+
+      // AC3: Ambiguity check — if multiple distinct blocked events exist, blockPrecedence
+      // must cover each exactly once.
+      if (possibleBlockedEvents.size > 1) {
+        const blockPrecedenceRaw = gate['blockPrecedence'];
+        if (!Array.isArray(blockPrecedenceRaw)) {
+          throw new Error(
+            `v2 gate "${gateId}" (operator: ${operator}) can emit multiple blocked events: ` +
+            `${[...possibleBlockedEvents].sort().join(', ')}. ` +
+            `A blockPrecedence list is required to resolve ambiguity at startup. ` +
+            `Add blockPrecedence: [${[...possibleBlockedEvents].sort().map(e => `"${e}"`).join(', ')}] ` +
+            `(highest priority first) to the gate config.`
+          );
+        }
+        const blockPrecedence = blockPrecedenceRaw as unknown[];
+        const blockPrecedenceNormalized = blockPrecedence
+          .filter((e): e is string => typeof e === 'string')
+          .map(e => e.trim().toUpperCase());
+
+        const seenInPrec = new Map<string, number>();
+        for (const e of blockPrecedenceNormalized) {
+          seenInPrec.set(e, (seenInPrec.get(e) ?? 0) + 1);
+        }
+        for (const evt of possibleBlockedEvents) {
+          const count = seenInPrec.get(evt) ?? 0;
+          if (count === 0) {
+            throw new Error(
+              `v2 gate "${gateId}" blockPrecedence is missing event "${evt}". ` +
+              `Every possible blocked event must appear exactly once in blockPrecedence. ` +
+              `Possible blocked events: ${[...possibleBlockedEvents].sort().join(', ')}. ` +
+              `Current blockPrecedence: ${blockPrecedenceNormalized.join(', ') || '(empty)'}.`
+            );
+          }
+          if (count > 1) {
+            throw new Error(
+              `v2 gate "${gateId}" blockPrecedence references event "${evt}" ${count} times. ` +
+              `Each event must appear exactly once in blockPrecedence. ` +
+              `Remove the duplicate "${evt}" entry from blockPrecedence.`
             );
           }
         }
