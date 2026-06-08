@@ -2057,6 +2057,29 @@
                 "runtimeBudget": {
                   "$ref": "#/definitions/runtimeBudgetPolicy",
                   "description": "pi-experiment-6q0y.48: Action-level runtime budget policy (highest precedence, AC2). Overrides state.runtimeBudget and settings.runtimeBudget for this specific action. AC6 startup lint rejects negative limits and routes absent from the statechart vocabulary."
+                },
+                "llm": {
+                  "type": "object",
+                  "description": "pi-experiment-0njv: v2 LLM action configuration. When present, this action is a v2 LLM action. llm.promptFile is required; inline prompt bodies (llm.prompt or top-level prompt) are forbidden. Path safety is enforced at config load before any provider/model request.",
+                  "required": ["promptFile"],
+                  "properties": {
+                    "promptFile": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Project-relative path to the prompt file. Must be a non-empty normalized path within the project root (no absolute paths, no .. escape, no symlink escape, no directory, no unreadable/nonexistent file)."
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "v2PromptProvenance": {
+                  "type": "object",
+                  "description": "pi-experiment-0njv: Resolved prompt provenance for this v2 LLM action. Populated by ConfigLoader at load time. Records normalized path, byteCount, sha256 digest, and actionId. The prompt body is never stored here.",
+                  "properties": {
+                    "normalizedPath": { "type": "string" },
+                    "byteCount": { "type": "integer", "minimum": 0 },
+                    "sha256": { "type": "string" },
+                    "actionId": { "type": "string" }
+                  }
                 }
               }
             }

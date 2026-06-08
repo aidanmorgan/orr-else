@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as yaml from 'yaml';
 import AjvModule from 'ajv';
 import addFormatsModule from 'ajv-formats';
-import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig } from './domain/StateModels.js';
+import { ResolvedLLMConfig, HarnessConfig, ToolProfileConfig, TsProjectToolDefaults, ProjectCommandToolConfig, V2PromptFileProvenance } from './domain/StateModels.js';
 import { ChecklistItem } from './ProtocolParser.js';
 import { resolveInstall, resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
@@ -592,6 +592,16 @@ export class ConfigLoader {
     //   4. Case-insensitive duplicate keys → rejected (AC5 duplicate detection).
     // State keys (states map) are also validated for key grammar.
     this.validateV2MapCollections(config, states);
+
+    // pi-experiment-0njv: v2 LLM action promptFile admission.
+    // Runs BEFORE any model/provider/Pi request (AC2: before-model-spend).
+    // Validates that every v2 LLM action (any action with an `llm` sub-object):
+    //   - Has llm.promptFile (non-empty) — no inline llm.prompt or top-level prompt.
+    //   - promptFile is a safe, project-relative, existing, readable FILE (not absolute,
+    //     no `..` escape, no symlink escape, no directory, no unreadable/nonexistent).
+    // Runs on the RAW map-form states (before normalizeV2MapCollections converts actions
+    // to arrays), so both map-form and array-form action shapes are handled.
+    this.validateV2LlmActions(states);
   }
 
   /**
@@ -779,6 +789,242 @@ export class ConfigLoader {
           `(or must match the key exactly). Remove the inner ${identityField} field from the entry ` +
           `(migration path: ${migrationPath}).`
         );
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-0njv: Validate v2 LLM action promptFile declarations.
+   *
+   * Runs in preValidateV2Admission on the raw map-form states (BEFORE map normalization
+   * converts actions to arrays), ensuring rejection happens BEFORE any provider/model
+   * request is issued (AC2: before-model-spend).
+   *
+   * A "v2 LLM action" is any action entry that declares an `llm` sub-object.
+   *
+   * Rules (all startup-fatal):
+   *   AC1: llm.promptFile must be present and non-empty; llm.prompt (inline body) is FORBIDDEN.
+   *   AC1: The legacy top-level `prompt` field on a v2 LLM action is FORBIDDEN.
+   *   AC2: promptFile must not be absolute.
+   *   AC2: promptFile must not escape the project root via `..` (normalized path check).
+   *   AC2: promptFile must not escape the project root via symlinks (realpath containment).
+   *   AC2: promptFile must not name a directory.
+   *   AC2: promptFile must exist and be readable.
+   *
+   * @param states Raw map-form states object from the parsed YAML (pre-normalization).
+   */
+  private validateV2LlmActions(states: Record<string, unknown>): void {
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (!isRecord(stateRaw)) continue;
+      const actionsRaw = (stateRaw as Record<string, unknown>)['actions'];
+      if (!actionsRaw) continue;
+
+      // Actions may be map-form (record) or array-form (array) at this point.
+      // Map-form: iterate over entries; array-form: iterate over elements.
+      const actionEntries: Array<[string, unknown]> = isRecord(actionsRaw)
+        ? Object.entries(actionsRaw as Record<string, unknown>)
+        : Array.isArray(actionsRaw)
+          ? (actionsRaw as unknown[]).map((a, i) => {
+              const id = isRecord(a) ? ((a as Record<string, unknown>)['id'] as string ?? `action_${i}`) : `action_${i}`;
+              return [id, a] as [string, unknown];
+            })
+          : [];
+
+      for (const [actionId, actionRaw] of actionEntries) {
+        if (!isRecord(actionRaw)) continue;
+        const action = actionRaw as Record<string, unknown>;
+        const llmRaw = action['llm'];
+
+        // Only process actions that declare an `llm` sub-object.
+        if (llmRaw === undefined || llmRaw === null) continue;
+
+        const location = `state "${stateId}" action "${actionId}"`;
+
+        // AC1: llm must be a record.
+        if (!isRecord(llmRaw)) {
+          throw new Error(
+            `v2 config: ${location} declares llm as a non-object value. ` +
+            `The llm field must be an object with promptFile: "<project-relative-path>". ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+
+        const llm = llmRaw as Record<string, unknown>;
+
+        // AC1: inline llm.prompt is forbidden.
+        if ('prompt' in llm) {
+          throw new Error(
+            `v2 config: ${location} declares llm.prompt (inline body) which is forbidden. ` +
+            `Inline prompt bodies are not allowed in v2 LLM actions. ` +
+            `Replace llm.prompt with llm.promptFile pointing to a project-relative prompt file. ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+
+        // AC1: legacy top-level prompt field on a v2 LLM action is forbidden.
+        if ('prompt' in action) {
+          throw new Error(
+            `v2 config: ${location} declares a top-level prompt field on a v2 LLM action. ` +
+            `Inline prompt bodies are forbidden on v2 LLM actions (actions with an llm block). ` +
+            `Remove the prompt field and use llm.promptFile instead. ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+
+        // AC1: llm.promptFile must be present and non-empty.
+        const promptFile = llm['promptFile'];
+        if (promptFile === undefined || promptFile === null || promptFile === '') {
+          throw new Error(
+            `v2 config: ${location} declares an llm block without promptFile. ` +
+            `Every v2 LLM action must declare llm.promptFile as a non-empty project-relative path. ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+        if (typeof promptFile !== 'string' || !promptFile.trim()) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile as a non-string or blank value. ` +
+            `llm.promptFile must be a non-empty string naming a project-relative file path. ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+
+        // AC2: path must not be absolute.
+        if (path.isAbsolute(promptFile)) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" which is an absolute path. ` +
+            `promptFile must be a project-relative path (no leading /). ` +
+            `Example: llm:\n  promptFile: .pi/prompts/implement.md`
+          );
+        }
+
+        // AC2: normalize and check for `..` escape (the resolved path must be within projectRoot).
+        // Also check symlink escape via realpath.
+        const resolved = path.resolve(this.projectRoot, promptFile);
+
+        // Normalize projectRoot itself (resolve symlinks for the root too, for containment check).
+        let realRoot: string;
+        try {
+          realRoot = fs.realpathSync(this.projectRoot);
+        } catch {
+          realRoot = path.resolve(this.projectRoot);
+        }
+
+        // Check `..` escape: the resolved path must start with the realRoot prefix.
+        const normalizedResolved = path.resolve(resolved);
+        const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+        if (normalizedResolved !== realRoot && !normalizedResolved.startsWith(rootPrefix)) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" which escapes ` +
+            `the project root via ".." traversal. ` +
+            `promptFile must resolve to a path within the project root. ` +
+            `Project root: ${realRoot}. Resolved path: ${normalizedResolved}.`
+          );
+        }
+
+        // AC2: path must exist (rejects nonexistent + measures lstat before realpath).
+        if (!fs.existsSync(resolved)) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" which does not exist. ` +
+            `The file must exist and be readable at config load time. ` +
+            `Create the prompt file at: ${resolved}`
+          );
+        }
+
+        // AC2: path must not be a directory.
+        const stat = fs.statSync(resolved);
+        if (stat.isDirectory()) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" which is a directory, not a file. ` +
+            `promptFile must name a readable file, not a directory.`
+          );
+        }
+
+        // AC2: symlink escape — resolve all symlinks and verify the real path is within projectRoot.
+        let realPromptFile: string;
+        try {
+          realPromptFile = fs.realpathSync(resolved);
+        } catch {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" — ` +
+            `could not resolve real path (broken symlink or permission error). ` +
+            `Ensure the file exists and is accessible.`
+          );
+        }
+        if (realPromptFile !== realRoot && !realPromptFile.startsWith(rootPrefix)) {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" — ` +
+            `the file resolves via symlink to "${realPromptFile}" which is outside the project root. ` +
+            `promptFile must resolve within the project root (no symlink escape). ` +
+            `Project root: ${realRoot}.`
+          );
+        }
+
+        // AC2: file must be readable.
+        try {
+          fs.accessSync(resolved, fs.constants.R_OK);
+        } catch {
+          throw new Error(
+            `v2 config: ${location} declares llm.promptFile: "${promptFile}" which is not readable. ` +
+            `Ensure the file has read permissions.`
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-0njv: Resolve and record provenance for v2 LLM action prompt files.
+   *
+   * Called from resolveFileBackedFields() AFTER path safety validation (preValidateV2Admission
+   * already guaranteed all llm.promptFile paths are safe). Records normalized path,
+   * byteCount, sha256 digest, and actionId for each admitted v2 LLM action.
+   *
+   * The prompt BODY is NEVER stored on the resolved config — only the provenance record
+   * (AC4: no body inlining). The prompt content is read only to compute the digest,
+   * then discarded.
+   *
+   * @param config The validated (schema-checked) HarnessConfig (version: 2 only).
+   */
+  private resolveV2LlmPromptProvenance(config: HarnessConfig): void {
+    if (config.version !== 2) return;
+
+    for (const [, state] of Object.entries(config.states || {})) {
+      for (const action of state.actions || []) {
+        const actionRecord = action as unknown as Record<string, unknown>;
+        const llmRaw = actionRecord['llm'];
+        if (!isRecord(llmRaw)) continue;
+
+        const llm = llmRaw as Record<string, unknown>;
+        const promptFile = llm['promptFile'];
+        if (typeof promptFile !== 'string' || !promptFile.trim()) continue;
+
+        // Resolve to absolute path within projectRoot (already validated safe).
+        const resolved = path.resolve(this.projectRoot, promptFile);
+
+        // Compute normalized project-relative path (canonical form).
+        let realRoot: string;
+        try {
+          realRoot = fs.realpathSync(this.projectRoot);
+        } catch {
+          realRoot = path.resolve(this.projectRoot);
+        }
+        const realResolved = fs.realpathSync(resolved);
+        const normalizedPath = path.relative(realRoot, realResolved);
+
+        // Read file contents to compute digest + byte count. Body is NOT stored.
+        const contents = fs.readFileSync(resolved);
+        const byteCount = contents.length;
+        const sha256 = createHash('sha256').update(contents).digest('hex');
+
+        const provenance: V2PromptFileProvenance = {
+          normalizedPath,
+          byteCount,
+          sha256,
+          actionId: action.id
+        };
+
+        // Store provenance on the action (AC3). Body is never stored (AC4).
+        (action as unknown as Record<string, unknown>)['v2PromptProvenance'] = provenance;
       }
     }
   }
@@ -2551,6 +2797,11 @@ export class ConfigLoader {
         action.checklist = this.resolveChecklistReference(action.checklist);
       }
     }
+
+    // pi-experiment-0njv: compute and store v2 LLM action prompt file provenance.
+    // Runs after all other field resolution; path safety was already enforced by
+    // preValidateV2Admission → validateV2LlmActions (before-model-spend guarantee).
+    this.resolveV2LlmPromptProvenance(config);
   }
 
   public resolveLLMConfig(stateId: string, config: HarnessConfig): ResolvedLLMConfig {

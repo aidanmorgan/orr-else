@@ -512,6 +512,44 @@ export interface ValidationGateConfig {
   required?: boolean;
 }
 
+/**
+ * pi-experiment-0njv: v2 LLM action configuration sub-object.
+ *
+ * When an action in a v2 config (version: 2) declares an `llm` block, it is a
+ * "v2 LLM action". The `promptFile` field is REQUIRED; inline prompt bodies
+ * (`llm.prompt` or the legacy top-level `prompt` field) are FORBIDDEN.
+ *
+ * promptFile must be a normalized project-relative path — no absolute paths,
+ * no `..` escape, no symlink escape, no directory, no unreadable/nonexistent file.
+ * Path safety is verified at config load BEFORE any provider/model request.
+ */
+export interface V2LlmActionConfig {
+  /**
+   * Project-relative path to the prompt file for this LLM action.
+   * Must be a non-empty string naming an existing, readable file within the
+   * project root (no absolute paths, no `..` escape, no symlink escape outside root).
+   */
+  promptFile: string;
+}
+
+/**
+ * pi-experiment-0njv: Provenance record for a v2 LLM action prompt file.
+ *
+ * Recorded at config load for every admitted v2 LLM action promptFile.
+ * The prompt BODY is NEVER stored here — only path, digest, byte count,
+ * and source action ID for deterministic provenance tracking.
+ */
+export interface V2PromptFileProvenance {
+  /** Normalized project-relative path (e.g. ".pi/prompts/implement.md"). */
+  normalizedPath: string;
+  /** Byte count of the prompt file at admission time. */
+  byteCount: number;
+  /** SHA-256 hex digest of the prompt file contents at admission time. */
+  sha256: string;
+  /** Canonical action ID (map key / action.id) that owns this prompt file. */
+  actionId: string;
+}
+
 export interface TeammateAction {
   id: string;
   type: ActionType;
@@ -562,6 +600,25 @@ export interface TeammateAction {
    * When absent, the state-level policy applies.
    */
   runtimeBudget?: RuntimeBudgetPolicy;
+  /**
+   * pi-experiment-0njv: v2 LLM action configuration.
+   *
+   * When present, this action is a "v2 LLM action". The `promptFile` field is
+   * REQUIRED. Inline prompt bodies (llm.prompt or top-level prompt) are FORBIDDEN.
+   * Path safety is validated at config load before any provider/model request.
+   *
+   * Only admitted in v2 configs (version: 2). In v1 configs this field is ignored.
+   */
+  llm?: V2LlmActionConfig;
+  /**
+   * pi-experiment-0njv: Resolved prompt provenance for this v2 LLM action.
+   *
+   * Populated by ConfigLoader.resolveV2LlmPromptProvenance() after path admission.
+   * Records normalized path, byteCount, sha256 digest, and actionId.
+   * The prompt BODY is NEVER stored here (AC4: no body inlining).
+   * Absent for non-LLM actions and v1 configs.
+   */
+  v2PromptProvenance?: V2PromptFileProvenance;
 }
 
 export type ActionDefinition = TeammateAction;
