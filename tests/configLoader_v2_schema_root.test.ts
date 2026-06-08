@@ -69,6 +69,7 @@ afterEach(() => {
 // worktreePolicy, statechart.initialState, statechart.terminalStates (all
 // removed v1 fields that v2 configs must not use).
 // ---------------------------------------------------------------------------
+// pi-experiment-0dgy: v2 uses map-form actions (keys become canonical action IDs).
 const MINIMAL_V2_YAML = `
 version: 2
 settings:
@@ -89,7 +90,7 @@ states:
     identity: { role: "Implementer", expertise: "Coding", constraints: [] }
     baseInstructions: "Implement the task."
     actions:
-      - id: run_impl
+      run_impl:
         type: prompt
         prompt: "Implement the requested changes."
     transitions:
@@ -151,7 +152,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -183,7 +184,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -215,7 +216,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -248,7 +249,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -284,7 +285,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -372,7 +373,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -404,7 +405,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -575,7 +576,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -606,7 +607,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;

@@ -47,6 +47,7 @@ afterEach(() => {
 // Minimal valid v2 fixture with events block.
 // No advanceOutcomes/failedOutcomes/blockedOutcomes — those are v1 fields rejected in v2.
 // ---------------------------------------------------------------------------
+// pi-experiment-0dgy: v2 uses map-form actions (keys become canonical action IDs).
 const MINIMAL_V2_WITH_EVENTS_YAML = `
 version: 2
 settings:
@@ -67,7 +68,7 @@ states:
     identity: { role: "Implementer", expertise: "Coding", constraints: [] }
     baseInstructions: "Implement the task."
     actions:
-      - id: run_impl
+      run_impl:
         type: prompt
         prompt: "Implement the requested changes."
     transitions:
@@ -171,7 +172,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -202,7 +203,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -240,7 +241,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -273,7 +274,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -311,7 +312,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions:
       QUALITY_PASSED_GATE_1: completed
@@ -351,7 +352,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions:
       SUCCESS: completed
@@ -519,7 +520,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions:
       SUCCESS: completed
@@ -560,7 +561,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { FAILURE: Implement }
 `;
@@ -596,7 +597,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed }
 `;
@@ -632,7 +633,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -669,7 +670,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -706,7 +707,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: { SUCCESS: completed, FAILURE: Implement }
 `;
@@ -744,7 +745,7 @@ states:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
     actions:
-      - id: a1
+      a1:
         type: prompt
     transitions: {}
 `;

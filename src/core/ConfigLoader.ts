@@ -171,6 +171,13 @@ export class ConfigLoader {
       // BEFORE defaults are merged, so DEFAULTS-injected fields (startState:undefined,
       // teamLeadSystemPrompt, projectObjective) do not cause false rejections.
       this.preValidateV2Admission(parsed);
+      // pi-experiment-0dgy: normalize v2 map-form collections (tools, validationGates,
+      // states.<state>.actions) to sorted arrays with canonical map-derived IDs.
+      // Runs after preValidateV2Admission (which already validated grammar/conflicts)
+      // and before schema validation (which expects array form).
+      if (isRecord(parsed) && parsed['version'] === 2) {
+        this.normalizeV2MapCollections(parsed);
+      }
       // s3wp.10: expand tsProjectTool shorthand before merging with defaults
       // so that the merged+validated config only ever sees type: command tools.
       this.expandTsProjectToolsInRaw(parsed);
@@ -559,15 +566,279 @@ export class ConfigLoader {
 
     // AC5: terminal sink not runnable.
     // A name in statechart.terminal must not also be a runnable state (a state with actions).
+    // Handles both array-form and map-form actions (map-form check: non-empty object).
     const terminalV2 = Array.isArray(statechart['terminal']) ? statechart['terminal'] as string[] : [];
     for (const sinkName of terminalV2) {
       const stateRaw = states[sinkName];
-      if (isRecord(stateRaw) && Array.isArray(stateRaw['actions']) && (stateRaw['actions'] as unknown[]).length > 0) {
+      if (!isRecord(stateRaw)) continue;
+      const stateActions = stateRaw['actions'];
+      const hasActions =
+        (Array.isArray(stateActions) && (stateActions as unknown[]).length > 0) ||
+        (isRecord(stateActions) && Object.keys(stateActions as Record<string, unknown>).length > 0);
+      if (hasActions) {
         throw new Error(
           `v2 statechart.terminal lists "${sinkName}" as a terminal sink, but "${sinkName}" is also declared as a runnable state with actions. ` +
           `Terminal sinks must not be runnable states. ` +
           `Either remove "${sinkName}" from statechart.terminal, or remove its actions block to make it a true sink state.`
         );
+      }
+    }
+
+    // pi-experiment-0dgy: v2 map-form collection validation.
+    // Validates tools, validationGates, and states.<state>.actions:
+    //   1. Array-form → rejected with migration guidance (AC2).
+    //   2. Map key grammar → each key must match the v2 identifier pattern (AC1).
+    //   3. Inner-identity conflict → entries that also declare a conflicting id/name → rejected (AC3).
+    //   4. Case-insensitive duplicate keys → rejected (AC5 duplicate detection).
+    // State keys (states map) are also validated for key grammar.
+    this.validateV2MapCollections(config, states);
+  }
+
+  /**
+   * pi-experiment-0dgy: v2 identifier grammar for map keys.
+   *
+   * Pattern: one letter (upper or lower), followed by zero or more letters,
+   * digits, underscores, dots, or hyphens. No spaces, no leading digit,
+   * no leading special character.
+   *
+   * Valid examples:
+   *   write-plan, verify-plan, plan_contract, run_impl, a1, tool.v2
+   *   Implement, Planning, PlanContract   (PascalCase; existing v2 state names)
+   * Invalid examples:
+   *   1bad          (starts with digit)
+   *   my name       (contains space)
+   *   -leading      (starts with hyphen)
+   *
+   * Documented as the canonical v2 identifier grammar for tools, gates,
+   * state IDs, and action IDs.
+   */
+  private static readonly V2_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
+
+  /**
+   * pi-experiment-0dgy AC1–AC5: Validate v2 map-form collections.
+   *
+   * Checks (all startup-fatal):
+   *   AC1: Map keys must match the v2 identifier grammar.
+   *   AC2: Array-form tools/gates/actions in v2 → rejected with migration guidance.
+   *   AC3: Inner identity fields (id/name) that conflict with the map key → rejected.
+   *   AC5: Case-insensitive duplicate keys → rejected.
+   *
+   * Collection-specific key grammar and identity field:
+   *   tools           → identity field: name  → migration path: tools.<name>
+   *   validationGates → identity field: id    → migration path: gates.<id>
+   *   states (keys)   → no identity field      → just grammar validation
+   *   state.actions   → identity field: id    → migration path: actions.<id>
+   */
+  private validateV2MapCollections(config: Record<string, unknown>, states: Record<string, unknown>): void {
+    // ── tools ────────────────────────────────────────────────────────────────
+    const toolsRaw = config['tools'];
+    if (toolsRaw !== undefined) {
+      if (Array.isArray(toolsRaw)) {
+        throw new Error(
+          `v2 harness config (version: 2) declares tools as an array (old v1 form). ` +
+          `In v2, tools must be a map whose keys are the canonical tool names. ` +
+          `Migrate to map form: replace the array with an object keyed by tool name.\n` +
+          `Migration example: tools:\n  plan_contract:\n    type: command\n    command: node\n` +
+          `(old array entry with name: plan_contract becomes the key tools.plan_contract)`
+        );
+      }
+      if (isRecord(toolsRaw)) {
+        this.validateV2MapKeys(toolsRaw as Record<string, unknown>, 'tools', 'name', 'tools.<name>');
+      }
+    }
+
+    // ── validationGates ──────────────────────────────────────────────────────
+    const gatesRaw = config['validationGates'];
+    if (gatesRaw !== undefined) {
+      if (Array.isArray(gatesRaw)) {
+        throw new Error(
+          `v2 harness config (version: 2) declares validationGates as an array (old v1 form). ` +
+          `In v2, validationGates must be a map whose keys are the canonical gate IDs. ` +
+          `Migrate to map form: replace the array with an object keyed by gate ID.\n` +
+          `Migration example: gates:\n  review-gate:\n    states: [Implement]\n` +
+          `(old array entry with id: review-gate becomes the key gates.review-gate)`
+        );
+      }
+      if (isRecord(gatesRaw)) {
+        this.validateV2MapKeys(gatesRaw as Record<string, unknown>, 'validationGates', 'id', 'gates.<id>');
+      }
+    }
+
+    // ── states key grammar ───────────────────────────────────────────────────
+    // State keys are already the canonical IDs; just validate grammar.
+    this.validateV2StateKeys(states);
+
+    // ── states.<state>.actions ───────────────────────────────────────────────
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (!isRecord(stateRaw)) continue;
+      const actionsRaw = stateRaw['actions'];
+      if (actionsRaw === undefined) continue;
+      if (Array.isArray(actionsRaw)) {
+        throw new Error(
+          `v2 harness config (version: 2) state "${stateId}" declares actions as an array (old v1 form). ` +
+          `In v2, actions must be a map whose keys are the canonical action IDs. ` +
+          `Migrate to map form: replace the array with an object keyed by action ID.\n` +
+          `Migration example: actions:\n  write-plan:\n    type: prompt\n` +
+          `(old array entry with id: write-plan becomes the key actions.write-plan)`
+        );
+      }
+      if (isRecord(actionsRaw)) {
+        this.validateV2MapKeys(
+          actionsRaw as Record<string, unknown>,
+          `states.${stateId}.actions`,
+          'id',
+          'actions.<id>'
+        );
+      }
+    }
+  }
+
+  /**
+   * Validate v2 state map keys for grammar only (no inner-identity field for states).
+   *
+   * State keys are the canonical state IDs. Key grammar violations are rejected.
+   * Case-insensitive duplicate detection is applied.
+   *
+   * Note: existing configs may use PascalCase state names (e.g. "Implement") from v1.
+   * For v2, state keys must match the v2 identifier grammar (lowercase-first).
+   */
+  private validateV2StateKeys(states: Record<string, unknown>): void {
+    const seenLower = new Map<string, string>(); // lowercase key → original key
+    for (const stateKey of Object.keys(states)) {
+      // Grammar check
+      if (!ConfigLoader.V2_IDENTIFIER_PATTERN.test(stateKey)) {
+        throw new Error(
+          `v2 harness config (version: 2) state key "${stateKey}" does not match the v2 identifier grammar. ` +
+          `State keys must start with a letter and contain only letters, digits, underscores, dots, or hyphens. ` +
+          `(pattern: ^[A-Za-z][A-Za-z0-9_.-]*$). Rename the state to a valid v2 identifier.`
+        );
+      }
+      // Case-insensitive duplicate detection
+      const lower = stateKey.toLowerCase();
+      const prev = seenLower.get(lower);
+      if (prev !== undefined) {
+        throw new Error(
+          `v2 harness config (version: 2) states map has case-insensitive duplicate keys: ` +
+          `"${prev}" and "${stateKey}" are the same identifier after case folding. ` +
+          `Each state key must be unique case-insensitively. Remove or rename one of the duplicate state keys.`
+        );
+      }
+      seenLower.set(lower, stateKey);
+    }
+  }
+
+  /**
+   * Validate a single v2 map collection for key grammar, inner-identity conflicts,
+   * and case-insensitive duplicate keys.
+   *
+   * @param mapRaw         The raw map object.
+   * @param collectionPath Path for diagnostic messages (e.g. "tools", "states.Implement.actions").
+   * @param identityField  The inner field name that must NOT conflict with the key ("name" or "id").
+   * @param migrationPath  Migration hint path fragment (e.g. "tools.<name>", "actions.<id>").
+   */
+  private validateV2MapKeys(
+    mapRaw: Record<string, unknown>,
+    collectionPath: string,
+    identityField: string,
+    migrationPath: string
+  ): void {
+    const seenLower = new Map<string, string>(); // lowercase key → original key
+
+    for (const [key, entry] of Object.entries(mapRaw)) {
+      // AC1: Key grammar validation.
+      if (!ConfigLoader.V2_IDENTIFIER_PATTERN.test(key)) {
+        throw new Error(
+          `v2 harness config (version: 2) ${collectionPath} map key "${key}" does not match the v2 identifier grammar. ` +
+          `Map keys must start with a letter and contain only letters, digits, underscores, dots, or hyphens. ` +
+          `(pattern: ^[A-Za-z][A-Za-z0-9_.-]*$). ` +
+          `Rename the key to a valid v2 identifier (migration path: ${migrationPath}).`
+        );
+      }
+
+      // AC5: Case-insensitive duplicate detection.
+      const lower = key.toLowerCase();
+      const prev = seenLower.get(lower);
+      if (prev !== undefined) {
+        throw new Error(
+          `v2 harness config (version: 2) ${collectionPath} map has case-insensitive duplicate keys: ` +
+          `"${prev}" and "${key}" are the same identifier after case folding. ` +
+          `Each map key must be unique case-insensitively (migration path: ${migrationPath}). ` +
+          `Remove or rename one of the duplicate keys.`
+        );
+      }
+      seenLower.set(lower, key);
+
+      // AC3: Inner-identity conflict detection.
+      if (!isRecord(entry)) continue;
+      const innerIdentity = (entry as Record<string, unknown>)[identityField];
+      if (innerIdentity !== undefined && innerIdentity !== key) {
+        throw new Error(
+          `v2 harness config (version: 2) ${collectionPath} map entry "${key}" declares inner ` +
+          `"${identityField}: ${innerIdentity}" which conflicts with the map key "${key}". ` +
+          `In v2, the map key is the canonical identity — inner ${identityField} fields must not be declared ` +
+          `(or must match the key exactly). Remove the inner ${identityField} field from the entry ` +
+          `(migration path: ${migrationPath}).`
+        );
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-0dgy AC4: Normalize v2 map-form collections to sorted arrays.
+   *
+   * Converts map-form tools, validationGates, and states.<state>.actions to
+   * sorted arrays with canonical map-derived IDs. The sort is lexicographic on
+   * the canonical ID (map key), ensuring deterministic resolved serialization.
+   *
+   * Called AFTER preValidateV2Admission (grammar/conflict validation already done)
+   * and BEFORE AJV schema validation (which expects array form).
+   *
+   * Version-gated: only runs when version === 2.
+   */
+  private normalizeV2MapCollections(parsed: unknown): void {
+    if (!isRecord(parsed)) return;
+
+    // ── tools: map → sorted array with name = key ─────────────────────────
+    const toolsRaw = parsed['tools'];
+    if (isRecord(toolsRaw)) {
+      const entries = Object.entries(toolsRaw as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+      parsed['tools'] = entries.map(([key, value]) => {
+        if (!isRecord(value)) return value;
+        const entry = { ...(value as Record<string, unknown>) };
+        // Map key becomes the canonical name; inner name (if matching key) is normalized
+        entry['name'] = key;
+        return entry;
+      });
+    }
+
+    // ── validationGates: map → sorted array with id = key ─────────────────
+    const gatesRaw = parsed['validationGates'];
+    if (isRecord(gatesRaw)) {
+      const entries = Object.entries(gatesRaw as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+      parsed['validationGates'] = entries.map(([key, value]) => {
+        if (!isRecord(value)) return value;
+        const entry = { ...(value as Record<string, unknown>) };
+        // Map key becomes the canonical id; inner id (if matching key) is normalized
+        entry['id'] = key;
+        return entry;
+      });
+    }
+
+    // ── states.<state>.actions: map → sorted array with id = key ─────────
+    const statesRaw = parsed['states'];
+    if (isRecord(statesRaw)) {
+      for (const [, stateRaw] of Object.entries(statesRaw as Record<string, unknown>)) {
+        if (!isRecord(stateRaw)) continue;
+        const actionsRaw = (stateRaw as Record<string, unknown>)['actions'];
+        if (!isRecord(actionsRaw)) continue;
+        const entries = Object.entries(actionsRaw as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+        (stateRaw as Record<string, unknown>)['actions'] = entries.map(([key, value]) => {
+          if (!isRecord(value)) return value;
+          const entry = { ...(value as Record<string, unknown>) };
+          // Map key becomes the canonical id; inner id (if matching key) is normalized
+          entry['id'] = key;
+          return entry;
+        });
       }
     }
   }

@@ -62,6 +62,7 @@ function removeTempDir(dir: string): void {
   } catch { /* ignore */ }
 }
 
+// pi-experiment-0dgy: v2 uses map-form actions (keys become canonical action IDs).
 /** Minimal v2 config YAML with events block containing PLAN_ACCEPTED. */
 const V2_CONFIG_YAML = `
 version: 2
@@ -85,7 +86,7 @@ states:
     identity: { role: "Planner", expertise: "Planning", constraints: [] }
     baseInstructions: "Plan the work."
     actions:
-      - id: plan_action
+      plan_action:
         type: prompt
         prompt: "Plan the task."
     transitions:

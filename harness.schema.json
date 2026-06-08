@@ -833,6 +833,7 @@
       }
     },
     "tools": {
+      "description": "Configured project tools. v1: array of objects with required 'name' field. v2 (pi-experiment-0dgy): map form accepted in YAML (ConfigLoader normalizes to sorted array before schema validation); map keys are the canonical tool names (identifier grammar: ^[A-Za-z][A-Za-z0-9_.-]*$).",
       "type": "array",
       "items": {
         "oneOf": [
@@ -847,7 +848,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_]+$"
+                "pattern": "^[A-Za-z0-9_.-]+$"
               },
               "description": {
                 "type": "string"
@@ -1042,7 +1043,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_]+$"
+                "pattern": "^[A-Za-z0-9_.-]+$"
               },
               "description": {
                 "type": "string"
@@ -1224,7 +1225,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_]+$"
+                "pattern": "^[A-Za-z0-9_.-]+$"
               },
               "description": {
                 "type": "string"
@@ -1320,7 +1321,7 @@
             "properties": {
               "name": {
                 "type": "string",
-                "pattern": "^[A-Za-z0-9_]+$"
+                "pattern": "^[A-Za-z0-9_.-]+$"
               },
               "description": {
                 "type": "string"
@@ -1602,6 +1603,7 @@
       }
     },
     "validationGates": {
+      "description": "Configured validation gates. v1: array of objects with required 'id' field. v2 (pi-experiment-0dgy): map form accepted in YAML (ConfigLoader normalizes to sorted array before schema validation); map keys are the canonical gate IDs (identifier grammar: ^[A-Za-z][A-Za-z0-9_.-]*$).",
       "type": "array",
       "items": {
         "type": "object",
@@ -1679,6 +1681,7 @@
       }
     },
     "states": {
+      "description": "Statechart states. Keys are canonical state IDs. v2 (pi-experiment-0dgy): state keys must match the v2 identifier grammar (^[A-Za-z][A-Za-z0-9_.-]*$). Each state's actions may be declared as a map in v2 (ConfigLoader normalizes to sorted array with canonical IDs before schema validation).",
       "type": "object",
       "additionalProperties": {
         "type": "object",
@@ -1948,6 +1951,7 @@
             }
           },
           "actions": {
+            "description": "State actions. v1: array of objects with required 'id' and 'type' fields. v2 (pi-experiment-0dgy): map form accepted in YAML (ConfigLoader normalizes to sorted array before schema validation); map keys are the canonical action IDs (identifier grammar: ^[A-Za-z][A-Za-z0-9_.-]*$).",
             "type": "array",
             "items": {
               "type": "object",
