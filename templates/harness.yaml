@@ -4,73 +4,61 @@
 #
 # ORR_ELSE_FRAMEWORK_ROOT is NOT set here and NOT required for normal project use.
 # It is only needed when developing the orr-else harness itself.
+#
+# For an opinionated Planning → Implementation → Review workflow example,
+# see examples/planning-implementation-review.yaml in the orr-else package.
 # ---------------------------------------------------------------------------
+
+version: 2
+
 settings:
   maxConcurrentSlots: 3
   agentTurnTimeoutMs: 3600000
   processReapIntervalMs: 60000
   defaultProvider: claude
-  startState: Planning
-  worktreePolicy:
-    default: always
-  modelProviders:
-    claude:
-      provider: claude
-      model: claude-opus-4-5
-      thinking: high
   handoverTemplate: |
     CRITICAL: You are hitting context limits.
     Generate a dense RESUMPTION HANDOVER for a fresh teammate.
     Include the Bead ID, current state, completed checklist evidence, changed files,
     commands run, decisions made, blockers, and the exact next action.
     HISTORY: {{history}}
+  modelProviders:
+    claude:
+      provider: claude
+      model: claude-opus-4-5
+      thinking: high
 
 scheduler:
-  algorithm: fifo
-  maxQueueDepth: 100
+  weights:
+    waitTime: 1.0
+    executionTime: 0.5
+    progress: 2.0
+    penalty: 1.0
+
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
 
 statechart:
-  states:
-    - Planning
-    - Implementation
-    - Review
-    - Done
-  transitions:
-    - from: Planning
-      to: Implementation
-      on: PLAN_APPROVED
-    - from: Implementation
-      to: Review
-      on: IMPLEMENTATION_COMPLETE
-    - from: Review
-      to: Done
-      on: REVIEW_APPROVED
-    - from: Review
-      to: Implementation
-      on: CHANGES_REQUESTED
+  initial: Implement
+  terminal: [completed]
 
 states:
-  - id: Planning
-    label: Planning
+  Implement:
+    identity:
+      role: The Implementer
+      expertise: Software engineering
+      constraints:
+        - Work only inside the assigned worktree.
+    baseInstructions: |
+      Implement the task as described. Refer to .pi/prompts/ for detailed instructions.
     actions:
-      - id: plan
+      run:
         type: prompt
-        promptKey: planner
-
-  - id: Implementation
-    label: Implementation
-    actions:
-      - id: implement
-        type: prompt
-        promptKey: implementer
-
-  - id: Review
-    label: Review
-    actions:
-      - id: review
-        type: prompt
-        promptKey: reviewer
-
-  - id: Done
-    label: Done
-    terminal: true
+        llm:
+          promptFile: .pi/prompts/implementer.md
+    transitions:
+      SUCCESS: completed
+      FAILURE: Implement

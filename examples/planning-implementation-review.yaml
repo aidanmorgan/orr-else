@@ -1,0 +1,105 @@
+# ---------------------------------------------------------------------------
+# Orr Else example: Planning → Implementation → Review workflow
+#
+# This is an OPINIONATED EXAMPLE, not a runtime default.
+# Copy and adapt this file to your project — it is NOT automatically used
+# by the harness. Place your actual config at harness.yaml (or set
+# ORR_ELSE_CONFIG_PATH to point to your config file).
+#
+# To use this example as a starting point:
+#   cp examples/planning-implementation-review.yaml harness.yaml
+# Then customise harness.yaml for your project.
+# ---------------------------------------------------------------------------
+
+version: 2
+
+settings:
+  maxConcurrentSlots: 3
+  agentTurnTimeoutMs: 3600000
+  processReapIntervalMs: 60000
+  defaultProvider: claude
+  handoverTemplate: |
+    CRITICAL: You are hitting context limits.
+    Generate a dense RESUMPTION HANDOVER for a fresh teammate.
+    Include the Bead ID, current state, completed checklist evidence, changed files,
+    commands run, decisions made, blockers, and the exact next action.
+    HISTORY: {{history}}
+  modelProviders:
+    claude:
+      provider: claude
+      model: claude-opus-4-5
+      thinking: high
+
+scheduler:
+  weights:
+    waitTime: 1.0
+    executionTime: 0.5
+    progress: 2.0
+    penalty: 1.0
+
+events:
+  advance: [SUCCESS]
+  failure: [FAILURE]
+  blocked: [BLOCKED]
+  neutral: []
+
+statechart:
+  initial: Planning
+  terminal: [completed]
+
+states:
+  Planning:
+    identity:
+      role: The Planner Teammate
+      expertise: Software architecture, codebase exploration, and implementation planning
+      constraints:
+        - Think before acting.
+        - Ground every recommendation in current repository facts.
+        - Define explicit, verifiable success criteria.
+        - Do not modify code in Planning.
+    baseInstructions: |
+      Produce a thorough, surgical implementation plan for the assigned task.
+    actions:
+      formulate-plan:
+        type: prompt
+        llm:
+          promptFile: .pi/prompts/planner.md
+    transitions:
+      SUCCESS: Implementation
+      FAILURE: Planning
+
+  Implementation:
+    identity:
+      role: The Implementer Teammate
+      expertise: Surgical code changes, test-driven implementation, and quality verification
+      constraints:
+        - Work only inside the assigned worktree.
+        - Make surgical changes that match the approved plan.
+    baseInstructions: |
+      Execute the approved plan in the isolated worktree.
+    actions:
+      implement:
+        type: prompt
+        llm:
+          promptFile: .pi/prompts/implementer.md
+    transitions:
+      SUCCESS: Review
+      FAILURE: Implementation
+
+  Review:
+    identity:
+      role: The Reviewer Teammate
+      expertise: Post-implementation audit, correctness review, and integration safety
+      constraints:
+        - Audit the implementation independently.
+        - Verify tests and quality checks directly.
+    baseInstructions: |
+      Conduct a high-effort post-implementation audit.
+    actions:
+      review:
+        type: prompt
+        llm:
+          promptFile: .pi/prompts/reviewer.md
+    transitions:
+      SUCCESS: completed
+      FAILURE: Implementation

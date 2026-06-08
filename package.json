@@ -13,6 +13,7 @@
   "files": [
     "dist",
     "templates",
+    "examples",
     "harness.schema.json",
     "README.md",
     "docs"

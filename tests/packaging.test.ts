@@ -62,6 +62,20 @@ describe('package.json packaging', () => {
     expect(files).toContain('templates');
   });
 
+  it('includes examples in files array (AC3: examples shipped intentionally)', () => {
+    const pkg = readPackageJson();
+    const files = pkg.files as string[];
+    expect(files).toContain('examples');
+  });
+
+  it('does not include root harness.yaml as a shipped default (AC3)', () => {
+    // The root harness.yaml is the pi-experiment project config, not a shipped package default.
+    // It must NOT appear in the package files list.
+    const pkg = readPackageJson();
+    const files = pkg.files as string[];
+    expect(files).not.toContain('harness.yaml');
+  });
+
   it('includes dist in files array', () => {
     const pkg = readPackageJson();
     const files = pkg.files as string[];
@@ -151,6 +165,75 @@ describe('templates/ directory', () => {
     // The YAML key that actually sets the framework root must not appear.
     // (Mentions in comments are fine — they explain the var is not needed.)
     expect(content).not.toMatch(/^\s*orrElseFrameworkRoot\s*:/m);
+  });
+
+  it('AC1/AC2: templates/harness.yaml has no v1 fields (startState, worktreePolicy, promptKey, array-form states/actions)', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'templates', 'harness.yaml'),
+      'utf8'
+    );
+    // v1 field: startState in settings
+    expect(content).not.toMatch(/^\s*startState\s*:/m);
+    // v1 field: worktreePolicy in settings
+    expect(content).not.toMatch(/^\s*worktreePolicy\s*:/m);
+    // v1 field: promptKey on actions
+    expect(content).not.toMatch(/\bpromptKey\s*:/m);
+    // v1 field: array-form states (- id: ...)
+    expect(content).not.toMatch(/^\s*-\s+id\s*:/m);
+  });
+
+  it('AC2: templates/harness.yaml declares version: 2', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'templates', 'harness.yaml'),
+      'utf8'
+    );
+    expect(content).toMatch(/^version:\s*2\s*$/m);
+  });
+});
+
+describe('examples/ directory (AC1/AC3)', () => {
+  it('examples/planning-implementation-review.yaml exists', () => {
+    const p = path.join(PROJECT_ROOT, 'examples', 'planning-implementation-review.yaml');
+    expect(fs.existsSync(p)).toBe(true);
+  });
+
+  it('AC1: opinionated Planning/Implementation/Review workflow lives under examples/', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'examples', 'planning-implementation-review.yaml'),
+      'utf8'
+    );
+    // Must contain the opinionated workflow states
+    expect(content).toContain('Planning');
+    expect(content).toContain('Implementation');
+    expect(content).toContain('Review');
+  });
+
+  it('AC1: examples/ workflow is v2-valid (version: 2, no v1 fields)', () => {
+    const content = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'examples', 'planning-implementation-review.yaml'),
+      'utf8'
+    );
+    expect(content).toMatch(/^version:\s*2\s*$/m);
+    expect(content).not.toMatch(/^\s*startState\s*:/m);
+    expect(content).not.toMatch(/^\s*worktreePolicy\s*:/m);
+    expect(content).not.toMatch(/\bpromptKey\s*:/m);
+  });
+
+  it('AC3: opinionated workflow states are NOT declared in templates/harness.yaml (only in examples/)', () => {
+    // The Planning/Implementation/Review workflow must not be declared as states in templates.
+    // We check for YAML state key declarations (indented state name followed by colon),
+    // not mentions in comments.
+    const templateContent = fs.readFileSync(
+      path.join(PROJECT_ROOT, 'templates', 'harness.yaml'),
+      'utf8'
+    );
+    // State key declarations in YAML map-form: "  StateName:" (indented key with colon)
+    // This is distinct from comment mentions.
+    const hasPlanningState = /^\s{2,}Planning\s*:/m.test(templateContent);
+    const hasImplementationState = /^\s{2,}Implementation\s*:/m.test(templateContent);
+    const hasReviewState = /^\s{2,}Review\s*:/m.test(templateContent);
+    // Must not declare all three opinionated workflow states as YAML map keys.
+    expect(hasPlanningState && hasImplementationState && hasReviewState).toBe(false);
   });
 });
 
@@ -247,6 +330,11 @@ describe('orr-else init command writes a checkout-free shim', () => {
     expect(content).not.toContain('/Users/aidan/dev/pi-experiment');
     // Should NOT configure orrElseFrameworkRoot as a YAML key (comments are fine).
     expect(content).not.toMatch(/^\s*orrElseFrameworkRoot\s*:/m);
+    // AC2: generated starter must declare version: 2 (no v1 fields).
+    expect(content).toMatch(/^version:\s*2\s*$/m);
+    expect(content).not.toMatch(/^\s*startState\s*:/m);
+    expect(content).not.toMatch(/^\s*worktreePolicy\s*:/m);
+    expect(content).not.toMatch(/\bpromptKey\s*:/m);
   });
 
   it('scaffolds .pi/prompts, .pi/skills, .pi/rules directories', () => {
