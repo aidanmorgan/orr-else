@@ -30,6 +30,23 @@
         }
       }
     },
+    "toolPayloadBudgetPolicy": {
+      "type": "object",
+      "description": "pi-experiment-6q0y.18: Optional hard tool-payload budget policy. Absent = no rejection for that result path (true no-op). When declared, the model-facing tool result is checked against maxBytes before being returned to the model.",
+      "additionalProperties": false,
+      "required": ["maxBytes", "route"],
+      "properties": {
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum UTF-8 byte length for the model-facing tool result payload. When exceeded, the harness rejects the payload and returns a semantic rejection message instead."
+        },
+        "route": {
+          "type": "string",
+          "description": "Deterministic outcome route emitted when the limit is exceeded. Must be a declared outcome in the statechart vocabulary (startup lint rejects unknown routes)."
+        }
+      }
+    },
     "toolPromptProfileEntry": {
       "type": "object",
       "description": "pi-experiment-6q0y.4: A single per-tool prompt text override within a named tool prompt profile.",
@@ -540,6 +557,17 @@
           "description": "pi-experiment-6q0y.17 AC7(b): Named per-action budget overrides keyed by 'stateId/actionId'. Startup lint rejects keys whose state segment is not a declared state, or whose action segment is not a declared action of that state (AC7(b) unknown-action-reference check). Precedence: lower than action.promptBudget, higher than settings.promptBudgetStateOverrides.",
           "additionalProperties": {
             "$ref": "#/definitions/promptBudgetPolicy"
+          }
+        },
+        "toolPayloadBudget": {
+          "$ref": "#/definitions/toolPayloadBudgetPolicy",
+          "description": "pi-experiment-6q0y.18: Default tool-payload budget applied to all tools that do not declare an explicit per-tool budget. Absent = no limit enforced anywhere (true no-op, AC2). Per-tool declarations in toolPayloadBudgetByTool override this default."
+        },
+        "toolPayloadBudgetByTool": {
+          "type": "object",
+          "description": "pi-experiment-6q0y.18 AC4/AC7: Per-tool payload budget overrides keyed by tool name. Takes precedence over settings.toolPayloadBudget (default). Startup lint (AC7) rejects keys that do not match a declared tool name and routes absent from the statechart vocabulary.",
+          "additionalProperties": {
+            "$ref": "#/definitions/toolPayloadBudgetPolicy"
           }
         },
         "tsProjectToolDefaults": {

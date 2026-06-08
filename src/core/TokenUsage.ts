@@ -32,19 +32,30 @@ export interface ToolTokenAccounting {
 }
 
 /**
- * Estimate the UTF-8 byte length of a value when serialized to the string form
- * the model receives (plain string values are used as-is; everything else is
- * JSON-serialized).  Returns 0 when serialization fails.
+ * Serialize a tool result value to the exact string form that the model
+ * receives as `content[0].text` (pi-experiment-6q0y.18 AC1).
  *
- * This mirrors the logic in toolResult() in extension.ts:
- *   typeof value === 'string' ? value : JSON.stringify(value, null, 2)
- * We use compact JSON here (no pretty-print) for a conservative byte estimate;
- * the difference is whitespace, which has negligible token cost.
+ * This is the SINGLE canonical serialization used by BOTH the model-facing
+ * toolResult() return value AND the byte accounting, so metered bytes always
+ * match the actual payload. Callers must not re-implement this logic.
+ *
+ * Logic: plain string values are used as-is; everything else is pretty-printed
+ * JSON (2-space indent) — matching toolResult() in extension.ts exactly.
+ */
+export function serializeToolResultText(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+
+/**
+ * Compute the UTF-8 byte length of a tool result as it will appear in
+ * `content[0].text` sent to the model. Returns 0 when serialization fails.
+ *
+ * Uses serializeToolResultText so the metered bytes EXACTLY match the model-
+ * facing payload (AC1 — no drift between accounting and actual content).
  */
 export function estimateResultBytes(value: unknown): number {
   try {
-    const serialized = typeof value === 'string' ? value : JSON.stringify(value);
-    return Buffer.byteLength(serialized, 'utf8');
+    return Buffer.byteLength(serializeToolResultText(value), 'utf8');
   } catch {
     return 0;
   }

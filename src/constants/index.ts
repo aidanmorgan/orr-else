@@ -377,7 +377,23 @@ export enum DomainEventName {
    * NO prompt body is ever included — only hashes, byte counts, token estimates,
    * config path, state/action identity, and route (AC5).
    */
-  PROMPT_BUDGET_ADMISSION = 'PROMPT_BUDGET_ADMISSION'
+  PROMPT_BUDGET_ADMISSION = 'PROMPT_BUDGET_ADMISSION',
+
+  /**
+   * Emitted when a configured tool-payload budget is exceeded and the harness
+   * rejects the model-facing result BEFORE it reaches the model
+   * (pi-experiment-6q0y.18 AC5 / AC6).
+   *
+   * Carries: { tool, beadId?, stateId?, actionId?, toolInvocationId?,
+   *   actualBytes, limitBytes, outputFile?, decision, route }.
+   *
+   * Only emitted when a budget is configured AND the payload exceeds the limit.
+   * With no budget configured this event is NEVER emitted (true no-op, AC2).
+   *
+   * NO raw tool-output body is ever included — only tool name, identity fields,
+   * exact byte count, limit, artifact references, and the route (AC6).
+   */
+  TOOL_PAYLOAD_BUDGET_REJECTED = 'TOOL_PAYLOAD_BUDGET_REJECTED'
 }
 
 export enum BeadsCliCommand {

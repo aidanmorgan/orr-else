@@ -61,7 +61,7 @@ import {
 } from './core/TeammateEvents.js';
 import { validateHandoffPayload, HandoffSchemaId } from './core/HandoffSchemas.js';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from './core/ProviderRequestCap.js';
-import { buildTurnUsageRecord, buildToolTokenAccounting } from './core/TokenUsage.js';
+import { buildTurnUsageRecord, buildToolTokenAccounting, serializeToolResultText } from './core/TokenUsage.js';
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
 import { postHarnessSignal } from './core/HarnessApiClient.js';
 import { Logger } from './core/Logger.js';
@@ -133,6 +133,7 @@ import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, 
 import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
 import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';
 import { computePromptSizing, evaluatePromptBudgetAdmission } from './core/PromptBudgetAdmission.js';
+import { evaluateToolPayloadBudget } from './core/ToolPayloadBudget.js';
 import { createRuntimeServices, type RuntimeServices } from './composition/createRuntimeServices.js';
 import { assertDeclaredOutcome, isAdvanceOutcome, isTerminalState } from './core/FlowManager.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
@@ -447,8 +448,15 @@ async function initializeObservability(services: RuntimeServices): Promise<Obser
   return runtimeObservability;
 }
 
+/**
+ * Serialize a tool result value and wrap it in the Pi-expected format.
+ *
+ * Uses serializeToolResultText() — the single canonical serializer shared with
+ * byte accounting — so content[0].text always matches the metered bytes exactly
+ * (pi-experiment-6q0y.18 AC1: no drift between accounting and payload).
+ */
 function toolResult(value: unknown) {
-  const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+  const text = serializeToolResultText(value);
   return {
     content: [{ type: 'text' as const, text }],
     details: value
@@ -734,6 +742,62 @@ async function persistPluginToolRawResult(
   return { tool: toolName, status, outputFile: rawFile, outputFileBytes: rawBytes, ...(failureCategory ? { failureCategory } : {}) };
 }
 
+/**
+ * Evaluate the optional tool-payload budget and build the model-facing result.
+ *
+ * When no budget is configured, behaves identically to toolResult(value) (AC2 no-op).
+ * When a budget IS configured and the payload exceeds the limit, emits a
+ * TOOL_PAYLOAD_BUDGET_REJECTED event and returns a semantic rejection message
+ * instead of the raw payload (AC5). The rejection message includes the artifact
+ * path (outputFile) when available so the coordinator gate can still reach the
+ * artifact without the model receiving the raw body (AC6).
+ *
+ * The exact byte count from evaluateToolPayloadBudget() equals the byte length
+ * of content[0].text because both use serializeToolResultText() (AC1).
+ */
+async function applyToolPayloadBudget(
+  toolName: string,
+  value: unknown,
+  config: HarnessConfig,
+  context: {
+    beadId: string | undefined;
+    stateId: string | undefined;
+    actionId: string | undefined;
+    toolInvocationId: string;
+    outputFile?: string;
+  },
+  eventStore: RuntimeServices['eventStore']
+): Promise<ReturnType<typeof toolResult>> {
+  const budget = evaluateToolPayloadBudget(toolName, value, config);
+
+  if (!budget.exceeded) {
+    // No-op: return the normal result using the pre-computed serialized text.
+    return {
+      content: [{ type: 'text' as const, text: budget.serializedText }],
+      details: value
+    };
+  }
+
+  // Budget exceeded — emit rejection event (no raw body, AC6) and return semantic rejection.
+  await eventStore.record(DomainEventName.TOOL_PAYLOAD_BUDGET_REJECTED, {
+    tool: toolName,
+    beadId: context.beadId,
+    stateId: context.stateId,
+    actionId: context.actionId,
+    toolInvocationId: context.toolInvocationId,
+    actualBytes: budget.actualBytes,
+    limitBytes: budget.resolvedPolicy!.maxBytes,
+    outputFile: context.outputFile,
+    decision: 'REJECTED',
+    route: budget.route,
+  }).catch(() => {});
+
+  // Return semantic rejection: route + byte info + artifact ref when available (AC5).
+  const artifactRef = context.outputFile ? ` Artifact: ${context.outputFile}.` : '';
+  const rejection = `TOOL_PAYLOAD_BUDGET_EXCEEDED: \`${toolName}\` result is ${budget.actualBytes} bytes, exceeding the configured limit of ${budget.resolvedPolicy!.maxBytes} bytes. The model-facing payload has been suppressed.${artifactRef} Route: ${budget.route}.`;
+  return toolResult(rejection);
+}
+
 function wrapPluginTool(
   tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> },
   runtimeObservability: Observability,
@@ -835,7 +899,13 @@ function wrapPluginTool(
             process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id,
             hit.result, true, toolInvocationId
           )).catch(() => {});
-          return toolResult(hit.result);
+          // pi-experiment-6q0y.18: enforce optional payload budget on cache-hit path (AC3).
+          return applyToolPayloadBudget(
+            tool.name, hit.result, config,
+            { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
+              toolInvocationId, outputFile: hit.toolResult.outputFile },
+            services.eventStore
+          );
         }
       } else if (isWorkerMode() && session.toolResultCache.size > 0) {
         session.toolResultCache.clear();
@@ -923,11 +993,16 @@ function wrapPluginTool(
       const retryPolicy = lookupRetryPolicy(tool.name, config);
       const idempotencyClass = lookupIdempotencyClass(tool.name, config);
       let attempt = 1;
+      // pi-experiment-6q0y.18: capture the last persisted outputFile so the
+      // payload-budget rejection event can reference the semantic artifact (AC6).
+      // Reset each iteration of the retry loop alongside currentInvocationId.
+      let capturedOutputFile: string | undefined;
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
         // Rebuild tracedExecute each attempt so span attributes and all closures
         // capture the current toolInvocationId (pi-experiment-t6gw retry loop).
+        capturedOutputFile = undefined;
         const currentInvocationId = toolInvocationId;
         const tracedExecute = runtimeObservability.tracedAsync(
           `tool:${tool.name}`,
@@ -958,6 +1033,8 @@ function wrapPluginTool(
               tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
               ToolResultStatus.PASSED, undefined, currentInvocationId
             );
+            // pi-experiment-6q0y.18: capture for payload-budget rejection event (AC6).
+            capturedOutputFile = toolResultHandle.outputFile;
 
             // zog2.2 (producer-side): look up this tool's RTK summary factory in the
             // registry. If registered, call the factory with the result + params to get
@@ -1077,7 +1154,14 @@ function wrapPluginTool(
             }
           }
 
-          return toolResult(result);
+          // pi-experiment-6q0y.18: enforce optional tool-payload budget BEFORE
+          // the result reaches the model. No-op when no budget is configured (AC2).
+          return applyToolPayloadBudget(
+            tool.name, result, config,
+            { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
+              toolInvocationId: currentInvocationId, outputFile: capturedOutputFile },
+            services.eventStore
+          );
         } catch (error) {
           if (breakerEnabled) {
             session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);

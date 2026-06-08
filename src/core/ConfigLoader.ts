@@ -962,6 +962,71 @@ export class ConfigLoader {
     }
   }
 
+  /**
+   * pi-experiment-6q0y.18 AC7: Validate tool-payload budget declarations.
+   *
+   * Three load-bearing checks (all startup-fatal):
+   *   (a) Negative limits: maxBytes < 0 is rejected.
+   *   (b) Unknown tool names: keys in toolPayloadBudgetByTool that do not match
+   *       any declared tool in config.tools are rejected with a diagnostic.
+   *   (c) Routes absent from statechart vocabulary: every configured route must
+   *       be in declaredOutcomes (case-insensitive match).
+   *
+   * Each check is independent — removing any one causes its test to fail.
+   */
+  private validateToolPayloadBudgetDeclarations(
+    config: HarnessConfig,
+    declaredToolNames: Set<string>,
+    declaredOutcomes: Set<string>
+  ): void {
+    const configPath = this.getConfigPath();
+    const settings = config.settings as typeof config.settings & {
+      toolPayloadBudget?: { maxBytes: number; route: string };
+      toolPayloadBudgetByTool?: Record<string, { maxBytes: number; route: string }>;
+    };
+
+    const validatePolicy = (
+      policy: { maxBytes: number; route: string } | undefined,
+      context: string
+    ): void => {
+      if (!policy) return;
+
+      // (a) Negative limits
+      if (policy.maxBytes < 0) {
+        throw new Error(
+          `${context} declares toolPayloadBudget.maxBytes: ${policy.maxBytes} which is negative. ` +
+          `Tool payload budget limits must be non-negative integers. ` +
+          `Remove the field or set a non-negative value.`
+        );
+      }
+
+      // (c) Route absent from statechart vocabulary
+      if (!declaredOutcomes.has(policy.route.toUpperCase())) {
+        throw new Error(
+          `${context} declares toolPayloadBudget.route: "${policy.route}" which is absent ` +
+          `from the statechart outcome vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
+          `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+          `Add "${policy.route}" to the appropriate outcome list or correct the route.`
+        );
+      }
+    };
+
+    // Settings-level global default policy
+    validatePolicy(settings.toolPayloadBudget, `settings (${configPath})`);
+
+    // (b) Per-tool policies: validate tool name exists AND validate each policy
+    for (const [toolName, policy] of Object.entries(settings.toolPayloadBudgetByTool ?? {})) {
+      if (!declaredToolNames.has(toolName)) {
+        throw new Error(
+          `settings.toolPayloadBudgetByTool key "${toolName}" (${configPath}) references an unknown tool name. ` +
+          `Known tools: ${[...declaredToolNames].join(', ')}. ` +
+          `Remove or correct the tool name reference.`
+        );
+      }
+      validatePolicy(policy, `settings.toolPayloadBudgetByTool["${toolName}"] (${configPath})`);
+    }
+  }
+
   private validateSerializeRequiresSerializationKey(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
       const t = tool as { serialize?: boolean; sideEffectContract?: { serializationKey?: string | null } };
@@ -1533,6 +1598,11 @@ export class ConfigLoader {
     // ── AC7 (pi-experiment-6q0y.17): prompt-budget policy validation ──────────
     // Now that declaredOutcomes is built we can validate budget routes.
     this.validatePromptBudgetDeclarations(config, stateIds, declaredOutcomes);
+
+    // ── AC7 (pi-experiment-6q0y.18): tool-payload budget policy validation ──
+    // Build the set of declared tool names for unknown-tool-name checks (AC7(b)).
+    const declaredToolNames = new Set<string>((config.tools ?? []).map(t => t.name));
+    this.validateToolPayloadBudgetDeclarations(config, declaredToolNames, declaredOutcomes);
   }
 
   /**

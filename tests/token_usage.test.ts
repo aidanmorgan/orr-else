@@ -87,9 +87,12 @@ describe('estimateResultBytes', () => {
     expect(estimateResultBytes('€')).toBe(3);
   });
 
-  it('serializes objects to JSON and returns byte length', () => {
+  it('serializes objects to pretty-print JSON and returns byte length (AC1: matches actual content[0].text)', () => {
+    // pi-experiment-6q0y.18 AC1: estimateResultBytes uses serializeToolResultText
+    // (pretty-print JSON, 2-space indent) so metered bytes exactly match the string
+    // that appears in content[0].text — no drift between accounting and payload.
     const obj = { status: 'ok', count: 42 };
-    const expected = Buffer.byteLength(JSON.stringify(obj), 'utf8');
+    const expected = Buffer.byteLength(JSON.stringify(obj, null, 2), 'utf8');
     expect(estimateResultBytes(obj)).toBe(expected);
   });
 
@@ -141,7 +144,9 @@ describe('buildToolTokenAccounting', () => {
     expect(accounting.toolInvocationId).toBe(invocationId);
   });
 
-  it('produces accounting for an object result without mutating the input', () => {
+  it('produces accounting for an object result without mutating the input (AC1: uses pretty-print bytes)', () => {
+    // pi-experiment-6q0y.18 AC1: modelFacingBytes uses serializeToolResultText
+    // (pretty-print JSON) so accounting bytes exactly match content[0].text.
     const result = { status: 'ok', files: ['a.ts', 'b.ts'] };
     const serializedBefore = JSON.stringify(result);
     const accounting = buildToolTokenAccounting(
@@ -149,7 +154,7 @@ describe('buildToolTokenAccounting', () => {
     );
     // Object must be unchanged — deep-equal
     expect(JSON.stringify(result)).toBe(serializedBefore);
-    const expectedBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+    const expectedBytes = Buffer.byteLength(JSON.stringify(result, null, 2), 'utf8');
     expect(accounting.modelFacingBytes).toBe(expectedBytes);
     expect(accounting.estimatedTokens).toBe(Math.ceil(expectedBytes / 4));
     expect(accounting.cached).toBe(false);

@@ -427,6 +427,19 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['beadId', 'actionId', 'limitBytes', 'limitTokens']
   },
+
+  // ── Tool-payload budget rejection (pi-experiment-6q0y.18) ─────────────────
+  // Emitted ONLY when a tool-payload budget is configured AND a result exceeds
+  // the limit. With no budget configured this event is NEVER emitted (true no-op).
+  // Required fields: tool (name), actualBytes (exact bytes), limitBytes (the
+  //   configured limit), decision (always 'REJECTED'), route (outcome route).
+  // Optional: beadId/stateId/actionId/toolInvocationId (absent when no bead
+  //   context), outputFile (artifact path when available — AC6 semantic ref).
+  [DomainEventName.TOOL_PAYLOAD_BUDGET_REJECTED]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['beadId', 'stateId', 'actionId', 'toolInvocationId', 'outputFile']
+  },
 };
 
 /**
@@ -607,5 +620,14 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
     'piBasePromptBytes', 'piBasePromptTokens', 'piBasePromptHash',
     'volatileSuffixBytes', 'volatileSuffixTokens', 'volatileSuffixHash',
     'finalPromptBytes', 'finalPromptTokens', 'finalPromptHash'
+  ],
+
+  // ── Tool-payload budget rejection (pi-experiment-6q0y.18) ────────────────
+  // Required: tool (name), actualBytes (exact bytes from serializeToolResultText),
+  //   limitBytes (configured limit), decision (always 'REJECTED'), route (outcome).
+  // All optional: beadId/stateId/actionId/toolInvocationId (context), outputFile
+  //   (semantic artifact path when persisted — AC6 ref without raw body).
+  [DomainEventName.TOOL_PAYLOAD_BUDGET_REJECTED]: [
+    'tool', 'actualBytes', 'limitBytes', 'decision', 'route'
   ],
 };

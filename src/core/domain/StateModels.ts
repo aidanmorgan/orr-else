@@ -42,6 +42,28 @@ export interface PromptBudgetPolicy {
 }
 
 /**
+ * Optional per-tool or default payload-budget policy (pi-experiment-6q0y.18).
+ *
+ * Opt-in: absent = no rejection for that result path (true no-op when unconfigured).
+ * When declared:
+ *   - maxBytes: hard upper limit for the model-facing tool result in UTF-8 bytes.
+ *   - route: deterministic outcome route when the limit is exceeded. Must be a
+ *     declared outcome in the statechart vocabulary (AC7 startup lint).
+ *
+ * Resolution: per-tool declaration > default.
+ * Only the innermost configured policy takes effect — there is no merging.
+ */
+export interface ToolPayloadBudgetPolicy {
+  /** Maximum UTF-8 byte length for the model-facing tool result payload. */
+  maxBytes: number;
+  /**
+   * Deterministic outcome route emitted when the limit is exceeded.
+   * Must reference a declared outcome in the statechart vocabulary (AC7 lint).
+   */
+  route: string;
+}
+
+/**
  * Retry policy for project-configured tools (pi-experiment-t6gw).
  *
  * Opt-in: absent retryPolicy means ZERO automatic retries (default).
@@ -774,6 +796,23 @@ export interface HarnessConfig {
      * than settings.promptBudgetStateOverrides and settings.promptBudget.
      */
     promptBudgetActionOverrides?: Record<string, PromptBudgetPolicy>;
+    /**
+     * Default tool-payload budget applied to all tools that do not declare an
+     * explicit per-tool budget (pi-experiment-6q0y.18).
+     *
+     * Absent = no limit enforced anywhere (full no-op, AC2). Per-tool declarations
+     * in toolPayloadBudgetByTool override this default for specific tools.
+     */
+    toolPayloadBudget?: ToolPayloadBudgetPolicy;
+    /**
+     * Per-tool tool-payload budget overrides keyed by tool name
+     * (pi-experiment-6q0y.18 AC4).
+     *
+     * Takes precedence over settings.toolPayloadBudget (default).
+     * Startup lint (AC7) rejects keys that do not match a declared tool name
+     * and routes absent from the statechart vocabulary.
+     */
+    toolPayloadBudgetByTool?: Record<string, ToolPayloadBudgetPolicy>;
   };
   scheduler: {
     weights: {
