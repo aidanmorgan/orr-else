@@ -468,7 +468,32 @@ export enum DomainEventName {
    * Replay-critical (same as LOOP_DETECTED): LoopDetector.rebuildFromEvents()
    * reads these to re-mark warnedFingerprints on restart (AC7).
    */
-  LOOP_WARNING_DIAGNOSTIC = 'LOOP_WARNING_DIAGNOSTIC'
+  LOOP_WARNING_DIAGNOSTIC = 'LOOP_WARNING_DIAGNOSTIC',
+
+  /**
+   * pi-experiment-6k8e: v2 first-class route-event contract.
+   *
+   * Emitted ONLY by configured deterministic emitters (tools, verifiers, gates,
+   * system preconditions) when they produce a v2 route decision. Model-authored
+   * fields (outcome/transitionEvent/nextPhase/route labels in prose), tool
+   * stdout/stderr, and untrusted tool arguments MUST NEVER produce this event.
+   *
+   * Carries: { schemaId, schemaVersion, configVersion, configFingerprint,
+   *   beadId, stateId, actionId, runId, emitterType, emitterId,
+   *   eventName, category, evidenceRefs }.
+   *
+   * evidenceRefs: each ref includes { semanticPath, byteCount, sha256,
+   *   schemaId?, schemaVersion? }.  A ref missing byteCount or sha256 is
+   *   rejected by schema validation BEFORE any projection can consume it.
+   *
+   * Replay-critical: v2 BeadStateProjection consumes ONLY these events (plus
+   * the admitted transition table) to produce STATE_TRANSITION_APPLIED v2
+   * records that reference the route-event ID.
+   *
+   * version-gated: only emitted for configs with version === 2. v1 configs
+   * are completely unaffected.
+   */
+  ROUTE_EVENT_EMITTED = 'ROUTE_EVENT_EMITTED',
 }
 
 export enum BeadsCliCommand {
@@ -1583,6 +1608,11 @@ export const REPLAY_CRITICAL_EVENT_TYPES = new Set<string>([
   // via eventsForActiveProjectToolRun() to enforce per-bead failure limits
   // (consumer 5 above).
   DomainEventName.PROJECT_TOOL_FAILED,
+  // v2 route-event contract (pi-experiment-6k8e): the v2 BeadStateProjection
+  // reads these to reconstruct which transitions were applied from deterministic
+  // emitter decisions. Loss of these events means v2 replay cannot reconstruct
+  // authoritative transition history.
+  DomainEventName.ROUTE_EVENT_EMITTED,
 ]);
 
 export const TelemetryDefaults = {

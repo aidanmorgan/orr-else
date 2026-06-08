@@ -55,6 +55,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BACKEND_READINESS_MANIFEST_SCHEMA } from './BackendReadiness.js';
+import {
+  ROUTE_EVENT_EMITTED_SCHEMA_ID,
+  ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+  ROUTE_EVENT_EMITTED_JSON_SCHEMA,
+} from './RouteEventContract.js';
 
 const Ajv = AjvModule.default ?? AjvModule;
 const addFormats = addFormatsModule.default ?? addFormatsModule;
@@ -1002,6 +1007,207 @@ schemaRegistry.register(modelTurnUsageSchema);
 schemaRegistry.register(toolPayloadAccountingSchema);
 
 // ---------------------------------------------------------------------------
+// harness.event.routeEventEmitted — v2 route-event contract (pi-experiment-6k8e)
+//
+// ROUTE_EVENT_EMITTED boundary contract: emitted ONLY by configured deterministic
+// emitters. Schema enforces all required fields + artifact-digest strictness
+// (byteCount + sha256 required per evidenceRef — AC4).
+// ---------------------------------------------------------------------------
+
+(function registerRouteEventEmittedSchema(): void {
+  const routeEventEmittedSchema: SchemaRegistryEntry = {
+    id: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+    version: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+    owner: 'src/core/RouteEventContract.ts',
+    replayPolicy: 'CRITICAL',
+    compatibilityPolicy: 'ADDITIVE_ONLY',
+    jsonSchema: ROUTE_EVENT_EMITTED_JSON_SCHEMA,
+    positiveFixtures: [
+      {
+        label: 'minimal valid ROUTE_EVENT_EMITTED with one evidence ref',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-001',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc123',
+          emitterType: 'verifier',
+          emitterId: 'plan_verifier',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: [
+            {
+              semanticPath: '.pi/artifacts/plan.md',
+              byteCount: 1024,
+              sha256: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd'
+            }
+          ]
+        }
+      },
+      {
+        label: 'ROUTE_EVENT_EMITTED with optional schemaId/schemaVersion in evidenceRef',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-002',
+          stateId: 'Review',
+          actionId: 'review-action',
+          runId: 'run-def456',
+          emitterType: 'gate',
+          emitterId: 'review_gate',
+          eventName: 'QUALITY_PASSED',
+          category: 'advance',
+          evidenceRefs: [
+            {
+              semanticPath: '.pi/artifacts/review.json',
+              byteCount: 512,
+              sha256: 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+              schemaId: 'harness.tool.reviewOutput',
+              schemaVersion: '1.0.0'
+            }
+          ]
+        }
+      },
+      {
+        label: 'ROUTE_EVENT_EMITTED with optional routeEventId (pi-experiment-6k8e self-referential link)',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-003',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-xyz789',
+          emitterType: 'verifier',
+          emitterId: 'plan_verifier',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: [
+            {
+              semanticPath: '.pi/artifacts/plan.md',
+              byteCount: 256,
+              sha256: 'aabbccddeeff0011aabbccddeeff0011aabbccddeeff0011aabbccddeeff0011'
+            }
+          ],
+          routeEventId: '01928c8d-1234-7abc-8def-000000000001'
+        }
+      }
+    ],
+    negativeFixtures: [
+      {
+        label: 'missing required beadId',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc',
+          emitterType: 'verifier',
+          emitterId: 'plan_verifier',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: []
+        }
+      },
+      {
+        label: 'evidenceRef missing sha256 (AC4 — digest required)',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-001',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc123',
+          emitterType: 'tool',
+          emitterId: 'plan_tool',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: [
+            {
+              semanticPath: '.pi/artifacts/plan.md',
+              byteCount: 1024
+              // sha256: missing — MUST be rejected
+            }
+          ]
+        }
+      },
+      {
+        label: 'evidenceRef missing byteCount (AC4 — digest required)',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-001',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc123',
+          emitterType: 'tool',
+          emitterId: 'plan_tool',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: [
+            {
+              semanticPath: '.pi/artifacts/plan.md',
+              sha256: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd'
+              // byteCount: missing — MUST be rejected
+            }
+          ]
+        }
+      },
+      {
+        label: 'configVersion not equal to 2',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 1,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-001',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc123',
+          emitterType: 'verifier',
+          emitterId: 'plan_verifier',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: []
+        }
+      },
+      {
+        label: 'unknown emitterType rejected (not in enum)',
+        value: {
+          schemaId: ROUTE_EVENT_EMITTED_SCHEMA_ID,
+          schemaVersion: ROUTE_EVENT_EMITTED_SCHEMA_VERSION,
+          configVersion: 2,
+          configFingerprint: 'abcd1234abcd1234',
+          beadId: 'bead-001',
+          stateId: 'Planning',
+          actionId: 'plan-action',
+          runId: 'run-abc123',
+          emitterType: 'model',
+          emitterId: 'llm_prose',
+          eventName: 'PLAN_ACCEPTED',
+          category: 'advance',
+          evidenceRefs: []
+        }
+      }
+    ]
+  };
+
+  schemaRegistry.register(routeEventEmittedSchema);
+})();
+
+// ---------------------------------------------------------------------------
 // Convenience re-exports for the seeded schema ids
 // ---------------------------------------------------------------------------
 
@@ -1018,6 +1224,8 @@ export const SchemaId = {
   MODEL_TURN_USAGE:  'harness.accounting.modelTurnUsage',
   /** pi-experiment-6q0y.15: tool-payload byte/token accounting event payload. */
   TOOL_PAYLOAD:      'harness.accounting.toolPayload',
+  /** pi-experiment-6k8e: v2 route-event boundary contract. */
+  ROUTE_EVENT_EMITTED: ROUTE_EVENT_EMITTED_SCHEMA_ID,
 } as const;
 
 export type SchemaId = typeof SchemaId[keyof typeof SchemaId];
@@ -1057,4 +1265,5 @@ export const REQUIRED_BOUNDARY_IDS: ReadonlySet<string> = new Set<string>([
   SchemaId.BACKEND_READINESS_MANIFEST,
   SchemaId.MODEL_TURN_USAGE,
   SchemaId.TOOL_PAYLOAD,
+  SchemaId.ROUTE_EVENT_EMITTED,
 ]);
