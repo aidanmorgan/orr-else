@@ -1975,23 +1975,63 @@ function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices
 }
 
 /**
- * Combined state + completed-action requiredTools for the COORDINATOR gate
- * (pi-experiment-0yt5.20). Returns the unresolved RequiredTool entries for the
- * completing (state, action); the gate's RequiredToolResolver applies any `when`
- * conditions and de-dupes. Empty list ⇒ unguarded transition (gate is a no-op).
+ * Combined state + completed-action + route-level requiredTools for the
+ * COORDINATOR gate. Returns the unresolved RequiredTool entries for the
+ * completing (state, action, transitionEvent); the gate's RequiredToolResolver
+ * applies any `when` conditions and de-dupes. Empty list ⇒ unguarded transition
+ * (gate is a no-op).
+ *
+ * pi-experiment-6q0y.46: also merges state.routeEvidence[transitionEvent] so
+ * that per-route required-tool evidence is enforced at both advance AND terminal
+ * transitions. This is the SINGLE collection point for all required-tool inputs
+ * to the gate — no additional check sites needed.
  */
 function coordinatorGateRequiredTools(
   config: import('./core/ConfigLoader.js').HarnessConfig,
   stateId: string,
-  actionId: string | undefined
+  actionId: string | undefined,
+  transitionEvent?: string
 ): import('./core/domain/StateModels.js').RequiredTool[] {
   const state = config.states[stateId];
   if (!state) return [];
   const action = actionId ? (state.actions || []).find(a => a.id === actionId) : undefined;
+  // Merge route-level evidence (case-insensitive key match against transitionEvent).
+  let routeTools: import('./core/domain/StateModels.js').RequiredTool[] = [];
+  if (transitionEvent && state.routeEvidence) {
+    const upperEvent = transitionEvent.toUpperCase();
+    const matched = Object.entries(state.routeEvidence).find(
+      ([key]) => key.toUpperCase() === upperEvent
+    );
+    if (matched) routeTools = matched[1];
+  }
   return [
     ...(state.requiredTools || []),
-    ...(action?.requiredTools || [])
+    ...(action?.requiredTools || []),
+    ...routeTools
   ];
+}
+
+/**
+ * pi-experiment-6q0y.46 FAIL-CLOSED: Returns true if the config has at least one
+ * non-empty evidence declaration (state.requiredTools, action.requiredTools, or
+ * routeEvidence) across ALL states.
+ *
+ * Configs with ZERO evidence declarations are legacy configs that predate the
+ * artifact-first system. The fail-closed gate only activates for configs that have
+ * opted into the evidence system — otherwise integration tests and minimal test
+ * fixtures without evidence would all be blocked.
+ */
+function configHasAnyEvidence(
+  config: import('./core/ConfigLoader.js').HarnessConfig
+): boolean {
+  for (const state of Object.values(config.states || {})) {
+    if ((state.requiredTools || []).length > 0) return true;
+    if ((state.actions || []).some(a => (a.requiredTools || []).length > 0)) return true;
+    if (state.routeEvidence) {
+      if (Object.values(state.routeEvidence).some(tools => (tools || []).length > 0)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -2148,7 +2188,7 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
       }
     }
 
-    // ── COORDINATOR-side artifact-presence gate (pi-experiment-0yt5.20) ─────────
+    // ── COORDINATOR-side artifact-presence gate (pi-experiment-0yt5.20 / 6q0y.46) ──
     // The BINDING authority (decision B): before applying an ADVANCE transition,
     // re-evaluate the completing (state, action) coordinator-side against durable
     // state. A transition declaring NO required tools is a NO-OP (evaluate returns
@@ -2156,9 +2196,69 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
     // On a block we do NOT advance; we route the bead to BLOCKED via the existing
     // worker-remediation surface (the model picks the recovery edge — failureOutcome
     // is advisory only, never auto-routed).
+    //
+    // pi-experiment-6q0y.46: coordinatorGateRequiredTools now also merges
+    // state.routeEvidence[transitionEvent] so route-level evidence requirements
+    // are enforced without a separate check site. Both advance AND terminal
+    // transitions run this gate when routeEvidence is configured.
     if (isAdvanceOutcome(event.transitionEvent, config)) {
-      const gateRequiredTools = coordinatorGateRequiredTools(config, event.stateId, event.actionId);
-      if (gateRequiredTools.length > 0) {
+      const gateRequiredTools = coordinatorGateRequiredTools(config, event.stateId, event.actionId, event.transitionEvent);
+      if (gateRequiredTools.length === 0 && configHasAnyEvidence(config)) {
+        // pi-experiment-6q0y.46 FAIL-CLOSED: an advance/terminal route with zero
+        // evidence (state.requiredTools ∪ action.requiredTools ∪ routeEvidence[outcome]
+        // all empty) is REJECTED when the config has opted into the evidence system
+        // (at least one state declares non-empty evidence). Prose-only progress is never
+        // admitted for configs that use the artifact-first system.
+        // The startup lint (ConfigLoader.validateEmptyAdvanceEvidence) catches this
+        // at load time; this admission site is the runtime enforcement layer.
+        const rejectMessage = `Route "${event.transitionEvent}" on state "${event.stateId}" declares no artifact evidence (requiredTools + routeEvidence are empty). Artifact-first enforcement requires at least one tool in requiredTools or routeEvidence for every advance/terminal route.`;
+        Logger.warn(Component.ORR_ELSE, 'Advance route BLOCKED — zero evidence declared (fail-closed)', {
+          beadId, stateId: event.stateId, actionId: event.actionId, route: event.transitionEvent
+        });
+        await services.eventStore.record(DomainEventName.ROUTE_ADMISSION_REJECTED, {
+          beadId,
+          stateId: event.stateId,
+          actionId: event.actionId || '',
+          routeEvent: event.transitionEvent,
+          missingIds: [],
+          remediationHint: rejectMessage
+        }).catch(() => {});
+        ack?.send({ pass: false, failures: [], rejectMessage });
+        await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
+          beadId,
+          workerId: event.workerId,
+          sessionStateId: event.sessionStateId,
+          idempotencyKey: event.idempotencyKey,
+          fromState: event.stateId,
+          nextState: event.stateId,
+          transitionEvent: event.transitionEvent,
+          actionId: event.actionId,
+          actionKey: event.actionId ? actionCompletionKey(config, event.stateId, event.actionId) : undefined,
+          summary: event.summary,
+          evidence: event.evidence,
+          handover: event.handover,
+          gateBlocked: true,
+          gateFailures: [],
+          gateRejectMessage: rejectMessage
+        });
+        const updateStatusZero = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
+        if (updateStatusZero) {
+          await Promise.resolve(updateStatusZero.execute({
+            id: beadId,
+            status: BeadStatus.BLOCKED,
+            notes: `Artifact-first fail-closed: no evidence declared for advance route ${event.stateId}/${event.transitionEvent}`
+          }, ctx)).catch((error: unknown) => {
+            Logger.warn(Component.ORR_ELSE, 'Failed to persist BLOCKED status after zero-evidence rejection', {
+              beadId, stateId: event.stateId, error: String(error)
+            });
+          });
+        }
+        await Promise.resolve(releaseTool.execute({ id: beadId })).catch((error: unknown) => {
+          Logger.warn(Component.ORR_ELSE, 'Unable to release Bead lease after zero-evidence rejection', { beadId, error: String(error) });
+        });
+        currentSupervisor.markBeadExited(beadId);
+        return;
+      } else if (gateRequiredTools.length > 0) {
         const worktreePath = await latestWorktreePathForBead(services, beadId);
         const gateOutcome = await evaluateCoordinatorGate(
           {
@@ -2228,6 +2328,22 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             evaluatedTools: gateOutcome.evaluatedTools
           });
 
+          // pi-experiment-6q0y.46 AC3: emit ROUTE_ADMISSION_REJECTED BEFORE
+          // sending the ack so the event is durable when the response arrives.
+          // No raw prompt or tool-output bodies — only identity + missing IDs + hint.
+          {
+            const missingIds = gateOutcome.failures.map(f => f.tool);
+            const remediationHint = `Route "${event.transitionEvent}" requires artifact evidence. Invoke the required tools and produce their artifacts before re-signaling. Missing: ${missingIds.join(', ')}.`;
+            await services.eventStore.record(DomainEventName.ROUTE_ADMISSION_REJECTED, {
+              beadId,
+              stateId: event.stateId,
+              actionId: event.actionId || '',
+              routeEvent: event.transitionEvent,
+              missingIds,
+              remediationHint
+            }).catch(() => {});
+          }
+
           // AC3: round-trip the structured rejection to the caller SYNCHRONOUSLY
           // (before the slow BLOCKED-status side effects) so the worker receives
           // the verdict + reasons and can remediate — not a bare {ok:true}.
@@ -2284,6 +2400,91 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
         // caller before continuing the (slow) advance side effects.
         if (gateOutcome.ran) {
           ack?.send({ pass: true, failures: [], rejectMessage: '' });
+        }
+      }
+    } else if (event.transitionEvent) {
+      // ── pi-experiment-6q0y.46: routeEvidence gate for NON-advance routes ──
+      // Non-advance routes (custom, failed, blocked) may also declare routeEvidence.
+      // We run the same coordinator gate when routeEvidence is configured for this
+      // route — so the artifact-first invariant covers EVERY configured route, not
+      // just advance outcomes. The gate is a NO-OP (ran:false) when no routeEvidence
+      // is declared for this route.
+      const nonAdvanceRouteTools = coordinatorGateRequiredTools(config, event.stateId, event.actionId, event.transitionEvent);
+      // Only run if there are route-level tools (state/action-level requiredTools
+      // are advance-outcome-only by design; only routeEvidence applies here).
+      const stateForRoute = config.states[event.stateId];
+      const hasRouteEvidence = stateForRoute?.routeEvidence &&
+        Object.keys(stateForRoute.routeEvidence).some(
+          k => k.toUpperCase() === (event.transitionEvent || '').toUpperCase()
+        );
+      if (hasRouteEvidence && nonAdvanceRouteTools.length > 0) {
+        const worktreePath = await latestWorktreePathForBead(services, beadId);
+        const routeGateOutcome = await evaluateCoordinatorGate(
+          {
+            eventStore: services.eventStore,
+            artifactPaths: services.artifactPaths,
+            requiredToolResolver: services.requiredToolResolver,
+            planWriteSet: services.planWriteSet,
+            projectRoot: services.projectRoot,
+            config
+          },
+          {
+            beadId,
+            stateId: event.stateId,
+            actionId: event.actionId || '',
+            requiredTools: nonAdvanceRouteTools,
+            worktreePath
+          }
+        );
+        if (routeGateOutcome.ran && !routeGateOutcome.pass) {
+          const missingIds = routeGateOutcome.failures.map(f => f.tool);
+          const remediationHint = `Route "${event.transitionEvent}" requires artifact evidence. Invoke the required tools and produce their artifacts before re-signaling. Missing: ${missingIds.join(', ')}.`;
+          // AC3: no-body rejection event — only identity + missing IDs + hint.
+          await services.eventStore.record(DomainEventName.ROUTE_ADMISSION_REJECTED, {
+            beadId,
+            stateId: event.stateId,
+            actionId: event.actionId || '',
+            routeEvent: event.transitionEvent,
+            missingIds,
+            remediationHint
+          }).catch(() => {});
+          Logger.warn(Component.ORR_ELSE, 'Route admission gate BLOCKED non-advance transition', {
+            beadId, stateId: event.stateId, actionId: event.actionId,
+            routeEvent: event.transitionEvent, missingIds
+          });
+          ack?.send({
+            pass: false,
+            failures: routeGateOutcome.failures,
+            rejectMessage: routeGateOutcome.rejectMessage
+          });
+          await services.eventStore.record(DomainEventName.STATE_TRANSITION_APPLIED, {
+            beadId,
+            workerId: event.workerId,
+            sessionStateId: event.sessionStateId,
+            idempotencyKey: event.idempotencyKey,
+            fromState: event.stateId,
+            nextState: event.stateId,
+            transitionEvent: event.transitionEvent,
+            actionId: event.actionId,
+            actionKey: event.actionId ? actionCompletionKey(config, event.stateId, event.actionId) : undefined,
+            summary: event.summary,
+            evidence: event.evidence,
+            handover: event.handover,
+            gateBlocked: true,
+            gateFailures: routeGateOutcome.failures,
+            gateRejectMessage: routeGateOutcome.rejectMessage
+          });
+          const updateStatus = services.plugins.bd.tools.find(t => t.name === PluginToolName.BD_UPDATE_STATUS);
+          if (updateStatus) {
+            await Promise.resolve(updateStatus.execute({
+              id: beadId,
+              status: BeadStatus.BLOCKED,
+              notes: `Route admission gate blocked ${event.stateId}/${event.transitionEvent}: ${routeGateOutcome.rejectMessage}`
+            }, ctx)).catch(() => {});
+          }
+          await Promise.resolve(releaseTool.execute({ id: beadId })).catch(() => {});
+          currentSupervisor.markBeadExited(beadId);
+          return;
         }
       }
     }

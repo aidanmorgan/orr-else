@@ -1016,8 +1016,8 @@ export function checkRtkInventoryCoverage(registeredToolNames: readonly string[]
  *   this gate — a durable tool-call event in the EventStore is required — but
  *   the gate does NOT inspect or validate the output content.
  *
- *   In Cerdiwen: coding_standards, add_checklist_item, submit_review_artifact,
- *   pytest, semgrep.
+ *   In Cerdiwen: coding_standards, add_checklist_item, tick_items,
+ *   submit_review_artifact, pytest, semgrep.
  */
 export type EvidenceClass =
   | 'VERIFIER_BACKED_SEMANTIC_ARTIFACT'
@@ -1233,7 +1233,21 @@ export const CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS: readonly CerdiwenToolClassi
     notes:
       'Built-in control-plane tool (BuiltInToolName.ADD_CHECKLIST_ITEM). No verify() ' +
       'registered. Gate confirms the tool was invoked; the content of checklist items ' +
-      'is not subject to a verifier verdict.',
+      'is not subject to a verifier verdict. Required by AdversarialPostReview.',
+  },
+
+  {
+    toolName: 'tick_items',
+    evidenceClass: 'PRESENCE_ONLY',
+    expectsVerify: false,
+    hasVerifyCallback: false,
+    verifyOwner: 'none',
+    notes:
+      'Built-in control-plane tool (BuiltInToolName.TICK_ITEMS). No verify() registered. ' +
+      'Gate confirms the model called tick_items (batch-ticking mandatory checklist items ' +
+      'with evidence) and the run PASSED; wrapPluginTool records TOOL_INVOCATION_SUCCEEDED ' +
+      'with an outputFile (persistPluginToolRawResult), satisfying presence-only evidence ' +
+      'per zog2.8. Required by RequirementsClarification (6q0y.51 no-deadlock fix).',
   },
 
   {
@@ -1295,6 +1309,7 @@ export const CERDIWEN_REQUIRED_TOOL_NAMES: readonly string[] = [
   'pytest',
   'coding_standards',
   'add_checklist_item',
+  'tick_items',
   'submit_review_artifact',
   'requirements_schema',
   'plan_contract',

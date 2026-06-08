@@ -1691,6 +1691,141 @@ export class ConfigLoader {
 
     // ── AC6 (pi-experiment-6q0y.48): runtime budget policy validation ──────
     this.validateRuntimeBudgetDeclarations(config, stateIds, declaredOutcomes);
+
+    // ── AC5 (pi-experiment-6q0y.46): routeEvidence startup lint ──────────────
+    // Reports which artifacts/verifiers are required for each advance or terminal
+    // route event. Fails at startup if any tool with expectsVerify:true has no
+    // registered verify() callback resolution can be proven deterministically.
+    // NOTE: verify() registry validation for routeEvidence tools is handled at
+    // coordinator startup via validateRequiredToolVerifiers (CoordinatorVerifierGate),
+    // which already scans ALL state + action requiredTools. The lint here validates
+    // that routeEvidence route keys are declared in the statechart vocabulary so
+    // referencing an unknown outcome fails fast at load time (before a worker runs).
+    this.validateRouteEvidenceDeclarations(config, declaredOutcomes);
+
+    // ── pi-experiment-6q0y.46 FAIL-CLOSED: advance/terminal route must declare evidence ──
+    // Every state transition whose outcome is an advance outcome OR whose target is
+    // a terminal state must have a non-empty evidence union
+    // (state.requiredTools ∪ matching routeEvidence[outcome]).
+    // A zero-evidence advance/terminal route is a configuration error — it means the
+    // artifact-first invariant would be silently bypassed at runtime. Fail at load().
+    this.validateEmptyAdvanceEvidence(config, sc.advanceOutcomes ?? ['SUCCESS'], terminalStates);
+  }
+
+  /**
+   * pi-experiment-6q0y.46 FAIL-CLOSED: enforce that every advance/terminal route
+   * declares at least one tool in the resolved evidence union
+   * (state.requiredTools ∪ action.requiredTools ∪ routeEvidence[outcome]).
+   *
+   * A route is "advance/terminal" when its outcome is in advanceOutcomes OR its
+   * transition target is a terminal state.  Both are checked here: advance by
+   * outcome vocabulary membership; terminal-target by consulting the state's
+   * transitions map.
+   *
+   * Throws at load() with a diagnostic naming the offending state + route if any
+   * such route has an empty evidence union.  Self-verifying: removing this call
+   * causes the startup-lint test to fail.
+   */
+  private validateEmptyAdvanceEvidence(
+    config: HarnessConfig,
+    advanceOutcomes: string[],
+    terminalStates: Set<string>
+  ): void {
+    // Only enforce when the config has opted into the evidence system: at least
+    // one state must have a non-empty requiredTools, action.requiredTools, or
+    // routeEvidence declaration. Configs with ZERO evidence declarations anywhere
+    // are legacy/test configs that predate the artifact-first system; imposing the
+    // lint on them would break all existing test fixtures that never declared evidence.
+    const hasAnyEvidence = Object.values(config.states || {}).some(state => {
+      if ((state.requiredTools ?? []).length > 0) return true;
+      if ((state.actions ?? []).some(a => (a.requiredTools ?? []).length > 0)) return true;
+      if (state.routeEvidence && Object.values(state.routeEvidence).some(tools => (tools ?? []).length > 0)) return true;
+      return false;
+    });
+    if (!hasAnyEvidence) return;
+
+    const advanceSet = new Set(advanceOutcomes.map(o => o.toUpperCase()));
+
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      // Collect the union of all transitions for this state.
+      const allTransitions: Record<string, string> = {
+        ...(state.transitions || {}),
+        ...(state.on || {}),
+      };
+
+      for (const [outcomeKey, targetState] of Object.entries(allTransitions)) {
+        const upperOutcome = outcomeKey.toUpperCase();
+        const isAdvance = advanceSet.has(upperOutcome);
+        const isTerminalTarget = terminalStates.has(targetState);
+
+        if (!isAdvance && !isTerminalTarget) continue;
+
+        // Compute evidence union: state.requiredTools ∪ action.requiredTools (any) ∪ routeEvidence[outcome].
+        // This mirrors coordinatorGateRequiredTools() in extension.ts which unions all three sources.
+        const stateTools = state.requiredTools ?? [];
+        const actionTools = (state.actions ?? []).flatMap(a => a.requiredTools ?? []);
+        const routeEvidenceEntry = state.routeEvidence
+          ? Object.entries(state.routeEvidence).find(
+              ([key]) => key.toUpperCase() === upperOutcome
+            )
+          : undefined;
+        const routeTools = routeEvidenceEntry ? (routeEvidenceEntry[1] ?? []) : [];
+        const evidenceUnion = [...stateTools, ...actionTools, ...routeTools];
+
+        if (evidenceUnion.length === 0) {
+          throw new Error(
+            `State "${stateId}" route "${outcomeKey}" → "${targetState}" is an ` +
+            `${isAdvance ? 'advance' : 'terminal-target'} route but declares no artifact evidence ` +
+            `(state.requiredTools, all action.requiredTools, and routeEvidence["${outcomeKey}"] are all empty). ` +
+            `Artifact-first enforcement requires at least one tool in requiredTools or ` +
+            `routeEvidence for every advance/terminal route. ` +
+            `Add a tool to state "${stateId}".requiredTools, an action's requiredTools, or routeEvidence["${outcomeKey}"].`
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * AC5 (pi-experiment-6q0y.46): Validate state.routeEvidence declarations.
+   *
+   * Checks that every route key in state.routeEvidence is declared in the
+   * statechart vocabulary. An undeclared route key means the evidence config
+   * can never fire (the outcome is unknown) — this is almost certainly a typo
+   * and should fail fast.
+   *
+   * Does NOT validate verifier callbacks here (they are runtime-registered; the
+   * validateRequiredToolVerifiers startup check at coordinator startup covers them).
+   * Does log a startup summary of which routes require evidence per state (AC5).
+   */
+  private validateRouteEvidenceDeclarations(
+    config: HarnessConfig,
+    declaredOutcomes: Set<string>
+  ): void {
+    for (const [stateId, state] of Object.entries(config.states || {})) {
+      if (!state.routeEvidence) continue;
+      for (const [routeKey, tools] of Object.entries(state.routeEvidence)) {
+        if (!tools || tools.length === 0) continue;
+        const normalizedKey = routeKey.toUpperCase();
+        if (!declaredOutcomes.has(normalizedKey)) {
+          const toolIds = tools.map((t: import('./domain/StateModels.js').RequiredTool) =>
+            typeof t === 'string' ? t : t.name
+          ).join(', ');
+          throw new Error(
+            `State "${stateId}" declares routeEvidence for route "${routeKey}" which is not in the ` +
+            `statechart vocabulary (advanceOutcomes/failedOutcomes/blockedOutcomes/customOutcomes). ` +
+            `Declared outcomes: ${[...declaredOutcomes].join(', ')}. ` +
+            `Either add "${routeKey}" to the statechart vocabulary or remove the routeEvidence entry. ` +
+            `Required tools for this route: ${toolIds}.`
+          );
+        }
+        // AC5: log which artifacts/verifiers are required for this route.
+        const toolIds = tools.map((t: import('./domain/StateModels.js').RequiredTool) =>
+          typeof t === 'string' ? t : (t.expectsVerify ? `${t.name}(verify)` : t.name)
+        ).join(', ');
+        Logger.info('ConfigLoader', `routeEvidence lint: state "${stateId}" route "${routeKey}" requires [${toolIds}]`);
+      }
+    }
   }
 
   /**

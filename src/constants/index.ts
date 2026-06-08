@@ -414,7 +414,28 @@ export enum DomainEventName {
    * limit      — the configured limit for that dimension.
    * nextRoute  — the configured route that will drive the deterministic outcome.
    */
-  RUNTIME_BUDGET_EXCEEDED = 'RUNTIME_BUDGET_EXCEEDED'
+  RUNTIME_BUDGET_EXCEEDED = 'RUNTIME_BUDGET_EXCEEDED',
+
+  /**
+   * Emitted when a terminal or advance route event is rejected because required
+   * artifact evidence (declared in state.routeEvidence) is missing or
+   * schema-invalid (pi-experiment-6q0y.46 AC3).
+   *
+   * Carries: { beadId, stateId, actionId, routeEvent, missingIds,
+   *   remediationHint }.
+   *
+   * NO raw prompt or tool-output bodies — only identity fields, the missing
+   * artifact/verifier IDs, and a deterministic remediation hint (AC3).
+   * Deterministic: no Date.now() or Math.random() in the decision or event.
+   *
+   * beadId         — the bead attempting the transition.
+   * stateId        — the state the bead was completing from.
+   * actionId       — the action that completed (may be empty string).
+   * routeEvent     — the attempted route/transition event name (e.g. 'SUCCESS').
+   * missingIds     — array of tool/artifact names that are absent or FAIL.
+   * remediationHint — deterministic guidance: which tools to invoke / artifacts to produce.
+   */
+  ROUTE_ADMISSION_REJECTED = 'ROUTE_ADMISSION_REJECTED'
 }
 
 export enum BeadsCliCommand {

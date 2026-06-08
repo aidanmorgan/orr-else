@@ -30,6 +30,19 @@
  * LLM teammate loop (that only *produces* artifacts; it is not the gate logic
  * this bead verifies). The full-binary run remains cerdiwen-gate-e2e.mjs.
  *
+ * Five scenarios are driven:
+ *   1. advance-on-present+valid  — sonarqube tool ran + quality gate OK artifact
+ *                                  => real sonarqube.verify() PASS => gate advances.
+ *   2. block-on-absent-artifact  — required smt_lib has NO tool-result event
+ *                                  => gate blocks (TOOL_NOT_INVOKED).
+ *   3. block-on-present-but-FAIL — sonarqube tool ran + quality gate ERROR artifact
+ *                                  => real sonarqube.verify() FAIL => gate blocks.
+ *   4. RC-advance-on-tick_items  — RequirementsClarification tick_items ran
+ *                                  (TOOL_INVOCATION_SUCCEEDED + outputFile) =>
+ *                                  presence-only gate PASSES (6q0y.51 no-deadlock).
+ *   5. RC-block-on-absent        — tick_items not invoked => gate BLOCKS
+ *                                  (TOOL_NOT_INVOKED); proves gate is genuine.
+ *
  * Usage: node --experimental-strip-types scripts/e2e/gate-drive-real-cerdiwen.mjs <cerdiwen-root>
  */
 
@@ -97,6 +110,22 @@ function makeStore(eventsByKey) {
 function succeededEvent(tool, outputFile) {
   return { type: 'PROJECT_TOOL_SUCCEEDED', data: { tool, status: 'PASSED', outputFile } };
 }
+/**
+ * Seed a TOOL_INVOCATION_SUCCEEDED event — the NESTED shape produced by
+ * wrapPluginTool for built-in tools (tick_items, add_checklist_item, etc.).
+ * status + outputFile live on the nested `toolResult` handle per zog2.8.
+ */
+function nestedSucceededEvent(tool, outputFile, stateId, actionId) {
+  return {
+    type: 'TOOL_INVOCATION_SUCCEEDED',
+    data: {
+      tool,
+      stateId: stateId ?? 's',
+      actionId: actionId ?? 'a',
+      toolResult: { tool, status: 'PASSED', outputFile },
+    },
+  };
+}
 
 // ── Durable VERIFY_EVALUATED / STATE_TRANSITION_APPLIED log ───────────────────
 const events = [];
@@ -125,6 +154,10 @@ async function driveScenario({ stateId, requiredTool, store, advanceTo }) {
   return result;
 }
 
+// A minimal tick_items raw-result artifact (the file persistPluginToolRawResult writes).
+const tickItemsOutputFile = path.join(seedDir, 'tick_items-raw.json');
+writeFileSync(tickItemsOutputFile, JSON.stringify({ status: 'PASSED', checked: ['Re-read worktree AGENTS.md...'], count: 1 }), 'utf8');
+
 try {
   // 1) ADVANCE: sonarqube ran + quality gate OK => real verify() PASS.
   await driveScenario({
@@ -146,6 +179,46 @@ try {
     store: makeStore({ 'BlockOnFail:sonarqube': succeededEvent('sonarqube', sonarErrFile) }),
   });
 
+  // ── 6q0y.51: RequirementsClarification SUCCESS gate — no-deadlock proof ──────
+  //
+  // The fix: RequirementsClarification.requiredTools = [tick_items] (was
+  // add_checklist_item). The clarification prompt mandates "Tick mandatory
+  // checklist items with evidence", so the model calls tick_items directly.
+  // wrapPluginTool records TOOL_INVOCATION_SUCCEEDED (NESTED shape) with
+  // toolResult.outputFile — satisfying the presence-only gate per zog2.8.
+  //
+  // tick_items has NO registered verify() in cerdiwen.ts → pure presence-only.
+  // Two scenarios prove the gate is satisfiable AND genuinely gated:
+
+  // 4) ADVANCE: tick_items ran (TOOL_INVOCATION_SUCCEEDED + outputFile present)
+  //    => presence-only gate PASSES => RequirementsClarification can advance.
+  const rcAdvResult = await driveScenario({
+    stateId: 'RC_AdvanceOnTickItems',
+    requiredTool: 'tick_items',
+    store: makeStore({
+      'RC_AdvanceOnTickItems:tick_items': nestedSucceededEvent('tick_items', tickItemsOutputFile, 'RC_AdvanceOnTickItems', 'a'),
+    }),
+    advanceTo: 'RequirementsAnalysis',
+  });
+  if (!rcAdvResult.pass) {
+    fail(`RequirementsClarification SUCCESS gate BLOCKED despite tick_items evidence: ${rcAdvResult.rejectMessage}`);
+  }
+
+  // 5) BLOCK: tick_items not invoked (no tool-result event) => gate BLOCKS.
+  //    Proves the route is genuinely gated (not open by default).
+  const rcBlockResult = await driveScenario({
+    stateId: 'RC_BlockOnAbsent',
+    requiredTool: 'tick_items',
+    store: makeStore({}), // no tick_items event => TOOL_NOT_INVOKED
+  });
+  if (rcBlockResult.pass) {
+    fail('RequirementsClarification SUCCESS gate ADMITTED despite absent tick_items evidence — gate is not enforced.');
+  }
+  const rcBlockKind = rcBlockResult.failures[0]?.kind;
+  if (rcBlockKind !== 'TOOL_NOT_INVOKED') {
+    fail(`RequirementsClarification block scenario produced unexpected kind "${rcBlockKind}" (expected TOOL_NOT_INVOKED).`);
+  }
+
   // ── Persist the durable event log, then ASSERT via the unit-tested analyzer ──
   const eventsDir = path.join(seedDir, '.pi', 'events');
   mkdirSync(eventsDir, { recursive: true });
@@ -165,7 +238,10 @@ try {
   }
   log('PASS: block-on-present-but-FAIL (real sonarqube.verify() FAIL => gate blocked with reasons).');
 
-  log('ALL THREE gate outcomes verified over the REAL installed gate + REAL cerdiwen verify() + REAL durable VERIFY_EVALUATED events.');
+  log('PASS: RequirementsClarification SUCCESS gate ADMITTED with tick_items TOOL_INVOCATION_SUCCEEDED + outputFile (6q0y.51 no-deadlock).');
+  log('PASS: RequirementsClarification SUCCESS gate BLOCKED (TOOL_NOT_INVOKED) when tick_items absent (6q0y.51 gate is genuine).');
+
+  log('ALL FIVE gate outcomes verified over the REAL installed gate + REAL cerdiwen verify() + REAL durable VERIFY_EVALUATED events.');
   process.exit(0);
 } catch (error) {
   fail(`gate-drive assertion failed: ${error && error.message ? error.message : error}`);

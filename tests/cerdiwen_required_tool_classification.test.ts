@@ -117,6 +117,7 @@ const EXPECTED_CONTROL_PLANE_ACK: readonly string[] = [
 const EXPECTED_PRESENCE_ONLY: readonly string[] = [
   'coding_standards',
   'add_checklist_item',
+  'tick_items',
   'submit_review_artifact',
   'pytest',
   'semgrep',
@@ -638,8 +639,8 @@ describe('structural integrity: CERDIWEN_REQUIRED_TOOL_NAMES matches classificat
     expect(backed + ack + presence).toBe(CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS.length);
   });
 
-  it('total required tool count is 15 (all state.requiredTools entries from harness.yaml)', () => {
-    expect(CERDIWEN_REQUIRED_TOOL_NAMES.length).toBe(15);
-    expect(CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS.length).toBe(15);
+  it('total required tool count is 16 (all state.requiredTools entries from harness.yaml)', () => {
+    expect(CERDIWEN_REQUIRED_TOOL_NAMES.length).toBe(16);
+    expect(CERDIWEN_REQUIRED_TOOL_CLASSIFICATIONS.length).toBe(16);
   });
 });

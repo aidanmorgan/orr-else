@@ -123,6 +123,7 @@ states:
         mandatory: true
       - text: Added mandatory handover documentation
         mandatory: true
+    requiredTools: [add_checklist_item]
     actions:
       - id: formulate-plan
         type: prompt
@@ -165,6 +166,7 @@ states:
         mandatory: true
       - text: Added mandatory handover documentation
         mandatory: true
+    requiredTools: [add_checklist_item]
     actions:
       - id: adversarial-plan-review
         type: prompt
@@ -211,6 +213,7 @@ states:
         mandatory: true
       - text: Added mandatory handover documentation
         mandatory: true
+    requiredTools: [add_checklist_item]
     actions:
       - id: surgical-execution
         type: prompt
@@ -251,6 +254,7 @@ states:
         mandatory: true
       - text: Added mandatory handover documentation
         mandatory: true
+    requiredTools: [add_checklist_item]
     actions:
       - id: adversarial-code-review
         type: prompt

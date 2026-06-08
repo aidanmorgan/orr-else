@@ -687,6 +687,33 @@ export interface SDLCState {
    * Absent means no per-state runtime limit — falls back to settings.runtimeBudget.
    */
   runtimeBudget?: RuntimeBudgetPolicy;
+  /**
+   * Per-route required-tool evidence (pi-experiment-6q0y.46).
+   *
+   * Declares required tool evidence for specific route events (advance AND
+   * terminal transitions). When a bead signals the named route, the coordinator
+   * gate evaluates these required tools against durable tool-result events +
+   * registered verify() callbacks BEFORE applying the transition. A route event
+   * admitted without the declared evidence is REJECTED and a ROUTE_ADMISSION_REJECTED
+   * domain event is recorded — no raw prose bodies, only identity + missing IDs.
+   *
+   * Keys are outcome names (case-insensitive match against the route event).
+   * Values are RequiredTool arrays — same form as state/action-level requiredTools.
+   *
+   * Example:
+   *   routeEvidence:
+   *     SUCCESS:
+   *       - name: verify_build
+   *         expectsVerify: true
+   *
+   * AC1 (6q0y.46): admission is rejected when any listed tool is absent or its
+   *   verify() returns FAIL.
+   * AC4 (6q0y.46): enforced for EVERY advance AND terminal route event, not just
+   *   Cerdiwen `completed`.
+   * AC5 (6q0y.46): startup lint reports required tools per route and fails if any
+   *   tool with expectsVerify:true has no registered verify() callback.
+   */
+  routeEvidence?: Record<string, RequiredTool[]>;
 }
 
 export interface HarnessConfig {

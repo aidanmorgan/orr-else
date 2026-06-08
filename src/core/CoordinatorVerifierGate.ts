@@ -84,6 +84,12 @@ export function validateRequiredToolVerifiers(
     for (const action of state.actions || []) {
       inspect(action.requiredTools);
     }
+    // pi-experiment-6q0y.46 AC5: also inspect routeEvidence tools so that
+    // tools declared as expectsVerify:true in routeEvidence trigger the same
+    // startup-fail as state/action-level requiredTools.
+    for (const routeTools of Object.values(state.routeEvidence || {})) {
+      inspect(routeTools as RequiredTool[]);
+    }
   }
 
   if (offenders.size > 0) {

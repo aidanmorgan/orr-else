@@ -71,7 +71,9 @@ ${overrides}
 }
 
 function minimalState(id: string, transitions: string, actionsBlock: string = '    actions:\n      - id: a1\n        type: prompt'): string {
-  return `  ${id}:\n    identity: { role: "R", expertise: "E", constraints: [] }\n    baseInstructions: "i"\n${actionsBlock}\n    transitions: ${transitions}\n`;
+  // requiredTools: [dummy_tool] satisfies the artifact-first fail-closed lint
+  // (pi-experiment-6q0y.46): every advance/terminal route must declare evidence.
+  return `  ${id}:\n    identity: { role: "R", expertise: "E", constraints: [] }\n    baseInstructions: "i"\n    requiredTools: [dummy_tool]\n${actionsBlock}\n    transitions: ${transitions}\n`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +166,7 @@ ${minimalState('Alpha', '{ ADVANCE: "done", REWORK: "Alpha", HALT: "done" }')}
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
+    requiredTools: [dummy_tool]
     actions:
       - id: step-one
         type: prompt
@@ -290,6 +293,7 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
+    requiredTools: [dummy_tool]
     actions:
       - id: a1
         type: prompt
@@ -324,6 +328,7 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
+    requiredTools: [dummy_tool]
     actions:
       - id: a1
         type: prompt
@@ -534,6 +539,7 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
+    requiredTools: [dummy_tool]
     actions:
       - id: a1
         type: prompt
@@ -565,6 +571,7 @@ states:
   Alpha:
     identity: { role: "R", expertise: "E", constraints: [] }
     baseInstructions: "i"
+    requiredTools: [dummy_tool]
     actions:
       - id: a1
         type: prompt

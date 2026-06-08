@@ -1806,6 +1806,40 @@
             "$ref": "#/definitions/runtimeBudgetPolicy",
             "description": "pi-experiment-6q0y.48: State-level runtime budget policy. Applies to all actions in this state unless the action declares its own runtimeBudget (action > state > settings precedence, AC2). Absent = falls back to settings.runtimeBudget. AC6 startup lint rejects negative limits and routes absent from the statechart vocabulary."
           },
+          "routeEvidence": {
+            "type": "object",
+            "description": "pi-experiment-6q0y.46: Per-route required-tool evidence. Maps outcome names to required-tool arrays. When a route event matches, the coordinator gate enforces these tools before applying the transition. Startup lint fails if any tool with expectsVerify:true has no registered verify() callback.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "required": ["name"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": { "type": "string" },
+                      "expectsVerify": {
+                        "type": "boolean",
+                        "description": "When true, startup lint fails if no verify() callback is registered for this tool."
+                      },
+                      "when": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "writeSetIncludesAny": { "type": "array", "items": { "type": "string" } },
+                          "writeSetIncludesAll": { "type": "array", "items": { "type": "string" } }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
           "contextPolicy": {
             "description": "pi-experiment-6q0y.44: State-level context policy. Declares how this state's worker context is handled at spawn time. Default when absent: freshSubagent (new isolated sub-agent context). String shorthand: freshSubagent or namedContinuation (namedContinuation requires structured form with contextKey). Structured form: { mode, contextKey }.",
             "oneOf": [
