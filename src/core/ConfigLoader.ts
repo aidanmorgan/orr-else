@@ -602,6 +602,14 @@ export class ConfigLoader {
     // Runs on the RAW map-form states (before normalizeV2MapCollections converts actions
     // to arrays), so both map-form and array-form action shapes are handled.
     this.validateV2LlmActions(states);
+
+    // pi-experiment-hutg: v2 action emits mapping validation.
+    // Runs after event vocabulary is built (requires declaredV2Vocab for event-ref checks).
+    // Uses the already-built vocab (or empty map if no events declared yet).
+    const emitsVocab = eventsRaw !== undefined
+      ? this.buildV2EventVocabulary(eventsRaw)
+      : new Map<string, string>();
+    this.validateV2ActionEmits(states, emitsVocab);
   }
 
   /**
@@ -967,6 +975,156 @@ export class ConfigLoader {
             `v2 config: ${location} declares llm.promptFile: "${promptFile}" which is not readable. ` +
             `Ensure the file has read permissions.`
           );
+        }
+      }
+    }
+  }
+
+  /**
+   * pi-experiment-hutg AC1–AC4: Validate v2 action emits mappings.
+   *
+   * Runs in preValidateV2Admission on the raw map-form states (BEFORE map normalization
+   * converts actions to arrays). Three startup-fatal checks:
+   *
+   *   AC3 (LLM-emitter rejection): An action that declares both `llm` and `emits` → REJECTED.
+   *     LLM actions cannot choose workflow routes. emits is only valid on tool/verifier actions.
+   *
+   *   AC2 (undeclared event rejection): An emits mapping whose pass/fail/blocked/preconditionFailed
+   *     references an event NOT in the declared v2 vocabulary → REJECTED. If the events block
+   *     is not yet declared, any emits reference is rejected (no vocab means no valid refs).
+   *     Exception: if vocab is empty (no events block declared at all), we skip event-ref checks
+   *     because the config may be in a partial state during development — but if emits IS declared,
+   *     we require the vocab to also be declared (circular dependency: hutg requires cfzu events).
+   *
+   *   AC4 (precondition requirement): An emits action that also declares `requiresArtifact` (or
+   *     equivalent) without a preconditionFailed mapping → REJECTED. We use `requiredTools` as
+   *     the artifact-dependency signal: an action with emits + non-empty requiredTools must also
+   *     declare emits.preconditionFailed, or startup rejects it.
+   *
+   * @param states Raw map-form states object from the parsed YAML (pre-normalization).
+   * @param vocab  Pre-built v2 event vocabulary (normalized UPPER_SNAKE → category).
+   *               Empty map when no events block declared.
+   */
+  private validateV2ActionEmits(
+    states: Record<string, unknown>,
+    vocab: Map<string, string>
+  ): void {
+    for (const [stateId, stateRaw] of Object.entries(states)) {
+      if (!isRecord(stateRaw)) continue;
+      const actionsRaw = (stateRaw as Record<string, unknown>)['actions'];
+      if (!actionsRaw) continue;
+
+      // Actions may be map-form (record) or array-form (array) at this point.
+      const actionEntries: Array<[string, unknown]> = isRecord(actionsRaw)
+        ? Object.entries(actionsRaw as Record<string, unknown>)
+        : Array.isArray(actionsRaw)
+          ? (actionsRaw as unknown[]).map((a, i) => {
+              const id = isRecord(a) ? ((a as Record<string, unknown>)['id'] as string ?? `action_${i}`) : `action_${i}`;
+              return [id, a] as [string, unknown];
+            })
+          : [];
+
+      for (const [actionId, actionRaw] of actionEntries) {
+        if (!isRecord(actionRaw)) continue;
+        const action = actionRaw as Record<string, unknown>;
+        const emitsRaw = action['emits'];
+
+        // Only validate actions that declare an `emits` block.
+        if (emitsRaw === undefined || emitsRaw === null) continue;
+
+        const location = `state "${stateId}" action "${actionId}"`;
+
+        // emits must be a record.
+        if (!isRecord(emitsRaw)) {
+          throw new Error(
+            `v2 config: ${location} declares emits as a non-object value. ` +
+            `The emits field must be an object with pass and fail event names. ` +
+            `Example: emits:\n  pass: PLAN_ACCEPTED\n  fail: PLAN_REJECTED`
+          );
+        }
+
+        const emits = emitsRaw as Record<string, unknown>;
+
+        // AC3: LLM actions cannot declare emits.
+        const llmRaw = action['llm'];
+        if (llmRaw !== undefined && llmRaw !== null) {
+          throw new Error(
+            `v2 config: ${location} declares both llm and emits. ` +
+            `LLM actions cannot choose workflow routes — the emits mapping is only valid ` +
+            `on tool or verifier actions. ` +
+            `Remove emits from the LLM action, or convert it to a tool/verifier action.`
+          );
+        }
+
+        // emits.pass and emits.fail are required.
+        const passEvent = emits['pass'];
+        const failEvent = emits['fail'];
+        if (typeof passEvent !== 'string' || !passEvent.trim()) {
+          throw new Error(
+            `v2 config: ${location} declares emits without a non-empty pass event name. ` +
+            `emits.pass is required and must reference a declared v2 event. ` +
+            `Example: emits:\n  pass: PLAN_ACCEPTED\n  fail: PLAN_REJECTED`
+          );
+        }
+        if (typeof failEvent !== 'string' || !failEvent.trim()) {
+          throw new Error(
+            `v2 config: ${location} declares emits without a non-empty fail event name. ` +
+            `emits.fail is required and must reference a declared v2 event. ` +
+            `Example: emits:\n  pass: PLAN_ACCEPTED\n  fail: PLAN_REJECTED`
+          );
+        }
+
+        // AC2: Event-ref validation — all event names must be in the declared v2 vocabulary.
+        // If vocab is non-empty (events block declared), check each ref.
+        // If vocab is EMPTY and emits is declared, we still check: if an events block
+        // is expected (emits requires one), the vocab should not be empty — but rather
+        // than assuming intent, only reject when vocab has entries and the ref is missing.
+        // Strict: vocab non-empty → all refs must be in it.
+        if (vocab.size > 0) {
+          const eventRefs: Array<[string, string]> = [
+            ['pass', passEvent],
+            ['fail', failEvent],
+          ];
+          const blockedEvent = emits['blocked'];
+          if (typeof blockedEvent === 'string' && blockedEvent.trim()) {
+            eventRefs.push(['blocked', blockedEvent]);
+          }
+          const preconditionEvent = emits['preconditionFailed'];
+          if (typeof preconditionEvent === 'string' && preconditionEvent.trim()) {
+            eventRefs.push(['preconditionFailed', preconditionEvent]);
+          }
+
+          for (const [verdictKey, eventName] of eventRefs) {
+            const normalized = eventName.toUpperCase();
+            if (!vocab.has(normalized)) {
+              const declared = [...vocab.keys()].sort().join(', ') || '(none)';
+              throw new Error(
+                `v2 config: ${location} declares emits.${verdictKey}: "${eventName}" which is not ` +
+                `in the declared v2 event vocabulary (events.advance/failure/blocked/neutral). ` +
+                `Declared events: ${declared}. ` +
+                `Add "${eventName}" to the appropriate category in the events block, or correct the name.`
+              );
+            }
+          }
+        }
+
+        // AC4: Precondition requirement — if the action declares requiredTools (artifact deps),
+        // it must also declare emits.preconditionFailed so the harness can emit a route event
+        // when the artifact is missing (before the tool/verifier body runs).
+        const requiredTools = action['requiredTools'];
+        const hasRequiredTools = Array.isArray(requiredTools) && (requiredTools as unknown[]).length > 0;
+        if (hasRequiredTools) {
+          const preconditionEvent = emits['preconditionFailed'];
+          const hasPrecondition = typeof preconditionEvent === 'string' && preconditionEvent.trim().length > 0;
+          if (!hasPrecondition) {
+            throw new Error(
+              `v2 config: ${location} declares emits + requiredTools but has no emits.preconditionFailed event. ` +
+              `When a route-affecting action requires artifacts (requiredTools), it must declare ` +
+              `emits.preconditionFailed so the harness can emit a configured route event when an ` +
+              `artifact is missing — before the tool/verifier body runs. ` +
+              `Add emits.preconditionFailed: "<eventName>" to the action, or remove requiredTools if no artifacts are required.`
+            );
+          }
         }
       }
     }

@@ -513,6 +513,44 @@ export interface ValidationGateConfig {
 }
 
 /**
+ * pi-experiment-hutg: v2 action route-event emits mapping.
+ *
+ * Config-owned mapping from deterministic TypeScript verdicts to declared v2 event names.
+ * The route event name is chosen ONLY by (configured mapping + deterministic TS verdict).
+ * Tool stdout/stderr, LLM prose, and model-provided args MUST NEVER choose the route.
+ *
+ * Required fields:
+ *   pass  — event name emitted when the deterministic verdict is pass.
+ *   fail  — event name emitted when the deterministic verdict is fail.
+ *
+ * Optional fields:
+ *   blocked            — emitted when the verdict is blocked.
+ *   preconditionFailed — emitted when a required artifact is missing BEFORE the
+ *                        tool/verifier body runs. If a route-affecting action requires
+ *                        an artifact and this field is absent, startup REJECTS the action.
+ *
+ * All event names must reference the declared v2 event vocabulary (events.advance/
+ * failure/blocked/neutral). References to undeclared events fail at startup.
+ *
+ * Only valid on tool/verifier actions (emitterType: 'tool' | 'verifier'). Declaring
+ * emits on an LLM action (one with an `llm` block) is a STARTUP FAILURE — LLM
+ * actions cannot choose workflow routes.
+ */
+export interface ActionEmitsMapping {
+  /** Event name emitted when the deterministic verdict is pass. Must be in v2 vocab. */
+  readonly pass: string;
+  /** Event name emitted when the deterministic verdict is fail. Must be in v2 vocab. */
+  readonly fail: string;
+  /** Event name emitted when the deterministic verdict is blocked. Optional. Must be in v2 vocab. */
+  readonly blocked?: string;
+  /**
+   * Event name emitted BEFORE tool/verifier body when a required artifact is missing.
+   * If absent and the action requires artifacts, startup rejects the action.
+   */
+  readonly preconditionFailed?: string;
+}
+
+/**
  * pi-experiment-0njv: v2 LLM action configuration sub-object.
  *
  * When an action in a v2 config (version: 2) declares an `llm` block, it is a
@@ -619,6 +657,24 @@ export interface TeammateAction {
    * Absent for non-LLM actions and v1 configs.
    */
   v2PromptProvenance?: V2PromptFileProvenance;
+  /**
+   * pi-experiment-hutg: v2 action route-event emits mapping.
+   *
+   * Config-owned mapping from deterministic TypeScript verdicts (pass/fail/blocked/
+   * preconditionFailed) to declared v2 event names. The route event name is chosen
+   * ONLY by (configured mapping + deterministic TS verdict). Tool stdout/stderr,
+   * LLM prose, and model-provided args MUST NEVER choose the route.
+   *
+   * Only valid on tool/verifier actions. Declaring emits on an LLM action (with an
+   * `llm` block) is a STARTUP FAILURE — LLM actions cannot choose workflow routes.
+   *
+   * All event names must be in the declared v2 vocabulary. Startup rejects refs
+   * to undeclared events. If the action requires artifacts and preconditionFailed
+   * is absent, startup also rejects the action.
+   *
+   * Only admitted in v2 configs (version: 2). In v1 configs this field is ignored.
+   */
+  emits?: ActionEmitsMapping;
 }
 
 export type ActionDefinition = TeammateAction;

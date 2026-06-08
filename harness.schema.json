@@ -12,7 +12,9 @@
       "type": "object",
       "description": "pi-experiment-6q0y.17: Optional hard prompt-budget policy. Absent = no rejection (true no-op). When declared, the final assembled prompt is checked against maxBytes and/or maxTokens before the first model request. Precedence: action > state > settings.",
       "additionalProperties": false,
-      "required": ["route"],
+      "required": [
+        "route"
+      ],
       "properties": {
         "maxBytes": {
           "type": "integer",
@@ -34,7 +36,10 @@
       "type": "object",
       "description": "pi-experiment-6q0y.18: Optional hard tool-payload budget policy. Absent = no rejection for that result path (true no-op). When declared, the model-facing tool result is checked against maxBytes before being returned to the model.",
       "additionalProperties": false,
-      "required": ["maxBytes", "route"],
+      "required": [
+        "maxBytes",
+        "route"
+      ],
       "properties": {
         "maxBytes": {
           "type": "integer",
@@ -51,7 +56,9 @@
       "type": "object",
       "description": "pi-experiment-6q0y.48: Optional per-bead/per-state/per-action runtime budget policy. Absent = no enforcement (true no-op, AC1). When declared, exceeded hard limits fail BEFORE the next model/provider/tool spend and route through the configured deterministic outcome. Precedence: action > state > settings (AC2). LLM is NOT asked to self-report budget compliance (AC8).",
       "additionalProperties": false,
-      "required": ["route"],
+      "required": [
+        "route"
+      ],
       "properties": {
         "maxModelCalls": {
           "type": "integer",
@@ -102,7 +109,11 @@
     "toolPromptProfileEntry": {
       "type": "object",
       "description": "pi-experiment-6q0y.4: A single per-tool prompt text override within a named tool prompt profile.",
-      "required": ["tool", "id", "text"],
+      "required": [
+        "tool",
+        "id",
+        "text"
+      ],
       "additionalProperties": false,
       "properties": {
         "tool": {
@@ -111,7 +122,7 @@
         },
         "id": {
           "type": "string",
-          "description": "Profile ID — must match the enclosing profile map key."
+          "description": "Profile ID \u2014 must match the enclosing profile map key."
         },
         "text": {
           "type": "string",
@@ -124,7 +135,10 @@
       "type": "object",
       "description": "pi-experiment-t6gw: Opt-in retry policy. Absent = zero automatic retries. When present, the harness retry pipeline consults sideEffectContract.idempotencyClass before admitting any retry. non_idempotent tools are never retried.",
       "additionalProperties": false,
-      "required": ["maxAttempts", "retriableCategories"],
+      "required": [
+        "maxAttempts",
+        "retriableCategories"
+      ],
       "properties": {
         "maxAttempts": {
           "type": "integer",
@@ -136,7 +150,12 @@
           "minItems": 1,
           "items": {
             "type": "string",
-            "enum": ["TRANSPORT", "TIMEOUT", "INPUT", "INFRA"]
+            "enum": [
+              "TRANSPORT",
+              "TIMEOUT",
+              "INPUT",
+              "INFRA"
+            ]
           },
           "description": "Closed set of ToolFailureCategory values that may trigger a retry."
         }
@@ -149,19 +168,31 @@
       "properties": {
         "cancellationPolicy": {
           "type": "string",
-          "enum": ["supported", "not_supported"],
+          "enum": [
+            "supported",
+            "not_supported"
+          ],
           "description": "Whether the tool honours AbortSignal cancellation."
         },
         "idempotencyClass": {
           "type": "string",
-          "enum": ["idempotent", "non_idempotent", "at_least_once"],
+          "enum": [
+            "idempotent",
+            "non_idempotent",
+            "at_least_once"
+          ],
           "description": "Retry-safety classification."
         },
         "serializationKey": {
           "description": "Non-null string means tools with this key must not run concurrently. MUST be non-empty when serialize:true. null means no cross-tool serialization constraint.",
           "oneOf": [
-            { "type": "string", "minLength": 1 },
-            { "type": "null" }
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "allowedInReadOnlyContext": {
@@ -595,7 +626,7 @@
         },
         "promptBudget": {
           "$ref": "#/definitions/promptBudgetPolicy",
-          "description": "pi-experiment-6q0y.17: Settings-level (global) prompt-budget policy. Lowest precedence — applies to all states/actions that do not declare their own promptBudget. Absent = no limit enforced anywhere (true no-op). State and action-level declarations override this."
+          "description": "pi-experiment-6q0y.17: Settings-level (global) prompt-budget policy. Lowest precedence \u2014 applies to all states/actions that do not declare their own promptBudget. Absent = no limit enforced anywhere (true no-op). State and action-level declarations override this."
         },
         "promptBudgetStateOverrides": {
           "type": "object",
@@ -624,7 +655,7 @@
         },
         "runtimeBudget": {
           "$ref": "#/definitions/runtimeBudgetPolicy",
-          "description": "pi-experiment-6q0y.48: Settings-level (global) runtime budget policy. Lowest precedence — applies when no state or action runtimeBudget is configured. Absent = no runtime enforcement anywhere (full no-op, AC1). State and action-level declarations override this."
+          "description": "pi-experiment-6q0y.48: Settings-level (global) runtime budget policy. Lowest precedence \u2014 applies when no state or action runtimeBudget is configured. Absent = no runtime enforcement anywhere (full no-op, AC1). State and action-level declarations override this."
         },
         "tsProjectToolDefaults": {
           "type": "object",
@@ -1516,7 +1547,7 @@
       "properties": {
         "initialState": {
           "type": "string",
-          "description": "v1: Override for the initial state (mirrors settings.startState; settings wins). Rejected in version:2 configs — use statechart.initial instead."
+          "description": "v1: Override for the initial state (mirrors settings.startState; settings wins). Rejected in version:2 configs \u2014 use statechart.initial instead."
         },
         "terminalStates": {
           "type": "array",
@@ -1524,7 +1555,7 @@
             "type": "string"
           },
           "minItems": 1,
-          "description": "v1: State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent. Rejected in version:2 configs — use statechart.terminal instead."
+          "description": "v1: State IDs that are terminal (workflow is done when reached). Defaults to ['completed'] when the block is absent. Rejected in version:2 configs \u2014 use statechart.terminal instead."
         },
         "initial": {
           "type": "string",
@@ -1578,27 +1609,35 @@
     "events": {
       "type": "object",
       "additionalProperties": false,
-      "description": "pi-experiment-cfzu: v2 category-first event vocabulary. Only valid in version:2 configs. Each event name is canonical (UPPER_SNAKE_CASE) and appears in exactly one category after case-insensitive normalization. Categories are TAXONOMY ONLY — category membership never supplies a default transition, failure route, or fallback status. A state routes an event only when it declares an exact transition key for the canonical event name.",
+      "description": "pi-experiment-cfzu: v2 category-first event vocabulary. Only valid in version:2 configs. Each event name is canonical (UPPER_SNAKE_CASE) and appears in exactly one category after case-insensitive normalization. Categories are TAXONOMY ONLY \u2014 category membership never supplies a default transition, failure route, or fallback status. A state routes an event only when it declares an exact transition key for the canonical event name.",
       "properties": {
         "advance": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Advance-category event names. Taxonomy only — no routing fallback from category membership."
+          "items": {
+            "type": "string"
+          },
+          "description": "Advance-category event names. Taxonomy only \u2014 no routing fallback from category membership."
         },
         "failure": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Failure-category event names. Taxonomy only — no routing fallback from category membership."
+          "items": {
+            "type": "string"
+          },
+          "description": "Failure-category event names. Taxonomy only \u2014 no routing fallback from category membership."
         },
         "blocked": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Blocked-category event names. Taxonomy only — no routing fallback from category membership."
+          "items": {
+            "type": "string"
+          },
+          "description": "Blocked-category event names. Taxonomy only \u2014 no routing fallback from category membership."
         },
         "neutral": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Neutral-category event names. Taxonomy only — no routing fallback from category membership."
+          "items": {
+            "type": "string"
+          },
+          "description": "Neutral-category event names. Taxonomy only \u2014 no routing fallback from category membership."
         }
       }
     },
@@ -1821,7 +1860,9 @@
           },
           "activeTools": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "description": "Explicit set of tool names active for this state. When absent, all tools in config.tools are active (default: full exposure). Action-level activeTools further narrows this set. Unknown names fail startup lint."
           },
           "toolPromptProfile": {
@@ -1848,10 +1889,14 @@
                   },
                   {
                     "type": "object",
-                    "required": ["name"],
+                    "required": [
+                      "name"
+                    ],
                     "additionalProperties": false,
                     "properties": {
-                      "name": { "type": "string" },
+                      "name": {
+                        "type": "string"
+                      },
                       "expectsVerify": {
                         "type": "boolean",
                         "description": "When true, startup lint fails if no verify() callback is registered for this tool."
@@ -1860,8 +1905,18 @@
                         "type": "object",
                         "additionalProperties": false,
                         "properties": {
-                          "writeSetIncludesAny": { "type": "array", "items": { "type": "string" } },
-                          "writeSetIncludesAll": { "type": "array", "items": { "type": "string" } }
+                          "writeSetIncludesAny": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          },
+                          "writeSetIncludesAll": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            }
+                          }
                         }
                       }
                     }
@@ -1875,17 +1930,25 @@
             "oneOf": [
               {
                 "type": "string",
-                "enum": ["freshSubagent", "namedContinuation"],
+                "enum": [
+                  "freshSubagent",
+                  "namedContinuation"
+                ],
                 "description": "String shorthand for the context policy mode. Use 'freshSubagent' for the default or 'namedContinuation' requires the structured form with a contextKey."
               },
               {
                 "type": "object",
-                "required": ["mode"],
+                "required": [
+                  "mode"
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "mode": {
                     "type": "string",
-                    "enum": ["freshSubagent", "namedContinuation"],
+                    "enum": [
+                      "freshSubagent",
+                      "namedContinuation"
+                    ],
                     "description": "Context mode: freshSubagent (default) or namedContinuation."
                   },
                   "contextKey": {
@@ -2061,7 +2124,9 @@
                 "llm": {
                   "type": "object",
                   "description": "pi-experiment-0njv: v2 LLM action configuration. When present, this action is a v2 LLM action. llm.promptFile is required; inline prompt bodies (llm.prompt or top-level prompt) are forbidden. Path safety is enforced at config load before any provider/model request.",
-                  "required": ["promptFile"],
+                  "required": [
+                    "promptFile"
+                  ],
                   "properties": {
                     "promptFile": {
                       "type": "string",
@@ -2075,10 +2140,50 @@
                   "type": "object",
                   "description": "pi-experiment-0njv: Resolved prompt provenance for this v2 LLM action. Populated by ConfigLoader at load time. Records normalized path, byteCount, sha256 digest, and actionId. The prompt body is never stored here.",
                   "properties": {
-                    "normalizedPath": { "type": "string" },
-                    "byteCount": { "type": "integer", "minimum": 0 },
-                    "sha256": { "type": "string" },
-                    "actionId": { "type": "string" }
+                    "normalizedPath": {
+                      "type": "string"
+                    },
+                    "byteCount": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "sha256": {
+                      "type": "string"
+                    },
+                    "actionId": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "emits": {
+                  "type": "object",
+                  "description": "pi-experiment-hutg: v2 action route-event emits mapping. Config-owned mapping from deterministic verdicts (pass/fail/blocked/preconditionFailed) to declared v2 event names. Only valid on tool/verifier actions. LLM actions (with llm block) may not declare emits. All event names must be in the declared v2 vocabulary. Startup rejects LLM emitters, undeclared event refs, and missing preconditionFailed when the action requires artifacts.",
+                  "required": [
+                    "pass",
+                    "fail"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "pass": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Event name emitted when the deterministic verdict is pass. Must be in the declared v2 event vocabulary."
+                    },
+                    "fail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Event name emitted when the deterministic verdict is fail. Must be in the declared v2 event vocabulary."
+                    },
+                    "blocked": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Event name emitted when the deterministic verdict is blocked. Optional. Must be in the declared v2 event vocabulary."
+                    },
+                    "preconditionFailed": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "Event name emitted BEFORE tool/verifier body when a required artifact is missing. If absent and the action requires artifacts, startup rejects the action."
+                    }
                   }
                 }
               }
