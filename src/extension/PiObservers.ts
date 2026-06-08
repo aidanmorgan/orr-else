@@ -20,7 +20,7 @@ import type {
   TurnStartEvent
 } from '@earendil-works/pi-coding-agent';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from '../core/ProviderRequestCap.js';
-import { buildTurnUsageRecord } from '../core/TokenUsage.js';
+import { buildTurnUsageRecord, buildPromptCacheObservabilityEvent } from '../core/TokenUsage.js';
 import {
   type ProviderBudgetPolicy,
   computeRequestSizing,
@@ -281,6 +281,13 @@ export interface AgentLifecycleObserverSession {
   currentTurnStartMs: number | undefined;
   activeRun: ActiveRun | null;
   agentFailureSignaled: boolean;
+  /**
+   * Stable-block digest IDs recorded in the current worker run (insertion-ordered Set).
+   * The most-recently-added entry is the current run's active digest.
+   * Used by recordTurnUsage to attribute cache-read/write tokens to the prompt digest.
+   * pi-experiment-6q0y.9.
+   */
+  recordedPromptDigestIds: Set<string>;
 }
 
 /**
@@ -533,7 +540,7 @@ export function registerPiToolObservers(
   });
 }
 
-export async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServices, session: { currentTurnStartMs: number | undefined }): Promise<void> {
+export async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServices, session: { currentTurnStartMs: number | undefined; recordedPromptDigestIds: Set<string> }): Promise<void> {
   const endTimeMs = Date.now();
   const startTimeMs = session.currentTurnStartMs ?? endTimeMs;
   session.currentTurnStartMs = undefined;
@@ -559,6 +566,20 @@ export async function recordTurnUsage(event: TurnEndEvent, services: RuntimeServ
   await services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, record.event).catch(error => {
     Logger.warn(Component.OBSERVABILITY, 'Failed to record token usage event', { error: String(error) });
   });
+
+  // pi-experiment-6q0y.9: cache-hit observability keyed by prompt digest.
+  // Emit only when there are cache-read or cache-write tokens to attribute.
+  // The digest is the most-recently-added entry in recordedPromptDigestIds
+  // (set cleared at initializeWorkerRun, populated at BEFORE_AGENT_START).
+  const cacheObsEvent = buildPromptCacheObservabilityEvent(
+    record.event,
+    session.recordedPromptDigestIds.size > 0 ? [...session.recordedPromptDigestIds].at(-1) : undefined
+  );
+  if (cacheObsEvent !== null) {
+    await services.eventStore.record(DomainEventName.PROMPT_CACHE_OBSERVABILITY, cacheObsEvent).catch(error => {
+      Logger.warn(Component.OBSERVABILITY, 'Failed to record cache observability event', { error: String(error) });
+    });
+  }
 
   try {
     services.observability.recordCompletedSpan(SpanName.LLM_TURN, {

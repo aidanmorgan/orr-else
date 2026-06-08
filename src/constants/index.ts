@@ -234,6 +234,21 @@ export enum DomainEventName {
    * Never carries raw tool output bodies or source files.
    */
   TOOL_PAYLOAD_ACCOUNTED = 'TOOL_PAYLOAD_ACCOUNTED',
+  /**
+   * pi-experiment-6q0y.9: cache-hit observability keyed by prompt digest.
+   *
+   * Emitted alongside TOKEN_USAGE_RECORDED when a turn reports non-zero
+   * cache-read or cache-write token counts. Carries the stable prompt digest
+   * (stableBlockDigestId) + cache/input token counts so cache-hit ratios are
+   * computable per digest WITHOUT logging prompt bodies.
+   *
+   * cacheHitRatio = cacheReadTokens / (inputTokens + cacheReadTokens + cacheWriteTokens)
+   *
+   * stableBlockDigestId is absent when no digest has been recorded yet for the
+   * current run (edge case: first turn before BEFORE_AGENT_START has fired).
+   * Carries NO raw prompt body, tool body, or source content (AC3).
+   */
+  PROMPT_CACHE_OBSERVABILITY = 'PROMPT_CACHE_OBSERVABILITY',
   TOOL_INVOCATION_FAILED = 'TOOL_INVOCATION_FAILED',
   TOOL_INVOCATION_STARTED = 'TOOL_INVOCATION_STARTED',
   TOOL_INVOCATION_SUCCEEDED = 'TOOL_INVOCATION_SUCCEEDED',

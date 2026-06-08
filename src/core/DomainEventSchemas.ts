@@ -356,6 +356,20 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     optionalFields: ['stateId', 'actionId', 'count']
   },
 
+  // ── Cache-hit observability (pi-experiment-6q0y.9) ────────────────────────
+  //
+  // PROMPT_CACHE_OBSERVABILITY: emitted alongside TOKEN_USAGE_RECORDED when a
+  //   turn reports non-zero cache-read or cache-write token counts. Carries the
+  //   stable prompt digest + cache/input token counts. stableBlockDigestId is
+  //   optional — absent when no digest has been recorded for the current run.
+  //   beadId/stateId/actionId/workerId/model are writer-guaranteed.
+  //   NO prompt body, tool body, or raw source content (AC3).
+  [DomainEventName.PROMPT_CACHE_OBSERVABILITY]: {
+    version: 1,
+    replayImpact: 'AUDIT',
+    optionalFields: ['stableBlockDigestId']
+  },
+
   // ── Token accounting (pi-experiment-6q0y.15) ──────────────────────────────
   //
   // MODEL_TURN_USAGE_RECORDED: carries provider-reported token usage + cost for
@@ -641,6 +655,18 @@ export const DOMAIN_EVENT_SCHEMAS: Readonly<Record<string, readonly string[]>> =
 
   // ── Context compaction counter ─────────────────────────────────────────────
   [DomainEventName.CONTEXT_COMPACTION_RECORDED]: ['beadId'],
+
+  // ── Cache-hit observability (pi-experiment-6q0y.9) ────────────────────────
+  //
+  // PROMPT_CACHE_OBSERVABILITY: writer-guaranteed fields are beadId, stateId,
+  //   actionId, workerId, model, inputTokens, cacheReadTokens, cacheWriteTokens.
+  //   stableBlockDigestId is optional — absent when no digest has been recorded
+  //   for the current run (edge case on very first turn). All numeric counts are
+  //   non-negative integers. NO prompt body or raw content ever written.
+  [DomainEventName.PROMPT_CACHE_OBSERVABILITY]: [
+    'beadId', 'stateId', 'actionId', 'workerId', 'model',
+    'inputTokens', 'cacheReadTokens', 'cacheWriteTokens'
+  ],
 
   // ── Token accounting (pi-experiment-6q0y.15) ──────────────────────────────
   //

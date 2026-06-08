@@ -203,6 +203,70 @@ export function buildToolPayloadIdempotencyKey(
   return `${toolInvocationId ?? tool}:${beadId ?? 'global'}`;
 }
 
+// ---------------------------------------------------------------------------
+// pi-experiment-6q0y.9: cache-hit observability keyed by prompt digest
+// ---------------------------------------------------------------------------
+
+/**
+ * Payload for PROMPT_CACHE_OBSERVABILITY events.
+ *
+ * Emitted when a turn reports non-zero cache-read or cache-write token counts.
+ * Carries enough data to compute per-digest cache-hit ratios without storing
+ * any prompt body, tool body, or raw source content.
+ *
+ * cacheHitRatio = cacheReadTokens / (inputTokens + cacheReadTokens + cacheWriteTokens)
+ */
+export interface PromptCacheObservabilityEvent {
+  /** Stable bead identifier — always present. */
+  beadId: string;
+  /** State name the turn ran in — always present. */
+  stateId: string;
+  /** Action id within the state — always present. */
+  actionId: string;
+  /** Worker id that executed the turn — always present. */
+  workerId: string;
+  /** Provider-reported model identifier. */
+  model: string;
+  /**
+   * Deterministic stable-block digest ID (from digestStableBlock / digestIdentity).
+   * Absent when no digest has been recorded yet for the current run.
+   * MUST NOT be a raw prompt body — only the 16-char hex digest ID.
+   */
+  stableBlockDigestId: string | undefined;
+  /** Provider-reported input token count (not counting cache hits/writes). */
+  inputTokens: number;
+  /** Provider-reported cache-read token count. */
+  cacheReadTokens: number;
+  /** Provider-reported cache-write token count. */
+  cacheWriteTokens: number;
+}
+
+/**
+ * Build a PromptCacheObservabilityEvent from a completed turn's usage data.
+ *
+ * Returns null when both cacheReadTokens and cacheWriteTokens are zero —
+ * there is nothing to observe when no caching activity occurred.
+ *
+ * Pure function: no Date.now() or Math.random().
+ */
+export function buildPromptCacheObservabilityEvent(
+  event: TurnUsageEvent,
+  stableBlockDigestId: string | undefined
+): PromptCacheObservabilityEvent | null {
+  if (event.cacheReadTokens === 0 && event.cacheWriteTokens === 0) return null;
+  return {
+    beadId: event.beadId,
+    stateId: event.stateId,
+    actionId: event.actionId,
+    workerId: event.workerId,
+    model: event.model,
+    stableBlockDigestId,
+    inputTokens: event.inputTokens,
+    cacheReadTokens: event.cacheReadTokens,
+    cacheWriteTokens: event.cacheWriteTokens
+  };
+}
+
 /** Token/cost usage as reported on a Pi assistant message (`message.usage`). */
 export interface RawUsage {
   input?: number;
