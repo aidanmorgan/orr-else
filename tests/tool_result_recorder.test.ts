@@ -8,7 +8,7 @@
  *   2. worker merge guard (MERGE_AND_COMMIT in worker mode)
  *   3. circuit breaker (failures >= maxFailures)
  *   4. terminal failure limit (terminalRejection)
- *   5. deprecated project tool (TOOL_DEPRECATED_REJECTED)
+ *   5. deprecated project tool (removed — ebzz: runtime guard was dead code; config admission is the gate)
  *   6. project-tool preflight rejection (extension-type)
  *   7. backpressure (concurrent-call guard)
  *   8. timeout (runWithWrapperTimeout exceeded)
@@ -411,7 +411,6 @@ describe('ToolResultRecorder — 10 exit-path failure categories (AC5)', () => {
     { name: 'worker merge guard', failureCategory: 'INFRA', rejectionReason: 'PROTOCOL VIOLATION: teammates cannot merge' },
     { name: 'circuit breaker', failureCategory: 'INFRA', rejectionReason: 'REJECTED: circuit open after 3 consecutive failures' },
     { name: 'terminal failure limit', failureCategory: 'INFRA', rejectionReason: 'REJECTED: terminal failure limit reached' },
-    { name: 'deprecated project tool', failureCategory: 'INPUT', rejectionReason: 'REJECTED: tool is deprecated' },
     { name: 'project-tool preflight rejection', failureCategory: 'INFRA', rejectionReason: 'REJECTED: extension-type tool cannot be executed directly' },
     { name: 'backpressure (concurrent call)', failureCategory: 'INFRA', rejectionReason: 'REJECTED: concurrent call in progress' },
     { name: 'timeout', failureCategory: 'TIMEOUT', rejectionReason: 'Tool exceeded harness wrapper timeout of 30000ms' },

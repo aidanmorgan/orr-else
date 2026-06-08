@@ -117,53 +117,6 @@ export async function executeConfiguredProjectTool(
   injectedRoot: string = process.cwd(),
   signal?: AbortSignal
 ): Promise<unknown> {
-  // Deprecation guard: intercept before any execution when tool is marked deprecated.
-  const defAny = definition as { deprecated?: boolean; replacedBy?: string[]; deprecationReason?: string };
-  if (defAny.deprecated) {
-    const beadIdForEvent = beadIdFromArgs(args, env);
-    const stateIdForEvent = typeof args.stateId === 'string' ? args.stateId : undefined;
-    const actionIdForEvent = typeof args.actionId === 'string' ? args.actionId : undefined;
-    const replacements = defAny.replacedBy;
-    const reason = defAny.deprecationReason;
-    const replacementHint = replacements?.length
-      ? ` Use ${replacements.map(r => `\`${r}\``).join(' or ')} instead.`
-      : '';
-    const reasonHint = reason ? ` Reason: ${reason}` : '';
-    const message = `REJECTED: \`${definition.name}\` is deprecated and cannot be invoked.${replacementHint}${reasonHint}`;
-    await eventStore.record(DomainEventName.TOOL_DEPRECATED_REJECTED, {
-      tool: definition.name,
-      ...(beadIdForEvent !== undefined ? { beadId: beadIdForEvent } : {}),
-      ...(stateIdForEvent !== undefined ? { stateId: stateIdForEvent } : {}),
-      ...(actionIdForEvent !== undefined ? { actionId: actionIdForEvent } : {}),
-      ...(replacements !== undefined ? { replacedBy: replacements } : {}),
-      ...(reason !== undefined ? { reason } : {})
-    }).catch(() => {});
-    // zog2.16: also emit PROJECT_TOOL_FAILED with a durable outputFile so
-    // latestToolResultEvent can match this invocation as TOOL_REJECTED (not TOOL_NOT_INVOKED).
-    const deprecatedInvocationId = uuidv7();
-    const deprecatedRecorder = new ToolResultRecorder(pathFactory, injectedRoot);
-    const deprecatedHandle = await deprecatedRecorder.recordShortCircuit({
-      toolName: definition.name, invocationId: deprecatedInvocationId,
-      beadId: beadIdForEvent, stateId: stateIdForEvent, actionId: actionIdForEvent,
-      status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
-      rejectionReason: message,
-    }).catch(() => undefined);
-    if (deprecatedHandle && deprecatedHandle.outputFile) {
-      await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
-        beadId: beadIdForEvent,
-        stateId: stateIdForEvent,
-        actionId: actionIdForEvent,
-        tool: definition.name,
-        type: definition.type,
-        status: ToolResultStatus.REJECTED,
-        toolInvocationId: deprecatedInvocationId,
-        outputFile: deprecatedHandle.outputFile,
-        result: summarizeToolResult({ status: ToolResultStatus.REJECTED, message }),
-      }).catch(() => {});
-    }
-    return { status: ToolResultStatus.REJECTED, message };
-  }
-
   const beadId = beadIdFromArgs(args, env);
   const context = executionContext(pathFactory, definition, args, env, injectedRoot, process.env);
   const stateId = context.templateContext.stateId;

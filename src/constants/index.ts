@@ -333,14 +333,6 @@ export enum DomainEventName {
    */
   CONTEXT_POLICY_FINGERPRINT_RECORDED = 'CONTEXT_POLICY_FINGERPRINT_RECORDED',
   /**
-   * Emitted when a deprecated project tool is invoked by the model. Carries:
-   * { tool, beadId?, stateId?, actionId?, replacedBy?, reason? }.
-   * Always accompanies the REJECTED result returned to the model — the two
-   * fire together and provide deterministic evidence that the model attempted
-   * to use an obsolete tool. Diagnostic + audit; NOT replay-critical.
-   */
-  TOOL_DEPRECATED_REJECTED = 'TOOL_DEPRECATED_REJECTED',
-  /**
    * Emitted exactly ONCE when the supervisor enters a capacity-pause mode
    * (scheduling suspended until pauseUntil).  Carries: { reason, pauseUntil }.
    * Subsequent polls within the same pause window emit no additional events —

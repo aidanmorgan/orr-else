@@ -1,26 +1,26 @@
 /**
- * pi-experiment-h05b: Remove deprecated-tool and allowDeprecated compatibility surfaces.
+ * pi-experiment-h05b / pi-experiment-ebzz: Deprecated-tool config admission and legacy-removal.
  *
  * Acceptance criteria tested here:
  * AC1: Config startup FAILS when any tool declares deprecated/hidden/replacedBy/deprecationReason.
  * AC2: describeConfiguredProjectTools never includes deprecated/hidden tools (those fields are gone).
- * AC3: Invoking a tool that has deprecated:true (runtime only, stale config) returns REJECTED + emits event.
- *      (Defensive guard kept for impossible/stale runtime calls — cannot be model-facing or satisfy gates.)
  * AC4: Config startup FAILS when requiredTools, action sequences, or tool inventory references
  *      a deprecated/hidden/removed tool — no allowDeprecated escape hatch exists.
  * AC5: describeConfiguredProjectTools with no deprecated/hidden tools surfaces all declared tools.
+ *
+ * The former AC3 (runtime deprecated-tool guard) was removed by pi-experiment-ebzz.
+ * Config admission (AC1/AC4) is the only rejection point — the runtime guard was dead code.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import {
   describeConfiguredProjectTools,
-  executeConfiguredProjectTool
 } from '../src/plugins/projectTools.js';
-import { DomainEventName, ProjectToolType, ToolResultStatus } from '../src/constants/index.js';
+import { ProjectToolType } from '../src/constants/index.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { ProjectCommandToolConfig } from '../src/core/domain/StateModels.js';
 
@@ -258,180 +258,6 @@ describe('AC2: describeConfiguredProjectTools surfaces only clean tools', () => 
     // Single-argument call must work and surface the tool.
     const description = describeConfiguredProjectTools(config);
     expect(description).toContain('plan_contract');
-  });
-});
-
-// ── AC3: invoking deprecated tool returns REJECTED + emits event (defensive runtime guard) ─
-
-describe('AC3: invoking a deprecated tool returns REJECTED and emits TOOL_DEPRECATED_REJECTED', () => {
-  let tempDir: string;
-
-  beforeEach(() => {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'h05b-dep-'));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  function makeEventStore() {
-    const recorded: Array<{ name: string; data: Record<string, unknown> }> = [];
-    return {
-      record: vi.fn(async (name: string, data: Record<string, unknown>) => {
-        recorded.push({ name, data });
-      }),
-      recorded
-    };
-  }
-
-  function makePathFactory(dir: string) {
-    return {
-      allocate: vi.fn((_ctx: unknown) => ({
-        outputDir: dir,
-        outputFile: path.join(dir, 'result.json')
-      }))
-    } as any;
-  }
-
-  function makeCtx() {
-    return { hasUI: false } as any;
-  }
-
-  function makeBackpressure() {
-    return {
-      acquire: vi.fn(async () => ({ acquired: true, key: 'k' })),
-      release: vi.fn()
-    } as any;
-  }
-
-  it('returns a REJECTED result immediately for a tool with deprecated:true (runtime guard, not config surface)', async () => {
-    const eventStore = makeEventStore();
-    const pathFactory = makePathFactory(tempDir);
-    const ctx = makeCtx();
-    const backpressure = makeBackpressure();
-
-    // The deprecated field is NOT accepted in config (fails startup). This guard fires
-    // only for impossible/stale runtime calls where the object is constructed directly.
-    const definition = {
-      name: 'artifact_validator',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      deprecated: true,
-      replacedBy: ['requirements_schema', 'plan_contract'],
-      deprecationReason: 'Replaced by project-owned validators.'
-    };
-
-    const result = await executeConfiguredProjectTool(
-      eventStore as any,
-      pathFactory,
-      definition as any,
-      { beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1' },
-      ctx,
-      undefined,
-      backpressure,
-      tempDir
-    );
-
-    const resultRecord = result as Record<string, unknown>;
-    expect(resultRecord.status).toBe(ToolResultStatus.REJECTED);
-    expect(typeof resultRecord.message).toBe('string');
-    const msg = resultRecord.message as string;
-    expect(msg).toContain('artifact_validator');
-    expect(msg).toContain('deprecated');
-    expect(msg).toContain('requirements_schema');
-    expect(msg).toContain('plan_contract');
-  });
-
-  it('emits TOOL_DEPRECATED_REJECTED event with tool name and replacements', async () => {
-    const eventStore = makeEventStore();
-    const pathFactory = makePathFactory(tempDir);
-    const ctx = makeCtx();
-    const backpressure = makeBackpressure();
-
-    const definition = {
-      name: 'artifact_validator',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      deprecated: true,
-      replacedBy: ['requirements_schema'],
-      deprecationReason: 'Use project-owned validators.'
-    };
-
-    await executeConfiguredProjectTool(
-      eventStore as any,
-      pathFactory,
-      definition as any,
-      { beadId: 'bead-1', stateId: 'state-1', actionId: 'action-1' },
-      ctx,
-      undefined,
-      backpressure,
-      tempDir
-    );
-
-    const deprecatedEvent = eventStore.recorded.find(e => e.name === DomainEventName.TOOL_DEPRECATED_REJECTED);
-    expect(deprecatedEvent).toBeDefined();
-    expect(deprecatedEvent!.data.tool).toBe('artifact_validator');
-    expect(deprecatedEvent!.data.replacedBy).toEqual(['requirements_schema']);
-    expect(deprecatedEvent!.data.reason).toBe('Use project-owned validators.');
-  });
-
-  it('emits TOOL_DEPRECATED_REJECTED even when no replacements are listed', async () => {
-    const eventStore = makeEventStore();
-    const pathFactory = makePathFactory(tempDir);
-    const ctx = makeCtx();
-    const backpressure = makeBackpressure();
-
-    const definition = {
-      name: 'old_validator',
-      type: ProjectToolType.COMMAND,
-      command: 'echo',
-      deprecated: true
-    };
-
-    const result = await executeConfiguredProjectTool(
-      eventStore as any,
-      pathFactory,
-      definition as any,
-      {},
-      ctx,
-      undefined,
-      backpressure,
-      tempDir
-    );
-
-    const resultRecord = result as Record<string, unknown>;
-    expect(resultRecord.status).toBe(ToolResultStatus.REJECTED);
-    const deprecatedEvent = eventStore.recorded.find(e => e.name === DomainEventName.TOOL_DEPRECATED_REJECTED);
-    expect(deprecatedEvent).toBeDefined();
-    expect(deprecatedEvent!.data.replacedBy).toBeUndefined();
-  });
-
-  it('does not reject a non-deprecated tool via the deprecation guard', async () => {
-    const eventStore = makeEventStore();
-    const pathFactory = makePathFactory(tempDir);
-    const ctx = makeCtx();
-    const backpressure = makeBackpressure();
-
-    const definition: ProjectCommandToolConfig = {
-      name: 'requirements_schema',
-      type: ProjectToolType.COMMAND,
-      command: process.execPath,
-      defaultArgs: ['-e', 'process.stdout.write(JSON.stringify({status:"PASSED"}))']
-    };
-
-    await executeConfiguredProjectTool(
-      eventStore as any,
-      pathFactory,
-      definition,
-      {},
-      ctx,
-      undefined,
-      backpressure,
-      tempDir
-    ).catch(() => {/* ignore execution errors — we only care the deprecation guard didn't fire */});
-
-    const deprecatedEvent = eventStore.recorded.find(e => e.name === DomainEventName.TOOL_DEPRECATED_REJECTED);
-    expect(deprecatedEvent).toBeUndefined();
   });
 });
 

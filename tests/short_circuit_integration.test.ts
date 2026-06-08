@@ -14,12 +14,11 @@
  * Exit paths covered:
  *   1. wrapPluginTool validation rejection (checkToolValidationRules) — site 1
  *   2. wrapPluginTool circuit-breaker short-circuit — site 3
- *   3. executeConfiguredProjectTool deprecated-tool rejection — site 5
- *   4. preflightProjectTool extension-type rejection — site 6
+ *   3. preflightProjectTool extension-type rejection — site 6
  *
- * Verifier gate assertion (AC3): for the deprecated-tool case, we drive
- * runVerifierGate against a real EventStore that recorded the PROJECT_TOOL_FAILED
- * event and assert the gate reports TOOL_REJECTED (not TOOL_NOT_INVOKED) and blocks.
+ * Note: the former site 5 (deprecated-tool runtime rejection) was removed by
+ * pi-experiment-ebzz — config admission (ConfigLoader.validateNoDeprecatedTools) is
+ * the only rejection point; the runtime guard was dead code.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -35,7 +34,6 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { executeConfiguredProjectTool } from '../src/plugins/projectTools.js';
 import { runVerifierGate, VerifierGateBlockKind } from '../src/core/VerifierGate.js';
 import { Logger } from '../src/core/Logger.js';
-import type { ProjectCommandToolConfig } from '../src/core/domain/StateModels.js';
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -328,131 +326,6 @@ states:
     expect(artifact.status).toBe(ToolResultStatus.REJECTED);
     expect(artifact.rejectionReason).toContain('circuit open');
     expect(artifact.schemaId).toContain('short-circuit-failure-artifact');
-  });
-});
-
-// ── Site 5: deprecated-tool rejection + verifier gate TOOL_REJECTED (AC3) ────
-
-describe('zog2.16 integration: deprecated-tool rejection carries outputFile + verifier sees TOOL_REJECTED', () => {
-  let tempRoot: string;
-  let tempWorktree: string;
-  let configLoader: ConfigLoader;
-  let eventStore: EventStore;
-  let toolCallPathFactory: ToolCallPathFactory;
-  let savedEnv: Record<string, string | undefined>;
-
-  beforeEach(() => {
-    savedEnv = saveEnv(EnvVars.PROJECT_ROOT, EnvVars.WORKTREE_PATH);
-    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'zog2-16-deprecated-')));
-    tempWorktree = path.join(tempRoot, 'worktrees', 'bd-depr-1');
-    fs.mkdirSync(tempWorktree, { recursive: true });
-    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), `
-settings:
-  startState: Planning
-  eventStore:
-    enabled: true
-  worktreePolicy:
-    default: always
-statechart:
-  terminalStates: [completed]
-  advanceOutcomes: [SUCCESS]
-  failedOutcomes: [FAILURE]
-  blockedOutcomes: [BLOCKED]
-
-states:
-  Planning:
-    identity: { role: "Planner", expertise: "Planning", constraints: [] }
-    baseInstructions: "Plan"
-    actions:
-      - id: a1
-        type: prompt
-    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
-`);
-    configLoader = new ConfigLoader(undefined, tempRoot);
-    eventStore = new EventStore(configLoader, undefined, undefined, tempRoot);
-    toolCallPathFactory = new ToolCallPathFactory();
-    eventStore.setSessionId(`test-depr-${process.pid}`);
-    process.env[EnvVars.PROJECT_ROOT] = tempRoot;
-    process.env[EnvVars.WORKTREE_PATH] = tempWorktree;
-  });
-
-  afterEach(() => {
-    configLoader.reset();
-    restoreEnv(savedEnv);
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  });
-
-  it('PROJECT_TOOL_FAILED for deprecated tool carries top-level outputFile', async () => {
-    const deprecatedTool: ProjectCommandToolConfig & { deprecated: boolean; deprecationReason: string } = {
-      name: 'old_verifier',
-      type: ProjectToolType.COMMAND,
-      command: process.execPath,
-      defaultArgs: ['-e', 'process.stdout.write("should never run");'],
-      deprecated: true,
-      deprecationReason: 'replaced by new_verifier',
-    };
-
-    const result = await executeConfiguredProjectTool(
-      eventStore, toolCallPathFactory, deprecatedTool,
-      { beadId: 'bd-depr-1', stateId: 'Planning', actionId: 'analyze' },
-      {} as any, undefined, new Map(), tempRoot,
-    );
-
-    // Model-facing result: REJECTED with a message
-    expect((result as any).status).toBe(ToolResultStatus.REJECTED);
-    expect((result as any).message).toContain('deprecated');
-
-    // AC1: PROJECT_TOOL_FAILED event must carry top-level outputFile
-    const events = await eventStore.eventsForBead('bd-depr-1');
-    const failedEvent = events.find(
-      e => e.type === DomainEventName.PROJECT_TOOL_FAILED && e.data?.tool === 'old_verifier'
-    );
-    expect(failedEvent).toBeDefined();
-    expect(typeof failedEvent!.data.outputFile).toBe('string');
-    expect(failedEvent!.data.outputFile.length).toBeGreaterThan(0);
-    expect(fs.existsSync(failedEvent!.data.outputFile as string)).toBe(true);
-
-    // AC2: artifact fields
-    const artifact = JSON.parse(fs.readFileSync(failedEvent!.data.outputFile as string, 'utf8'));
-    expect(artifact.status).toBe(ToolResultStatus.REJECTED);
-    expect(artifact.failureCategory).toBe('INPUT');
-    expect(artifact.schemaId).toContain('short-circuit-failure-artifact');
-  });
-
-  // AC3: verifier gate must see TOOL_REJECTED (not TOOL_NOT_INVOKED) and STILL BLOCK
-  it('runVerifierGate reports TOOL_REJECTED for deprecated-tool rejection and blocks (AC3)', async () => {
-    const deprecatedTool: ProjectCommandToolConfig & { deprecated: boolean } = {
-      name: 'gated_old_verifier',
-      type: ProjectToolType.COMMAND,
-      command: process.execPath,
-      defaultArgs: ['-e', 'process.stdout.write("should never run");'],
-      deprecated: true,
-    };
-
-    await executeConfiguredProjectTool(
-      eventStore, toolCallPathFactory, deprecatedTool,
-      { beadId: 'bd-depr-1', stateId: 'Planning', actionId: 'audit' },
-      {} as any, undefined, new Map(), tempRoot,
-    );
-
-    // Give the async eventStore record calls time to flush
-    await new Promise(r => setTimeout(r, 20));
-
-    // runVerifierGate against the real EventStore — the event recorded above must
-    // make the gate see TOOL_REJECTED, not TOOL_NOT_INVOKED, and block.
-    const gateResult = await runVerifierGate(
-      { beadId: 'bd-depr-1', stateId: 'Planning', actionId: 'audit', writeSet: [], artifacts: {} },
-      ['gated_old_verifier'],
-      eventStore,
-    );
-
-    expect(gateResult.pass).toBe(false);
-    expect(gateResult.failures).toHaveLength(1);
-    // The gate must NOT treat the tool as never-invoked — it WAS invoked but rejected
-    expect(gateResult.failures[0].kind).toBe(VerifierGateBlockKind.TOOL_REJECTED);
-    expect(gateResult.failures[0].tool).toBe('gated_old_verifier');
-    // Verifier gate blocks (does not satisfy requiredTools presence check)
-    expect(gateResult.pass).toBe(false);
   });
 });
 

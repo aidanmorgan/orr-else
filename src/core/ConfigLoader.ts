@@ -2387,8 +2387,6 @@ export class ConfigLoader {
    *
    * Deprecated/replaced tools must be REMOVED from config entirely. Stale
    * references to removed tools are caught by validateNoStaleToolReferences.
-   * The invocation-time REJECTED guard in executeConfiguredProjectTool remains
-   * as a defensive runtime guard for impossible/stale calls only.
    */
   private validateNoDeprecatedTools(config: HarnessConfig): void {
     for (const tool of config.tools || []) {
