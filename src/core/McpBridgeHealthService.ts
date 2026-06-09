@@ -1,14 +1,10 @@
 /**
  * McpBridgeHealthService — per-runtime MCP bridge probe and health cache.
  *
- * Replaces the module-level `healthCache` and `_activeBridgeProbe` globals in
- * McpTransportPreflight.ts. The composition root creates one instance per
- * runtime and injects it wherever bridge health is checked (BeadSpawnCoordinator,
- * extension.ts).
- *
- * The public module functions in McpTransportPreflight.ts remain available for
- * the public boundary (extension.ts) but delegate to this service via the
- * injected instance — the core NEVER reads the module-level cache directly.
+ * The composition root creates one instance per runtime and injects it wherever
+ * bridge health is checked (BeadSpawnCoordinator, extension.ts). The probe is
+ * purely instance-owned: inject via setProbe() or the constructor; no module-level
+ * globals are used.
  *
  * Design mirrors the s3wp.32 design goals:
  *  - SINGLE health event recorded per unique failure key
@@ -19,7 +15,6 @@
 import {
   mcpBackedRequiredToolNames,
   type McpBridgeHealth,
-  getGlobalBridgeProbeForTest,
 } from './McpTransportPreflight.js';
 
 export type { McpBridgeHealth };
@@ -53,9 +48,8 @@ const REMEDIATION =
 /**
  * Per-runtime MCP bridge health service.
  *
- * Owns the probe cache (probe/cache state is NOT shared with other runtimes
- * or with the module-level globals in McpTransportPreflight.ts).
- * Tests create fresh instances instead of calling resetMcpBridgeHealthCache().
+ * Owns the probe cache and bridge probe — state is NOT shared with other runtimes.
+ * Tests create fresh instances and inject probes via setProbe().
  */
 export class McpBridgeHealthService {
   private readonly healthCache = new Map<HealthCacheKey, McpBridgeHealth>();
@@ -75,11 +69,7 @@ export class McpBridgeHealthService {
    * Returns a structured health result. Never throws.
    */
   private async probeModule(): Promise<{ ok: boolean; errorMessage?: string; errorType?: string }> {
-    // Instance probe takes precedence. Fall back to the module-level test probe
-    // (set via setBridgeProbeForTest) so legacy tests that do not supply a per-runtime
-    // service continue to work.
-    const probe = this.bridgeProbe ?? getGlobalBridgeProbeForTest();
-    if (probe) return probe();
+    if (this.bridgeProbe) return this.bridgeProbe();
     for (const mod of BRIDGE_MODULES_TO_PROBE) {
       try {
         await import(mod);

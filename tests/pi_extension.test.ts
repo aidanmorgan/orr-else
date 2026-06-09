@@ -11,7 +11,8 @@ import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
 import { BuiltInToolName, DomainEventName, PluginToolName } from '../src/constants/domain.js';
 import { EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/infra.js';
-import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
+import { createRuntimeServices } from '../src/composition/createRuntimeServices.js';
+import { McpBridgeHealthService } from '../src/core/McpBridgeHealthService.js';
 import { ContextInjector } from '../src/core/ContextInjector.js';
 
 function fakePi() {
@@ -2427,24 +2428,7 @@ states:
 // is down.  This mirrors the harness_status and scheduling surfaces (Parts 1+2).
 
 describe('pre_signal_audit — s3wp.32: MCP bridge unavailability (3rd required surface)', () => {
-  beforeEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
-  afterEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
   it('marks required MCP-backed tools as unavailable when the bridge is down', async () => {
-    // Simulate missing @modelcontextprotocol/sdk bridge
-    setBridgeProbeForTest(async () => ({
-      ok: false as const,
-      errorMessage: "Cannot find module '@modelcontextprotocol/sdk/dist/cjs/dist/cjs/client/index.js'",
-      errorType: 'Error'
-    }));
-
     const previousCwd = process.cwd();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
@@ -2493,9 +2477,18 @@ states:
       process.env[EnvVars.ACTION_ID] = 'formulate-plan';
       process.env[EnvVars.PROJECT_ROOT] = tempRoot;
       process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+
+      // Inject a failing probe via per-runtime service injection
+      const services = createRuntimeServices();
+      services.mcpBridgeHealthService.setProbe(async () => ({
+        ok: false as const,
+        errorMessage: "Cannot find module '@modelcontextprotocol/sdk/dist/cjs/dist/cjs/client/index.js'",
+        errorType: 'Error'
+      }));
+
       harness = fakePi();
 
-      await orrElseExtension(harness.pi);
+      await orrElseExtension(harness.pi, services);
       await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
       await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
 
@@ -2547,9 +2540,6 @@ states:
   });
 
   it('does NOT mark required tools as unavailable when the MCP bridge is healthy', async () => {
-    // Bridge is healthy — no MCP unavailability signal should appear
-    setBridgeProbeForTest(async () => ({ ok: true as const }));
-
     const previousCwd = process.cwd();
     const previousEnv = {
       workerMode: process.env[EnvVars.WORKER_MODE],
@@ -2597,9 +2587,14 @@ states:
       process.env[EnvVars.ACTION_ID] = 'formulate-plan';
       process.env[EnvVars.PROJECT_ROOT] = tempRoot;
       process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+
+      // Bridge is healthy — inject a passing probe via per-runtime service injection
+      const services = createRuntimeServices();
+      services.mcpBridgeHealthService.setProbe(async () => ({ ok: true as const }));
+
       harness = fakePi();
 
-      await orrElseExtension(harness.pi);
+      await orrElseExtension(harness.pi, services);
       await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
       await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
 

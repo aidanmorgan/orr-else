@@ -37,7 +37,7 @@ import {
 } from '../src/core/FailureTaxonomy.js';
 import { DomainEventName } from '../src/constants/domain.js';
 import { SupervisorDefaults, TimeMs } from '../src/constants/infra.js';
-import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
+import { McpBridgeHealthService } from '../src/core/McpBridgeHealthService.js';
 
 // ---------------------------------------------------------------------------
 // Helpers — pure routeFailure assertions (no Supervisor needed)
@@ -248,7 +248,6 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
 
   it('BEAD_QUARANTINED events for MCP backend failure carry taxonomy fields (BACKEND_READINESS → QUARANTINE)', async () => {
     const { Supervisor } = await import('../src/core/Supervisor.js');
-    const { checkMcpBridgeHealth } = await import('../src/core/McpTransportPreflight.js');
     const records: Array<{ event: string; data: any }> = [];
     const claim = vi.fn(async ({ id, stateId }: { id: string; stateId: string }) => ({ id, status: stateId } as any));
     const release = vi.fn(async () => {});
@@ -620,6 +619,7 @@ async function makeTestSupervisor(overrides: {
   worktreePort?: any;
   factory?: any;
   nowMs?: number;
+  mcpBridgeHealthService?: any;
 } = {}) {
   const { Supervisor } = await import('../src/core/Supervisor.js');
   const NOW_MS = overrides.nowMs ?? Date.parse('2026-01-02T03:04:05.000Z');
@@ -675,7 +675,8 @@ async function makeTestSupervisor(overrides: {
       beadsPort: defaultBeadsPort,
       worktreePort: overrides.worktreePort ?? { createWorktree: vi.fn(async () => ({ success: true, path: '/tmp/wt' })) },
       scheduler: {},
-      flowManager: { nextState: vi.fn(), stateForBead: vi.fn() }
+      flowManager: { nextState: vi.fn(), stateForBead: vi.fn() },
+      ...(overrides.mcpBridgeHealthService !== undefined ? { mcpBridgeHealthService: overrides.mcpBridgeHealthService } : {})
     } as any,
     { maxSlots: 2, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
   );
@@ -827,83 +828,78 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
 
   // Path 4: BACKEND_READINESS × SPAWN → QUARANTINE (MCP backend down)
   it('path 4: MCP backend unavailable (BACKEND_READINESS, SPAWN) → QUARANTINE → BEAD_QUARANTINED carries taxonomy fields', async () => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(async () => ({ ok: false, errorMessage: 'Cannot find module mcp', errorType: 'Error' }));
+    const mcpBridgeHealthService = new McpBridgeHealthService();
+    mcpBridgeHealthService.setProbe(async () => ({ ok: false, errorMessage: 'Cannot find module mcp', errorType: 'Error' }));
 
-    try {
-      const { supervisor, records } = await makeTestSupervisor({
-        configLoader: {
-          load: async () => ({
-            settings: { teammateNoProgressTimeoutMs: 1 },
-            tools: [{ name: 'cerdiwen', type: 'mcp' }],
-            states: {
-              Planning: {
-                requiredTools: ['cerdiwen'],
-                actions: [], on: {}, transitions: {}
-              }
+    const { supervisor, records } = await makeTestSupervisor({
+      configLoader: {
+        load: async () => ({
+          settings: { teammateNoProgressTimeoutMs: 1 },
+          tools: [{ name: 'cerdiwen', type: 'mcp' }],
+          states: {
+            Planning: {
+              requiredTools: ['cerdiwen'],
+              actions: [], on: {}, transitions: {}
             }
-          })
-        },
-        beadsPortExtras: {
-          claim: vi.fn(async ({ id }: { id: string }) => ({ id } as any)),
-          getBead: vi.fn(async (id: string) => ({ id, status: 'Planning', lastActivity: '' } as any))
-        },
-        factory: {
-          getLiveTeammateBeadIds: vi.fn(async () => new Set()),
-          spawnTeammateInTmux: vi.fn(async () => ({ success: true })),
-          getActiveTeammateCount: vi.fn(async () => 0),
-          getAvailableSlots: vi.fn(async () => 1),
-          terminateTeammatesForBead: vi.fn(),
-          captureBeadPaneText: vi.fn(async () => '')
-        },
-        eventStoreExtras: {
-          latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
-          projectBead: vi.fn(async () => ({ restartRequested: false }))
-        }
-      });
+          }
+        })
+      },
+      beadsPortExtras: {
+        claim: vi.fn(async ({ id }: { id: string }) => ({ id } as any)),
+        getBead: vi.fn(async (id: string) => ({ id, status: 'Planning', lastActivity: '' } as any))
+      },
+      factory: {
+        getLiveTeammateBeadIds: vi.fn(async () => new Set()),
+        spawnTeammateInTmux: vi.fn(async () => ({ success: true })),
+        getActiveTeammateCount: vi.fn(async () => 0),
+        getAvailableSlots: vi.fn(async () => 1),
+        terminateTeammatesForBead: vi.fn(),
+        captureBeadPaneText: vi.fn(async () => '')
+      },
+      eventStoreExtras: {
+        latestProjectToolFailureLimitEvent: vi.fn(async () => undefined),
+        projectBead: vi.fn(async () => ({ restartRequested: false }))
+      },
+      mcpBridgeHealthService
+    });
 
-      // Simulate unhealthy MCP bridge (already probed — cache miss triggers event)
-      await (supervisor as any).spawnCoordinator.runMcpPreflightForTools(['cerdiwen']);
+    // Simulate unhealthy MCP bridge (already probed — cache miss triggers event)
+    await (supervisor as any).spawnCoordinator.runMcpPreflightForTools(['cerdiwen']);
 
-      // Now scanAndSpawn — must quarantine the bead
-      (supervisor as any).spawnCoordinator.mcpBridgeHealth = {
-        healthy: false,
-        affectedToolNames: ['cerdiwen'],
-        message: 'Cannot find module mcp'
-      };
+    // Now scanAndSpawn — must quarantine the bead
+    (supervisor as any).spawnCoordinator.mcpBridgeHealth = {
+      healthy: false,
+      affectedToolNames: ['cerdiwen'],
+      message: 'Cannot find module mcp'
+    };
 
-      // Manually drive the MCP-skip preflight inline
-      const bead = { id: 'bead-mcp-down', stateId: 'Planning', score: 0, status: 'Planning', lastActivity: '', assigned_to: 'Orr Else' } as any;
-      const config = await (supervisor as any).services.configLoader.load();
+    // Manually drive the MCP-skip preflight inline
+    const bead = { id: 'bead-mcp-down', stateId: 'Planning', score: 0, status: 'Planning', lastActivity: '', assigned_to: 'Orr Else' } as any;
 
-      // Drive the taxonomy route for BACKEND_READINESS × SPAWN (same code path as scanAndSpawn)
-      const taxonomyRoute = (supervisor as any).spawnCoordinator.routeTaxonomy(
-        FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
-      );
-      expect(taxonomyRoute.nextAction).toBe(NextAction.QUARANTINE);
+    // Drive the taxonomy route for BACKEND_READINESS × SPAWN (same code path as scanAndSpawn)
+    const taxonomyRoute = (supervisor as any).spawnCoordinator.routeTaxonomy(
+      FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
+    );
+    expect(taxonomyRoute.nextAction).toBe(NextAction.QUARANTINE);
 
-      // Drive quarantineBead directly (mirrors scanAndSpawn MCP path)
-      const fields = (supervisor as any).spawnCoordinator.taxonomyFields(
-        FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
-      );
-      await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'UNKNOWN', {
-        ...fields,
-        unavailableTools: ['cerdiwen'],
-        errorMessage: 'Cannot find module mcp',
-        taxonomyReason: 'MCP backend unavailable at spawn — BACKEND_READINESS × SPAWN → QUARANTINE'
-      });
+    // Drive quarantineBead directly (mirrors scanAndSpawn MCP path)
+    const fields = (supervisor as any).spawnCoordinator.taxonomyFields(
+      FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
+    );
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'UNKNOWN', {
+      ...fields,
+      unavailableTools: ['cerdiwen'],
+      errorMessage: 'Cannot find module mcp',
+      taxonomyReason: 'MCP backend unavailable at spawn — BACKEND_READINESS × SPAWN → QUARANTINE'
+    });
 
-      const quarantineEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);
-      expect(quarantineEvent, 'BEAD_QUARANTINED must be emitted for BACKEND_READINESS').toBeDefined();
-      expect(quarantineEvent!.data.taxonomyClass).toBe(FailureClass.BACKEND_READINESS);
-      expect(quarantineEvent!.data.taxonomyRowId).toBe('backend_readiness.spawn');
-      expect(quarantineEvent!.data.taxonomyAction).toBe(NextAction.QUARANTINE);
-      expect(quarantineEvent!.data.retryBudget).toBe(RetryBudget.AVAILABLE);
-      expect(quarantineEvent!.data.lifecyclePhase).toBe(LifecyclePhase.SPAWN);
-    } finally {
-      setBridgeProbeForTest(undefined);
-      resetMcpBridgeHealthCache();
-    }
+    const quarantineEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);
+    expect(quarantineEvent, 'BEAD_QUARANTINED must be emitted for BACKEND_READINESS').toBeDefined();
+    expect(quarantineEvent!.data.taxonomyClass).toBe(FailureClass.BACKEND_READINESS);
+    expect(quarantineEvent!.data.taxonomyRowId).toBe('backend_readiness.spawn');
+    expect(quarantineEvent!.data.taxonomyAction).toBe(NextAction.QUARANTINE);
+    expect(quarantineEvent!.data.retryBudget).toBe(RetryBudget.AVAILABLE);
+    expect(quarantineEvent!.data.lifecyclePhase).toBe(LifecyclePhase.SPAWN);
   });
 
   // Path 4b: BACKEND_READINESS — drive the real MCP preflight + quarantine path in supervisor
