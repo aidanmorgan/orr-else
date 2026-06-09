@@ -400,10 +400,19 @@ export const DOMAIN_EVENT_SCHEMA_METADATA: Readonly<Record<string, DomainEventSc
     replayImpact: 'AUDIT',
     optionalFields: ['stateId', 'owner', 'description']
   },
+  // pi-experiment-1elr.10: added lifecycleState, supervisorHealthStage, runMode
+  // as typed optional fields (present in worker-mode HARNESS_STARTED via
+  // buildLifecycleEventFields; absent in coordinator-mode /orr-else path).
   [DomainEventName.HARNESS_STARTED]: {
-    version: 1,
+    version: 2,
     replayImpact: 'AUDIT',
-    optionalFields: ['beadId', 'requestedBeadId', 'mode', 'version']
+    optionalFields: [
+      'beadId', 'requestedBeadId', 'mode', 'version',
+      // pi-experiment-1elr.10: typed lifecycle/health/runMode fields (AC5).
+      // Present in worker-mode SESSION_START HARNESS_STARTED via buildLifecycleEventFields.
+      // Values are PiLifecycleState / SupervisorHealthStage / RunMode enum members.
+      'lifecycleState', 'supervisorHealthStage', 'runMode',
+    ]
   },
   [DomainEventName.HARNESS_STOPPED]: {
     version: 1,

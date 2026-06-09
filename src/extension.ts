@@ -236,6 +236,18 @@ import {
   computeContextPolicyFingerprint
 } from './extension/CoordinatorController.js';
 import { SignalNoiseCoalescer } from './core/SignalNoiseCoalescer.js';
+import {
+  PiLifecycleEvent,
+  PiLifecycleState,
+  RunMode,
+  SupervisorHealthStage,
+  applyTransition,
+  buildLifecycleEventFields,
+  buildResourcesDiscoverFailure,
+  createLifecycleMachineState,
+  transition,
+  type LifecycleMachineState,
+} from './core/PiLifecycleStateMachine.js';
 
 /**
  * Orr Else Extension
@@ -263,6 +275,15 @@ const FrameworkToolCallListSchema = z.array(FrameworkToolCallSchema);
  * second invocation against a different `pi` instance.
  */
 interface ExtensionSession {
+  // ── lifecycle state machine (pi-experiment-1elr.10) ──────────────────────
+  /**
+   * Deterministic Pi lifecycle state machine.  Every lifecycle handler
+   * (RESOURCES_DISCOVER, SESSION_START, BEFORE_AGENT_START, SESSION_SHUTDOWN,
+   * tool events, reload, restart) calls transition() on this machine BEFORE
+   * mutating session state or registering tools.  Invalid ordering produces
+   * a LIFECYCLE_VIOLATION diagnostic via the n8fg taxonomy.
+   */
+  lifecycleMachine: LifecycleMachineState;
   // ── coordinator ──────────────────────────────────────────────────────────
   supervisor: Supervisor | null;
   currentFlowOptions: FlowOptions | null;
@@ -376,6 +397,7 @@ interface ExtensionSession {
 
 function createExtensionSession(): ExtensionSession {
   return {
+    lifecycleMachine: createLifecycleMachineState(),
     supervisor: null,
     currentFlowOptions: null,
     teammateFactory: null,
@@ -1419,6 +1441,33 @@ function wrapPluginTool(
 
 function isWorkerMode(): boolean {
   return process.env[EnvVars.WORKER_MODE] === ProcessFlag.TRUE && !!process.env[EnvVars.BEAD_ID] && !!process.env[EnvVars.STATE_ID];
+}
+
+/**
+ * Emit a LIFECYCLE_VIOLATION diagnostic log from a failed transition.
+ *
+ * This is the central fail-closed path for all lifecycle violations (AC3).
+ * Called by each lifecycle handler after transition() returns ok:false.
+ * The handler then decides whether to return early or continue (for shutdown
+ * which must always proceed even if the machine disagrees).
+ *
+ * pi-experiment-1elr.10: uses the n8fg taxonomy result from the machine,
+ * not a parallel classification.
+ */
+function emitLifecycleViolation(
+  violation: import('./core/PiLifecycleStateMachine.js').TransitionFailure,
+  context: Record<string, unknown> = {}
+): void {
+  Logger.warn(Component.ORR_ELSE, 'Lifecycle violation detected', {
+    kind: violation.kind,
+    fromState: violation.fromState,
+    event: violation.event,
+    description: violation.description,
+    taxonomyRowId: violation.routingResult.rowId,
+    taxonomyNextAction: violation.routingResult.nextAction,
+    idempotencyKey: violation.idempotencyKey,
+    ...context,
+  });
 }
 
 // isRecord is imported from ./extension/PiEventAdapters.js
@@ -3710,6 +3759,9 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     requestedBeadId: options.beadId
   });
 
+  // pi-experiment-1elr.10: reflect supervisor active state on the lifecycle machine.
+  session.lifecycleMachine.supervisorHealthStage = SupervisorHealthStage.ACTIVE;
+
   await session.supervisor.start();
 
   return `${(await flowStatus(services, session, 'text')) as string}\nAttach with: tmux attach -t orr-else`;
@@ -3814,6 +3866,24 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   });
 
   pi.on(PiEventName.SESSION_SHUTDOWN, () => {
+    // pi-experiment-1elr.10: transition the lifecycle machine before side effects.
+    // SESSION_SHUTDOWN always proceeds even on violation — cleanup must never be blocked.
+    const shutdownResult = transition(session.lifecycleMachine, PiLifecycleEvent.SESSION_SHUTDOWN);
+    if (!shutdownResult.ok) {
+      emitLifecycleViolation(shutdownResult, { isWorker: isWorkerMode() });
+      // Do NOT return early — shutdown must always run.
+    } else {
+      if (shutdownResult.shutdownWithActiveRun) {
+        // AC3: shutdown-with-active-run diagnostic (LIFECYCLE_VIOLATION via taxonomy).
+        Logger.warn(Component.ORR_ELSE, 'SESSION_SHUTDOWN arrived while a tool turn was active', {
+          fromState: shutdownResult.fromState,
+          isWorker: isWorkerMode(),
+        });
+      }
+      applyTransition(session.lifecycleMachine, shutdownResult);
+      session.lifecycleMachine.supervisorHealthStage = SupervisorHealthStage.STOPPED;
+    }
+
     Logger.info(Component.ORR_ELSE, 'Pi session shutdown observed', { isWorker: isWorkerMode() });
     if (session.supervisor) session.supervisor.stop();
     session.supervisor = null;
@@ -3833,6 +3903,24 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
   pi.on(PiEventName.BEFORE_AGENT_START, async (event: BeforeAgentStartEvent) => {
     if (!isWorkerMode()) return;
+
+    // pi-experiment-1elr.10: transition the lifecycle machine BEFORE initialising
+    // the worker run or injecting prompts. Invalid ordering (e.g. BEFORE_AGENT_START
+    // before SESSION_START) produces a LIFECYCLE_VIOLATION diagnostic and returns early
+    // — workers must not start if the lifecycle gate rejects admission.
+    const bafResult = transition(session.lifecycleMachine, PiLifecycleEvent.BEFORE_AGENT_START);
+    if (!bafResult.ok) {
+      emitLifecycleViolation(bafResult, {
+        isWorker: true,
+        beadId: process.env[EnvVars.BEAD_ID],
+        stateId: process.env[EnvVars.STATE_ID],
+      });
+      return; // Do NOT start workers or inject prompts on lifecycle violation.
+    }
+    if (!bafResult.wasIdempotent) {
+      applyTransition(session.lifecycleMachine, bafResult);
+    }
+
     const config = await services.configLoader.load();
     if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
     const promptResult = buildStateSystemPrompt(config, services, session);
@@ -4073,13 +4161,47 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   });
 
   pi.on(PiEventName.RESOURCES_DISCOVER, async () => {
-    const config = await services.configLoader.load();
+    // pi-experiment-1elr.10: transition the lifecycle machine before resolving skills.
+    const rdResult = transition(session.lifecycleMachine, PiLifecycleEvent.RESOURCES_DISCOVER);
+    if (!rdResult.ok) {
+      emitLifecycleViolation(rdResult);
+      // Emit RESOURCES_DISCOVER_FAILURE diagnostic and return empty (fail-closed).
+      const failureDiag = buildResourcesDiscoverFailure(session.lifecycleMachine);
+      emitLifecycleViolation(failureDiag, { context: 'invalid-state-for-resources-discover' });
+      return {};
+    }
+    if (!rdResult.wasIdempotent) {
+      applyTransition(session.lifecycleMachine, rdResult);
+    }
+
+    let config;
+    try {
+      config = await services.configLoader.load();
+    } catch (err) {
+      const failureDiag = buildResourcesDiscoverFailure(session.lifecycleMachine);
+      emitLifecycleViolation(failureDiag, { error: String(err) });
+      return {};
+    }
     const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
     const skillPaths = resolvePiSkillPaths(config, projectRoot);
     return skillPaths.length > 0 ? { skillPaths } : {};
   });
 
   pi.on(PiEventName.SESSION_START, async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+    // pi-experiment-1elr.10: transition the lifecycle machine BEFORE registering tools,
+    // initialising observability, or constructing the TeammateFactory. A duplicate
+    // SESSION_START (invalid ordering) produces a LIFECYCLE_VIOLATION diagnostic and
+    // returns early — duplicate observer registration is a structural harness error.
+    const ssResult = transition(session.lifecycleMachine, PiLifecycleEvent.SESSION_START);
+    if (!ssResult.ok) {
+      emitLifecycleViolation(ssResult, { isWorker: isWorkerMode() });
+      return; // Do NOT register tools or initialise observability on lifecycle violation.
+    }
+    applyTransition(session.lifecycleMachine, ssResult);
+    // Determine run mode once, immutably, at SESSION_START.
+    session.lifecycleMachine.runMode = isWorkerMode() ? RunMode.WORKER : RunMode.COORDINATOR;
+    session.lifecycleMachine.supervisorHealthStage = SupervisorHealthStage.IDLE;
+
     const config = await services.configLoader.load();
     const runtimeObservability = await initializeObservability(services);
     session.piToolObservability = runtimeObservability;
@@ -4103,7 +4225,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           stateId: process.env[EnvVars.STATE_ID],
           workerId: process.env[EnvVars.WORKER_ID],
           buildProvenance: workerProvenance,
-          hostSdkFingerprint
+          hostSdkFingerprint,
+          // pi-experiment-1elr.10: typed lifecycle/health/runMode fields (AC5).
+          ...buildLifecycleEventFields(session.lifecycleMachine),
         }).catch(() => {});
         // AC3: store the harness fingerprint for inclusion in STATE_RUN_INITIALIZED
         // and STATE_PROMPT_ASSEMBLED events (pi-experiment-1elr.9).
