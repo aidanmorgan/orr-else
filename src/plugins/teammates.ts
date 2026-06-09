@@ -21,7 +21,7 @@ import { WorkerPromptIdentityBuilder, formatSkillDuplicationDiagnostic } from '.
 import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
 import { DomainEventName, PiCliCommand, PluginToolName, ThinkingLevel } from '../constants/domain.js';
-import { Component, Defaults, EnvVars, OperationalArtifactPath, OtelAttr, PaneTranscriptDefaults, PiCliFlag, ProcessFlag, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, WorktreeDefaults } from '../constants/infra.js';
+import { Component, Defaults, EnvVars, OperationalArtifactPath, OtelAttr, PaneTranscriptDefaults, PiCliFlag, ProcessFlag, sanitizePaneId, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, WorktreeDefaults } from '../constants/infra.js';
 import { nodeTmuxClient, type TmuxClient } from './TmuxClient.js';
 import { nodeWorkerCommandBuilder, type WorkerCommandBuilder } from './WorkerCommandBuilder.js';
 
@@ -76,12 +76,6 @@ export function parseOrrWorkerPaneOption(value: string): { workerId: string; bea
   if (!workerId || !beadId || !stateId) return null;
   return { workerId, beadId, stateId };
 }
-
-/**
- * Sanitise a tmux pane ID (e.g. "%42") to a safe filename component.
- * Replaces any character that is not alphanumeric, dot, dash, or underscore.
- */
-const PANE_ID_UNSAFE_CHARS = /[^A-Za-z0-9._-]/g;
 
 const SAFE_REF = /^[A-Za-z0-9._-]+$/;
 
@@ -385,7 +379,7 @@ export class TeammateFactory {
       );
       fs.mkdirSync(transcriptDir, { recursive: true });
 
-      const safeId = paneId.replace(PANE_ID_UNSAFE_CHARS, '_');
+      const safeId = sanitizePaneId(paneId);
       const transcriptPath = path.join(
         transcriptDir,
         `${safeId}${PaneTranscriptDefaults.FILE_SUFFIX}`
