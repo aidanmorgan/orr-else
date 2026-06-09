@@ -1371,8 +1371,9 @@ describe('tool count summary', () => {
     // query_harness_events added by 6q0y.22.
     // query_tool_output added by 6q0y.23.
     // submit_action_evidence added by x0zh (v2 evidence-only surface).
-    // Current counts: built_in=17, plugin=21, native_pi=8
-    expect(builtInCount, 'BuiltInToolName count must be 17').toBe(17);
+    // query_harness_logs, query_tmux_transcripts, query_otel_spans added by 6q0y.24/25/26.
+    // Current counts: built_in=20, plugin=21, native_pi=8
+    expect(builtInCount, 'BuiltInToolName count must be 20').toBe(20);
     expect(pluginCount, 'PluginToolName count must be 21').toBe(21);
     expect(nativeCount, 'DEFAULT_OBSERVED_PI_TOOLS count must be 8').toBe(8);
     expect(total, 'RTK_INVENTORY total must equal sum of all three sources').toBe(builtInCount + pluginCount + nativeCount);

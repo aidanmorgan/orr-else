@@ -442,6 +442,16 @@ export const PaneTranscriptDefaults = {
   POINTER_FILENAME: 'current.path',
 } as const;
 
+/**
+ * Sanitise a tmux pane ID (e.g. "%42") to a safe filename component.
+ * Replaces any character that is not alphanumeric, dot, dash, or underscore
+ * with '_'. Used by both the transcript writer (teammates.ts) and the reader
+ * (TmuxTranscriptQuery.ts) so they always agree on the on-disk filename.
+ */
+export function sanitizePaneId(paneId: string): string {
+  return paneId.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
 export const EventStoreDefaults = {
   DIR: OperationalArtifactPath.PI_EVENTS_DIR,
   FILE_NAME_TEMPLATE: '{{projectName}}.jsonl',

@@ -3,16 +3,26 @@
  * pane transcripts written to .pi/logs/tmux/.
  *
  * Design goals (pi-experiment-6q0y.25):
- * - Query by bead ID, worker ID, pane ID, or latest pointer (AC1).
+ * - Query by pane ID or latest pointer (AC1 — partial; see note below).
  * - Default response: metadata + at most 80 tail lines after deterministic redaction (AC2).
  * - Search mode: at most 10 hits with at most 2 context lines per hit (AC3).
  * - Missing panes / expired transcripts return structured not_found responses (AC4).
  * - Redaction is applied BEFORE truncation; path traversal is rejected (AC5).
+ *
+ * N3 — bead-ID and worker-ID lookup NOT implemented:
+ *   AC1 originally specified querying by bead ID or worker ID in addition to
+ *   pane ID. This is infeasible without new recording infrastructure: the
+ *   bead→pane mapping lives only in live tmux pane user-options (@orr_worker)
+ *   and is never persisted to disk. The transcript writer (teammates.ts) stores
+ *   only <safePaneId>.log files — no index maps bead/worker IDs to pane files.
+ *   Implementing bead/worker lookup requires a new persisted index (e.g. a
+ *   bead→paneId JSON sidecar written at spawn time). Until that infra exists,
+ *   only paneId and latest:true are supported.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { OperationalArtifactPath, PaneTranscriptDefaults } from '../constants/infra.js';
+import { OperationalArtifactPath, PaneTranscriptDefaults, sanitizePaneId } from '../constants/infra.js';
 import { redactPaneText } from './PaneTextRedactor.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -98,8 +108,7 @@ export type TmuxTranscriptQueryResult =
 
 /** Convert a pane ID to the safe filename form used by teammates.ts. */
 function paneIdToFilename(paneId: string): string {
-  // Matches the sanitization in teammates.ts: replace unsafe chars with '_'
-  return paneId.replace(/[^A-Za-z0-9._%-]/g, '_') + PaneTranscriptDefaults.FILE_SUFFIX;
+  return sanitizePaneId(paneId) + PaneTranscriptDefaults.FILE_SUFFIX;
 }
 
 function buildMetadata(paneId: string, transcriptPath: string, lines: string[]): TmuxTranscriptMetadata {

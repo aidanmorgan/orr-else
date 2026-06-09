@@ -310,6 +310,31 @@ describe('pi-experiment-6q0y.24: query_harness_logs progressive-disclosure tool'
     expect(result.latestLine?.timestamp).toBe('2020-06-10T10:00:00.000Z');
   });
 
+  it('(D5) fromTime filter works with real winston YYYY-MM-DD HH:mm:ss timestamps (N1)', async () => {
+    // Real logger writes "YYYY-MM-DD HH:mm:ss" (space-separated, no TZ).
+    // The query must parse these as UTC, not local time.
+    const logDir = path.join(tempRoot, '.pi/logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, 'orr-else-2021-01-01.log');
+    const writeLine = (ts: string, component: string, msg: string) => {
+      fs.appendFileSync(logPath, JSON.stringify({ level: 'info', message: msg, timestamp: ts, component, pid: 1 }) + '\n', 'utf8');
+    };
+    // "2021-06-01 09:00:00" UTC = 2021-06-01T09:00:00Z
+    writeLine('2021-06-01 09:00:00', 'fixture-winston', 'old-entry');
+    // "2021-06-01 11:00:00" UTC = 2021-06-01T11:00:00Z
+    writeLine('2021-06-01 11:00:00', 'fixture-winston', 'new-entry');
+
+    const tool = await registeredTool();
+    // fromTime = 2021-06-01T10:00:00Z — should include only the 11:00 line
+    const result = await callTool(tool, {
+      fromTime: '2021-06-01T10:00:00.000Z',
+      component: 'fixture-winston'
+    });
+    expect(result.status).toBe('summary');
+    expect(result.totalMatched).toBe(1);
+    expect(result.latestLine?.timestamp).toBe('2021-06-01 11:00:00');
+  });
+
   // ── (E) Fail-closed ───────────────────────────────────────────────────────
 
   it('(E1) invalid fromTime returns status:rejected', async () => {

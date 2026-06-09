@@ -437,6 +437,54 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
     safeForReadinessProbe: true
   },
 
+  {
+    toolName: BuiltInToolName.QUERY_HARNESS_LOGS,
+    toolClass: 'built_in',
+    owningFile: 'src/core/HarnessLogQuery.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
+  },
+
+  {
+    toolName: BuiltInToolName.QUERY_TMUX_TRANSCRIPTS,
+    toolClass: 'built_in',
+    owningFile: 'src/core/TmuxTranscriptQuery.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
+  },
+
+  {
+    toolName: BuiltInToolName.QUERY_OTEL_SPANS,
+    toolClass: 'built_in',
+    owningFile: 'src/core/OtelSpanQuery.ts',
+    schemaTypeName: 'untyped_record',
+    skillPath: '.pi/skills/tool-routing/SKILL.md',
+    rawOutputLocation: 'tool_calls_dir',
+    deterministicCompaction: true,
+    mutating: false,
+    cancellationPolicy: 'not_supported',
+    idempotencyClass: 'idempotent',
+    serializationKey: null,
+    allowedInReadOnlyContext: true,
+    safeForReadinessProbe: true
+  },
+
   // =========================================================================
   // PLUGIN tools — bundled runtime plugins
   // =========================================================================

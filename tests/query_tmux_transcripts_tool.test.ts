@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { BuiltInToolName } from '../src/constants/domain.js';
-import { EnvVars, PiEventName } from '../src/constants/infra.js';
+import { EnvVars, PiEventName, sanitizePaneId } from '../src/constants/infra.js';
 import { Logger } from '../src/core/Logger.js';
 import orrElseExtension from '../src/extension.js';
 
@@ -124,9 +124,8 @@ describe('pi-experiment-6q0y.25: query_tmux_transcripts progressive-disclosure t
 
   /** Write a transcript file for a given pane ID. */
   function writeTranscript(paneId: string, content: string): string {
-    // Mirrors teammates.ts: replace unsafe chars with '_', append .log
-    const safeId = paneId.replace(/[^A-Za-z0-9._%-]/g, '_');
-    const filename = safeId + '.log';
+    // Uses the shared sanitizePaneId from infra.ts — same function as teammates.ts writer.
+    const filename = sanitizePaneId(paneId) + '.log';
     const transcriptPath = path.join(transcriptDir, filename);
     fs.writeFileSync(transcriptPath, content, 'utf8');
     return transcriptPath;

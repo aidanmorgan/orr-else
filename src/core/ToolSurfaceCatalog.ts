@@ -426,6 +426,9 @@ export function buildToolSurfaceCatalog(
     { name: BuiltInToolName.PRE_SIGNAL_AUDIT, mutating: false },
     { name: BuiltInToolName.QUERY_HARNESS_EVENTS, mutating: false },
     { name: BuiltInToolName.QUERY_TOOL_OUTPUT, mutating: false },
+    { name: BuiltInToolName.QUERY_HARNESS_LOGS, mutating: false },
+    { name: BuiltInToolName.QUERY_TMUX_TRANSCRIPTS, mutating: false },
+    { name: BuiltInToolName.QUERY_OTEL_SPANS, mutating: false },
   ];
 
   for (const { name, mutating } of builtInTools) {

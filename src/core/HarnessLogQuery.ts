@@ -12,7 +12,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
-import { OperationalArtifactPath, LoggingDefaults } from '../constants/infra.js';
+import { OperationalArtifactPath } from '../constants/infra.js';
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -110,14 +110,27 @@ function parseLogLine(line: string): ParsedLogLine | null {
   }
 }
 
+/**
+ * Parse a log timestamp as UTC milliseconds.
+ * Handles both ISO 8601 (e.g. "2020-01-01T10:00:00.000Z") and the winston
+ * TIMESTAMP_FORMAT "YYYY-MM-DD HH:mm:ss" (space-separated, no TZ designator)
+ * which must be treated as UTC.
+ */
+function parseTimestampAsUtcMs(ts: string): number {
+  // ISO format already includes TZ info — parse directly.
+  if (ts.includes('T') || ts.endsWith('Z')) return Date.parse(ts);
+  // Space-separated "YYYY-MM-DD HH:mm:ss" — replace space with 'T' and append 'Z'.
+  return Date.parse(ts.replace(' ', 'T') + 'Z');
+}
+
 function passesFilters(line: ParsedLogLine, input: HarnessLogQueryInput): boolean {
   if (input.fromTime) {
-    const ts = Date.parse(line.timestamp);
+    const ts = parseTimestampAsUtcMs(line.timestamp);
     const from = Date.parse(input.fromTime);
     if (isNaN(from) || ts < from) return false;
   }
   if (input.toTime) {
-    const ts = Date.parse(line.timestamp);
+    const ts = parseTimestampAsUtcMs(line.timestamp);
     const to = Date.parse(input.toTime);
     if (isNaN(to) || ts > to) return false;
   }
