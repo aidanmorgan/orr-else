@@ -1469,6 +1469,11 @@ export interface RetentionConfig {
    * Defaults to RetentionDefaults.MAX_TOOL_CALL_DIRS_PER_RUN (10,000).
    */
   maxToolCallDirsPerRun?: number;
+  /**
+   * Maximum size in bytes for an OTEL traces-*.jsonl file before rotation.
+   * Defaults to RetentionDefaults.OTEL_MAX_BYTES.
+   */
+  otelMaxBytes?: number;
 }
 
 // ── pi-experiment-w2tz: v2 defaults/profiles ─────────────────────────────────

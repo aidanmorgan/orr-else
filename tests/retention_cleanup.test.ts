@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { RetentionCleanup } from '../src/core/RetentionCleanup.js';
+import { RetentionService } from '../src/core/retention/RetentionService.js';
+import { resolveRetentionConfig } from '../src/core/retention/RetentionPlanner.js';
 import {
   DomainEventName,
   EventStoreDefaults,
@@ -16,6 +17,24 @@ import { Logger } from '../src/core/Logger.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { RetentionConfig } from '../src/core/domain/StateModels.js';
+
+/**
+ * Construct a RetentionService with the same argument shape that
+ * RetentionCleanup used to expose. This is the single migration seam —
+ * all test sites call makeService() instead of makeService().
+ */
+function makeService(
+  projectRoot: string,
+  clock: Clock,
+  eventStore: unknown,
+  maxAgeMs: number = RetentionDefaults.MAX_AGE_MS,
+  liveBeadIds: (() => Set<string> | Promise<Set<string>>) | null = null,
+  retentionConfig?: RetentionConfig
+): RetentionService {
+  const resolved = resolveRetentionConfig(maxAgeMs, retentionConfig);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return new RetentionService(projectRoot, clock, eventStore as any, resolved, liveBeadIds);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,7 +180,7 @@ describe('RetentionCleanup', () => {
     writeFileWithMtime(oldFile, 'old content', oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
 
     expect(fs.existsSync(oldFile)).toBe(false);
@@ -175,7 +194,7 @@ describe('RetentionCleanup', () => {
     writeFileWithMtime(newFile, 'new content', newMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     await cleanup.run();
 
     expect(fs.existsSync(newFile)).toBe(true);
@@ -192,7 +211,7 @@ describe('RetentionCleanup', () => {
     makeDirWithMtime(oldDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
 
     expect(fs.existsSync(oldDir)).toBe(false);
@@ -207,7 +226,7 @@ describe('RetentionCleanup', () => {
     makeDirWithMtime(beadDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -228,7 +247,7 @@ describe('RetentionCleanup', () => {
     makeDirWithMtime(oldTrash, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
 
     expect(fs.existsSync(oldTrash)).toBe(false);
@@ -245,7 +264,7 @@ describe('RetentionCleanup', () => {
     writeFileWithMtime(newFile, 'new', NOW_MS - ONE_HOUR_MS);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     await cleanup.run();
 
     expect(fs.existsSync(oldFile)).toBe(false);
@@ -259,7 +278,7 @@ describe('RetentionCleanup', () => {
     writeFileWithMtime(oldFile, 'data', NOW_MS - TWO_DAYS_MS - ONE_HOUR_MS);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     await cleanup.run();
 
     expect(es.record).toHaveBeenCalledWith(
@@ -284,7 +303,7 @@ describe('RetentionCleanup', () => {
 
   it('emits the event even when nothing is removed', async () => {
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     await cleanup.run();
 
     expect(es.record).toHaveBeenCalledWith('RETENTION_CLEANUP_COMPLETED', expect.any(Object));
@@ -302,7 +321,7 @@ describe('RetentionCleanup', () => {
     fs.rmSync(path.join(tmpRoot, '.tmp'), { recursive: true, force: true });
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
 
     await expect(cleanup.run()).resolves.toMatchObject({
       totalFilesRemoved: 0,
@@ -338,7 +357,7 @@ describe('RetentionCleanup', () => {
     }
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
 
     // Should not throw, regardless of symlink behaviour.
     const result = await cleanup.run();
@@ -367,7 +386,7 @@ describe('RetentionCleanup', () => {
 
   it('always includes eventsCompacted field in result (0 when compaction disabled)', async () => {
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
     expect(result.eventsCompacted).toBe(0);
   });
@@ -412,7 +431,7 @@ describe('RetentionCleanup symlink confinement', () => {
       }
 
       const es = fakeEventStore();
-      const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+      const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
       await cleanup.run();
 
       // The external directory and its file MUST remain completely untouched.
@@ -437,7 +456,7 @@ describe('RetentionCleanup symlink confinement', () => {
     } catch { /* lutimes unavailable */ }
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     // Must not throw regardless of platform symlink/mtime behaviour.
     await expect(cleanup.run()).resolves.toMatchObject({
       totalErrors: expect.any(Number)
@@ -469,7 +488,7 @@ describe('RetentionCleanup tool-output live-bead protection', () => {
     makeDirWithMtime(liveBeadDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -492,7 +511,7 @@ describe('RetentionCleanup tool-output live-bead protection', () => {
     makeDirWithMtime(deadBeadDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -519,7 +538,7 @@ describe('RetentionCleanup tool-output live-bead protection', () => {
     makeDirWithMtime(deadBeadDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -539,7 +558,7 @@ describe('RetentionCleanup tool-output live-bead protection', () => {
     fs.utimesSync(toolOutputRoot, oldMtimeSec, oldMtimeSec);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -561,7 +580,7 @@ describe('RetentionCleanup tool-output live-bead protection', () => {
     makeDirWithMtime(beadDir, oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -772,7 +791,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: SEVEN_DAYS_MS, // 7 days — all old events are eligible
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -835,7 +854,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: ONE_HOUR_MS, // extremely short — everything is old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -877,7 +896,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: SEVEN_DAYS_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -921,7 +940,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: ONE_HOUR_MS, // very short — everything is "old"
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -955,7 +974,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -995,7 +1014,7 @@ describe('RetentionCleanup — MANDATORY replay-equality oracle', () => {
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1040,7 +1059,7 @@ describe('RetentionCleanup — retention config', () => {
 
     // No retentionConfig provided — compaction must be disabled (backward-safe).
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any);
     const result = await cleanup.run();
 
     expect(result.eventsCompacted).toBe(0);
@@ -1063,7 +1082,7 @@ describe('RetentionCleanup — retention config', () => {
 
     const retentionConfig: RetentionConfig = { compactionEnabled: false };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -1088,7 +1107,7 @@ describe('RetentionCleanup — retention config', () => {
 
     const retentionConfig: RetentionConfig = { maxAgeMs: shortMaxAgeMs };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -1122,7 +1141,7 @@ describe('RetentionCleanup — retention config', () => {
       compactionWindowMs: ONE_HOUR_MS * 1.5, // 1.5 hours: drops 2h-old, keeps 1h-old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1165,7 +1184,7 @@ describe('RetentionCleanup — disk health event', () => {
       diskHealthWarnBytes: 100, // very low threshold — 1000 bytes will exceed it
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -1190,7 +1209,7 @@ describe('RetentionCleanup — disk health event', () => {
       diskHealthWarnBytes: RetentionDefaults.DISK_HEALTH_WARN_BYTES,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -1246,7 +1265,7 @@ describe('RetentionCleanup — MUST-FIX 1: signal events are replay-critical', (
       compactionWindowMs: ONE_HOUR_MS, // very short — everything looks old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1284,7 +1303,7 @@ describe('RetentionCleanup — MUST-FIX 1: signal events are replay-critical', (
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1316,7 +1335,7 @@ describe('RetentionCleanup — MUST-FIX 1: signal events are replay-critical', (
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1348,7 +1367,7 @@ describe('RetentionCleanup — MUST-FIX 1: signal events are replay-critical', (
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1444,7 +1463,7 @@ describe('RetentionCleanup — MUST-FIX 2: by-bead index invalidated after compa
       compactionWindowMs: ONE_HOUR_MS, // very short — event is old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1486,7 +1505,7 @@ describe('RetentionCleanup — MUST-FIX 2: by-bead index invalidated after compa
       compactionWindowMs: SEVEN_DAYS_MS, // 7 days — recent event is within window, nothing dropped
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1576,7 +1595,7 @@ states:
       compactionWindowMs: ONE_HOUR_MS, // very short — heartbeat is old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1662,7 +1681,7 @@ describe('RetentionCleanup — OTEL traces retention', () => {
     writeFileWithMtime(otelFile, '{"span":"old"}\n', oldMtime);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
 
     expect(fs.existsSync(otelFile)).toBe(false);
@@ -1677,7 +1696,7 @@ describe('RetentionCleanup — OTEL traces retention', () => {
     writeFileWithMtime(otelFile, '{"span":"new"}\n', NOW_MS - ONE_HOUR_MS);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     await cleanup.run();
 
     expect(fs.existsSync(otelFile)).toBe(true);
@@ -1691,12 +1710,8 @@ describe('RetentionCleanup — OTEL traces retention', () => {
     writeFileWithMtime(otelFile, big, recentMtime);
 
     const es = fakeEventStore();
-    // maxBytes is the 5th positional? No — otelMaxBytes is an instance default; we
-    // exercise it via a tiny RetentionConfig-independent path by constructing with
-    // a small threshold through the public surface: the default is 50MiB, so to
-    // prove rotation we shrink the threshold by monkeypatching the instance.
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
-    (cleanup as unknown as { otelMaxBytes: number }).otelMaxBytes = 1000; // 1000 < 2000
+    // otelMaxBytes is now a RetentionConfig field — set it via config (no monkeypatching).
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, null, { otelMaxBytes: 1000 });
     const result = await cleanup.run();
 
     expect(fs.existsSync(otelFile)).toBe(false);
@@ -1709,11 +1724,34 @@ describe('RetentionCleanup — OTEL traces retention', () => {
     writeFileWithMtime(otelFile, 'x'.repeat(100), NOW_MS - ONE_HOUR_MS);
 
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
-    (cleanup as unknown as { otelMaxBytes: number }).otelMaxBytes = 1000; // 100 < 1000 → kept
+    // otelMaxBytes is a RetentionConfig field — set it via config (no monkeypatching).
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, null, { otelMaxBytes: 1000 });
     await cleanup.run();
 
     expect(fs.existsSync(otelFile)).toBe(true);
+  });
+
+  it('config-supplied otelMaxBytes takes effect: lower threshold causes rotation that default would miss', async () => {
+    // File is 5000 bytes — far below the 50MiB default, but above a config-supplied 2000-byte threshold.
+    const otelFile = path.join(tmpRoot, '.pi', 'otel', 'traces-config-threshold.jsonl');
+    const recentMtime = NOW_MS - ONE_HOUR_MS; // recent — age scan keeps it
+    writeFileWithMtime(otelFile, 'x'.repeat(5000), recentMtime);
+
+    const es = fakeEventStore();
+    // Without otelMaxBytes in config: default (50 MiB) → file survives.
+    const noConfigCleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    await noConfigCleanup.run();
+    expect(fs.existsSync(otelFile)).toBe(true); // survived default threshold
+
+    // Restore file for the next assertion.
+    writeFileWithMtime(otelFile, 'x'.repeat(5000), recentMtime);
+
+    // With otelMaxBytes: 2000 in config → 5000-byte file is rotated.
+    const configCleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, null, { otelMaxBytes: 2000 });
+    const result = await configCleanup.run();
+    expect(fs.existsSync(otelFile)).toBe(false); // rotated by config threshold
+    const otelArea = result.areas.find(a => a.area === 'otel');
+    expect(otelArea!.bytesReclaimed).toBeGreaterThanOrEqual(5000);
   });
 });
 
@@ -1790,7 +1828,7 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
       [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
     });
 
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
     );
     const result = await cleanup.run();
@@ -1815,7 +1853,7 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
     const es = fakeEventStoreWithCurrent({
       [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
     });
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
     );
     await cleanup.run();
@@ -1836,7 +1874,7 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
     const es = fakeEventStoreWithCurrent({
       [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
     });
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
     );
     const result = await cleanup.run();
@@ -1864,7 +1902,7 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
     const es = fakeEventStoreWithCurrent({
       [beadId]: { currentState: 'Implementation', activeActionId: 'surgical-execution' }
     });
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
     );
     await cleanup.run();
@@ -1883,7 +1921,7 @@ describe('RetentionCleanup — live-bead raw-archive reclaim + gate-before-recla
 
     // currentState undefined → cannot key the carve-out → preserve everything.
     const es = fakeEventStoreWithCurrent({ [beadId]: { currentState: undefined } });
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot, fakeClock(), es as any, TWO_DAYS_MS, () => new Set([beadId])
     );
     await cleanup.run();
@@ -1942,7 +1980,7 @@ describe('RetentionCleanup — c5bv: evidence-bearing tool-result events survive
       compactionWindowMs: ONE_HOUR_MS, // very short — both events are old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -1986,7 +2024,7 @@ describe('RetentionCleanup — c5bv: evidence-bearing tool-result events survive
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2027,7 +2065,7 @@ describe('RetentionCleanup — c5bv: evidence-bearing tool-result events survive
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2104,7 +2142,7 @@ states:
       compactionWindowMs: ONE_HOUR_MS, // everything is old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2178,7 +2216,7 @@ describe('RetentionCleanup — c5bv review fix: PROJECT_TOOL_SUCCEEDED flat outp
       compactionWindowMs: ONE_HOUR_MS, // very short — both events are old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2220,7 +2258,7 @@ describe('RetentionCleanup — c5bv review fix: PROJECT_TOOL_SUCCEEDED flat outp
       compactionWindowMs: ONE_HOUR_MS,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2297,7 +2335,7 @@ states:
       compactionWindowMs: ONE_HOUR_MS, // everything is old
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(NOW_MS),
       es as any,
@@ -2377,7 +2415,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
       maxToolCallDirsPerRun: CEILING,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2416,7 +2454,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
       maxToolCallFilesPerRun: CEILING,
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2444,7 +2482,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
 
     // No ceiling config — legacy behavior: all aged beads removed.
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2477,7 +2515,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
       maxToolCallDirsPerRun: 2, // tight ceiling — stops early
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2518,7 +2556,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
     const retentionConfig: RetentionConfig = {
       maxToolCallDirsPerRun: 1, // very tight
     };
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2545,7 +2583,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
       diskHealthWarnBytes: 1, // very low threshold — health event will always fire
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2576,7 +2614,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
       diskHealthWarnBytes: 1, // low threshold — always fires
     };
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(
+    const cleanup = makeService(
       tmpRoot,
       fakeClock(),
       es as any,
@@ -2605,7 +2643,7 @@ describe('RetentionCleanup — cp8u: bounded batch ceilings', () => {
 
   it('RetentionCleanupResult includes backpressureActive field', async () => {
     const es = fakeEventStore();
-    const cleanup = new RetentionCleanup(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
+    const cleanup = makeService(tmpRoot, fakeClock(), es as any, TWO_DAYS_MS);
     const result = await cleanup.run();
     expect(typeof result.backpressureActive).toBe('boolean');
     expect(result.backpressureActive).toBe(false); // nothing removed, no ceiling hit

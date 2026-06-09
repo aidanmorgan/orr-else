@@ -16,6 +16,7 @@ import type { DomainEvent } from '../src/core/EventStore.js';
 import { SupervisorRecoveryService } from '../src/core/SupervisorRecoveryService.js';
 import { BeadSpawnCoordinator } from '../src/core/BeadSpawnCoordinator.js';
 import { RetentionScheduler } from '../src/core/RetentionScheduler.js';
+import { RetentionService } from '../src/core/retention/RetentionService.js';
 import { FailureClass, LifecyclePhase, RetryBudget } from '../src/core/FailureTaxonomy.js';
 
 // ---------------------------------------------------------------------------
@@ -419,9 +420,8 @@ describe('BeadSpawnCoordinator — quarantine helpers, fake-port (amq0.2)', () =
 describe('RetentionScheduler — interval gating, fake-port (amq0.2)', () => {
   it('runIfDue does NOT run cleanup before the interval has elapsed', async () => {
     const runSpy = vi.fn(async () => ({ areas: [], totalFilesRemoved: 0, totalDirsRemoved: 0, totalBytesReclaimed: 0, totalErrors: 0, eventsCompacted: 0, backpressureActive: false }));
-    // Mock RetentionCleanup constructor to spy on run()
-    const { RetentionCleanup } = await import('../src/core/RetentionCleanup.js');
-    const runMock = vi.spyOn(RetentionCleanup.prototype, 'run').mockImplementation(runSpy);
+    // Spy on RetentionService.run() — RetentionScheduler constructs it directly.
+    const runMock = vi.spyOn(RetentionService.prototype, 'run').mockImplementation(runSpy);
 
     let nowMs = NOW_MS;
     const clock = { now: () => nowMs, date: (ms?: number) => new Date(ms ?? nowMs) };
@@ -449,9 +449,9 @@ describe('RetentionScheduler — interval gating, fake-port (amq0.2)', () => {
   });
 
   it('runIfDue runs cleanup after the interval has elapsed', async () => {
-    const { RetentionCleanup } = await import('../src/core/RetentionCleanup.js');
     const runSpy = vi.fn(async () => ({ areas: [], totalFilesRemoved: 0, totalDirsRemoved: 0, totalBytesReclaimed: 0, totalErrors: 0, eventsCompacted: 0, backpressureActive: false }));
-    const runMock = vi.spyOn(RetentionCleanup.prototype, 'run').mockImplementation(runSpy);
+    // Spy on RetentionService.run() — RetentionScheduler constructs it directly.
+    const runMock = vi.spyOn(RetentionService.prototype, 'run').mockImplementation(runSpy);
 
     const { RetentionDefaults } = await import('../src/constants/index.js');
     let nowMs = NOW_MS;

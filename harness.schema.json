@@ -860,6 +860,21 @@
           "type": "integer",
           "minimum": 1,
           "description": "Bytes threshold for emitting a RETENTION_DISK_HEALTH event. Defaults to 50 MiB."
+        },
+        "otelMaxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum size in bytes for an OTEL traces-*.jsonl file before rotation. Defaults to RetentionDefaults.OTEL_MAX_BYTES."
+        },
+        "maxToolCallFilesPerRun": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of files removed from the tool-output area in a single retention run. Defaults to 50,000."
+        },
+        "maxToolCallDirsPerRun": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum number of directories removed from the tool-output area in a single retention run. Defaults to 10,000."
         }
       }
     },
