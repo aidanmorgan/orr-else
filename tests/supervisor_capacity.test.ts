@@ -3,21 +3,22 @@ import { Logger } from '../src/core/Logger.js';
 import { BeadStatus, DomainEventName, EventName, SupervisorDefaults, TimeMs } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
-
-const orchestratorMock = vi.hoisted(() => ({
-  selectAssignments: vi.fn()
-}));
-
-vi.mock('../src/core/Orchestrator.js', () => ({
-  Orchestrator: vi.fn(function Orchestrator() {
-    return {
-      selectAssignments: orchestratorMock.selectAssignments
-    };
-  })
-}));
-
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
+
+// Shared mutable orchestrator mock — injected directly into Supervisor options
+// (pi-experiment-amq0.2: no vi.mock needed; orchestrator is now a required inject).
+const orchestratorMock = {
+  selectAssignments: vi.fn()
+};
+
+function fakeOrchestrator() {
+  return orchestratorMock as any;
+}
+
+function fakeRetentionScheduler() {
+  return { runIfDue: vi.fn(async () => {}) } as any;
+}
 
 const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
 
@@ -92,7 +93,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -150,7 +151,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).restoreCapacityPauseFromStore();
@@ -199,7 +200,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim }),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).restoreCapacityPauseFromStore();
@@ -241,7 +242,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
     (supervisor as any).startedBeads.add('bead-live');
     (supervisor as any).startedBeads.add('bead-stale');
@@ -314,7 +315,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release: release as any, getBead }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
     (supervisor as any).startedBeads.add('bead-live');
     (supervisor as any).startedBeads.add('bead-restart');
@@ -429,7 +430,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -544,7 +545,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -587,9 +588,9 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim }),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
-    (supervisor as any).inactiveRestartedAtMs.set('bead-cooling', clock.now());
+    (supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.set('bead-cooling', clock.now());
 
     await (supervisor as any).scanAndSpawn();
 
@@ -630,7 +631,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim }),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -672,7 +673,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ getBead, release }),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
     (supervisor as any).startedBeads.add('bead-closed');
 
@@ -722,7 +723,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -769,7 +770,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     // SCAN 1: worktree creation fails → bead quarantined
@@ -781,8 +782,8 @@ describe('Supervisor capacity pause handling', () => {
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
 
     // The quarantine entry must exist with the right reason
-    expect((supervisor as any).quarantine.has('bead-wt')).toBe(true);
-    expect((supervisor as any).quarantine.get('bead-wt').reason).toBe('ALREADY_CHECKED_OUT');
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-wt')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.get('bead-wt').reason).toBe('ALREADY_CHECKED_OUT');
 
     // A structured BEAD_QUARANTINED event must have been emitted once
     expect(records.filter(r => r.event === DomainEventName.BEAD_QUARANTINED)).toHaveLength(1);
@@ -842,17 +843,17 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     // SCAN 1: failure → quarantined
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-rq')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-rq')).toBe(true);
     expect(createWorktree).toHaveBeenCalledTimes(1);
 
     // SCAN 2: signature changed (beadV2) → quarantine cleared → re-attempted → succeeds
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-rq')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-rq')).toBe(false);
     expect(createWorktree).toHaveBeenCalledTimes(2);
     expect(spawnTeammateInTmux).toHaveBeenCalledTimes(1);
   });
@@ -902,19 +903,19 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     // SCAN 1: worktree creation fails → bead quarantined with status='ready':T1 signature
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-ts')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-ts')).toBe(true);
     expect(createWorktree).toHaveBeenCalledTimes(1);
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
 
     // SCAN 2: status unchanged but lastActivity bumped → signature differs → quarantine
     // CLEARS and createWorktree is called again, this time succeeding.
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-ts')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-ts')).toBe(false);
     expect(createWorktree).toHaveBeenCalledTimes(2);
     expect(spawnTeammateInTmux).toHaveBeenCalledTimes(1);
   });
@@ -959,17 +960,17 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     // SCAN 1: failure → quarantined
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-nc')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-nc')).toBe(true);
     expect(createWorktree).toHaveBeenCalledTimes(1);
 
     // SCAN 2: signature completely unchanged → still quarantined, not retried
     await (supervisor as any).scanAndSpawn();
-    expect((supervisor as any).quarantine.has('bead-nc')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-nc')).toBe(true);
     expect(createWorktree).toHaveBeenCalledTimes(1); // no second attempt
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
 
@@ -1006,7 +1007,7 @@ describe('Supervisor capacity pause handling', () => {
         beadsPort: fakeBeadsPort({ release }),
         worktreePort: fakeWorktreePort({ createWorktree })
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     await (supervisor as any).scanAndSpawn();
@@ -1017,7 +1018,7 @@ describe('Supervisor capacity pause handling', () => {
     expect((supervisor as any).startedBeads.has('bead-leak')).toBe(false);
     expect((supervisor as any).startedBeadAtMs.has('bead-leak')).toBe(false);
     // Error must be classified as INVALID_BRANCH_REF
-    expect((supervisor as any).quarantine.get('bead-leak')?.reason).toBe('INVALID_BRANCH_REF');
+    expect((supervisor as any).spawnCoordinator.quarantine.get('bead-leak')?.reason).toBe('INVALID_BRANCH_REF');
   });
 });
 
@@ -1063,7 +1064,7 @@ describe('Supervisor quiet capacity-pause mode', () => {
         beadsPort: fakeBeadsPort(),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
     return { supervisor, records };
   }
@@ -1171,7 +1172,7 @@ describe('Supervisor quiet capacity-pause mode', () => {
         beadsPort: fakeBeadsPort(),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     const pauseDurationMs = TimeMs.MINUTE;
@@ -1199,8 +1200,10 @@ describe('Supervisor quiet capacity-pause mode', () => {
       expect((supervisor as any).isSchedulingPaused()).toBe(false);
 
       // Reset digests so recordCapacityUnderfill sees a new digest and emits again
-      (supervisor as any).lastCapacityUnderfillDigest = '';
-      (supervisor as any).lastLoggedSlotHealthDigest = '';
+      // lastCapacityUnderfillDigest and lastLoggedSlotHealthDigest are now
+      // owned by SlotHealthMonitor (pi-experiment-amq0.2).
+      (supervisor as any).slotHealthMonitor.lastCapacityUnderfillDigest = '';
+      (supervisor as any).slotHealthMonitor.lastLoggedSlotHealthDigest = '';
 
       warn.mockClear();
       await (supervisor as any).recordSlotHealth('test_resumed');
@@ -1244,7 +1247,7 @@ describe('Supervisor quiet capacity-pause mode', () => {
         beadsPort: fakeBeadsPort(),
         worktreePort: fakeWorktreePort()
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
     );
 
     supervisor.pauseSchedulingUntil(clock.now() + TimeMs.HOUR, 'usage_limit_reached');

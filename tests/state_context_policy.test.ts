@@ -28,22 +28,22 @@ import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 
-// ── mock Orchestrator before Supervisor import ────────────────────────────────
-
-const orchestratorMock = vi.hoisted(() => ({
-  selectAssignments: vi.fn()
-}));
-
-vi.mock('../src/core/Orchestrator.js', () => ({
-  Orchestrator: vi.fn(function Orchestrator() {
-    return {
-      selectAssignments: orchestratorMock.selectAssignments
-    };
-  })
-}));
-
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
+
+// Shared orchestrator mock — injected directly into Supervisor options
+// (pi-experiment-amq0.2: no vi.mock needed; orchestrator is now a required inject).
+const orchestratorMock = {
+  selectAssignments: vi.fn()
+};
+
+function fakeOrchestrator() {
+  return orchestratorMock as any;
+}
+
+function fakeRetentionScheduler() {
+  return { runIfDue: vi.fn(async () => {}) } as any;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper builders
@@ -122,7 +122,7 @@ function buildSupervisor(
       worktreePort: fakeWorktreePort(),
       projectRoot: '/project/root'
     } as any,
-    { maxSlots: 2, clock: { now: () => NOW_MS, date: () => new Date(NOW_MS) } }
+    { maxSlots: 2, clock: { now: () => NOW_MS, date: () => new Date(NOW_MS) }, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
   );
   return { supervisor, records, spawnTeammateInTmux };
 }
@@ -390,7 +390,7 @@ describe('Supervisor context policy — real coordinator spawn path', () => {
 
     // Pre-seed the context key store with a ContextKeyRecord (simulates a prior state having produced 'planCtx').
     // beadId must match the consuming bead ('bead-cont') and digest must match real config.
-    const digest = (supervisor as any).computeConfigDigest() as string;
+    const digest = (supervisor as any).spawnCoordinator.computeConfigDigest() as string;
     const planCtxRecord: ContextKeyRecord = {
       piSessionPath: 'prior-session-id-abc',
       beadId: 'bead-cont',
@@ -399,7 +399,7 @@ describe('Supervisor context policy — real coordinator spawn path', () => {
       configDigest: digest,
       terminal: false
     };
-    (supervisor as any).contextKeyStore.set('planCtx', planCtxRecord);
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', planCtxRecord);
 
     await (supervisor as any).scanAndSpawn();
 
@@ -455,7 +455,7 @@ describe('Supervisor context policy — real coordinator spawn path', () => {
     // Beta: alphaCtx stored as a full ContextKeyRecord (AC7 format).
     // beadId must match the consuming bead ('bead-beta') for the beadId check to pass.
     const { supervisor: s2, spawnTeammateInTmux: spawn2 } = buildSupervisor(config);
-    const digest2 = (s2 as any).computeConfigDigest() as string;
+    const digest2 = (s2 as any).spawnCoordinator.computeConfigDigest() as string;
     const alphaCtxRecord: ContextKeyRecord = {
       piSessionPath: 'alpha-session-xyz',
       beadId: 'bead-beta',
@@ -464,7 +464,7 @@ describe('Supervisor context policy — real coordinator spawn path', () => {
       configDigest: digest2,
       terminal: false
     };
-    (s2 as any).contextKeyStore.set('alphaCtx', alphaCtxRecord);
+    (s2 as any).spawnCoordinator.contextKeyStore.set('alphaCtx', alphaCtxRecord);
     await (s2 as any).scanAndSpawn();
     const [, , , , opts2] = spawn2.mock.calls[0];
     expect(opts2).toEqual({ contextKey: 'alpha-session-xyz' }); // namedContinuation

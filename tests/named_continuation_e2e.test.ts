@@ -38,22 +38,22 @@ import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 
-// ── mock Orchestrator before Supervisor import ────────────────────────────────
-
-const orchestratorMock = vi.hoisted(() => ({
-  selectAssignments: vi.fn()
-}));
-
-vi.mock('../src/core/Orchestrator.js', () => ({
-  Orchestrator: vi.fn(function Orchestrator() {
-    return {
-      selectAssignments: orchestratorMock.selectAssignments
-    };
-  })
-}));
-
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
+
+// Shared orchestrator mock — injected directly into Supervisor options
+// (pi-experiment-amq0.2: no vi.mock needed; orchestrator is now a required inject).
+const orchestratorMock = {
+  selectAssignments: vi.fn()
+};
+
+function fakeOrchestrator() {
+  return orchestratorMock as any;
+}
+
+function fakeRetentionScheduler() {
+  return { runIfDue: vi.fn(async () => {}) } as any;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -132,7 +132,7 @@ function buildSupervisor(
       worktreePort: fakeWorktreePort(),
       projectRoot: '/project/root'
     } as any,
-    { maxSlots: 2, clock: { now: () => NOW_MS, date: () => new Date(NOW_MS) } }
+    { maxSlots: 2, clock: { now: () => NOW_MS, date: () => new Date(NOW_MS) }, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
   );
   return { supervisor, records, spawnTeammateInTmux };
 }
@@ -718,7 +718,7 @@ describe('AC7: continuation admission gate', () => {
     });
     // beadId matches the consuming bead so beadId check passes;
     // sourceStateId is 'Alpha' but consuming stateId is 'Gamma' — source-state mismatch.
-    (supervisor as any).contextKeyStore.set('planCtx', makeRecord({ beadId: 'bead-gamma', sourceStateId: 'Alpha' }));
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', makeRecord({ beadId: 'bead-gamma', sourceStateId: 'Alpha' }));
 
     await (supervisor as any).scanAndSpawn();
 
@@ -747,7 +747,7 @@ describe('AC7: continuation admission gate', () => {
     // Store a record with beadId matching the consuming bead and a digest that won't match
     // the real config file digest. The Supervisor's computeConfigDigest reads the real config
     // file; 'zz...z' won't match — only the digest check triggers.
-    (supervisor as any).contextKeyStore.set('planCtx', makeRecord({
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', makeRecord({
       beadId: 'bead-digest',
       sourceStateId: 'Beta',
       configDigest: 'z'.repeat(64)   // deliberate mismatch
@@ -777,8 +777,8 @@ describe('AC7: continuation admission gate', () => {
       }
     });
     // Store a terminal record — beadId, state, and digest all match; terminal:true is the only mismatch.
-    const digest = (supervisor as any).computeConfigDigest() as string;
-    (supervisor as any).contextKeyStore.set('planCtx', makeRecord({
+    const digest = (supervisor as any).spawnCoordinator.computeConfigDigest() as string;
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', makeRecord({
       beadId: 'bead-term',
       sourceStateId: 'Beta',
       configDigest: digest,
@@ -813,8 +813,8 @@ describe('AC7: continuation admission gate', () => {
     });
     // Store a valid record for 'bead-stored' — all constraints pass EXCEPT beadId.
     // The consuming bead is 'bead-other', so this should be denied.
-    const digest = (supervisor as any).computeConfigDigest() as string;
-    (supervisor as any).contextKeyStore.set('planCtx', makeRecord({
+    const digest = (supervisor as any).spawnCoordinator.computeConfigDigest() as string;
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', makeRecord({
       beadId: 'bead-stored',           // differs from consuming 'bead-other'
       piSessionPath: '/path/to/session.jsonl',
       sourceStateId: 'Beta',
@@ -849,9 +849,9 @@ describe('AC7: continuation admission gate', () => {
         }
       }
     });
-    const digest = (supervisor as any).computeConfigDigest() as string;
+    const digest = (supervisor as any).spawnCoordinator.computeConfigDigest() as string;
     // beadId must match the consuming bead ('bead-admit') for all constraints to pass.
-    (supervisor as any).contextKeyStore.set('planCtx', makeRecord({
+    (supervisor as any).spawnCoordinator.contextKeyStore.set('planCtx', makeRecord({
       beadId: 'bead-admit',
       piSessionPath: '/path/to/session.jsonl',
       sourceStateId: 'Beta',
@@ -1053,7 +1053,7 @@ describe('AC9: additional load-bearing test coverage', () => {
     await (sAlpha as any).scanAndSpawn();
 
     // The contextKeyStore should now hold a ContextKeyRecord with the Pi session path.
-    const stored: ContextKeyRecord = (sAlpha as any).contextKeyStore.get('alphaCtx');
+    const stored: ContextKeyRecord = (sAlpha as any).spawnCoordinator.contextKeyStore.get('alphaCtx');
     expect(stored).toBeDefined();
     expect(stored.piSessionPath).toBe(piSessionPath);
 
@@ -1074,8 +1074,8 @@ describe('AC9: additional load-bearing test coverage', () => {
     );
     // Pre-seed with a ContextKeyRecord (simulates what Alpha's spawn stored).
     // beadId must match the consuming bead ('bead-beta') and digest must match real config.
-    const digest = (sBeta as any).computeConfigDigest() as string;
-    (sBeta as any).contextKeyStore.set('alphaCtx', makeRecord({
+    const digest = (sBeta as any).spawnCoordinator.computeConfigDigest() as string;
+    (sBeta as any).spawnCoordinator.contextKeyStore.set('alphaCtx', makeRecord({
       beadId: 'bead-beta',
       piSessionPath,
       sourceStateId: 'Beta',

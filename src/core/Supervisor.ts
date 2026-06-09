@@ -1,72 +1,78 @@
-import { createHash } from 'node:crypto';
-import * as fs from 'node:fs';
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
-import { AgentFailureSummary, App, Component, Defaults, DomainEventName, EventName, OtelAttr, PluginToolName, QuarantineReason, RestartKind, RetentionDefaults, SpanName, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
-import { detectFinalBlockedState, ScanCategory } from './PaneTranscriptScanner.js';
+import { Component, Defaults, DomainEventName, EventName, QuarantineReason, RestartKind, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent, ProjectionCapableStore } from './EventStore.js';
-import type { RuntimeServices, WorktreeResult } from './RuntimeServices.js';
 import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import { systemClock } from './Clock.js';
 import type { Clock } from './Clock.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import type { WorktreeProvisioningMode } from './domain/StateModels.js';
-import {
-  resolveStateContextPolicy,
-  type ResolvedStateContextPolicy,
-  evaluateContinuationAdmission,
-  buildContextInstanceRecord,
-  type ContextKeyRecord
-} from '../extension/CoordinatorController.js';
-import { StateContextPolicy } from '../constants/index.js';
-import { RetentionCleanup } from './RetentionCleanup.js';
-import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 import { projectToolFailureLimitSuggestedOutcome } from './ProjectToolFailureLimit.js';
-import { deriveRestartId } from './RestartCorrelation.js';
 import {
-  routeFailure,
-  compactDescriptor,
   FailureClass,
   LifecyclePhase,
   RetryBudget,
-  AuthorityLevel,
   NextAction,
 } from './FailureTaxonomy.js';
+import type { EventStore } from './EventStore.js';
+import { BeadSpawnCoordinator } from './BeadSpawnCoordinator.js';
+import { SupervisorRecoveryService } from './SupervisorRecoveryService.js';
+import { SlotHealthMonitor } from './SlotHealthMonitor.js';
+import { RetentionScheduler } from './RetentionScheduler.js';
+import type { McpBridgeHealth } from './McpTransportPreflight.js';
+
+// ---------------------------------------------------------------------------
+// Narrow services interface (replaces broad RuntimeServices in the constructor)
+// ---------------------------------------------------------------------------
+
+/**
+ * Narrow services bag accepted by the Supervisor constructor.
+ * Only the dependencies the Supervisor actually uses — not the full RuntimeServices.
+ *
+ * pi-experiment-amq0.2: extracted from RuntimeServices to keep Supervisor's
+ * dependency surface minimal and testable.
+ *
+ * configLoader.load() accepts both sync (HarnessConfig) and async (Promise<HarnessConfig>)
+ * return types so that the production ConfigLoader (sync) and test fakes (async) both satisfy
+ * this interface without wrapping.
+ */
+export interface SupervisorServices {
+  eventStore: ProjectionCapableStore;
+  configLoader: {
+    // Accepts sync (HarnessConfig) and async (Promise<HarnessConfig>) return values
+    // so that the production ConfigLoader and test fakes both satisfy this interface.
+    load(): HarnessConfig | Promise<HarnessConfig>;
+    getConfigPath(): string;
+  };
+  beadsPort: BeadsPort;
+  worktreePort: WorktreePort;
+  flowManager: {
+    nextState(state: unknown, outcome: string, fallbackStateId?: string): string;
+  };
+  /** Absolute path to the project root. Used by RetentionScheduler. */
+  projectRoot: string;
+}
 
 export interface SupervisorOptions {
   maxSlots: number;
   requestedBeadId?: string;
   clock?: Clock;
-}
-
-/**
- * Number of consecutive supervisor polls on which a bead must be detected as
- * final-blocked before the early-trip recovery fires.  Requiring two consecutive
- * detections eliminates one-frame false kills caused by transient pane snapshots
- * that happen to end mid-stream on a matching line.
- *
- * Latency cost: ≈ 2 × POLL_INTERVAL_MS instead of 1 × POLL_INTERVAL_MS.
- * That is still far faster than the full noProgressTimeoutMs path.
- */
-const FINAL_BLOCKED_CONFIRM_POLLS = 2;
-
-/** Quarantine entry for a bead whose worktree creation repeatedly fails.
- * The bead is skipped on subsequent scans until its signature changes, preventing
- * repeated claim/release churn and slot-health thrash. */
-interface QuarantineEntry {
-  /** Structured reason code from the worktree-creation failure. */
-  reason: QuarantineReason;
-  /** State fingerprint that must change for the bead to be re-attempted.
-   * Composed of the bead's status + updatedAt (or similar stable field) at the
-   * time of quarantine so that a bead re-assignment or status change lifts the block. */
-  signature: string;
-  /** Optional diagnostic fields recorded with the quarantine event. */
-  details?: Record<string, unknown>;
+  /**
+   * Pre-built Orchestrator for assignment selection.
+   * Required — constructed at the composition root (extension.ts) and injected here.
+   * pi-experiment-amq0.2: no construct-fallback; Orchestrator is always injected.
+   */
+  orchestrator: Orchestrator;
+  /**
+   * Pre-built RetentionScheduler for retention timing.
+   * Required — constructed at the composition root (extension.ts) and injected here.
+   * pi-experiment-amq0.2: no construct-fallback; RetentionScheduler is always injected.
+   */
+  retentionScheduler: RetentionScheduler;
 }
 
 interface MissingStartedRestartDetails {
@@ -93,87 +99,14 @@ interface NonRoutableTerminalFailureLimitQuarantineDetails extends Record<string
   terminalFailureEventTimestamp?: string;
 }
 
-/** Typed value object returned by `collectSlotHealthSnapshot`. Contains all
- * measured slot-health fields so that `recordSlotHealth` can record/log and
- * forward them to the remediation helpers without recomputing inline. */
-interface SlotHealthSnapshot {
-  /** Raw live bead IDs as returned by the factory (pre-exclusion). */
-  observedLiveBeadIds: string[];
-  /** Live bead IDs after missing-tracked beads are excluded. */
-  effectiveLiveBeadIds: string[];
-  /** Resolved no-progress timeout (config or default). */
-  noProgressTimeoutMs: number;
-  /** Latest heartbeat timestamp per bead, keyed by beadId. */
-  heartbeatByBead: Map<string, number>;
-  /** Full heartbeat detail records from the signaling server snapshot. */
-  heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>;
-  /** Latest non-heartbeat/non-slot-health event per live bead. */
-  latestProgressEvents: Map<string, DomainEvent>;
-  /** Live beads whose heartbeat timestamp is stale (or absent past grace period). */
-  staleHeartbeatBeadIds: string[];
-  /** Live beads that have exceeded the no-progress timeout. */
-  inactiveBeadIds: string[];
-  /** Deduplicated, sorted stale-by-inactivity bead IDs (== inactiveBeadIds deduped). */
-  staleBeadIds: string[];
-  /** Beads stale only by heartbeat, not yet by progress timeout. */
-  heartbeatOnlyStaleBeadIds: string[];
-  /** Configured maximum number of teammate slots. */
-  expectedCount: number;
-  /** All beads ever started this session, sorted. */
-  trackedBeadIds: string[];
-  /** Tracked beads not present in the live set (or flagged as persistently missing). */
-  missingTrackedBeadIds: string[];
-  /** Number of effective live teammates. */
-  activeCount: number;
-  /** Number of active teammates that are not stale-by-inactivity. */
-  workingCount: number;
-  /** Heartbeating bead IDs that are not in the live-pane set. */
-  heartbeatOnlyLiveGaps: string[];
-  /**
-   * Churn-diagnostic worker sets (s3wp.33).
-   *
-   * trackedOnly  — tracked by the supervisor but absent from the live pane set;
-   *                these are workers that may have exited without a pane-death event.
-   * paneOnly     — present in the live pane set but not tracked by the supervisor;
-   *                these are orphaned panes (e.g. from a prior run).
-   * restarting   — currently in inactive-restart backoff; a recovery was triggered
-   *                and the new spawn has not yet appeared in the pane scan.
-   * released     — durably pruned from tracking this tick (confirmed inactive events).
-   */
-  trackedOnlyBeadIds: string[];
-  paneOnlyBeadIds: string[];
-  restartingBeadIds: string[];
-  releasedBeadIds: string[];
-}
-
 export class Supervisor {
   private interval?: NodeJS.Timeout;
   private startedBeads = new Set<string>();
   private startedBeadAtMs = new Map<string, number>();
   private missingStartedBeadChecks = new Map<string, number>();
-  private inactiveRestartedAtMs = new Map<string, number>();
-  /**
-   * Per-bead count of inactive-restart recoveries this session.
-   * Used to determine RetryBudget: AVAILABLE while count <= MAX_INACTIVE_RESTARTS,
-   * EXHAUSTED when count exceeds it. EXHAUSTED routes WORKER_PROCESS_LOSS →
-   * QUARANTINE instead of BOUNDED_RETRY per the n8fg taxonomy table.
-   * Reset when a bead is fully exited (markBeadExited without preserveInactiveRestartBackoff).
-   */
-  private readonly inactiveRestartCountByBead = new Map<string, number>();
-  /**
-   * Context key store for named-continuation spawns (pi-experiment-6q0y.44 AC7).
-   *
-   * Maps a contextKey → a ContextKeyRecord capturing ALL admission-constraint
-   * fields: session path, producing bead/state/action, config digest, and
-   * lineage-terminal flag.  The full record is used by evaluateContinuationAdmission
-   * to enforce all five AC7 constraints before any model spend.
-   */
-  private readonly contextKeyStore = new Map<string, ContextKeyRecord>();
   private processedSignals = new Set<string>();
   private stepInProgress = false;
   private stopping = false;
-  private lastSlotHealthEventMs = 0;
-  private lastRetentionCleanupMs = 0;
   private schedulingPausedUntilMs = 0;
   private schedulingPausedReason = '';
   // Track the pauseUntil value at which the SCHEDULING_PAUSED domain event was
@@ -183,62 +116,16 @@ export class Supervisor {
   // Throttle the low-frequency pause heartbeat: at most once per
   // PAUSE_HEARTBEAT_INTERVAL_MS while pause is active.
   private lastPauseHeartbeatMs = 0;
-  // Throttle "underfilled or stale" slot warns: only emit when the digest
-  // (expected/working counts + stale bead set) changes.
-  private lastLoggedSlotHealthDigest = '';
-  private lastCapacityUnderfillDigest = '';
   private lastMissingStartedBeadIds = new Set<string>();
-  /** In-memory quarantine map: beadId → QuarantineEntry.
-   * Quarantined beads are skipped during scanAndSpawn unless their signature changes.
-   * Rehydrated on startup from BEAD_QUARANTINED events; cleared when signature changes. */
-  private readonly quarantine = new Map<string, QuarantineEntry>();
-  /**
-   * Set of beadIds whose quarantine entry was rehydrated from a durable
-   * BEAD_QUARANTINED event on coordinator restart (as opposed to established at
-   * runtime this session).  Used to emit BEAD_QUARANTINE_CLEARED when a rehydrated
-   * entry is lifted — providing a durable audit trail for the retry. */
-  private readonly rehydratedQuarantineBeadIds = new Set<string>();
-  /**
-   * Per-bead count of consecutive supervisor polls on which the bead's pane was
-   * detected as final-blocked.  Reset to zero when the bead is NOT detected as
-   * blocked (i.e. pane shows progress).  Only when the count reaches
-   * FINAL_BLOCKED_CONFIRM_POLLS does the early-trip recovery fire.
-   *
-   * This is a plain instance field (no static) so each Supervisor instance has
-   * its own independent debounce state.
-   */
-  private readonly finalBlockedPollCounts = new Map<string, number>();
-  /**
-   * Beads pruned from startedBeads this tick by pruneDurablyInactiveStartedBeads.
-   * Cleared at the start of each slot-health snapshot and populated during the prune
-   * step so that `recordSlotHealth` can include them in the releasedBeadIds set.
-   */
-  private releasedThisTick: string[] = [];
-  /**
-   * Per-beadId count of consecutive slot-health checks on which the bead appeared
-   * in heartbeatOnlyLiveGaps (heartbeat present, live pane absent).  Reset when the
-   * bead re-appears in the live pane set or is suppressed after orphan detection.
-   */
-  private readonly heartbeatOnlyGapCounts = new Map<string, number>();
-  /**
-   * Timestamp (ms) at which a beadId first appeared in heartbeatOnlyLiveGaps this
-   * session.  Used for the TTL-based orphan trigger.
-   */
-  private readonly heartbeatOnlyGapFirstSeenMs = new Map<string, number>();
-  /**
-   * Set of beadIds that have been declared orphaned and should be excluded from
-   * future heartbeatOnlyLiveGaps reporting.  Cleared if the bead re-appears in
-   * the live pane set (indicating a late pane-registration healed the gap).
-   */
-  private readonly suppressedHeartbeatOnlyGaps = new Set<string>();
   private readonly clock: Clock;
-  /**
-   * Cached MCP bridge health result (s3wp.32).
-   * Set on first MCP preflight check; reused on subsequent scan-loop iterations
-   * so the same module-load failure is not rediscovered per worker.
-   * undefined = not yet probed.
-   */
-  private mcpBridgeHealth: McpBridgeHealth | undefined;
+
+  // ---------------------------------------------------------------------------
+  // Extracted sub-services (pi-experiment-amq0.2)
+  // ---------------------------------------------------------------------------
+  private readonly spawnCoordinator: BeadSpawnCoordinator;
+  private readonly recoveryService: SupervisorRecoveryService;
+  private readonly slotHealthMonitor: SlotHealthMonitor;
+  private readonly retentionScheduler: RetentionScheduler;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -246,10 +133,47 @@ export class Supervisor {
     private readonly server: SignalingServer,
     private readonly factory: TeammateSpawner,
     private readonly observability: Observability,
-    private readonly services: RuntimeServices,
+    private readonly services: SupervisorServices,
     private readonly options: SupervisorOptions
   ) {
     this.clock = options.clock || systemClock;
+
+    this.recoveryService = new SupervisorRecoveryService(services.eventStore);
+
+    this.spawnCoordinator = new BeadSpawnCoordinator(
+      services.beadsPort,
+      services.worktreePort,
+      services.eventStore,
+      factory,
+      observability,
+      services.configLoader,
+      services.flowManager,
+      services.projectRoot,
+      () => this.clock.now(),
+      (ms?: number) => this.clock.date(ms)
+    );
+
+    this.slotHealthMonitor = new SlotHealthMonitor(
+      services.eventStore,
+      services.configLoader,
+      factory,
+      server,
+      services.beadsPort,
+      options.maxSlots,
+      this.clock,
+      this.startedBeads,
+      this.startedBeadAtMs,
+      () => this.lastMissingStartedBeadIds,
+      (liveBeadIds) => this.pruneDurablyInactiveStartedBeads(liveBeadIds),
+      (id, opts) => this.markBeadExited(id, opts),
+      (bead, reason, details) => this.spawnCoordinator.quarantineBead(bead, reason, details),
+      (cls, phase, budget) => this.spawnCoordinator.taxonomyFields(cls, phase, budget),
+      (cls, phase, budget) => this.spawnCoordinator.routeTaxonomy(cls, phase, budget),
+      () => this.harnessRestartEvent(),
+      () => this.isSchedulingPaused()
+    );
+
+    this.retentionScheduler = options.retentionScheduler;
   }
 
   /**
@@ -268,17 +192,19 @@ export class Supervisor {
   public async start() {
     await this.restoreCapacityPauseFromStore();
     // Single readAll() pass: fetch the full event log once and share it with
-    // both startup helpers so coordinator boot makes exactly one O(events) scan
-    // instead of two.
+    // all startup helpers so coordinator boot makes exactly one O(events) scan.
     let startupEvents: DomainEvent[] = [];
     try {
       startupEvents = await this.eventStore.readAll();
     } catch (error) {
       Logger.warn(Component.SUPERVISOR, 'Unable to read event store on startup; signal-state restore skipped', { error: String(error) });
     }
-    await this.rebuildProcessedSignalsFromEvents(startupEvents);
-    await this.reconcileUnacknowledgedSignalIntents(startupEvents);
-    await this.rehydrateQuarantinesFromEvents(startupEvents);
+    const rebuiltSignals = await this.recoveryService.rebuildProcessedSignalsFromEvents(startupEvents);
+    for (const key of rebuiltSignals) {
+      this.processedSignals.add(key);
+    }
+    await this.recoveryService.reconcileUnacknowledgedSignalIntents(startupEvents);
+    await this.spawnCoordinator.rehydrateQuarantinesFromEvents(startupEvents);
 
     this.interval = setInterval(() => {
       this.step().catch(error => Logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
@@ -311,7 +237,7 @@ export class Supervisor {
   /** Returns the last MCP bridge health result (s3wp.32).
    *  undefined if no MCP tool preflight has been run yet this session. */
   public getMcpBridgeHealth(): McpBridgeHealth | undefined {
-    return this.mcpBridgeHealth;
+    return this.spawnCoordinator.getMcpBridgeHealth();
   }
 
   /**
@@ -345,10 +271,12 @@ export class Supervisor {
     this.startedBeads.delete(id);
     this.startedBeadAtMs.delete(id);
     this.missingStartedBeadChecks.delete(id);
-    this.finalBlockedPollCounts.delete(id);
+    // finalBlockedPollCounts, inactiveRestartedAtMs, inactiveRestartCountByBead
+    // are owned by SlotHealthMonitor (pi-experiment-amq0.2).
+    this.slotHealthMonitor.finalBlockedPollCounts.delete(id);
     if (!options.preserveInactiveRestartBackoff) {
-      this.inactiveRestartedAtMs.delete(id);
-      this.inactiveRestartCountByBead.delete(id);
+      this.slotHealthMonitor.inactiveRestartedAtMs.delete(id);
+      this.slotHealthMonitor.inactiveRestartCountByBead.delete(id);
     }
   }
 
@@ -377,7 +305,7 @@ export class Supervisor {
         pauseUntil: pauseUntilIso,
         reason,
         // n8fg taxonomy: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE (budget irrelevant for this class)
-        ...this.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
+        ...this.spawnCoordinator.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
       }).catch(() => {});
       Logger.warn(Component.SUPERVISOR, 'Scheduling paused; entering quiet capacity-pause mode', {
         pauseUntil: pauseUntilIso,
@@ -387,186 +315,14 @@ export class Supervisor {
   }
 
   private async restoreCapacityPauseFromStore(): Promise<void> {
-    // j0tp: restore from SCHEDULING_PAUSED (canonical event). Legacy
-    // HARNESS_CAPACITY_LIMIT_REACHED events alone do NOT restore scheduler state.
-    const latestPausedEvent = await this.eventStore.latestEventByType(DomainEventName.SCHEDULING_PAUSED).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
-      return undefined;
-    });
-    const pauseUntilMs = Date.parse(String(latestPausedEvent?.data?.pauseUntil || ''));
-    if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= this.clock.now()) return;
-
-    this.schedulingPausedUntilMs = pauseUntilMs;
-    this.schedulingPausedReason = String(latestPausedEvent?.data?.reason || 'Scheduling paused');
+    const restored = await this.recoveryService.restoreCapacityPauseFromStore(() => this.clock.now());
+    if (!restored) return;
+    this.schedulingPausedUntilMs = restored.pauseUntilMs;
+    this.schedulingPausedReason = restored.reason;
     Logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
       pauseUntil: this.pausedUntilIso(),
       reason: this.schedulingPausedReason
     });
-  }
-
-  /**
-   * Rebuilds `processedSignals` from durable TEAMMATE_EVENT records so that
-   * idempotency survives a coordinator restart.  Replays all TEAMMATE_EVENT
-   * events whose processingDecision is ACCEPT and adds their idempotencyKey to
-   * the in-memory set — identical to what markSignalProcessed() does on the
-   * happy path.  Called once during start(), before the first supervisor step,
-   * so re-delivered signals are recognized as duplicates even after a restart.
-   *
-   * Accepts an optional pre-fetched `events` array so that start() can share
-   * a single readAll() pass with reconcileUnacknowledgedSignalIntents().  When
-   * called without arguments (e.g. directly in tests) it fetches events itself.
-   */
-  private async rebuildProcessedSignalsFromEvents(events?: DomainEvent[]): Promise<void> {
-    let rebuilt = 0;
-    try {
-      const allEvents = events ?? await this.eventStore.readAll();
-      for (const event of allEvents) {
-        if (event.type !== DomainEventName.TEAMMATE_EVENT) continue;
-        const data = event.data || {};
-        if (data.processingDecision !== TeammateEventDecisionAction.ACCEPT) continue;
-        const key = String(data.idempotencyKey || '');
-        if (!key) continue;
-        this.processedSignals.add(key);
-        rebuilt++;
-      }
-      if (rebuilt > 0) {
-        Logger.info(Component.SUPERVISOR, 'Rebuilt processed-signal idempotency set from event store', { rebuilt });
-      }
-    } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to rebuild processed-signal set from event store; idempotency layer is in-memory only this session', { error: String(error) });
-    }
-  }
-
-  /**
-   * Reconciles SIGNAL_INTENT_RECORDED events that have no corresponding
-   * processed TEAMMATE_EVENT (by idempotencyKey).  An intent without a matching
-   * accepted decision means the coordinator crashed or the POST failed after the
-   * intent was written — the signal was never applied.  Emits a
-   * SIGNAL_INTENT_RECONCILED event so operators can detect unacknowledged intents
-   * without silently losing them.  The reconciliation itself is idempotent: an
-   * intent that already has a SIGNAL_INTENT_RECONCILED event is skipped.
-   *
-   * Accepts an optional pre-fetched `events` array so that start() can share
-   * a single readAll() pass with rebuildProcessedSignalsFromEvents().  When
-   * called without arguments (e.g. directly in tests) it fetches events itself.
-   */
-  private async reconcileUnacknowledgedSignalIntents(events?: DomainEvent[]): Promise<void> {
-    try {
-      const allEvents = events ?? await this.eventStore.readAll();
-
-      // Build the set of idempotency keys already processed (ACCEPT decision) or
-      // already reconciled (a prior startup already emitted SIGNAL_INTENT_RECONCILED).
-      const processedKeys = new Set<string>();
-      const reconciledKeys = new Set<string>();
-      const intentsByKey = new Map<string, DomainEvent>();
-
-      for (const event of allEvents) {
-        const data = event.data || {};
-        const key = String(data.idempotencyKey || '');
-        if (!key) continue;
-
-        if (event.type === DomainEventName.SIGNAL_INTENT_RECORDED) {
-          // Keep the first recorded intent per key (earliest write).
-          if (!intentsByKey.has(key)) intentsByKey.set(key, event);
-          continue;
-        }
-        if (event.type === DomainEventName.TEAMMATE_EVENT && data.processingDecision === TeammateEventDecisionAction.ACCEPT) {
-          processedKeys.add(key);
-          continue;
-        }
-        if (event.type === DomainEventName.SIGNAL_ACKNOWLEDGED) {
-          processedKeys.add(key);
-          continue;
-        }
-        if (event.type === DomainEventName.SIGNAL_INTENT_RECONCILED) {
-          reconciledKeys.add(key);
-        }
-      }
-
-      // Identify intents that were recorded but never applied and not yet reconciled.
-      const unacknowledgedKeys = [...intentsByKey.keys()].filter(
-        key => !processedKeys.has(key) && !reconciledKeys.has(key)
-      );
-
-      for (const key of unacknowledgedKeys) {
-        const intentEvent = intentsByKey.get(key)!;
-        const intentData = intentEvent.data || {};
-        Logger.warn(Component.SUPERVISOR, 'Reconciling unacknowledged signal intent on startup', {
-          idempotencyKey: key,
-          beadId: intentData.beadId,
-          type: intentData.type,
-          stateId: intentData.stateId
-        });
-        await this.eventStore.record(DomainEventName.SIGNAL_INTENT_RECONCILED, {
-          idempotencyKey: key,
-          beadId: intentData.beadId,
-          type: intentData.type,
-          stateId: intentData.stateId,
-          intentTimestamp: intentEvent.timestamp,
-          reason: 'No processed TEAMMATE_EVENT or SIGNAL_ACKNOWLEDGED found for this intent after coordinator restart'
-        }).catch(() => {});
-      }
-
-      if (unacknowledgedKeys.length > 0) {
-        Logger.info(Component.SUPERVISOR, 'Signal intent reconciliation complete', { unacknowledgedCount: unacknowledgedKeys.length });
-      }
-    } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to reconcile unacknowledged signal intents', { error: String(error) });
-    }
-  }
-
-  /**
-   * Rehydrates the in-memory quarantine map from durable BEAD_QUARANTINED events
-   * on coordinator restart.  Replays the LATEST BEAD_QUARANTINED event per bead
-   * and restores the quarantine entry so that scanAndSpawn skips unchanged-broken
-   * beads without re-claiming, re-provisioning a worktree, or re-spawning.
-   *
-   * The rehydrated entry carries the signature recorded at quarantine time.  When
-   * isQuarantined() is next called for that bead, the CURRENT bead signature is
-   * compared against the stored one: if unchanged, the bead is still skipped; if
-   * changed (bead state evolved externally), the entry is cleared and a
-   * BEAD_QUARANTINE_CLEARED event is emitted so the retry is explained durably.
-   *
-   * Accepts an optional pre-fetched `events` array so that start() can share the
-   * single readAll() pass with rebuildProcessedSignalsFromEvents() and
-   * reconcileUnacknowledgedSignalIntents().
-   */
-  private async rehydrateQuarantinesFromEvents(events?: DomainEvent[]): Promise<void> {
-    try {
-      const allEvents = events ?? await this.eventStore.readAll();
-
-      // Collect the LATEST BEAD_QUARANTINED event per beadId (last write wins).
-      const latestByBead = new Map<string, DomainEvent>();
-      for (const event of allEvents) {
-        if (event.type !== DomainEventName.BEAD_QUARANTINED) continue;
-        const beadId = String(event.data?.beadId || '');
-        if (!beadId) continue;
-        latestByBead.set(beadId, event);
-      }
-
-      let rehydrated = 0;
-      for (const [beadId, event] of latestByBead) {
-        const reason = String(event.data?.reason || '');
-        const signature = String(event.data?.signature || '');
-        if (!reason || !signature) continue;
-
-        this.quarantine.set(beadId, { reason: reason as QuarantineReason, signature });
-        this.rehydratedQuarantineBeadIds.add(beadId);
-        rehydrated++;
-
-        await this.eventStore.record(DomainEventName.BEAD_QUARANTINE_REHYDRATED, {
-          beadId,
-          reason,
-          signature
-        }).catch(() => {});
-      }
-
-      if (rehydrated > 0) {
-        Logger.info(Component.SUPERVISOR, 'Rehydrated bead quarantines from event store on startup', { rehydrated });
-      }
-    } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to rehydrate quarantines from event store; quarantine state is in-memory only this session', { error: String(error) });
-    }
   }
 
   private isSchedulingPaused(): boolean {
@@ -599,174 +355,6 @@ export class Supervisor {
 
   private beadsPort(): BeadsPort {
     return this.services.beadsPort;
-  }
-
-  private worktreePort(): WorktreePort {
-    return this.services.worktreePort;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Quarantine helpers
-  // ---------------------------------------------------------------------------
-
-  /** Derive a stable signature for the given bead that captures the external
-   * state that must CHANGE before a quarantined re-attempt is warranted.
-   * Uses status + lastActivity so that a bead update, re-assignment, or any
-   * activity timestamp bump by the user lifts the quarantine automatically.
-   * Both fields are typed on Bead — no unsafe cast needed. */
-  private quarantineSignatureFor(bead: Bead): string {
-    return `${bead.status}:${bead.lastActivity || ''}`;
-  }
-
-  /** Classify a worktree-creation error string into a structured QuarantineReason. */
-  private classifyWorktreeError(errorText: string): QuarantineReason {
-    const lower = errorText.toLowerCase();
-    // "already checked out" — git worktree add rejects a branch in use by another worktree
-    if (lower.includes('already checked out') || lower.includes('is already checked out')) {
-      return QuarantineReason.ALREADY_CHECKED_OUT;
-    }
-    // "invalid reference" / "invalid branch ref" / "not a valid object name"
-    if (
-      lower.includes('invalid reference') ||
-      lower.includes('not a valid object name') ||
-      lower.includes('invalid branch') ||
-      lower.includes('bad revision') ||
-      (lower.includes('pathspec') && lower.includes('did not match'))
-    ) {
-      return QuarantineReason.INVALID_BRANCH_REF;
-    }
-    // Worktree path already exists on disk (git worktree add refuses to clobber)
-    if (lower.includes('already exists') || lower.includes('file exists') || lower.includes('path is already')) {
-      return QuarantineReason.WORKTREE_PATH_TAKEN;
-    }
-    return QuarantineReason.UNKNOWN;
-  }
-
-  /** Returns true if the bead is currently quarantined with an UNCHANGED signature.
-   * If the signature changed (bead state evolved externally) the quarantine entry is
-   * cleared and the bead is eligible for a re-attempt.
-   * When the cleared entry was rehydrated from a durable event, emits a
-   * BEAD_QUARANTINE_CLEARED event so the retry is explained in the event log. */
-  private async isQuarantined(bead: Bead): Promise<boolean> {
-    const entry = this.quarantine.get(bead.id);
-    if (!entry) return false;
-    const currentSig = this.quarantineSignatureFor(bead);
-    if (currentSig !== entry.signature) {
-      // Signature changed — bead state evolved; clear quarantine and allow retry.
-      const wasRehydrated = this.rehydratedQuarantineBeadIds.has(bead.id);
-      this.quarantine.delete(bead.id);
-      this.rehydratedQuarantineBeadIds.delete(bead.id);
-      if (wasRehydrated) {
-        // Emit a durable event so operators can trace the retry back to the cleared quarantine.
-        await this.eventStore.record(DomainEventName.BEAD_QUARANTINE_CLEARED, {
-          beadId: bead.id,
-          reason: entry.reason,
-          previousSignature: entry.signature,
-          currentSignature: currentSig
-        }).catch(() => {});
-        Logger.info(Component.SUPERVISOR, 'Rehydrated quarantine cleared — bead eligible for retry', {
-          beadId: bead.id,
-          reason: entry.reason,
-          previousSignature: entry.signature,
-          currentSignature: currentSig
-        });
-      }
-      return false;
-    }
-    return true;
-  }
-
-  /** Quarantine a bead with a structured reason + its current signature.
-   * Emits a bounded BEAD_QUARANTINED event exactly once per quarantine entry
-   * (subsequent ticks skip silently until the signature changes). */
-  private async quarantineBead(bead: Bead, reason: QuarantineReason, details: Record<string, unknown> = {}): Promise<void> {
-    const signature = this.quarantineSignatureFor(bead);
-    this.quarantine.set(bead.id, { reason, signature, details });
-    await this.eventStore.record(DomainEventName.BEAD_QUARANTINED, {
-      beadId: bead.id,
-      reason,
-      signature,
-      ...details
-    }).catch(() => {});
-    Logger.warn(Component.SUPERVISOR, 'Bead quarantined by supervisor preflight', {
-      beadId: bead.id,
-      reason,
-      ...details
-    });
-  }
-
-  /**
-   * Route a failure through the central n8fg taxonomy table and return the
-   * taxonomy fields as a plain record suitable for embedding in domain event data.
-   *
-   * This is the ONLY entry-point for failure classification in the Supervisor.
-   * No local failure categories are defined here — use FailureClass values.
-   *
-   * retryBudget MUST be passed explicitly — use retryBudgetFor(beadId) for
-   * worker-loss/transport paths that are budget-sensitive. Do NOT hard-code AVAILABLE.
-   */
-  private taxonomyFields(
-    failureClass: FailureClass,
-    lifecyclePhase: LifecyclePhase,
-    retryBudget: RetryBudget
-  ): { taxonomyClass: string; lifecyclePhase: string; taxonomyRowId: string; taxonomyAction: string; retryBudget: string } {
-    const result = routeFailure({ failureClass, lifecyclePhase, retryBudget, authorityLevel: AuthorityLevel.HARNESS });
-    const desc = compactDescriptor(result);
-    return {
-      taxonomyClass: desc.cls,
-      lifecyclePhase,
-      taxonomyRowId: desc.rowId,
-      taxonomyAction: desc.action,
-      retryBudget,
-    };
-  }
-
-  /**
-   * Route a failure and return the RoutingResult (nextAction) directly.
-   * Use when the caller needs to ACT on result.nextAction (branch on behavior),
-   * not just record taxonomy fields.
-   */
-  private routeTaxonomy(
-    failureClass: FailureClass,
-    lifecyclePhase: LifecyclePhase,
-    retryBudget: RetryBudget
-  ) {
-    return routeFailure({ failureClass, lifecyclePhase, retryBudget, authorityLevel: AuthorityLevel.HARNESS });
-  }
-
-  /**
-   * Determine the retry budget for a given bead based on how many inactive-restart
-   * recoveries it has already consumed this session.
-   *
-   * AVAILABLE  — restarts so far ≤ MAX_INACTIVE_RESTARTS (budget remains).
-   * EXHAUSTED  — restarts so far >  MAX_INACTIVE_RESTARTS (budget consumed).
-   *
-   * This is the authoritative budget signal for WORKER_PROCESS_LOSS and
-   * TRANSIENT_TRANSPORT routing decisions in the Supervisor.
-   */
-  private retryBudgetFor(beadId: string): RetryBudget {
-    const count = this.inactiveRestartCountByBead.get(beadId) ?? 0;
-    return count > SupervisorDefaults.MAX_INACTIVE_RESTARTS
-      ? RetryBudget.EXHAUSTED
-      : RetryBudget.AVAILABLE;
-  }
-
-  /**
-   * Compute the SHA-256 hex digest of the current harness config file.
-   *
-   * Used as the `configDigest` field in ContextKeyRecord so that the AC7
-   * admission gate can detect incompatible config changes between a producing
-   * spawn and a consuming spawn.  Best-effort: returns 'unknown' if the file
-   * cannot be read (startup validation would have already failed for hard errors).
-   */
-  private computeConfigDigest(): string {
-    try {
-      const configPath = this.services.configLoader.getConfigPath();
-      const contents = fs.readFileSync(configPath);
-      return createHash('sha256').update(contents).digest('hex');
-    } catch {
-      return 'unknown';
-    }
   }
 
   private configuredOutcomesForState(stateId: string, config: HarnessConfig): string[] {
@@ -888,326 +476,27 @@ export class Supervisor {
     };
   }
 
-  // ---------------------------------------------------------------------------
-  // Worktree allocation policy
-  // ---------------------------------------------------------------------------
-
   /**
-   * Resolve whether a worktree should be provisioned for a given stateId,
-   * according to the configured `settings.worktreePolicy` and per-state
-   * `provisionWorktree` override.
-   *
-   * Resolution order (highest to lowest precedence):
-   *   1. Per-state `provisionWorktree` (explicit boolean on the SDLCState)
-   *   2. `settings.worktreePolicy.default` ('always' | 'never')
-   *
-   * ConfigLoader rejects configs that omit settings.worktreePolicy.default,
-   * so by the time this method is called the policy is always explicitly set.
-   */
-  private resolveWorktreeProvisioning(stateId: string, config: HarnessConfig): boolean {
-    const stateConfig = config.states?.[stateId];
-    // 1. Per-state explicit override wins over everything.
-    if (stateConfig?.provisionWorktree !== undefined) {
-      return stateConfig.provisionWorktree;
-    }
-    // 2. Policy-level default (always declared explicitly — ConfigLoader enforces this).
-    const policyDefault: WorktreeProvisioningMode = config.settings?.worktreePolicy?.default ?? 'always';
-    return policyDefault !== 'never';
-  }
-
-  private async releaseClaimedAfterPause(claimed: Bead): Promise<void> {
-    await this.beadsPort().release(claimed.id).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
-        beadId: claimed.id,
-        error: String(error)
-      });
-    });
-    this.markBeadExited(claimed.id, { preserveInactiveRestartBackoff: true });
-    Logger.warn(Component.SUPERVISOR, 'Stopped assignment dispatch after scheduling pause', {
-      beadId: claimed.id,
-      pauseUntil: this.pausedUntilIso(),
-      reason: this.schedulingPausedReason
-    });
-  }
-
-  /**
-   * Return the names of MCP-backed required tools for the given bead/state (s3wp.32).
-   *
-   * Collects required tool names from both the state and all of its actions,
-   * then filters to those backed by MCP-type project tools. The result is used
-   * to gate spawning: if any required MCP tool is unhealthy, the bead is skipped.
-   */
-  private requiredMcpToolNamesForBead(
-    stateId: string,
-    config: HarnessConfig
-  ): string[] {
-    const state = config.states?.[stateId];
-    if (!state) return [];
-
-    // Collect required tool names from state-level and all action-level declarations.
-    const requiredNames = new Set<string>();
-    for (const tool of state.requiredTools || []) {
-      const name = typeof tool === 'string' ? tool : tool.name;
-      if (name) requiredNames.add(name);
-    }
-    for (const action of state.actions || []) {
-      for (const tool of action.requiredTools || []) {
-        const name = typeof tool === 'string' ? tool : tool.name;
-        if (name) requiredNames.add(name);
-      }
-    }
-    if (requiredNames.size === 0) return [];
-
-    return mcpBackedRequiredToolNames([...requiredNames], config.tools || []);
-  }
-
-  /**
-   * Run the MCP bridge preflight for a set of required MCP tool names (s3wp.32).
-   *
-   * Caches the result on this Supervisor instance so the same probe result is
-   * reused across scan-loop iterations (collapsed health, not per-worker spam).
-   * Records a single domain event on the first unique failure.
-   */
-  private async runMcpPreflightForTools(mcpToolNames: string[]): Promise<McpBridgeHealth> {
-    const health = await checkMcpBridgeHealth(
-      mcpToolNames,
-      (data) => this.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
-    );
-    // Cache on this Supervisor instance for harness_status reporting.
-    if (!this.mcpBridgeHealth || (!this.mcpBridgeHealth.healthy && health.healthy)) {
-      this.mcpBridgeHealth = health;
-    }
-    if (!health.healthy && this.mcpBridgeHealth?.healthy !== false) {
-      this.mcpBridgeHealth = health;
-    }
-    return health;
-  }
-
-  /** Claim one bead, conditionally provision its worktree, record the event,
-   * and spawn a teammate.  Owns the full claim → [worktree] → record → spawn
-   * sequence for a single bead, including releasing the lease on every failure
-   * path.
-   *
-   * Whether a worktree is provisioned is determined by `resolveWorktreeProvisioning`:
-   *   1. Per-state `provisionWorktree` (explicit boolean override on the SDLCState)
-   *   2. `settings.worktreePolicy.default` ('always' | 'never')
-   *   3. Hard default: 'always' (preserves behavior for configs without the field)
-   *
-   * Returns:
-   *   'spawned'     — success; continue to the next bead.
-   *   'paused'      — scheduling pause detected mid-flight; caller should break the loop.
-   *   'quarantined' — worktree creation failed and the bead was quarantined; caller skips
-   *                   this bead but continues processing others (no slot consumed).
-   *   throws        — hard failure (spawn failure or unexpected error); caller catches and records.
+   * Claim one bead, provision its worktree, and spawn a teammate.
+   * Delegates to BeadSpawnCoordinator — the single source of truth for
+   * the claim → [worktree] → record → spawn transaction (pi-experiment-amq0.2).
    */
   private async claimAndSpawnBead(
     bead: ScoredBead & { stateId: string },
     config: HarnessConfig
   ): Promise<'spawned' | 'paused' | 'quarantined'> {
-    if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Claiming ${bead.id}...`);
-
-    const beadsPort = this.beadsPort();
-    const worktreePort = this.worktreePort();
-
-    const claimed = await beadsPort.claim({
-      id: bead.id,
-      owner: App.DISPLAY_NAME,
-      stateId: bead.stateId,
-      leaseTtlMs: config.settings?.agentTurnTimeoutMs || Defaults.LEASE_TTL_MS
-    }, this.ctx);
-
-    // Post-claim pause check: pause was detected while the claim was in-flight.
-    // Release the lease we just acquired and signal the caller to break.
-    if (this.isSchedulingPaused()) {
-      await this.releaseClaimedAfterPause(claimed);
-      return 'paused';
-    }
-
-    if (this.stopping) {
-      await beadsPort.release(claimed.id).catch(() => {});
-      this.startedBeads.delete(claimed.id);
-      return 'paused';
-    }
-
-    // Worktree Allocation Policy
-    // resolveWorktreeProvisioning checks per-state override then policy default.
-    // Default is 'always' for backward compatibility.
-    const needsWorktree = this.resolveWorktreeProvisioning(bead.stateId, config);
-    let worktreePath: string;
-
-    if (needsWorktree) {
-      const result = await worktreePort.createWorktree(claimed.id, this.ctx);
-      worktreePath = result.path ?? '';
-      if (result.success !== true || !worktreePath) {
-        // Release the lease before quarantining — preserves WI-11 lease integrity.
-        await beadsPort.release(claimed.id).catch(() => {});
-        this.startedBeads.delete(claimed.id);
-        this.startedBeadAtMs.delete(claimed.id);
-        // Classify and quarantine — emit once-per-quarantine structured event.
-        const errorText = result.error || `Failed to provision worktree for ${claimed.id}`;
-        const quarantineReason = this.classifyWorktreeError(errorText);
-        // n8fg taxonomy: worktree/substrate failure at spawn → STARTUP_SUBSTRATE × SPAWN → QUARANTINE
-        // Budget is AVAILABLE at this point (pre-spawn quarantine, no restarts consumed yet).
-        await this.quarantineBead(bead, quarantineReason, this.taxonomyFields(FailureClass.STARTUP_SUBSTRATE, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE));
-        return 'quarantined';
-      }
-      await this.eventStore.record(DomainEventName.WORKTREE_PROVISIONED, { beadId: claimed.id, worktreePath });
-    } else {
-      // pi-experiment-ek2j: v2 spawn invariant — NO project-root fallback.
-      // v2 configs forbid running workers at the project root: every v2 worker
-      // MUST have an isolated git worktree. If the state is configured with
-      // provisionWorktree: false on a v2 config, fail-closed (quarantine the
-      // bead) instead of silently falling back to the shared checkout.
-      if (config.version === 2) {
-        await beadsPort.release(claimed.id).catch(() => {});
-        this.startedBeads.delete(claimed.id);
-        this.startedBeadAtMs.delete(claimed.id);
-        await this.quarantineBead(bead, QuarantineReason.V2_ISOLATED_WORKTREE_REQUIRED, {
-          ...this.taxonomyFields(FailureClass.STARTUP_SUBSTRATE, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE),
-          stateId: bead.stateId,
-          diagnostic:
-            `v2 spawn invariant violated: state "${bead.stateId}" has provisionWorktree: false ` +
-            `but v2 harness forbids running workers at the project root. ` +
-            `Either set provisionWorktree: true on this state or remove it to use the v2 default (isolated worktree).`
-        });
-        return 'quarantined';
-      }
-      // v1: project-root fallback is valid for non-worktree states (read-only
-      // states such as Planning/Review configured with worktreePolicy.default = 'never').
-      worktreePath = this.services.projectRoot;
-      Logger.info(Component.SUPERVISOR, `Worktree provisioning skipped for state ${bead.stateId}; teammate will run at project root`, {
-        beadId: claimed.id,
-        stateId: bead.stateId
-      });
-    }
-
-    // Post-worktree pause check: pause was detected after worktree decision.
-    // Release the lease and signal the caller to break.
-    if (this.isSchedulingPaused()) {
-      await this.releaseClaimedAfterPause(claimed);
-      return 'paused';
-    }
-
-    if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Spawning ${bead.id} (${bead.stateId})...`);
-
-    // pi-experiment-6q0y.44: resolve and apply the state's context policy.
-    // freshSubagent (default): each spawn gets an independent Pi context.
-    // namedContinuation: the coordinator looks up the stored Pi session path and
-    //   passes it to the spawner so the worker can resume (--session <path>).
-    //   AC7: admission gate runs before model spend; fails closed on any mismatch.
-    // producesContextKey: this spawn creates a persistent Pi session whose path
-    //   is stored in contextKeyStore so a later namedContinuation state can resume it.
-    const contextPolicy = resolveStateContextPolicy(bead.stateId, config);
-    let spawnContextKey: string | undefined;
-    let isResumption = false;
-
-    if (contextPolicy.mode === StateContextPolicy.NAMED_CONTINUATION && contextPolicy.contextKey) {
-      // AC7: admission gate — fail closed before model spend.
-      // Pass the full stored record (not just the path) and the consuming run's
-      // config digest so ALL five constraints are evaluated.
-      const storedRecord = this.contextKeyStore.get(contextPolicy.contextKey);
-      const consumingConfigDigest = this.computeConfigDigest();
-      const admission = evaluateContinuationAdmission({
-        contextKey: contextPolicy.contextKey,
-        storedRecord,
-        beadId: claimed.id,
-        consumingStateId: bead.stateId,
-        consumingConfigDigest
-      });
-
-      if (!admission.admitted) {
-        // Admission denied: record the denial event, log, and fall back to fresh spawn.
-        await this.eventStore.record(DomainEventName.CONTEXT_CONTINUATION_DENIED, {
-          beadId: claimed.id,
-          stateId: bead.stateId,
-          contextKey: contextPolicy.contextKey,
-          reason: admission.reason
-        }).catch(() => {});
-        Logger.warn(Component.SUPERVISOR, 'Named-continuation admission denied — spawning fresh', {
-          beadId: claimed.id,
-          stateId: bead.stateId,
-          contextKey: contextPolicy.contextKey,
-          reason: admission.reason
-        });
-      } else {
-        spawnContextKey = admission.sessionPath;
-        isResumption = true;
-        Logger.info(Component.SUPERVISOR, 'Named-continuation admission granted — resuming session', {
-          beadId: claimed.id,
-          stateId: bead.stateId,
-          contextKey: contextPolicy.contextKey,
-          sessionPath: admission.sessionPath
-        });
-      }
-    }
-    const spawnOptions: import('./OrchestrationPorts.js').SpawnOptions | undefined =
-      spawnContextKey !== undefined
-        ? { contextKey: spawnContextKey }
-        : contextPolicy.producesContextKey !== undefined
-          ? { persistSessionForKey: contextPolicy.producesContextKey }
-          : undefined;
-
-    const spawnStartMs = Date.now();
-    const spawned = await this.factory.spawnTeammateInTmux(claimed.id, bead.stateId, worktreePath, this.ctx, spawnOptions);
-    const spawnEndMs = Date.now();
-
-    // Emit a teammate_spawn span covering the tmux pane creation duration.
-    try {
-      this.observability.recordCompletedSpan(SpanName.TEAMMATE_SPAWN, {
-        [OtelAttr.ORR_ELSE_BEAD_ID]: claimed.id,
-        [OtelAttr.ORR_ELSE_STATE_ID]: bead.stateId,
-        'spawn.success': spawned.success
-      }, spawnStartMs, spawnEndMs);
-    } catch {
-      // Span emission is best-effort — never block the spawn path.
-    }
-
-    if (!spawned.success) {
-      await beadsPort.release(claimed.id).catch(() => {});
-      throw new Error(spawned.error || `Failed to spawn teammate for ${claimed.id}`);
-    }
-
-    // pi-experiment-6q0y.44 AC6: record context-instance identity for this spawn.
-    // Nit B: include the PRODUCED session path (spawned.piSessionPath) so the
-    // record captures both the consumed and produced session paths for audit/replay.
-    const contextInstanceId = spawned.paneId
-      ? `ctx-${claimed.id}-${bead.stateId}-${spawnStartMs}`
-      : `ctx-${claimed.id}-${bead.stateId}`;
-    const instanceRecord = buildContextInstanceRecord({
-      contextInstanceId,
-      beadId: claimed.id,
-      stateId: bead.stateId,
+    return this.spawnCoordinator.claimAndSpawnBead(
+      bead,
       config,
-      piSessionPath: spawnContextKey ?? spawned.piSessionPath,
-      isResumption
-    });
-    await this.eventStore.record(DomainEventName.CONTEXT_INSTANCE_RECORDED, instanceRecord).catch(() => {});
-
-    // pi-experiment-6q0y.44 write side (AC7): if this state produces a context key, store
-    // the full ContextKeyRecord (not just the session path) so the AC7 admission gate
-    // can enforce all five constraints on the consuming spawn.
-    if (contextPolicy.producesContextKey && spawned.piSessionPath) {
-      const configDigest = this.computeConfigDigest();
-      const record: ContextKeyRecord = {
-        piSessionPath: spawned.piSessionPath,
-        beadId: claimed.id,
-        sourceStateId: bead.stateId,
-        sourceActionId: '',  // action is not tracked at coordinator spawn time
-        configDigest,
-        terminal: false
-      };
-      this.contextKeyStore.set(contextPolicy.producesContextKey, record);
-      Logger.info(Component.SUPERVISOR, 'Stored Pi session path for named continuation (AC7 record)', {
-        beadId: claimed.id,
-        stateId: bead.stateId,
-        producesContextKey: contextPolicy.producesContextKey,
-        piSessionPath: spawned.piSessionPath,
-        configDigest
-      });
-    }
-
-    Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
-    return 'spawned';
+      this.ctx,
+      () => this.isSchedulingPaused(),
+      () => this.schedulingPausedUntilMs,
+      () => this.schedulingPausedReason,
+      () => this.stopping,
+      this.startedBeads,
+      this.startedBeadAtMs,
+      (id, opts) => this.markBeadExited(id, opts)
+    );
   }
 
   private async step() {
@@ -1375,15 +664,8 @@ export class Supervisor {
 
     if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), `Scanning backlog (${slots} slots free)`);
 
-    const orchestrator = new Orchestrator(
-      this.observability,
-      this.services.configLoader,
-      this.services.flowManager,
-      this.services.scheduler,
-      this.services.beadsPort,
-      this.options.maxSlots
-    );
-    const assignments = await orchestrator.selectAssignments(slots, this.options.requestedBeadId, excludedBeadIds);
+    // pi-experiment-amq0.2: use the required injected orchestrator (no fallback).
+    const assignments = await this.options.orchestrator.selectAssignments(slots, this.options.requestedBeadId, excludedBeadIds);
 
     if (assignments.length === 0) {
       if (this.ctx.hasUI) this.ctx.ui.setStatus(Component.ORR_ELSE.toLowerCase(), 'Idle (Backlog empty)');
@@ -1398,10 +680,6 @@ export class Supervisor {
       if (currentSlots <= 0) break;
 
       // PREFLIGHT: skip terminal/closed beads before claiming a slot.
-      // This prevents claiming/spawning a bead that has already reached a terminal
-      // state externally (e.g. closed via another process between backlog scan and now).
-      // Also skip beads currently quarantined with an unchanged signature (worktree
-      // creation would fail again identically — no slot-health churn).
       if (TERMINAL_BEAD_STATUSES.has(bead.status)) {
         Logger.info(Component.SUPERVISOR, 'Preflight: skipping terminal bead', {
           beadId: bead.id,
@@ -1409,43 +687,36 @@ export class Supervisor {
         });
         continue;
       }
-      if (await this.isQuarantined(bead)) {
+      if (await this.spawnCoordinator.isQuarantined(bead)) {
         Logger.info(Component.SUPERVISOR, 'Preflight: skipping quarantined bead (unchanged signature)', {
           beadId: bead.id,
-          reason: this.quarantine.get(bead.id)?.reason
+          reason: this.spawnCoordinator.quarantine.get(bead.id)?.reason
         });
         continue;
       }
 
       const terminalRestartDetails = await this.nonRoutableTerminalFailureLimitRestartDetails(bead, config);
       if (terminalRestartDetails) {
-        // n8fg taxonomy: restart into non-routable terminal failure = lifecycle invariant violated at spawn → TERMINAL_REJECT
-        // mapped to LIFECYCLE_VIOLATION × SPAWN because the bead's spawn would loop into the same failure.
-        await this.quarantineBead(
+        await this.spawnCoordinator.quarantineBead(
           bead,
           QuarantineReason.NON_ROUTABLE_TERMINAL_FAILURE_LIMIT,
-          { ...terminalRestartDetails, ...this.taxonomyFields(FailureClass.LIFECYCLE_VIOLATION, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE) }
+          {
+            ...terminalRestartDetails,
+            ...this.spawnCoordinator.taxonomyFields(FailureClass.LIFECYCLE_VIOLATION, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE)
+          }
         );
         continue;
       }
 
       // PREFLIGHT: MCP transport health check (s3wp.32).
-      // If the bead's state has required MCP-backed tools and the bridge is
-      // unhealthy, quarantine the bead via BACKEND_READINESS × SPAWN → QUARANTINE.
-      // The failure event is collapsed to once-per-cache-miss (not repeated per bead).
-      const requiredMcpTools = this.requiredMcpToolNamesForBead(bead.stateId, config);
+      const requiredMcpTools = this.spawnCoordinator.requiredMcpToolNamesForBead(bead.stateId, config);
       if (requiredMcpTools.length > 0) {
-        const mcpHealth = await this.runMcpPreflightForTools(requiredMcpTools);
+        const mcpHealth = await this.spawnCoordinator.runMcpPreflightForTools(requiredMcpTools);
         if (!mcpHealth.healthy) {
-          // n8fg taxonomy: MCP backend unavailable at spawn → BACKEND_READINESS × SPAWN → QUARANTINE.
-          // ACT on result.nextAction: QUARANTINE — quarantine the bead so it is
-          // skipped until its signature changes (backend recovers / config changes).
-          const taxonomyRoute = this.routeTaxonomy(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
-          const fields = this.taxonomyFields(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
-          // taxonomyRoute.nextAction must be QUARANTINE per the table; quarantine
-          // the bead exactly as we do for worktree failures.
+          const taxonomyRoute = this.spawnCoordinator.routeTaxonomy(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
+          const fields = this.spawnCoordinator.taxonomyFields(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
           if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
-            await this.quarantineBead(bead, QuarantineReason.UNKNOWN, {
+            await this.spawnCoordinator.quarantineBead(bead, QuarantineReason.UNKNOWN, {
               ...fields,
               unavailableTools: mcpHealth.affectedToolNames,
               errorMessage: mcpHealth.message,
@@ -1529,8 +800,10 @@ export class Supervisor {
     }
 
     if (prunedBeadIds.length > 0) {
-      // Record released beads for inclusion in the current slot-health snapshot.
-      this.releasedThisTick.push(...prunedBeadIds);
+      // Notify SlotHealthMonitor so released beads appear in the slot-health snapshot.
+      for (const beadId of prunedBeadIds) {
+        this.slotHealthMonitor.addReleasedThisTick(beadId);
+      }
       Logger.info(Component.SUPERVISOR, 'Pruned released or exited Beads from slot health tracking', {
         beadIds: prunedBeadIds.sort()
       });
@@ -1574,9 +847,9 @@ export class Supervisor {
   private backoffBlockedBeadIds(noProgressTimeoutMs: number): string[] {
     const now = this.clock.now();
     const blocked: string[] = [];
-    for (const [beadId, restartedAtMs] of this.inactiveRestartedAtMs.entries()) {
+    for (const [beadId, restartedAtMs] of this.slotHealthMonitor.inactiveRestartedAtMs.entries()) {
       if (now - restartedAtMs >= noProgressTimeoutMs) {
-        this.inactiveRestartedAtMs.delete(beadId);
+        this.slotHealthMonitor.inactiveRestartedAtMs.delete(beadId);
       } else {
         blocked.push(beadId);
       }
@@ -1584,637 +857,40 @@ export class Supervisor {
     return blocked.sort();
   }
 
-  private async collectSlotHealthSnapshot(): Promise<SlotHealthSnapshot> {
-    // Clear the released-this-tick accumulator before the prune step so only
-    // beads pruned during THIS snapshot are included in the churn report.
-    this.releasedThisTick = [];
-
-    const liveBeadIds = [...await this.factory.getLiveTeammateBeadIds()].sort();
-    await this.pruneDurablyInactiveStartedBeads(new Set(liveBeadIds));
-    const config = await this.services.configLoader.load();
-    const noProgressTimeoutMs = config.settings.teammateNoProgressTimeoutMs || SupervisorDefaults.NO_PROGRESS_TIMEOUT_MS;
-    const heartbeatByBead = new Map<string, number>();
-    for (const heartbeat of this.server.getHeartbeatSnapshot()) {
-      if (!heartbeat.beadId) continue;
-      const previous = heartbeatByBead.get(heartbeat.beadId) || 0;
-      heartbeatByBead.set(heartbeat.beadId, Math.max(previous, heartbeat.timestampMs));
-    }
-    const heartbeatDetails = this.server.getHeartbeatSnapshot();
-    const latestProgressEvents = await this.eventStore.latestEventsForBeads(liveBeadIds.map(asBeadId), {
-      excludeTypes: [DomainEventName.HEARTBEAT_RECORDED, DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED],
-      excludeTeammateEventTypes: [TeammateEventType.HEARTBEAT],
-      excludeToolNames: [PluginToolName.BD_HEARTBEAT]
-    });
-
-    const now = this.clock.now();
-    const staleHeartbeatBeadIds = liveBeadIds.filter(beadId => {
-      const lastHeartbeatMs = heartbeatByBead.get(beadId) || 0;
-      if (!lastHeartbeatMs) {
-        const startedAtMs = this.startedBeadAtMs.get(beadId) || 0;
-        return startedAtMs > 0 && now - startedAtMs > SupervisorDefaults.STARTUP_HEARTBEAT_GRACE_MS;
-      }
-      return now - lastHeartbeatMs > SupervisorDefaults.STALE_HEARTBEAT_MS;
-    });
-    const inactiveBeadIds = liveBeadIds.filter(beadId => {
-      const latestProgress = latestProgressEvents.get(asBeadId(beadId));
-      const latestProgressMs = latestProgress ? Date.parse(latestProgress.timestamp) : this.startedBeadAtMs.get(beadId) || 0;
-      return Number.isFinite(latestProgressMs) && latestProgressMs > 0 && now - latestProgressMs > noProgressTimeoutMs;
-    });
-    const staleBeadIds = [...new Set(inactiveBeadIds)].sort();
-    const heartbeatOnlyStaleBeadIds = staleHeartbeatBeadIds
-      .filter(beadId => !staleBeadIds.includes(beadId))
-      .sort();
-    const expectedCount = this.options.maxSlots;
-    const trackedBeadIds = [...this.startedBeads].sort();
-    const missingTrackedBeadIds = trackedBeadIds
-      .filter(beadId => !liveBeadIds.includes(beadId) || this.lastMissingStartedBeadIds.has(beadId));
-    const effectiveLiveBeadIds = liveBeadIds.filter(beadId => !missingTrackedBeadIds.includes(beadId));
-    const activeCount = effectiveLiveBeadIds.length;
-    const workingCount = activeCount - staleBeadIds.filter(beadId => effectiveLiveBeadIds.includes(beadId)).length;
-    // Clear suppressed entries when the bead re-appears in the live pane set
-    // (late pane-registration healed the gap; restart the lifecycle cleanly).
-    for (const beadId of liveBeadIds) {
-      if (this.suppressedHeartbeatOnlyGaps.has(beadId)) {
-        this.suppressedHeartbeatOnlyGaps.delete(beadId);
-        this.heartbeatOnlyGapCounts.delete(beadId);
-        this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
-      }
-    }
-    const heartbeatOnlyLiveGaps = [...heartbeatByBead.keys()]
-      .filter(beadId => !liveBeadIds.includes(beadId) && !this.suppressedHeartbeatOnlyGaps.has(beadId))
-      .sort();
-
-    // Churn-diagnostic sets (s3wp.33).
-    // trackedOnly: tracked but not live → possible silent exit without pane-death event.
-    const trackedSet = new Set(trackedBeadIds);
-    const liveSet = new Set(liveBeadIds);
-    const trackedOnlyBeadIds = trackedBeadIds.filter(id => !liveSet.has(id)).sort();
-    // paneOnly: live but not tracked → orphaned pane from a prior run.
-    const paneOnlyBeadIds = liveBeadIds.filter(id => !trackedSet.has(id)).sort();
-    // restarting: currently in inactive-restart backoff.
-    const restartingBeadIds = [...this.inactiveRestartedAtMs.keys()]
-      .filter(id => now - (this.inactiveRestartedAtMs.get(id) || 0) < noProgressTimeoutMs)
-      .sort();
-    // released: durably pruned from tracking this tick.
-    const releasedBeadIds = [...new Set(this.releasedThisTick)].sort();
-
-    return {
-      observedLiveBeadIds: liveBeadIds,
-      effectiveLiveBeadIds,
-      noProgressTimeoutMs,
-      heartbeatByBead,
-      heartbeatDetails,
-      latestProgressEvents,
-      staleHeartbeatBeadIds,
-      inactiveBeadIds,
-      staleBeadIds,
-      heartbeatOnlyStaleBeadIds,
-      expectedCount,
-      trackedBeadIds,
-      missingTrackedBeadIds,
-      activeCount,
-      workingCount,
-      heartbeatOnlyLiveGaps,
-      trackedOnlyBeadIds,
-      paneOnlyBeadIds,
-      restartingBeadIds,
-      releasedBeadIds
-    };
-  }
-
-  private async recordSlotHealth(stage: string): Promise<void> {
-    const now = this.clock.now();
-    if (now - this.lastSlotHealthEventMs < SupervisorDefaults.SLOT_HEALTH_EVENT_INTERVAL_MS) return;
-    this.lastSlotHealthEventMs = now;
-
-    const snapshot = await this.collectSlotHealthSnapshot();
-    const {
-      observedLiveBeadIds,
-      effectiveLiveBeadIds,
-      noProgressTimeoutMs,
-      heartbeatByBead,
-      heartbeatDetails,
-      latestProgressEvents,
-      staleHeartbeatBeadIds,
-      inactiveBeadIds,
-      staleBeadIds,
-      heartbeatOnlyStaleBeadIds,
-      expectedCount,
-      trackedBeadIds,
-      missingTrackedBeadIds,
-      activeCount,
-      workingCount,
-      heartbeatOnlyLiveGaps,
-      trackedOnlyBeadIds,
-      paneOnlyBeadIds,
-      restartingBeadIds,
-      releasedBeadIds
-    } = snapshot;
-
-    await this.eventStore.record(DomainEventName.TEAMMATE_SLOT_HEALTH_CHECKED, {
-      stage,
-      expectedCount,
-      activeCount,
-      workingCount,
-      liveBeadIds: effectiveLiveBeadIds,
-      observedLiveBeadIds,
-      staleBeadIds,
-      staleHeartbeatBeadIds,
-      heartbeatOnlyStaleBeadIds,
-      inactiveBeadIds,
-      trackedBeadIds,
-      missingTrackedBeadIds,
-      heartbeatOnlyLiveGaps,
-      // Churn-diagnostic sets (s3wp.33)
-      trackedOnlyBeadIds,
-      paneOnlyBeadIds,
-      restartingBeadIds,
-      releasedBeadIds
-    }).catch(() => {});
-
-    const details = {
-      expectedCount,
-      activeCount,
-      workingCount,
-      liveBeadIds: effectiveLiveBeadIds,
-      missingTrackedBeadIds,
-      staleBeadIds,
-      heartbeatOnlyStaleBeadIds,
-      // Churn-diagnostic sets (s3wp.33)
-      trackedOnlyBeadIds,
-      paneOnlyBeadIds,
-      restartingBeadIds,
-      releasedBeadIds
-    };
-    const digest = `${expectedCount}/${workingCount}/${activeCount}|${missingTrackedBeadIds.join(',')}|${staleBeadIds.join(',')}|${heartbeatOnlyStaleBeadIds.join(',')}|${trackedOnlyBeadIds.join(',')}|${paneOnlyBeadIds.join(',')}`;
-    if (digest !== this.lastLoggedSlotHealthDigest) {
-      this.lastLoggedSlotHealthDigest = digest;
-      // While scheduling is intentionally paused, underfill is expected and
-      // not actionable — suppress the warn to avoid log spam.
-      const isUnderfilled = activeCount < expectedCount || staleBeadIds.length > 0 || heartbeatOnlyStaleBeadIds.length > 0;
-      if (isUnderfilled && this.isSchedulingPaused()) {
-        // Silently absorb the digest change; no operator-facing log.
-      } else if (isUnderfilled) {
-        Logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
-      } else {
-        Logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
-      }
-    }
-
-    await this.recordCapacityUnderfill({
-      stage,
-      expectedCount,
-      activeCount,
-      workingCount,
-      liveBeadIds: effectiveLiveBeadIds,
-      trackedBeadIds,
-      missingTrackedBeadIds,
-      heartbeatOnlyLiveGaps,
-      heartbeatByBead,
-      staleBeadIds,
-      heartbeatOnlyStaleBeadIds
-    });
-
-    await this.recoverOrphanHeartbeatGaps(heartbeatOnlyLiveGaps, heartbeatDetails, now);
-    await this.recoverInactiveBeads(inactiveBeadIds, effectiveLiveBeadIds, latestProgressEvents, heartbeatDetails, noProgressTimeoutMs);
-  }
-
-  private async recordCapacityUnderfill(details: {
-    stage: string;
-    expectedCount: number;
-    activeCount: number;
-    workingCount: number;
-    liveBeadIds: string[];
-    trackedBeadIds: string[];
-    missingTrackedBeadIds: string[];
-    heartbeatOnlyLiveGaps: string[];
-    heartbeatByBead: Map<string, number>;
-    staleBeadIds: string[];
-    heartbeatOnlyStaleBeadIds: string[];
-  }): Promise<void> {
-    if (details.activeCount >= details.expectedCount) return;
-
-    const missingSlotCount = details.expectedCount - details.activeCount;
-    const lastHeartbeatByBead = Object.fromEntries(
-      [...details.heartbeatByBead.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([beadId, timestampMs]) => [beadId, this.clock.date(timestampMs).toISOString()])
-    );
-    const digest = [
-      `${details.expectedCount}/${details.activeCount}`,
-      details.liveBeadIds.join(','),
-      details.trackedBeadIds.join(','),
-      details.missingTrackedBeadIds.join(','),
-      details.heartbeatOnlyLiveGaps.join(',')
-    ].join('|');
-    if (digest === this.lastCapacityUnderfillDigest) return;
-    this.lastCapacityUnderfillDigest = digest;
-
-    const eventData = {
-      stage: details.stage,
-      expectedCount: details.expectedCount,
-      activeCount: details.activeCount,
-      workingCount: details.workingCount,
-      missingSlotCount,
-      liveBeadIds: details.liveBeadIds,
-      trackedBeadIds: details.trackedBeadIds,
-      missingTrackedBeadIds: details.missingTrackedBeadIds,
-      heartbeatOnlyLiveGaps: details.heartbeatOnlyLiveGaps,
-      staleBeadIds: details.staleBeadIds,
-      heartbeatOnlyStaleBeadIds: details.heartbeatOnlyStaleBeadIds,
-      lastHeartbeatByBead
-    };
-
-    await this.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
-    // Suppress the operator-facing underfilled warning while scheduling is
-    // intentionally paused — underfill is expected and not actionable until
-    // pause expiry, so the log entry would only add noise.
-    if (this.isSchedulingPaused()) return;
-    Logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
-  }
-
-  private latestStateForBead(beadId: string, heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>): string | undefined {
-    return heartbeatDetails
-      .filter(heartbeat => heartbeat.beadId === beadId && heartbeat.stateId)
-      .sort((a, b) => b.timestampMs - a.timestampMs)[0]?.stateId;
-  }
-
   /**
-   * Gives heartbeat-only live gaps an explicit deterministic lifecycle.
-   *
-   * A beadId in heartbeatOnlyLiveGaps has a heartbeat but no live tmux pane.
-   * Left unchecked these entries repeat indefinitely, making health events noisy.
-   *
-   * Algorithm:
-   *   1. For beadIds currently in the gap set: increment the consecutive-check
-   *      counter; record firstSeen if new.
-   *   2. For beadIds no longer in the gap set: reset their counters (healed).
-   *   3. When a beadId exceeds orphanChecks consecutive detections OR its
-   *      firstSeen age exceeds orphanTtlMs:
-   *      a. Emit HEARTBEAT_ONLY_GAP_ORPHANED with diagnostic fields.
-   *      b. Suppress the beadId from future heartbeatOnlyLiveGaps reporting.
-   *      c. Attempt to release the bead lease (best-effort, never throws).
+   * Delegate slot-health recording to SlotHealthMonitor.
+   * pi-experiment-amq0.2: SlotHealthMonitor is the single source of truth.
    */
-  private async recoverOrphanHeartbeatGaps(
-    heartbeatOnlyLiveGaps: string[],
-    heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>,
-    nowMs: number
-  ): Promise<void> {
-    const config = await this.services.configLoader.load();
-    const orphanChecks = config.settings.heartbeatOnlyGapOrphanChecks ?? SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_CHECKS;
-    const orphanTtlMs = config.settings.heartbeatOnlyGapOrphanTtlMs ?? SupervisorDefaults.HEARTBEAT_ONLY_GAP_ORPHAN_TTL_MS;
-
-    const currentGapSet = new Set(heartbeatOnlyLiveGaps);
-
-    // Reset counters for beadIds that healed (no longer in gap set).
-    for (const beadId of [...this.heartbeatOnlyGapCounts.keys()]) {
-      if (!currentGapSet.has(beadId)) {
-        this.heartbeatOnlyGapCounts.delete(beadId);
-        this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
-      }
-    }
-
-    for (const beadId of heartbeatOnlyLiveGaps) {
-      // Track first-seen timestamp.
-      if (!this.heartbeatOnlyGapFirstSeenMs.has(beadId)) {
-        this.heartbeatOnlyGapFirstSeenMs.set(beadId, nowMs);
-      }
-
-      // Increment consecutive-check counter.
-      const prevCount = this.heartbeatOnlyGapCounts.get(beadId) ?? 0;
-      const newCount = prevCount + 1;
-      this.heartbeatOnlyGapCounts.set(beadId, newCount);
-
-      const firstSeenMs = this.heartbeatOnlyGapFirstSeenMs.get(beadId)!;
-      const ageMs = nowMs - firstSeenMs;
-      const ttlExpired = ageMs >= orphanTtlMs;
-      const thresholdReached = newCount >= orphanChecks;
-
-      if (!ttlExpired && !thresholdReached) continue;
-
-      // Determine reason string for the event.
-      const reason = ttlExpired
-        ? `heartbeat-only gap exceeded ttl (${ageMs}ms >= ${orphanTtlMs}ms)`
-        : `heartbeat-only gap exceeded consecutive check threshold (${newCount} >= ${orphanChecks})`;
-
-      // Collect worker IDs and last heartbeat timestamp for this beadId.
-      const beadHeartbeats = heartbeatDetails.filter(h => h.beadId === beadId);
-      const workerIds = [...new Set(beadHeartbeats.map(h => h.workerId))];
-      const lastHeartbeatMs = Math.max(...beadHeartbeats.map(h => h.timestampMs), 0);
-      const lastHeartbeatAt = lastHeartbeatMs > 0 ? this.clock.date(lastHeartbeatMs).toISOString() : undefined;
-      const stateId = this.latestStateForBead(beadId, heartbeatDetails);
-
-      Logger.warn(Component.SUPERVISOR, 'Heartbeat-only live gap declared orphaned; suppressing', {
-        beadId,
-        workerIds,
-        lastHeartbeatAt,
-        stateId,
-        reason
-      });
-
-      await this.eventStore.record(DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED, {
-        beadId,
-        workerIds,
-        lastHeartbeatAt,
-        stateId,
-        reason
-      }).catch(() => {});
-
-      // Suppress this beadId from future heartbeatOnlyLiveGaps + reset counters.
-      this.suppressedHeartbeatOnlyGaps.add(beadId);
-      this.heartbeatOnlyGapCounts.delete(beadId);
-      this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
-
-      // Best-effort lease release — clears the stale server-side claim.
-      await this.beadsPort().release(beadId).catch(error => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release orphaned heartbeat-only gap bead', { beadId, error: String(error) });
-      });
-    }
-  }
-
-  private async recoverInactiveBeads(
-    inactiveBeadIds: string[],
-    effectiveLiveBeadIds: string[],
-    latestProgressEvents: Map<string, DomainEvent>,
-    heartbeatDetails: ReturnType<SignalingServer['getHeartbeatSnapshot']>,
-    noProgressTimeoutMs: number
-  ): Promise<void> {
-    const config = await this.services.configLoader.load();
-
-    // --- Early-trip: final-blocked pane detection ---
-    // Check effective live beads that are not already past the no-progress
-    // timeout and not in backoff for a terminal-blocked pane output.  When a
-    // pane's final output is a blocked/fatal banner, the bead is stalled NOW —
-    // no further progress will occur — so we recover it on this tick rather
-    // than waiting for the full noProgressTimeoutMs to elapse.
-    //
-    // Guards applied per bead (BLOCKER A + C):
-    //   1. captureBeadPaneText must exist on the factory (defensive, some test
-    //      factories omit it).  If absent, skip the early-trip entirely.
-    //   2. Skip beads already covered by the standard timeout path below.
-    //   3. Skip beads still in inactive-restart backoff.
-    //   4. Require TEMPORAL CORROBORATION (FINAL_BLOCKED_CONFIRM_POLLS = 2
-    //      consecutive polls) before recovering, to avoid killing a bead on a
-    //      single transient snapshot that happens to end on a matching line.
-    //      The per-bead counter is reset when the pane shows no blocked signal.
-    //
-    // Metric: detection latency ≈ 2 × POLL_INTERVAL_MS instead of the full
-    // noProgressTimeoutMs (~15 min), so the latency win is preserved while
-    // one-frame false kills are eliminated.
-    const hasCaptureBeadPaneText = typeof this.factory.captureBeadPaneText === 'function';
-    if (hasCaptureBeadPaneText) {
-      const inactiveSet = new Set(inactiveBeadIds);
-      for (const beadId of effectiveLiveBeadIds) {
-        // Skip beads already covered by the standard timeout path below.
-        if (inactiveSet.has(beadId)) continue;
-
-        // Skip beads whose backoff is still active (recently restarted).
-        const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;
-        const now = this.clock.now();
-        if (now - lastRestartAtMs < noProgressTimeoutMs) {
-          // Also reset the debounce counter — bead is in backoff, not being checked.
-          this.finalBlockedPollCounts.delete(beadId);
-          continue;
-        }
-
-        // Capture the live pane snapshot to inspect for a terminal-blocked banner.
-        const paneSnapshot = await this.factory.captureBeadPaneText(beadId).catch(() => '');
-        if (!paneSnapshot) {
-          this.finalBlockedPollCounts.delete(beadId);
-          continue;
-        }
-
-        const finalBlockedResult = detectFinalBlockedState(paneSnapshot);
-        if (!finalBlockedResult.blocked) {
-          // Agent is progressing — reset the debounce counter.
-          this.finalBlockedPollCounts.delete(beadId);
-          continue;
-        }
-
-        // Increment the consecutive-detection counter (BLOCKER C debounce).
-        const previousCount = this.finalBlockedPollCounts.get(beadId) ?? 0;
-        const newCount = previousCount + 1;
-        this.finalBlockedPollCounts.set(beadId, newCount);
-
-        if (newCount < FINAL_BLOCKED_CONFIRM_POLLS) {
-          // Not yet confirmed — wait for the next poll.
-          Logger.info(Component.SUPERVISOR, 'Final-blocked pane candidate; awaiting temporal confirmation', {
-            beadId,
-            pollCount: newCount,
-            requiredPolls: FINAL_BLOCKED_CONFIRM_POLLS,
-            category: finalBlockedResult.category
-          });
-          continue;
-        }
-
-        // Confirmed on FINAL_BLOCKED_CONFIRM_POLLS consecutive polls: recover.
-        this.finalBlockedPollCounts.delete(beadId);
-        this.inactiveRestartedAtMs.set(beadId, now);
-
-        // Increment restart count BEFORE computing budget so that the nth
-        // recovery sees the correct EXHAUSTED state when n > MAX_INACTIVE_RESTARTS.
-        const prevRestartCount = this.inactiveRestartCountByBead.get(beadId) ?? 0;
-        this.inactiveRestartCountByBead.set(beadId, prevRestartCount + 1);
-        const budget = this.retryBudgetFor(beadId);
-
-        // ACT on the taxonomy table's next-action — QUARANTINE when budget
-        // exhausted, BOUNDED_RETRY (restart) while budget remains.
-        const taxonomyRoute = this.routeTaxonomy(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
-        const fields = this.taxonomyFields(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
-
-        const latestProgressEvent = latestProgressEvents.get(beadId);
-        const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
-        const blockedCategory: ScanCategory | string = finalBlockedResult.category ?? ScanCategory.PANIC_FATAL;
-        const blockedEvidence = finalBlockedResult.evidenceLine
-          ? ` Evidence: "${finalBlockedResult.evidenceLine}".`
-          : '';
-        const summary = [
-          AgentFailureSummary.FINAL_BLOCKED,
-          `Detected category: ${blockedCategory}.${blockedEvidence}`,
-          `Last non-heartbeat event: ${latestProgressEvent?.type || 'none'} at ${latestProgressEvent?.timestamp || 'unknown'}.`,
-          AgentFailureSummary.EVENT_STORE_DETAILS
-        ].join(' ');
-        const evidence = `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`;
-
-        Logger.warn(Component.SUPERVISOR, 'Final-blocked pane detected; recovering bead immediately', {
-          beadId,
-          stateId,
-          category: blockedCategory,
-          evidenceLine: finalBlockedResult.evidenceLine,
-          taxonomyAction: taxonomyRoute.nextAction,
-          restartCount: prevRestartCount + 1,
-          budget
-        });
-
-        await this.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
-          beadId,
-          stateId,
-          summary,
-          paneSnapshot,
-          error: summary,
-          // n8fg taxonomy: driven by the table's nextAction (BOUNDED_RETRY or QUARANTINE)
-          ...fields
-        }).catch(() => {});
-
-        if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
-          // Budget exhausted: quarantine instead of restarting.
-          const beadObj = await this.beadsPort().getBead(beadId).catch(() => undefined);
-          if (beadObj) {
-            await this.quarantineBead(beadObj, QuarantineReason.UNKNOWN, {
-              ...fields,
-              summary,
-              reason: 'Worker process loss retry budget exhausted — final-blocked'
-            });
-          } else {
-            Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
-          }
-        } else {
-          // BOUNDED_RETRY: restart the bead (existing behavior).
-          const finalBlockedRestartKey = `supervisor-final-blocked-${beadId}-${stateId}-${now}`;
-          await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
-            beadId,
-            stateId,
-            targetState: stateId,
-            transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
-            summary,
-            evidence,
-            handover: summary,
-            restartId: deriveRestartId(finalBlockedRestartKey)
-          }).catch(() => {});
-        }
-
-        await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
-          Logger.warn(Component.SUPERVISOR, 'Unable to terminate final-blocked teammate panes', { beadId, error: String(error) });
-        });
-        await this.beadsPort().release(beadId).catch((error: unknown) => {
-          Logger.warn(Component.SUPERVISOR, 'Unable to release final-blocked Bead after teammate termination', { beadId, error: String(error) });
-        });
-        this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
-      }
-    }
-
-    // --- Standard path: no-progress timeout recovery ---
-    if (inactiveBeadIds.length === 0) return;
-
-    for (const beadId of inactiveBeadIds) {
-      const lastRestartAtMs = this.inactiveRestartedAtMs.get(beadId) || 0;
-      const now = this.clock.now();
-      if (now - lastRestartAtMs < noProgressTimeoutMs) continue;
-      this.inactiveRestartedAtMs.set(beadId, now);
-
-      // Increment restart count BEFORE computing budget so that the nth
-      // recovery sees the correct EXHAUSTED state when n > MAX_INACTIVE_RESTARTS.
-      const prevRestartCount = this.inactiveRestartCountByBead.get(beadId) ?? 0;
-      this.inactiveRestartCountByBead.set(beadId, prevRestartCount + 1);
-      const budget = this.retryBudgetFor(beadId);
-
-      // ACT on the taxonomy table's next-action — QUARANTINE when budget
-      // exhausted, BOUNDED_RETRY (restart) while budget remains.
-      const taxonomyRoute = this.routeTaxonomy(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
-      const fields = this.taxonomyFields(FailureClass.WORKER_PROCESS_LOSS, LifecyclePhase.RUNNING, budget);
-
-      const latestProgressEvent = latestProgressEvents.get(beadId);
-      const stateId = this.latestStateForBead(beadId, heartbeatDetails) || String(latestProgressEvent?.data?.stateId || '');
-      const summary = [
-        AgentFailureSummary.NO_PROGRESS,
-        `Last non-heartbeat event: ${latestProgressEvent?.type || 'none'} at ${latestProgressEvent?.timestamp || 'unknown'}.`,
-        `Timeout: ${noProgressTimeoutMs}ms.`,
-        AgentFailureSummary.EVENT_STORE_DETAILS
-      ].join(' ');
-
-      // Capture the live pane snapshot (reasoning already redacted) so
-      // operators can see what the agent was doing at the time of inactivity
-      // detection.  Errors are silently ignored — failure to capture pane
-      // text must not block the restart path.
-      const paneSnapshot = await this.factory.captureBeadPaneText(beadId).catch(() => '');
-      const evidence = paneSnapshot
-        ? `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`
-        : summary;
-
-      await this.eventStore.record(DomainEventName.AGENT_TURN_FAILED, {
-        beadId,
-        stateId,
-        summary,
-        paneSnapshot: paneSnapshot || undefined,
-        error: summary,
-        // n8fg taxonomy: no-progress timeout = worker process loss; action driven by table
-        ...fields
-      }).catch(() => {});
-
-      if (taxonomyRoute.nextAction === NextAction.QUARANTINE) {
-        // Budget exhausted: quarantine instead of restarting.
-        // Fetch the bead object for quarantine signature calculation.
-        const beadObj = await this.beadsPort().getBead(beadId).catch(() => undefined);
-        if (beadObj) {
-          await this.quarantineBead(beadObj, QuarantineReason.UNKNOWN, {
-            ...fields,
-            summary,
-            reason: 'Worker process loss retry budget exhausted — no-progress timeout'
-          });
-        } else {
-          // Best-effort: if we can't fetch the bead, record the failure event
-          // but skip quarantine entry (bead may have already been released).
-          Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
-        }
-      } else {
-        // BOUNDED_RETRY: restart the bead (existing behavior).
-        const noProgressRestartKey = `supervisor-no-progress-${beadId}-${stateId}-${now}`;
-        await this.eventStore.record(DomainEventName.HARNESS_RESTART_REQUESTED, {
-          beadId,
-          stateId,
-          targetState: stateId,
-          transitionEvent: config.settings.harnessRestartEvent || EventName.HARNESS_RESTART,
-          summary,
-          evidence,
-          handover: summary,
-          restartId: deriveRestartId(noProgressRestartKey)
-        }).catch(() => {});
-      }
-
-      await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to terminate inactive teammate panes', { beadId, error: String(error) });
-      });
-      await this.beadsPort().release(beadId).catch((error: unknown) => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release inactive Bead after teammate termination', { beadId, error: String(error) });
-      });
-      this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
-    }
+  private async recordSlotHealth(stage: string): Promise<void> {
+    return this.slotHealthMonitor.recordSlotHealth(stage);
   }
 
   /**
-   * Runs retention cleanup at most once per RetentionDefaults.CLEANUP_INTERVAL_MS.
-   * Removes files/dirs older than RetentionDefaults.MAX_AGE_MS from harness-owned
-   * log, .tmp, and .trash areas. Errors are logged but never propagate —
-   * cleanup failure must not disrupt the supervisor poll loop.
-   *
-   * Supplies the live bead ID set from the teammate spawner so that the
-   * .pi/tool-output per-bead directories of running beads are never deleted.
+   * Delegate slot-health snapshot to SlotHealthMonitor.
+   * Exposed for tests that call (supervisor as any).collectSlotHealthSnapshot().
+   */
+  private async collectSlotHealthSnapshot(): Promise<ReturnType<SlotHealthMonitor['collectSlotHealthSnapshot']>> {
+    return this.slotHealthMonitor.collectSlotHealthSnapshot();
+  }
+
+  /**
+   * Runs retention cleanup via the injected RetentionScheduler.
+   * pi-experiment-amq0.2: RetentionScheduler is the single source of truth.
    */
   private async runRetentionCleanupIfDue(): Promise<void> {
-    const now = this.clock.now();
-    if (now - this.lastRetentionCleanupMs < RetentionDefaults.CLEANUP_INTERVAL_MS) return;
-    this.lastRetentionCleanupMs = now;
+    return this.retentionScheduler.runIfDue();
+  }
 
-    // Source the retention/compaction policy from config so compaction can
-    // actually run when enabled (the `retention` block in harness.yaml).
-    // Without this, compactionEnabled is pinned to the
-    // RetentionDefaults.COMPACTION_ENABLED (false) default and compaction
-    // never runs regardless of config.
-    const config = await this.services.configLoader.load();
-
-    const cleanup = new RetentionCleanup(
-      this.services.projectRoot,
-      this.clock,
-      // RetentionCleanup needs the full concrete store (not the narrow
-      // ProjectionCapableStore the rest of the Supervisor consumes).
-      this.services.eventStore,
-      RetentionDefaults.MAX_AGE_MS,
-      () => this.factory.getLiveTeammateBeadIds(),
-      config.retention
-    );
-
-    await cleanup.run().catch(error => {
-      Logger.warn(Component.SUPERVISOR, 'Retention cleanup failed unexpectedly', { error: String(error) });
-    });
+  /**
+   * Returns the config setting for harnessRestartEvent — used by SlotHealthMonitor
+   * when requesting a harness restart for inactive beads.
+   */
+  private async harnessRestartEvent(): Promise<string> {
+    try {
+      const config = await this.services.configLoader.load();
+      return config.settings?.harnessRestartEvent || '';
+    } catch {
+      return '';
+    }
   }
 }

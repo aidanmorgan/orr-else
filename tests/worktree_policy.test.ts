@@ -17,21 +17,22 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { DomainEventName } from '../src/constants/index.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
-
-const orchestratorMock = vi.hoisted(() => ({
-  selectAssignments: vi.fn()
-}));
-
-vi.mock('../src/core/Orchestrator.js', () => ({
-  Orchestrator: vi.fn(function Orchestrator() {
-    return {
-      selectAssignments: orchestratorMock.selectAssignments
-    };
-  })
-}));
-
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
+
+// Shared mutable orchestrator mock — injected directly into Supervisor options
+// (pi-experiment-amq0.2: no vi.mock needed; orchestrator is now a required inject).
+const orchestratorMock = {
+  selectAssignments: vi.fn()
+};
+
+function fakeOrchestrator() {
+  return orchestratorMock as any;
+}
+
+function fakeRetentionScheduler() {
+  return { runIfDue: vi.fn(async () => {}) } as any;
+}
 
 const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
 
@@ -97,7 +98,7 @@ function buildSupervisor(
       worktreePort: fakeWorktreePort({ createWorktree }),
       projectRoot: '/project/root'
     } as any,
-    { maxSlots: 2, clock }
+    { maxSlots: 2, clock, orchestrator: fakeOrchestrator(), retentionScheduler: fakeRetentionScheduler() }
   );
   return { supervisor, records, createWorktree, spawnTeammateInTmux, claim, release };
 }
@@ -117,7 +118,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: { Planning: {} }
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('Planning', config)).toBe(true);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('Planning', config)).toBe(true);
   });
 
   it('returns false when policy.default = "never" and no per-state override', () => {
@@ -126,7 +127,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: { Planning: {} }
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('Planning', config)).toBe(false);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('Planning', config)).toBe(false);
   });
 
   it('per-state provisionWorktree: true overrides policy.default = "never"', () => {
@@ -135,7 +136,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: { Implementation: { provisionWorktree: true } }
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('Implementation', config)).toBe(true);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('Implementation', config)).toBe(true);
   });
 
   it('per-state provisionWorktree: false overrides policy.default = "always"', () => {
@@ -144,7 +145,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: { Planning: { provisionWorktree: false } }
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('Planning', config)).toBe(false);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('Planning', config)).toBe(false);
   });
 
   it('returns true for unknown state when policy.default = "always"', () => {
@@ -153,7 +154,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: { Planning: {} }
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('UnknownState', config)).toBe(true);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('UnknownState', config)).toBe(true);
   });
 
   it('returns false for unknown state when policy.default = "never"', () => {
@@ -162,7 +163,7 @@ describe('Supervisor.resolveWorktreeProvisioning — pure policy resolver', () =
       states: {}
     };
     const { supervisor } = buildSupervisor(config);
-    expect((supervisor as any).resolveWorktreeProvisioning('UnknownState', config)).toBe(false);
+    expect((supervisor as any).spawnCoordinator.resolveWorktreeProvisioning('UnknownState', config)).toBe(false);
   });
 });
 
@@ -279,8 +280,8 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
     // Lease must be released, no spawn
     expect(release).toHaveBeenCalledWith('bead-fail');
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
-    expect((supervisor as any).quarantine.has('bead-fail')).toBe(true);
-    expect((supervisor as any).quarantine.get('bead-fail').reason).toBe('ALREADY_CHECKED_OUT');
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-fail')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.get('bead-fail').reason).toBe('ALREADY_CHECKED_OUT');
   });
 
   it('no quarantine attempt when needsWorktree=false (project root path)', async () => {
@@ -305,7 +306,7 @@ describe('Supervisor worktree policy — integration via scanAndSpawn', () => {
 
     expect(failingCreateWorktree).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).toHaveBeenCalledWith('bead-nr', 'Planning', '/project/root', expect.anything(), undefined);
-    expect((supervisor as any).quarantine.size).toBe(0);
+    expect((supervisor as any).spawnCoordinator.quarantine.size).toBe(0);
     expect(records.some(r => r.event === DomainEventName.BEAD_QUARANTINED)).toBe(false);
   });
 });

@@ -227,7 +227,7 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) } }
+      { maxSlots: 1, clock: { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) }, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     const bead = { id: 'bead-substrate', stateId: 'Planning', score: 0, status: 'Planning', lastActivity: '' } as any;
@@ -298,11 +298,11 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
         scheduler: {},
         flowManager: { stateForBead: vi.fn(() => 'Planning'), nextState: vi.fn() }
       } as any,
-      { maxSlots: 1, clock: { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) } }
+      { maxSlots: 1, clock: { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) }, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     // Inject unhealthy MCP bridge health so the bead is skipped
-    (supervisor as any).mcpBridgeHealth = {
+    (supervisor as any).spawnCoordinator.mcpBridgeHealth = {
       healthy: false,
       affectedToolNames: ['cerdiwen'],
       message: 'MCP server cerdiwen is not available'
@@ -398,7 +398,7 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     await (supervisor as any).recordSlotHealth('test');
@@ -461,7 +461,7 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     // Call pauseSchedulingUntil with a PROVIDER_LIMIT reason
@@ -675,7 +675,7 @@ async function makeTestSupervisor(overrides: {
       scheduler: {},
       flowManager: { nextState: vi.fn(), stateForBead: vi.fn() }
     } as any,
-    { maxSlots: 2, clock }
+    { maxSlots: 2, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
   );
 
   return { supervisor, records, clock, NOW_MS };
@@ -756,7 +756,7 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
     });
 
     // Pre-exhaust the budget: set restart count above MAX_INACTIVE_RESTARTS
-    (supervisor as any).inactiveRestartCountByBead.set('bead-exhausted', SupervisorDefaults.MAX_INACTIVE_RESTARTS + 1);
+    (supervisor as any).slotHealthMonitor.inactiveRestartCountByBead.set('bead-exhausted', SupervisorDefaults.MAX_INACTIVE_RESTARTS + 1);
 
     await (supervisor as any).recordSlotHealth('test');
 
@@ -861,10 +861,10 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
       });
 
       // Simulate unhealthy MCP bridge (already probed — cache miss triggers event)
-      await (supervisor as any).runMcpPreflightForTools(['cerdiwen']);
+      await (supervisor as any).spawnCoordinator.runMcpPreflightForTools(['cerdiwen']);
 
       // Now scanAndSpawn — must quarantine the bead
-      (supervisor as any).mcpBridgeHealth = {
+      (supervisor as any).spawnCoordinator.mcpBridgeHealth = {
         healthy: false,
         affectedToolNames: ['cerdiwen'],
         message: 'Cannot find module mcp'
@@ -875,16 +875,16 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
       const config = await (supervisor as any).services.configLoader.load();
 
       // Drive the taxonomy route for BACKEND_READINESS × SPAWN (same code path as scanAndSpawn)
-      const taxonomyRoute = (supervisor as any).routeTaxonomy(
+      const taxonomyRoute = (supervisor as any).spawnCoordinator.routeTaxonomy(
         FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
       );
       expect(taxonomyRoute.nextAction).toBe(NextAction.QUARANTINE);
 
       // Drive quarantineBead directly (mirrors scanAndSpawn MCP path)
-      const fields = (supervisor as any).taxonomyFields(
+      const fields = (supervisor as any).spawnCoordinator.taxonomyFields(
         FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE
       );
-      await (supervisor as any).quarantineBead(bead, 'UNKNOWN', {
+      await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'UNKNOWN', {
         ...fields,
         unavailableTools: ['cerdiwen'],
         errorMessage: 'Cannot find module mcp',
@@ -923,20 +923,20 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
     });
 
     // Inject pre-computed unhealthy bridge health (avoids probing + cache side-effects)
-    (supervisor as any).mcpBridgeHealth = { healthy: false, affectedToolNames: ['cerdiwen'], message: 'MCP bridge missing' };
+    (supervisor as any).spawnCoordinator.mcpBridgeHealth = { healthy: false, affectedToolNames: ['cerdiwen'], message: 'MCP bridge missing' };
 
     const bead = { id: 'bead-mcp4b', stateId: 'Planning', score: 0, status: 'Planning', lastActivity: '', assigned_to: 'Orr Else' } as any;
 
     // Drive the same preflight + quarantine logic that scanAndSpawn uses
-    const mcpHealth = (supervisor as any).mcpBridgeHealth;
+    const mcpHealth = (supervisor as any).spawnCoordinator.mcpBridgeHealth;
     expect(mcpHealth.healthy).toBe(false);
 
-    const taxonomyRoute = (supervisor as any).routeTaxonomy(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
+    const taxonomyRoute = (supervisor as any).spawnCoordinator.routeTaxonomy(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
     expect(taxonomyRoute.nextAction).toBe(NextAction.QUARANTINE);
 
     // Drive the quarantine call (as scanAndSpawn does when taxonomyRoute.nextAction === QUARANTINE)
-    const fields = (supervisor as any).taxonomyFields(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
-    await (supervisor as any).quarantineBead(bead, 'UNKNOWN', {
+    const fields = (supervisor as any).spawnCoordinator.taxonomyFields(FailureClass.BACKEND_READINESS, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE);
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'UNKNOWN', {
       ...fields,
       unavailableTools: mcpHealth.affectedToolNames,
       errorMessage: mcpHealth.message,
@@ -1023,9 +1023,9 @@ describe('AC4 supervisor-driving tests: 9 failure paths → table drives behavio
     expect(details, 'nonRoutableTerminalFailureLimitRestartDetails should return details').toBeDefined();
 
     // Quarantine using the same code path as scanAndSpawn
-    await (supervisor as any).quarantineBead(bead, 'NON_ROUTABLE_TERMINAL_FAILURE_LIMIT', {
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'NON_ROUTABLE_TERMINAL_FAILURE_LIMIT', {
       ...details,
-      ...(supervisor as any).taxonomyFields(FailureClass.LIFECYCLE_VIOLATION, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE)
+      ...(supervisor as any).spawnCoordinator.taxonomyFields(FailureClass.LIFECYCLE_VIOLATION, LifecyclePhase.SPAWN, RetryBudget.AVAILABLE)
     });
 
     const qEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);

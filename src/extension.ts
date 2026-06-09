@@ -119,6 +119,8 @@ import {
   PromptProvenanceDefaults
 } from './constants/index.js';
 import { Supervisor } from './core/Supervisor.js';
+import { Orchestrator } from './core/Orchestrator.js';
+import { RetentionScheduler } from './core/RetentionScheduler.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
 import { runV2SubstratePreflight } from './core/V2SubstratePreflight.js';
 import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
@@ -2782,9 +2784,29 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     });
   }
 
+  // pi-experiment-amq0.2: construct and inject required Orchestrator + RetentionScheduler
+  // at the composition root — no construct-fallback inside Supervisor.
+  const supervisorOrchestrator = new Orchestrator(
+    runtimeObservability,
+    services.configLoader,
+    services.flowManager,
+    services.scheduler,
+    services.beadsPort,
+    options.maxSlots
+  );
+  const supervisorRetentionScheduler = new RetentionScheduler(
+    services.projectRoot,
+    { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) },
+    services.eventStore,
+    services.configLoader,
+    factory
+  );
+
   session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
     maxSlots: options.maxSlots,
-    requestedBeadId: options.beadId
+    requestedBeadId: options.beadId,
+    orchestrator: supervisorOrchestrator,
+    retentionScheduler: supervisorRetentionScheduler
   });
 
   // pi-experiment-1elr.10: reflect supervisor active state on the lifecycle machine.

@@ -244,7 +244,19 @@ function buildSupervisorForMcpGating(options: {
       },
       projectRoot: '/tmp/project'
     } as any,
-    { maxSlots: 5, clock }
+    {
+      maxSlots: 5,
+      clock,
+      // Inject an orchestrator that selects ready beads as assignments
+      orchestrator: {
+        selectAssignments: vi.fn(async () =>
+          backlogBeads
+            .filter(b => b.status === 'ready')
+            .map(b => ({ ...b, score: 1 }))
+        )
+      } as any,
+      retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any
+    }
   );
 
   // Inject the bridge probe

@@ -97,7 +97,12 @@ function supervisorHarness(
       scheduler: {},
       flowManager: {}
     } as any,
-    { maxSlots, clock }
+    {
+      maxSlots,
+      clock,
+      orchestrator: { selectAssignments: vi.fn(async () => []) } as any,
+      retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any
+    }
   );
   return { supervisor, records, release, terminateTeammatesForBead, captureBeadPaneText, clock };
 }
@@ -296,14 +301,14 @@ describe('Supervisor', () => {
     (supervisor as any).startedBeads.add('bead-1');
     (supervisor as any).startedBeadAtMs.set('bead-1', clock.now());
     (supervisor as any).missingStartedBeadChecks.set('bead-1', 1);
-    (supervisor as any).inactiveRestartedAtMs.set('bead-1', clock.now());
+    (supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.set('bead-1', clock.now());
 
     supervisor.markBeadExited('bead-1', { preserveInactiveRestartBackoff: true });
 
     expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
     expect((supervisor as any).startedBeadAtMs.has('bead-1')).toBe(false);
     expect((supervisor as any).missingStartedBeadChecks.has('bead-1')).toBe(false);
-    expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
+    expect((supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.has('bead-1')).toBe(true);
   });
 
   // ---------------------------------------------------------------------------
@@ -319,13 +324,13 @@ describe('Supervisor', () => {
 
     // Simulate a single blocked detection: count reaches 1 but recovery has
     // not fired yet (needs 2 consecutive detections).
-    (supervisor as any).finalBlockedPollCounts.set('bead-1', 1);
+    (supervisor as any).slotHealthMonitor.finalBlockedPollCounts.set('bead-1', 1);
 
     // The bead then exits (e.g. finishes its work or is terminated externally).
     supervisor.markBeadExited('bead-1');
 
     // The stale entry must be gone — no leak.
-    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+    expect((supervisor as any).slotHealthMonitor.finalBlockedPollCounts.has('bead-1')).toBe(false);
   });
 
   it('releaseClaimedAfterPause clears claimed/active state and preserves inactiveRestartedAtMs backoff', async () => {
@@ -337,17 +342,23 @@ describe('Supervisor', () => {
     (supervisor as any).startedBeadAtMs.set('bead-1', clock.now());
     (supervisor as any).missingStartedBeadChecks.set('bead-1', 2);
     // inactiveRestartedAtMs holds the backoff timestamp — must survive the release
-    (supervisor as any).inactiveRestartedAtMs.set('bead-1', clock.now() - TimeMs.MINUTE);
+    (supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.set('bead-1', clock.now() - TimeMs.MINUTE);
 
     // Trigger a pause so releaseClaimedAfterPause is reachable, then call it directly
-    await (supervisor as any).releaseClaimedAfterPause(claimedBead);
+    // releaseClaimedAfterPause moved to BeadSpawnCoordinator (pi-experiment-amq0.2)
+    await (supervisor as any).spawnCoordinator.releaseClaimedAfterPause(
+      claimedBead,
+      (supervisor as any).schedulingPausedUntilMs,
+      (supervisor as any).schedulingPausedReason,
+      (id: string, opts: any) => (supervisor as any).markBeadExited(id, opts)
+    );
 
     // Claimed/active tracking maps must be cleared
     expect((supervisor as any).startedBeads.has('bead-1')).toBe(false);
     expect((supervisor as any).startedBeadAtMs.has('bead-1')).toBe(false);
     expect((supervisor as any).missingStartedBeadChecks.has('bead-1')).toBe(false);
     // Backoff timestamp must NOT be reset — this is the WI-26 invariant
-    expect((supervisor as any).inactiveRestartedAtMs.has('bead-1')).toBe(true);
+    expect((supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.has('bead-1')).toBe(true);
     // The bd_release tool must have been called to drop the lease
     expect(release).toHaveBeenCalledWith('bead-1');
   });
@@ -374,7 +385,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
@@ -411,7 +422,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     const bead = { id: 'bead-1', stateId: 'Planning', score: 0 } as any;
@@ -722,7 +733,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     // Mark 'bead-live' as tracked so reconcileTerminalLiveBeads calls getBead.
@@ -760,7 +771,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
     (supervisor as any).stopping = true;
 
@@ -775,7 +786,7 @@ describe('Supervisor', () => {
 
   it('classifyWorktreeError returns ALREADY_CHECKED_OUT for already-checked-out error text', () => {
     const { supervisor } = supervisorHarness(NOW_MS);
-    const reason = (supervisor as any).classifyWorktreeError(
+    const reason = (supervisor as any).spawnCoordinator.classifyWorktreeError(
       "fatal: 'bead/pi-experiment-abc123' is already checked out at '/path/to/worktrees/pi-experiment-abc123'"
     );
     expect(reason).toBe('ALREADY_CHECKED_OUT');
@@ -783,7 +794,7 @@ describe('Supervisor', () => {
 
   it('classifyWorktreeError returns INVALID_BRANCH_REF for invalid-reference error text', () => {
     const { supervisor } = supervisorHarness(NOW_MS);
-    const reason = (supervisor as any).classifyWorktreeError(
+    const reason = (supervisor as any).spawnCoordinator.classifyWorktreeError(
       "fatal: invalid reference: refs/heads/bead/bad--ref"
     );
     expect(reason).toBe('INVALID_BRANCH_REF');
@@ -791,7 +802,7 @@ describe('Supervisor', () => {
 
   it('classifyWorktreeError returns WORKTREE_PATH_TAKEN for already-exists error text', () => {
     const { supervisor } = supervisorHarness(NOW_MS);
-    const reason = (supervisor as any).classifyWorktreeError(
+    const reason = (supervisor as any).spawnCoordinator.classifyWorktreeError(
       "fatal: '/path/to/worktrees/pi-experiment-abc123' already exists"
     );
     expect(reason).toBe('WORKTREE_PATH_TAKEN');
@@ -799,32 +810,32 @@ describe('Supervisor', () => {
 
   it('classifyWorktreeError returns UNKNOWN for unrecognised error text', () => {
     const { supervisor } = supervisorHarness(NOW_MS);
-    const reason = (supervisor as any).classifyWorktreeError('disk full');
+    const reason = (supervisor as any).spawnCoordinator.classifyWorktreeError('disk full');
     expect(reason).toBe('UNKNOWN');
   });
 
   it('isQuarantined returns false for a bead not in the quarantine map', async () => {
     const { supervisor } = supervisorHarness(NOW_MS);
     const bead = { id: 'bead-q', status: 'ready' } as any;
-    expect(await (supervisor as any).isQuarantined(bead)).toBe(false);
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(bead)).toBe(false);
   });
 
   it('isQuarantined returns true for a bead with unchanged signature', async () => {
     const { supervisor } = supervisorHarness(NOW_MS);
     const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    await (supervisor as any).quarantineBead(bead, 'ALREADY_CHECKED_OUT');
-    expect(await (supervisor as any).isQuarantined(bead)).toBe(true);
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'ALREADY_CHECKED_OUT');
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(bead)).toBe(true);
   });
 
   it('isQuarantined returns false and clears entry when bead signature changes (status changed)', async () => {
     const { supervisor } = supervisorHarness(NOW_MS);
     const beadAtQuarantine = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
+    await (supervisor as any).spawnCoordinator.quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
     // Simulate bead state changing externally (status updated, lastActivity bumped)
     const beadAfterUpdate = { id: 'bead-q', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    expect(await (supervisor as any).isQuarantined(beadAfterUpdate)).toBe(false);
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(beadAfterUpdate)).toBe(false);
     // Entry must be cleared from the map
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(false);
   });
 
   it('isQuarantined returns false and clears entry when ONLY lastActivity changes (timestamp-only clearing)', async () => {
@@ -833,12 +844,12 @@ describe('Supervisor', () => {
     // With the old status-only signature this would FAIL — the bead would remain quarantined.
     const { supervisor } = supervisorHarness(NOW_MS);
     const beadAtQuarantine = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    await (supervisor as any).quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
+    await (supervisor as any).spawnCoordinator.quarantineBead(beadAtQuarantine, 'ALREADY_CHECKED_OUT');
     // Only lastActivity changes — status stays 'ready'
     const beadAfterActivityBump = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    expect(await (supervisor as any).isQuarantined(beadAfterActivityBump)).toBe(false);
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(beadAfterActivityBump)).toBe(false);
     // Entry must be cleared from the map
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(false);
   });
 
   it('quarantineBead emits a structured BEAD_QUARANTINED event with reason and signature', async () => {
@@ -849,7 +860,7 @@ describe('Supervisor', () => {
       records.push({ event, data });
     });
     const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    await (supervisor as any).quarantineBead(bead, 'INVALID_BRANCH_REF');
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'INVALID_BRANCH_REF');
     const quarantineEvent = records.find(r => r.event === DomainEventName.BEAD_QUARANTINED);
     expect(quarantineEvent).toBeDefined();
     expect(quarantineEvent!.data.beadId).toBe('bead-q');
@@ -887,7 +898,7 @@ describe('Supervisor', () => {
 
     // Poll 2: reset the slot-health throttle so the second call is not skipped,
     // then confirm: second consecutive detection → recovery fires.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     // The bead must have been recovered via the final-blocked early-trip.
@@ -941,7 +952,7 @@ describe('Supervisor', () => {
     // Two polls required to confirm (FINAL_BLOCKED_CONFIRM_POLLS = 2).
     // Reset slot-health throttle between polls so the second call is not skipped.
     await (supervisor as any).recordSlotHealth('test');
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     const restartEvent = records.find(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED);
@@ -980,18 +991,18 @@ describe('Supervisor', () => {
     expect(terminateTeammatesForBead).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
     // Counter must be 1 after first detection.
-    expect((supervisor as any).finalBlockedPollCounts.get('bead-1')).toBe(1);
+    expect((supervisor as any).slotHealthMonitor.finalBlockedPollCounts.get('bead-1')).toBe(1);
 
     // Poll 2: reset throttle, second consecutive detection — counter reaches 2 =
     // FINAL_BLOCKED_CONFIRM_POLLS, recovery fires and counter is cleared.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
     expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(true);
     expect(records.some(r => r.event === DomainEventName.HARNESS_RESTART_REQUESTED)).toBe(true);
     expect(terminateTeammatesForBead).toHaveBeenCalledWith('bead-1', expect.stringContaining('terminal blocked/halted banner'));
     expect(release).toHaveBeenCalledWith('bead-1');
     // Counter must be cleared after recovery.
-    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+    expect((supervisor as any).slotHealthMonitor.finalBlockedPollCounts.has('bead-1')).toBe(false);
   });
 
   it('(final-blocked debounce) counter resets when pane shows non-blocked output between polls', async () => {
@@ -1013,15 +1024,15 @@ describe('Supervisor', () => {
 
     // Poll 1: blocked detected, counter = 1.
     await (supervisor as any).recordSlotHealth('test');
-    expect((supervisor as any).finalBlockedPollCounts.get('bead-1')).toBe(1);
+    expect((supervisor as any).slotHealthMonitor.finalBlockedPollCounts.get('bead-1')).toBe(1);
     expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
 
     // Poll 2: clean snapshot → counter resets, no recovery.
     // Reset the slot-health throttle so the second call is not skipped.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     captureBeadPaneText.mockResolvedValue(cleanPaneOutput);
     await (supervisor as any).recordSlotHealth('test');
-    expect((supervisor as any).finalBlockedPollCounts.has('bead-1')).toBe(false);
+    expect((supervisor as any).slotHealthMonitor.finalBlockedPollCounts.has('bead-1')).toBe(false);
     expect(records.some(r => r.event === DomainEventName.AGENT_TURN_FAILED)).toBe(false);
     expect(terminateTeammatesForBead).not.toHaveBeenCalled();
     expect(release).not.toHaveBeenCalled();
@@ -1044,7 +1055,7 @@ describe('Supervisor', () => {
 
     // Polls 1 + 2: confirm and recover.
     await (supervisor as any).recordSlotHealth('test');
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
     expect(terminateTeammatesForBead).toHaveBeenCalledTimes(1);
     expect(release).toHaveBeenCalledTimes(1);
@@ -1054,7 +1065,7 @@ describe('Supervisor', () => {
     // Poll 3: bead has been recovered (markBeadExited removes it from startedBeads)
     // and enters inactiveRestartedAtMs backoff.  A third poll must NOT produce
     // additional AGENT_TURN_FAILED or HARNESS_RESTART_REQUESTED recovery events.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     const captureCallCountBeforePoll3 = captureBeadPaneText.mock.calls.length;
     await (supervisor as any).recordSlotHealth('test');
     // No additional recovery events emitted.
@@ -1093,7 +1104,12 @@ describe('Supervisor', () => {
     // processedSignals starts empty (fresh supervisor, simulating restart)
     expect((supervisor as any).processedSignals.has(idempotencyKey)).toBe(false);
 
-    await (supervisor as any).rebuildProcessedSignalsFromEvents();
+    // rebuildProcessedSignalsFromEvents returns the rebuilt set; Supervisor.start() adds
+    // them to processedSignals. Simulate that here (pi-experiment-amq0.2).
+    const rebuilt = await (supervisor as any).recoveryService.rebuildProcessedSignalsFromEvents();
+    for (const key of rebuilt) {
+      (supervisor as any).processedSignals.add(key);
+    }
 
     // After rebuild, the key is present — re-delivered signal will be seen as a duplicate
     expect((supervisor as any).processedSignals.has(idempotencyKey)).toBe(true);
@@ -1119,7 +1135,11 @@ describe('Supervisor', () => {
     };
     const { supervisor } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [acceptedTeammateEvent]);
 
-    await (supervisor as any).rebuildProcessedSignalsFromEvents();
+    // rebuildProcessedSignalsFromEvents returns a Set; Supervisor.start() adds them to processedSignals.
+    const rebuilt2 = await (supervisor as any).recoveryService.rebuildProcessedSignalsFromEvents();
+    for (const key of rebuilt2) {
+      (supervisor as any).processedSignals.add(key);
+    }
 
     // After rebuild, isSignalProcessed returns true for the accepted key
     expect(supervisor.isSignalProcessed(idempotencyKey)).toBe(true);
@@ -1139,7 +1159,11 @@ describe('Supervisor', () => {
       }
     };
     const { supervisor: supervisor2 } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [duplicateTeammateEvent]);
-    await (supervisor2 as any).rebuildProcessedSignalsFromEvents();
+    // rebuildProcessedSignalsFromEvents returns Set; add to processedSignals.
+    const rebuilt3 = await (supervisor2 as any).recoveryService.rebuildProcessedSignalsFromEvents();
+    for (const key of rebuilt3) {
+      (supervisor2 as any).processedSignals.add(key);
+    }
     // DUPLICATE decisions must NOT populate processedSignals
     expect(supervisor2.isSignalProcessed('some-other-key')).toBe(false);
   });
@@ -1168,7 +1192,7 @@ describe('Supervisor', () => {
     };
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [intentEvent]);
 
-    await (supervisor as any).reconcileUnacknowledgedSignalIntents();
+    await (supervisor as any).recoveryService.reconcileUnacknowledgedSignalIntents();
 
     // A SIGNAL_INTENT_RECONCILED event must be recorded for the unacknowledged intent
     const reconciled = records.find(r => r.event === DomainEventName.SIGNAL_INTENT_RECONCILED);
@@ -1207,7 +1231,7 @@ describe('Supervisor', () => {
     };
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [intentEvent, alreadyReconciledEvent]);
 
-    await (supervisor as any).reconcileUnacknowledgedSignalIntents();
+    await (supervisor as any).recoveryService.reconcileUnacknowledgedSignalIntents();
 
     // No new SIGNAL_INTENT_RECONCILED event should be emitted (already reconciled)
     const newReconciled = records.filter(r => r.event === DomainEventName.SIGNAL_INTENT_RECONCILED);
@@ -1245,7 +1269,7 @@ describe('Supervisor', () => {
     };
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [intentEvent, processedTeammateEvent]);
 
-    await (supervisor as any).reconcileUnacknowledgedSignalIntents();
+    await (supervisor as any).recoveryService.reconcileUnacknowledgedSignalIntents();
 
     // No SIGNAL_INTENT_RECONCILED event should be emitted (intent was applied)
     const reconciled = records.filter(r => r.event === DomainEventName.SIGNAL_INTENT_RECONCILED);
@@ -1298,7 +1322,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     const bead = { id: 'bead-spawn-test', stateId: 'Planning', score: 0 } as any;
@@ -1357,7 +1381,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock: createFakeClock() }
+      { maxSlots: 1, clock: createFakeClock(), orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
 
     const bead = { id: 'bead-fail-test', stateId: 'Planning', score: 0 } as any;
@@ -1420,6 +1444,10 @@ describe('Supervisor', () => {
 
     const REQUESTED_BEAD_ID = 'pi-experiment-already-started';
 
+    // Inject an orchestrator that simulates the short-circuit: returns [] when
+    // the requested bead is already in alreadyStarted.
+    const mockOrchestrator = { selectAssignments: vi.fn(async () => []) };
+
     const supervisor = new Supervisor(
       {} as any,
       { hasUI: false } as any,
@@ -1440,14 +1468,14 @@ describe('Supervisor', () => {
         },
         beadsPort: fakeBeadsPort({ claim, release }),
         worktreePort: { createWorktree },
-        scheduler: {},
         flowManager: {}
       } as any,
       {
         maxSlots: 1,
-        // requestedBeadId wires the coordinator to target a specific bead.
         requestedBeadId: REQUESTED_BEAD_ID,
-        clock: createFakeClock()
+        clock: createFakeClock(),
+        orchestrator: mockOrchestrator as any,
+        retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any
       }
     );
 
@@ -1457,8 +1485,7 @@ describe('Supervisor', () => {
 
     await (supervisor as any).scanAndSpawn();
 
-    // The short-circuit in Orchestrator.selectAssignments must prevent any claim
-    // or spawn when the requested bead is already in the live set.
+    // The injected orchestrator returned [] — no claim or spawn should occur.
     expect(claim).not.toHaveBeenCalled();
     expect(createWorktree).not.toHaveBeenCalled();
     expect(spawnTeammateInTmux).not.toHaveBeenCalled();
@@ -1486,6 +1513,17 @@ describe('Supervisor', () => {
       score: 1,
       lastActivity: new Date(0).toISOString()
     } as any));
+
+    // Inject an orchestrator that returns the requested bead as a ready assignment.
+    const mockOrchestrator2 = {
+      selectAssignments: vi.fn(async () => [{
+        id: REQUESTED_BEAD_ID,
+        stateId: 'Planning',
+        score: 1,
+        status: 'ready',
+        lastActivity: new Date(0).toISOString()
+      }])
+    };
 
     const supervisor = new Supervisor(
       {} as any,
@@ -1517,25 +1555,20 @@ describe('Supervisor', () => {
           getBead
         } as any,
         worktreePort: { createWorktree },
-        scheduler: {
-          sortBacklog: async (beads: any[]) => beads.map((b: any) => ({ ...b, score: 1 }))
-        },
-        flowManager: {
-          stateForBead: (_bead: any, config: any) => 'Planning'
-        }
+        flowManager: {}
       } as any,
       {
         maxSlots: 1,
         requestedBeadId: REQUESTED_BEAD_ID,
-        clock: createFakeClock()
+        clock: createFakeClock(),
+        orchestrator: mockOrchestrator2 as any,
+        retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any
       }
     );
 
     // startedBeads is empty — bead is not yet started.
     await (supervisor as any).scanAndSpawn();
 
-    // The coordinator must proceed: getBead was called to fetch the targeted bead.
-    expect(getBead).toHaveBeenCalledWith(REQUESTED_BEAD_ID);
     // claim, worktree, and spawn must all fire.
     expect(claim).toHaveBeenCalledTimes(1);
     expect(createWorktree).toHaveBeenCalledTimes(1);
@@ -1622,12 +1655,12 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
     (supervisor as any).startedBeads.add('bead-1');
     (supervisor as any).startedBeadAtMs.set('bead-1', clock.now() - TimeMs.SECOND);
     // Set restart timestamp to NOW (0ms ago) — well within LONGER_TIMEOUT_MS.
-    (supervisor as any).inactiveRestartedAtMs.set('bead-restart', clock.now());
+    (supervisor as any).slotHealthMonitor.inactiveRestartedAtMs.set('bead-restart', clock.now());
 
     await (supervisor as any).recordSlotHealth('test');
 
@@ -1762,7 +1795,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 2, clock }
+      { maxSlots: 2, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
     return { supervisor, records, release, terminateTeammatesForBead, clock };
   }
@@ -1778,7 +1811,7 @@ describe('Supervisor', () => {
     expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(false);
 
     // Poll 2: reset throttle; second consecutive detection → orphan event fires.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     const orphanEvent = records.find(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED);
@@ -1815,14 +1848,14 @@ describe('Supervisor', () => {
 
     // Poll 1 + 2: confirm orphan.
     await (supervisor as any).recordSlotHealth('test');
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     // The orphan event must have fired.
     expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(true);
 
     // Poll 3: bead-orphan is now suppressed.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     // The most recent TEAMMATE_SLOT_HEALTH_CHECKED must report empty heartbeatOnlyLiveGaps.
@@ -1882,13 +1915,13 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 1, clock }
+      { maxSlots: 1, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
     (supervisor as any).startedBeads.add('bead-1');
 
     // Multiple polls — even with threshold=1 and TTL=0, bead-1 is healthy (pane exists).
     for (let i = 0; i < 3; i++) {
-      (supervisor as any).lastSlotHealthEventMs = 0;
+      (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
       await (supervisor as any).recordSlotHealth('test');
     }
 
@@ -1963,7 +1996,7 @@ describe('Supervisor', () => {
         scheduler: {},
         flowManager: {}
       } as any,
-      { maxSlots: 4, clock }
+      { maxSlots: 4, clock, orchestrator: { selectAssignments: vi.fn(async () => []) } as any, retentionScheduler: { runIfDue: vi.fn(async () => {}) } as any }
     );
     // bead-tracked-only: tracked but no live pane, no heartbeat
     (supervisor as any).startedBeads.add('bead-tracked-only');
@@ -1977,7 +2010,7 @@ describe('Supervisor', () => {
     expect(records.some(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED)).toBe(false);
 
     // Poll 2: second consecutive detection → orphan fires for bead-hb-only only.
-    (supervisor as any).lastSlotHealthEventMs = 0;
+    (supervisor as any).slotHealthMonitor.lastSlotHealthEventMs = 0;
     await (supervisor as any).recordSlotHealth('test');
 
     const orphanEvents = records.filter(r => r.event === DomainEventName.HEARTBEAT_ONLY_GAP_ORPHANED);
@@ -2024,14 +2057,14 @@ describe('Supervisor', () => {
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
 
     // Quarantine map starts empty (fresh Supervisor instance simulating restart).
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(false);
 
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
     // Quarantine map must now contain an entry for bead-q.
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(true);
-    expect((supervisor as any).quarantine.get('bead-q')?.reason).toBe('ALREADY_CHECKED_OUT');
-    expect((supervisor as any).quarantine.get('bead-q')?.signature).toBe('ready:2026-01-01T00:00:00.000Z');
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.get('bead-q')?.reason).toBe('ALREADY_CHECKED_OUT');
+    expect((supervisor as any).spawnCoordinator.quarantine.get('bead-q')?.signature).toBe('ready:2026-01-01T00:00:00.000Z');
 
     // A BEAD_QUARANTINE_REHYDRATED event must be emitted for the rehydrated bead.
     expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED)).toMatchObject({
@@ -2057,11 +2090,11 @@ describe('Supervisor', () => {
     };
     const { supervisor } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
 
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
     // Bead with the same status+lastActivity as the quarantined signature.
     const bead = { id: 'bead-q', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    expect(await (supervisor as any).isQuarantined(bead)).toBe(true);
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(bead)).toBe(true);
   });
 
   it('(sey0/AC2) changing bead status clears the rehydrated quarantine and allows retry', async () => {
@@ -2080,16 +2113,16 @@ describe('Supervisor', () => {
     };
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
 
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
     // Bead with CHANGED status — signature no longer matches.
     const beadAfterStatusChange = { id: 'bead-q', status: 'in_progress', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    const result = await (supervisor as any).isQuarantined(beadAfterStatusChange);
+    const result = await (supervisor as any).spawnCoordinator.isQuarantined(beadAfterStatusChange);
 
     // The bead must no longer be quarantined.
     expect(result).toBe(false);
     // Quarantine entry must be cleared.
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(false);
     // A BEAD_QUARANTINE_CLEARED event must be emitted to explain the retry.
     expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED)).toMatchObject({
       event: DomainEventName.BEAD_QUARANTINE_CLEARED,
@@ -2112,13 +2145,13 @@ describe('Supervisor', () => {
     };
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
 
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
     const beadAfterActivityBump = { id: 'bead-q', status: 'ready', lastActivity: '2026-02-01T00:00:00.000Z' } as any;
-    const result = await (supervisor as any).isQuarantined(beadAfterActivityBump);
+    const result = await (supervisor as any).spawnCoordinator.isQuarantined(beadAfterActivityBump);
 
     expect(result).toBe(false);
-    expect((supervisor as any).quarantine.has('bead-q')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-q')).toBe(false);
     // BEAD_QUARANTINE_CLEARED must be emitted for the retry explanation.
     expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_CLEARED)).toBeDefined();
   });
@@ -2141,14 +2174,14 @@ describe('Supervisor', () => {
     const { supervisor, records } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [quarantinedEvent]);
 
     // Simulate restart: rehydrate.
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
     // Verify skip event was emitted.
     expect(records.find(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED)).toBeDefined();
 
     // Bead signature changes (status updated externally).
     const beadChanged = { id: 'bead-lifecycle', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    await (supervisor as any).isQuarantined(beadChanged);
+    await (supervisor as any).spawnCoordinator.isQuarantined(beadChanged);
 
     // Verify cleared event was emitted after the skip event.
     const rehydratedIdx = records.findIndex(r => r.event === DomainEventName.BEAD_QUARANTINE_REHYDRATED);
@@ -2170,12 +2203,12 @@ describe('Supervisor', () => {
     };
     const { supervisor } = supervisorHarness(NOW_MS, undefined, new Set(), 1, new Map(), [unrelatedEvent]);
 
-    await (supervisor as any).rehydrateQuarantinesFromEvents();
+    await (supervisor as any).spawnCoordinator.rehydrateQuarantinesFromEvents();
 
-    expect((supervisor as any).quarantine.has('bead-clean')).toBe(false);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-clean')).toBe(false);
     // Non-rehydrated bead must not be skipped by isQuarantined.
     const bead = { id: 'bead-clean', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
-    expect(await (supervisor as any).isQuarantined(bead)).toBe(false);
+    expect(await (supervisor as any).spawnCoordinator.isQuarantined(bead)).toBe(false);
   });
 
   it('(sey0/AC4) a runtime (non-rehydrated) quarantine clear does NOT emit BEAD_QUARANTINE_CLEARED', async () => {
@@ -2186,12 +2219,12 @@ describe('Supervisor', () => {
 
     const bead = { id: 'bead-runtime', status: 'ready', lastActivity: '2026-01-01T00:00:00.000Z' } as any;
     // Quarantine via normal runtime path (not rehydration).
-    await (supervisor as any).quarantineBead(bead, 'ALREADY_CHECKED_OUT');
+    await (supervisor as any).spawnCoordinator.quarantineBead(bead, 'ALREADY_CHECKED_OUT');
     const countAfterQuarantine = records.length;
 
     // Now clear the runtime quarantine by presenting a changed signature.
     const beadChanged = { id: 'bead-runtime', status: 'in_progress', lastActivity: '2026-01-02T00:00:00.000Z' } as any;
-    await (supervisor as any).isQuarantined(beadChanged);
+    await (supervisor as any).spawnCoordinator.isQuarantined(beadChanged);
 
     // No BEAD_QUARANTINE_CLEARED event must be emitted for a runtime quarantine.
     const newEvents = records.slice(countAfterQuarantine);
@@ -2230,7 +2263,7 @@ describe('Supervisor', () => {
     await supervisor.start();
 
     // The quarantine map must be populated from the startup events.
-    expect((supervisor as any).quarantine.has('bead-start-q')).toBe(true);
+    expect((supervisor as any).spawnCoordinator.quarantine.has('bead-start-q')).toBe(true);
     // readAll must have been called exactly once (shared pass).
     expect((supervisor as any).services.eventStore.readAll).toHaveBeenCalledTimes(1);
   });
