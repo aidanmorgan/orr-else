@@ -259,6 +259,33 @@ import {
  * High-reliability agentic harness with obsessive, rehearsed resilience.
  */
 
+// ── per-Pi-host activation guard (pi-experiment-amq0.8) ─────────────────────
+//
+// CANONICAL ACTIVATION PATH
+// --------------------------
+// The package advertises `pi.extensions: ["./dist/extension.js"]` in package.json.
+// When Pi loads the package via its package system it calls `orrElseExtension(pi)`.
+//
+// `orr-else init` also writes `.pi/extensions/orr-else.ts` (a shim that re-exports
+// the same default export). Pi can load BOTH paths on the same host — the package
+// entrypoint via the npm package system AND the extension shim via `-e path`.
+//
+// Both paths converge on `orrElseExtension(pi)`.  Calling it twice on the SAME Pi
+// host would register duplicate commands, tools, observers, and a second
+// ExtensionSession — a structural bug that silently splits session state.
+//
+// GUARD DESIGN: Per-Pi-host, keyed on the ExtensionAPI object identity.
+//   - A WeakSet holds every Pi host object that has been activated.
+//   - The second call for the SAME host emits a bounded diagnostic and returns.
+//   - Two DIFFERENT Pi host objects each get independent sessions (correct).
+//   - Module-global boolean would wrongly block independent hosts.
+//   - The guard is load-bearing: removing it makes the double-load test fail.
+//
+// ACCEPTED ACTIVATION SOURCE: Either path (package entrypoint or init shim) is
+// accepted — whichever arrives first on a given Pi host wins.  The guard makes the
+// second arrival a bounded no-op.
+const _activatedPiHosts = new WeakSet<object>();
+
 /** Rate-limits repeated duplicate/out-of-order decision log entries (r06o AC1).
  * Fingerprinted by (decision, event type, beadId, stateId).
  * Durable TEAMMATE_EVENT event-store records are NEVER gated by this coalescer. */
@@ -2909,6 +2936,18 @@ function parseOrrElseArgs(rawArgs: string, config?: HarnessConfig): OrrElseParse
 }
 
 export default async function orrElseExtension(pi: ExtensionAPI, providedServices?: RuntimeServices) {
+  // ── per-Pi-host idempotency guard (pi-experiment-amq0.8) ──────────────────
+  // Guard is keyed on the pi object itself so two independent Pi hosts each
+  // get independent sessions, but the SAME host is only activated once.
+  // The second call for the same host emits a bounded diagnostic and returns.
+  if (_activatedPiHosts.has(pi as object)) {
+    Logger.warn(Component.ORR_ELSE, 'orrElseExtension: duplicate activation detected for this Pi host — second load is a no-op', {
+      reason: 'The same Pi host has already been activated (package entrypoint + init shim both loaded, or two loads of the same extension). No tools, commands, or observers will be registered again.',
+    });
+    return;
+  }
+  _activatedPiHosts.add(pi as object);
+
   // Fresh per-invocation state — guards reset here so a second call to
   // orrElseExtension(pi2, services) re-registers tools on the new pi instance.
   const session = createExtensionSession();
@@ -4331,6 +4370,71 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       parameters: Type.Object({}),
       execute: async () => flowStatus(services, session)
     }));
+
+    // ── pi-experiment-amq0.8: registration-manifest vs host-surface check ────
+    // Pi may suffix-rename a duplicate tool/command (e.g. `tick_items` → `tick_items_1`)
+    // if another extension registers the same name first.  This check catches a
+    // suffix-rename BEFORE any token spend by comparing the catalog's expected
+    // callable tool names against the Pi host's actual getAllTools() surface.
+    //
+    // getAllTools() is an OPTIONAL Pi host API (only present on real Pi hosts and
+    // test fakes that model it); the check is best-effort and does NOT hard-fail
+    // the session when the host lacks getAllTools().  Hard-fail would break
+    // environments that legitimately omit it (e.g. minimal test fakes).
+    //
+    // The check focuses on BUILTIN_TOOL + PLUGIN_TOOL names — the hardcoded tools
+    // that must never be duplicated regardless of project config.
+    if (session.toolSurfaceCatalog && typeof (pi as unknown as { getAllTools?: () => unknown[] }).getAllTools === 'function') {
+      const getAllToolsFn = (pi as unknown as { getAllTools: () => unknown[] }).getAllTools;
+      try {
+        const hostTools = getAllToolsFn.call(pi);
+        if (Array.isArray(hostTools)) {
+          // Collect actual tool names from the host surface
+          const hostToolNames = new Set<string>(
+            hostTools
+              .map((t: unknown) => (t && typeof t === 'object' && 'name' in t && typeof (t as { name: unknown }).name === 'string')
+                ? (t as { name: string }).name
+                : null)
+              .filter((n): n is string => n !== null)
+          );
+          // Catalog tool names that must appear on the host surface verbatim
+          // (BUILTIN_TOOL + PLUGIN_TOOL only — PROJECT_TOOL may legitimately differ by config).
+          const catalogEntries = session.toolSurfaceCatalog.entries;
+          const suffixRenamed: string[] = [];
+          for (const entry of catalogEntries) {
+            if (entry.kind !== 'BUILTIN_TOOL' && entry.kind !== 'PLUGIN_TOOL') continue;
+            if (!entry.callable) continue;
+            if (!hostToolNames.has(entry.name)) {
+              // Tool expected by catalog is absent or suffix-renamed on the host surface.
+              suffixRenamed.push(entry.name);
+            }
+          }
+          if (suffixRenamed.length > 0) {
+            // FAIL-CLOSED: a suffix-rename indicates duplicate registration.
+            // Throw before token spend so the operator sees the problem immediately.
+            throw new Error(
+              `orrElseExtension: registration-manifest vs host-surface mismatch — ` +
+              `the following tools were registered by the catalog but are absent or ` +
+              `suffix-renamed on the Pi host surface (likely caused by duplicate extension loading): ` +
+              `${suffixRenamed.join(', ')}. ` +
+              `Ensure only ONE activation path loads the orr-else extension on this Pi host.`
+            );
+          }
+        }
+      } catch (hostSurfaceError) {
+        // If the check itself throws (e.g. we threw above), re-throw to fail closed.
+        // If getAllTools() threw (host bug), log and continue.
+        if (
+          hostSurfaceError instanceof Error &&
+          hostSurfaceError.message.startsWith('orrElseExtension: registration-manifest')
+        ) {
+          throw hostSurfaceError;
+        }
+        Logger.warn(Component.ORR_ELSE, 'Host-surface duplicate-name check failed (getAllTools error) — proceeding', {
+          error: String(hostSurfaceError),
+        });
+      }
+    }
 
     if (isWorkerMode()) {
       await initializeWorkerRun(runtimeObservability, services, session);
