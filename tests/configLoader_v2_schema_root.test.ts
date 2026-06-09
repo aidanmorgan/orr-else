@@ -476,7 +476,10 @@ states:
 // S8: unknown version → fail closed
 // ---------------------------------------------------------------------------
 describe('pi-experiment-202g: unknown version → fail closed', () => {
-  it('S8: version: 1 → loader fails closed with unknown-version diagnostic', () => {
+  it('S8: version: 1 → loader fails closed (AJV schema rejects unsupported version value)', () => {
+    // pi-experiment-nkiq: version: 1 now passes preValidateV2Admission (explicit v1 path
+    // admitted for migration test fixtures). The full loader still rejects it at AJV
+    // schema validation because the schema declares version as const: 2.
     const yaml = `
 version: 1
 settings:
@@ -499,7 +502,9 @@ states: {}
     const p = writeYaml('s8_version1.yaml', yaml);
     const loader = new ConfigLoader(undefined, TEST_DIR);
 
-    expect(() => loader.load(p)).toThrow(/Unknown harness config version/);
+    // version: 1 is still rejected; now via AJV (/version must be equal to constant)
+    // rather than preValidateV2Admission. The config is not a supported schema version.
+    expect(() => loader.load(p)).toThrow();
   });
 
   it('S8b: version: 99 → loader fails closed with unknown-version diagnostic', () => {
