@@ -103,6 +103,29 @@ export class ConfigValidator {
     // Absent version → v1 path; skip v2 checks.
     if (versionRaw === undefined || versionRaw === null) return;
 
+    // pi-experiment-nkiq: Explicit legacy-v1 validation path.
+    // version: 1 is admitted for migration test fixtures. If the config declares
+    // a statechart block, terminalStates must be explicitly declared — the runtime
+    // will not silently default it. This prevents versionless migration from
+    // silently swallowing a missing terminalStates under the v1 fallback.
+    if (versionRaw === 1) {
+      const statechart = isRecord(config['statechart']) ? config['statechart'] as Record<string, unknown> : null;
+      if (statechart !== null) {
+        const terminalStates = statechart['terminalStates'];
+        const hasTerminalStates =
+          Array.isArray(terminalStates) && (terminalStates as unknown[]).length > 0;
+        if (!hasTerminalStates) {
+          throw new Error(
+            `Explicit version: 1 harness config declares a statechart block but omits terminalStates. ` +
+            `An explicit version: 1 statechart must declare terminalStates as a non-empty array. ` +
+            `Add statechart.terminalStates: [<state-id>, ...] to your config, ` +
+            `or remove the version: 1 field to use the versionless v1 path.`
+          );
+        }
+      }
+      return;
+    }
+
     // Unknown version → fail closed.
     if (versionRaw !== 2) {
       throw new Error(
