@@ -3,7 +3,7 @@ import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
 import { resolveProjectFrom } from './Paths.js';
 import { ConfigLoader } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { systemClock, type Clock } from './Clock.js';

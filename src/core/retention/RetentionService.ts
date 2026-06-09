@@ -11,7 +11,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup; pass-through deleted.
  */
 
-import { Logger } from '../Logger.js';
+import { nodeLogger as Logger } from '../Logger.js'
 import { Component, OperationalArtifactPath } from '../../constants/infra.js';
 import { resolveProjectFrom } from '../Paths.js';
 import {

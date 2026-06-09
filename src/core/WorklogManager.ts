@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { BeadId } from '../types/index.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { resolveProjectFrom } from './Paths.js';
 import { DomainEventName } from '../constants/domain.js';

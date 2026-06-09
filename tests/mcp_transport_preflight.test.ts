@@ -20,6 +20,7 @@ import {
   resetMcpBridgeHealthCache,
   setBridgeProbeForTest
 } from '../src/core/McpTransportPreflight.js';
+import { McpBridgeHealthService } from '../src/core/McpBridgeHealthService.js';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 import { DomainEventName, ProjectToolType } from '../src/constants/domain.js';
@@ -242,7 +243,12 @@ function buildSupervisorForMcpGating(options: {
       flowManager: {
         stateForBead: vi.fn((bead: any) => 'Planning')
       },
-      projectRoot: '/tmp/project'
+      projectRoot: '/tmp/project',
+      mcpBridgeHealthService: (() => {
+        const svc = new McpBridgeHealthService();
+        svc.setProbe(bridgeProbe);
+        return svc;
+      })()
     } as any,
     {
       maxSlots: 5,
@@ -259,7 +265,7 @@ function buildSupervisorForMcpGating(options: {
     }
   );
 
-  // Inject the bridge probe
+  // setBridgeProbeForTest still set for the McpTransportPreflight module-level unit tests
   setBridgeProbeForTest(bridgeProbe);
 
   return { supervisor, spawnTeammateInTmux, records };

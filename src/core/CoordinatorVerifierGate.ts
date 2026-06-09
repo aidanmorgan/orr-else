@@ -32,7 +32,7 @@
  * coordinator loads those extensions in its OWN process — decision A).
  */
 
-import { verifier as defaultVerifier, type Registry, type VerifyCallback } from '../contract.js';
+import { verifier as globalVerifier, type Registry, type VerifyCallback } from '../contract.js';
 import { DomainEventName } from '../constants/domain.js';
 import {
   runVerifierGate,
@@ -43,7 +43,7 @@ import {
 } from './VerifierGate.js';
 import type { RequiredTool } from './domain/StateModels.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { nodeLogger, type LoggerPort } from './Logger.js';
 import { Component } from '../constants/infra.js';
 import { asBeadId, asStateId, asActionId } from '../types/ids.js';
 import { checkRequiredToolsForCommandCollisions, type ToolSurfaceCatalog } from './ToolSurfaceCatalog.js';
@@ -106,7 +106,7 @@ export function validateRequiredToolsNotCommands(
 
 export function validateRequiredToolVerifiers(
   config: HarnessConfig,
-  registry: Pick<Registry<VerifyCallback>, 'has'> = defaultVerifier,
+  registry: Pick<Registry<VerifyCallback>, 'has'> = globalVerifier,
   catalog?: ToolSurfaceCatalog
 ): void {
   // pi-experiment-amq0.15: if a catalog is provided, enforce that no COMMAND
@@ -197,8 +197,18 @@ export interface CoordinatorVerifierGateDeps {
   config: HarnessConfig;
   /** Per-verify isolation timeout (ms). Defaults to DEFAULT_VERIFY_TIMEOUT_MS. */
   verifyTimeoutMs?: number;
-  /** verify() registry injection (tests); defaults to the module singleton. */
+  /**
+   * Instance-scoped verify() registry (amq0.3). When provided, the gate uses
+   * this registry instead of the global contract singleton. The production path
+   * always supplies this from the per-runtime ContractRegistrySet. Tests may
+   * omit it to fall back to the global singleton (backward compat).
+   */
   registry?: VerifierGateOptions['registry'];
+  /**
+   * Per-runtime logger port (amq0.3). Defaults to the process-wide nodeLogger
+   * for backward compat with callers that do not yet supply one.
+   */
+  logger?: LoggerPort;
 }
 
 /** The coordinator gate outcome surfaced to the caller. */
@@ -227,7 +237,7 @@ async function resolveArtifacts(
     });
     return resolution.artifactPaths ?? {};
   } catch (error) {
-    Logger.warn(Component.ORR_ELSE, 'Coordinator gate: artifact path resolution failed (degrading to empty map)', {
+    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: artifact path resolution failed (degrading to empty map)', {
       beadId: input.beadId,
       stateId: input.stateId,
       actionId: input.actionId,
@@ -256,7 +266,7 @@ async function resolveWriteSet(
     });
     return resolution.allowedWriteSet ?? [];
   } catch (error) {
-    Logger.warn(Component.ORR_ELSE, 'Coordinator gate: write-set resolution failed (degrading to empty array)', {
+    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: write-set resolution failed (degrading to empty array)', {
       beadId: input.beadId,
       stateId: input.stateId,
       error: String(error)
@@ -321,7 +331,7 @@ export async function evaluateCoordinatorGate(
     perTool: result.perTool,
     blocked: !result.pass
   }).catch((error: unknown) => {
-    Logger.warn(Component.ORR_ELSE, 'Coordinator gate: failed to record VERIFY_EVALUATED event', {
+    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: failed to record VERIFY_EVALUATED event', {
       beadId: input.beadId,
       stateId: input.stateId,
       actionId: input.actionId,

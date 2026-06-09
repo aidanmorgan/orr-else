@@ -158,4 +158,28 @@ export class LoggerService {
   }
 }
 
-export const Logger = new LoggerService();
+/**
+ * LoggerPort — the interface contract for logging.
+ * Core modules accept this type instead of the LoggerService class directly,
+ * so the composition root can inject a per-runtime instance while the public
+ * boundary still exposes the process-wide singleton.
+ */
+export type LoggerPort = LoggerService;
+
+/**
+ * Process-wide default logger instance.
+ * Imported by core module constructors as the default parameter value so
+ * tests can inject a fresh LoggerService without touching production behaviour.
+ *
+ * The named `Logger` export below is the public-boundary alias (used by
+ * extension.ts, plugins, bin scripts — NOT by core internals).
+ */
+export const nodeLogger: LoggerService = new LoggerService();
+
+/**
+ * Public-boundary alias for the process-wide default logger.
+ * Extension.ts, plugins, bin scripts, and Teammate.ts import THIS name.
+ * Core internals MUST NOT import this name — they receive a LoggerPort via
+ * their constructor (defaulting to nodeLogger).
+ */
+export const Logger = nodeLogger;

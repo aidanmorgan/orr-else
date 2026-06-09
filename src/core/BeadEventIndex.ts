@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'node:crypto';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { Component, EventStoreDefaults } from '../constants/infra.js';
 import { systemClock, type Clock } from './Clock.js';

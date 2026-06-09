@@ -1,5 +1,5 @@
 import { EventStore } from './EventStore.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { DomainEventName } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 

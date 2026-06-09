@@ -21,7 +21,7 @@ import {
   V2PromptFileProvenance
 } from './domain/StateModels.js';
 import { resolveProjectFrom } from './Paths.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord } from './RecordUtils.js';
 import { ActionContextMode, ActionRunContext, BeadStatus, EventName, ProjectToolRootKind, RECOGNIZED_COARSE_SINK_STATUSES, StateContextPolicy, ThinkingLevel } from '../constants/domain.js';

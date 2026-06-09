@@ -68,7 +68,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ToolResultBase } from '../contract.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { ToolResultStatus } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 

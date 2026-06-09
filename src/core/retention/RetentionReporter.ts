@@ -7,7 +7,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup.
  */
 
-import { Logger } from '../Logger.js';
+import { nodeLogger as Logger } from '../Logger.js'
 import { DomainEventName } from '../../constants/domain.js';
 import { Component } from '../../constants/infra.js';
 import type { RetentionAreaSummary, RetentionCleanupResult } from './RetentionTypes.js';

@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { DomainEventName } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';

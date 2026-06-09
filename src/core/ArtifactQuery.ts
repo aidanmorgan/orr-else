@@ -22,11 +22,12 @@
 import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/infra.js';
-import { projections, type ProjectionDef } from '../contract.js';
+import { projections as globalProjections, type ProjectionDef } from '../contract.js';
 import { ArtifactQueryStatus } from './vocabulary.js';
 import { nodePathScopeService, type PathScopeService } from './PathScopeService.js';
 import { nodeFileSystemPort, type FileSystemPort } from './FileSystemPort.js';
 import { nodeArtifactReader, type ArtifactReader } from './ArtifactReader.js';
+import type { RegistryPort } from './ContractRegistrySet.js';
 
 /**
  * Build the list of allowed roots for an explicit artifactPath:
@@ -579,12 +580,19 @@ export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection 
 // ─── ArtifactQuery class ──────────────────────────────────────────────────────
 
 export class ArtifactQuery {
+  private readonly projectionsRegistry: RegistryPort<ProjectionDef>;
+
   constructor(
     private readonly artifactPaths: ArtifactPaths,
     private readonly pathScope: PathScopeService = nodePathScopeService,
     private readonly fsPort: FileSystemPort = nodeFileSystemPort,
-    private readonly artifactReader: ArtifactReader = nodeArtifactReader
-  ) {}
+    private readonly artifactReader: ArtifactReader = nodeArtifactReader,
+    projectionsRegistry?: RegistryPort<ProjectionDef>
+  ) {
+    // Default to the global singleton proxy so behaviour is unchanged when no
+    // registry is injected. Tests pass a fresh registry from createFreshRegistrySet().
+    this.projectionsRegistry = projectionsRegistry ?? (globalProjections as unknown as RegistryPort<ProjectionDef>);
+  }
 
   public async query(input: ArtifactQueryInput): Promise<ArtifactQueryResult> {
     // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector / summary / schema)
@@ -929,12 +937,12 @@ export class ArtifactQuery {
   }
 
   private lookupProjection(artifactId: string, projectionName: string): ProjectionDef | undefined {
-    return projections.get(projectionKey(artifactId, projectionName));
+    return this.projectionsRegistry.get(projectionKey(artifactId, projectionName));
   }
 
   private validProjectionNames(artifactId: string): string[] {
     const prefix = `${artifactId}:`;
-    return projections
+    return this.projectionsRegistry
       .names()
       .filter((key) => key.startsWith(prefix))
       .map((key) => key.slice(prefix.length));

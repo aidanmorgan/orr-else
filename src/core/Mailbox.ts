@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
 import { resolveProjectFrom } from './Paths.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { DomainEventName, MailboxMessageType } from '../constants/domain.js';
 import { Component, MailboxDefaults } from '../constants/infra.js';

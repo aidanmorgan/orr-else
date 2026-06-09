@@ -11,7 +11,7 @@
  *   - Restore the capacity-pause state from SCHEDULING_PAUSED events.
  */
 
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { DomainEventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 import type { DomainEvent, ProjectionCapableStore } from './EventStoreTypes.js';

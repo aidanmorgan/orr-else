@@ -1272,7 +1272,9 @@ async function applyV2EvidenceDrivenTransition(
         requiredToolResolver: services.requiredToolResolver,
         planWriteSet: services.planWriteSet,
         projectRoot: services.projectRoot,
-        config
+        config,
+        registry: services.registrySet.verifier,
+        logger: services.logger
       },
       {
         beadId,
@@ -1755,7 +1757,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             requiredToolResolver: services.requiredToolResolver,
             planWriteSet: services.planWriteSet,
             projectRoot: services.projectRoot,
-            config
+            config,
+            registry: services.registrySet.verifier,
+            logger: services.logger
           },
           {
             beadId,
@@ -1940,7 +1944,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             requiredToolResolver: services.requiredToolResolver,
             planWriteSet: services.planWriteSet,
             projectRoot: services.projectRoot,
-            config
+            config,
+            registry: services.registrySet.verifier,
+            logger: services.logger
           },
           {
             beadId,
@@ -3516,7 +3522,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.queryArtifactToolRegistered) {
       session.queryArtifactToolRegistered = true;
-      const artifactQuery = new ArtifactQuery(services.artifactPaths);
+      const artifactQuery = new ArtifactQuery(services.artifactPaths, undefined, undefined, undefined, services.registrySet.projections);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.QUERY_ARTIFACT,
         description:
@@ -3607,7 +3613,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.readPathContextToolRegistered) {
       session.readPathContextToolRegistered = true;
-      const pathContext = new PathContext(services.projectRoot, services.env);
+      const pathContext = new PathContext(services.projectRoot, services.env, undefined, services.registrySet.skeletons);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.READ_PATH_CONTEXT,
         description:

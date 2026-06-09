@@ -1,6 +1,6 @@
 import http from 'http';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { TeammateEvent, validateTeammateEvent } from './TeammateEvents.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';

@@ -1,7 +1,7 @@
 import { Bead } from '../types/index.js';
 import { Scheduler, ScoredBead } from './Scheduler.js';
 import { ConfigLoader } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { Observability } from './Observability.js';
 import { App, BeadsIssueStatus, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/domain.js';
 import { BeadsDefaults, Component, Defaults } from '../constants/infra.js';

@@ -24,7 +24,7 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 import { v7 as uuidv7 } from 'uuid';
 import { ConfigLoader } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { resolveProjectFrom } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';

@@ -1,4 +1,4 @@
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { Component, TelemetryDefaults } from '../constants/infra.js';
 
 export interface TurnTelemetry {

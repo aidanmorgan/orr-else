@@ -1,6 +1,6 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BeadId, WorkerId, StateId, ActionId } from '../types/index.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { postHarnessSignal } from './HarnessApiClient.js';

@@ -25,6 +25,13 @@ import { EnvVars } from '../constants/infra.js';
 import type { BeadStatus } from '../constants/domain.js';
 import type { BeadsPort, BeadCompletionPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
+import { nodeLogger, type LoggerPort } from './Logger.js';
+import { ContractRegistrySet, createGlobalProxyRegistrySet, createFreshRegistrySet, buildRegistryPort } from './ContractRegistrySet.js';
+import { McpBridgeHealthService } from './McpBridgeHealthService.js';
+
+export type { LoggerPort };
+export { ContractRegistrySet, createGlobalProxyRegistrySet, createFreshRegistrySet, buildRegistryPort };
+export { McpBridgeHealthService };
 // WorktreeResult is defined in OrchestrationPorts; re-exported here for
 // backward compatibility with existing callers (git.ts, extension.ts, etc.)
 export type { WorktreeResult } from './OrchestrationPorts.js';
@@ -81,6 +88,26 @@ export interface RuntimeServices {
    * resolution. Exposed so collaborators (e.g. PathContext) resolve roots through
    * the same injected env rather than reading process.env directly. */
   env: RuntimeEnvironment;
+  /**
+   * Per-runtime logger instance (amq0.3).
+   * Core internals use this instead of the process-wide Logger singleton so
+   * each runtime has its own logger that can be isolated in tests.
+   */
+  logger: LoggerPort;
+  /**
+   * Per-runtime contract registry set (amq0.3).
+   * Drained from the public boundary singletons at startup admission so
+   * consuming extensions (e.g. cerdiwen) that call verifier.register() at
+   * module load are visible here. Core reads ONLY this set — never the
+   * process-global contract singletons.
+   */
+  registrySet: ContractRegistrySet;
+  /**
+   * Per-runtime MCP bridge health service (amq0.3).
+   * Owns the probe/cache state for the MCP transport preflight check.
+   * Tests create fresh instances; production creates one per runtime.
+   */
+  mcpBridgeHealthService: McpBridgeHealthService;
   configLoader: ConfigLoader;
   contextInjector: ContextInjector;
   eventStore: EventStore;
@@ -297,6 +324,20 @@ export function assembleRuntimeServices(
   // Use || (not ??) to match WI-1 precedence: empty-string PROJECT_ROOT falls back.
   const projectRoot = explicitProjectRoot || env.env(EnvVars.PROJECT_ROOT) || process.cwd();
 
+  // ── amq0.3 per-runtime ports ──────────────────────────────────────────────
+  // Create one instance per runtime so isolated harness instances, tests, and
+  // replay scenarios each get independent state.
+  const logger: LoggerPort = nodeLogger;
+  // Create a ContractRegistrySet that proxies the process-wide public boundary
+  // singletons (verifier/skeletons/projections). Reads/writes pass through to
+  // the global singletons so callbacks registered at any time (module load,
+  // loadCoordinatorWorkerExtensions, etc.) are immediately visible to core.
+  // Tests use createFreshRegistrySet() to get an isolated set without globals.
+  const registrySet: ContractRegistrySet = createGlobalProxyRegistrySet();
+  // Per-runtime MCP bridge health cache — no shared module-level state.
+  const mcpBridgeHealthService = new McpBridgeHealthService();
+  // ─────────────────────────────────────────────────────────────────────────
+
   const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot);
   const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot);
   const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot);
@@ -321,6 +362,9 @@ export function assembleRuntimeServices(
   return {
     projectRoot,
     env,
+    logger,
+    registrySet,
+    mcpBridgeHealthService,
     configLoader,
     contextInjector: new ContextInjector(),
     eventStore,

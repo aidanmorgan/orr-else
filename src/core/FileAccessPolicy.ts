@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { quote as quoteShellArgs } from 'shell-quote';
 import { DomainEventName } from '../constants/domain.js';
 import { Component, EnvVars, FileMutationPolicyDefaults, NativePiToolName, OperationalArtifactPath, OperationalLogPath, ProcessFlag } from '../constants/infra.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';
 import type { EventStore } from './EventStore.js';

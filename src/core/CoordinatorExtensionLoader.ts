@@ -20,7 +20,7 @@
 
 import { resolveWorkerExtensionPaths } from './WorkerResourceResolver.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { Component } from '../constants/infra.js';
 
 /** A dynamic-import seam so tests can inject a fake loader. */

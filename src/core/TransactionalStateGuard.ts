@@ -4,7 +4,7 @@ import type { BeadId } from '../types/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import type { PlanWriteSet } from './PlanWriteSet.js';
 import { nodeGitWorkingTreePort, type GitWorkingTreePort } from './GitWorkingTreePort.js';
 

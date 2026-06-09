@@ -3,7 +3,7 @@ import * as path from 'path';
 import { EventStore } from './EventStore.js';
 import { DomainEventName, FeatureStatus } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 
 export interface Feature {
   id: string;

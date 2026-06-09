@@ -12,7 +12,7 @@
  */
 
 import { asBeadId } from '../types/index.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { SignalingServer } from './SignalingServer.js';
 import { BeadStatus, DomainEventName, EventName, PluginToolName, QuarantineReason, TERMINAL_BEAD_STATUSES, TeammateEventType } from '../constants/domain.js';
 import { AgentFailureSummary, Component, SupervisorDefaults } from '../constants/infra.js';

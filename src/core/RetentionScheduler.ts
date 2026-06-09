@@ -14,7 +14,7 @@
  * RetentionService + its sub-roles).
  */
 
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { Component, RetentionDefaults } from '../constants/infra.js';
 import { RetentionService } from './retention/RetentionService.js';
 import { resolveRetentionConfig } from './retention/RetentionPlanner.js';

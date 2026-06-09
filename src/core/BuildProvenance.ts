@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { simpleGit } from 'simple-git';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { PATH_INSTALL_ROOT } from './Paths.js';
 import { DomainEventName } from '../constants/domain.js';
 import { BuildProvenanceDefaults, Component, TimeMs } from '../constants/infra.js';

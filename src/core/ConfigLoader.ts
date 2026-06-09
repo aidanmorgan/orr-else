@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ResolvedLLMConfig, HarnessConfig, type ResolvedHarnessConfig, type RawHarnessConfig } from './domain/StateModels.js';
 import { resolveProjectFrom } from './Paths.js';
-import { Logger } from './Logger.js';
+import { nodeLogger as Logger } from './Logger.js'
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
