@@ -22,7 +22,7 @@ import {
   resolveTemplateString,
   NAMED_ROOT_TOKEN_PREFIX,
   type TemplateContext
-} from '../src/core/PiIntegration.js';
+} from '../src/core/TemplateResolver.js';
 import {
   namedRootsFromConfig,
   projectToolEnvironment

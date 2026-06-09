@@ -3,8 +3,7 @@
  * Package-internal — do not import from outside src/plugins/.
  */
 import path from 'path';
-import { resolveTemplateString } from '../../core/PiIntegration.js';
-import type { TemplateContext } from '../../core/PiIntegration.js';
+import { resolveTemplateString, type TemplateContext } from '../../core/TemplateResolver.js';
 import type {
   ProjectCommandToolConfig,
   ProjectMcpToolConfig,

@@ -1,220 +1,54 @@
-import * as crypto from 'node:crypto';
+/**
+ * PromptProvenanceService — prompt provenance and asset hashing with injected
+ * file/config ports.
+ *
+ * pi-experiment-amq0.13: extracted verbatim from PiIntegration.ts.
+ *
+ * All fs.readFileSync / fs.statSync calls go through the injected FileReadPort so
+ * this module is testable without real disk access.
+ */
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'node:crypto';
 import * as yaml from 'yaml';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { DEFAULT_OBSERVED_PI_TOOLS, PromptProvenanceKind, PromptProvenanceDefaults } from '../constants/index.js';
+import { PromptProvenanceKind, PromptProvenanceDefaults } from '../constants/index.js';
+import { resolvePiSkillPathsForState, type FileSystemPort, nodeFileSystemPort } from './WorkerResourceResolver.js';
 
-const TemplateToken = {
-  CONFIG_PATH: '{{configPath}}',
-  PROJECT_ROOT: '{{projectRoot}}',
-  WORKTREE_PATH: '{{worktreePath}}',
-  FRAMEWORK_ROOT: '{{frameworkRoot}}',
-  BEAD_ID: '{{beadId}}',
-  STATE_ID: '{{stateId}}',
-  ACTION_ID: '{{actionId}}',
-  TOOL_NAME: '{{toolName}}',
-  TOOL_INVOCATION_ID: '{{toolInvocationId}}',
-  TOOL_CALL_DIR: '{{toolCallDir}}',
-  TOOL_OUTPUT_DIR: '{{toolOutputDir}}',
-  TOOL_OUTPUT_FILE: '{{toolOutputFile}}',
-  TOOL_TMP_DIR: '{{toolTmpDir}}'
-} as const;
+// ---------------------------------------------------------------------------
+// Injected ports
+// ---------------------------------------------------------------------------
 
-/** Prefix used to form named-root template tokens: `{{roots.NAME}}` */
-export const NAMED_ROOT_TOKEN_PREFIX = '{{roots.';
-const NAMED_ROOT_TOKEN_SUFFIX = '}}';
-
-export interface TemplateContext {
-  configPath?: string;
-  projectRoot: string;
-  worktreePath: string;
-  frameworkRoot?: string;
-  beadId?: string;
-  stateId?: string;
-  actionId?: string;
-  toolName?: string;
-  toolInvocationId?: string;
-  toolCallDir?: string;
-  toolOutputDir?: string;
-  toolOutputFile?: string;
-  toolTmpDir?: string;
-  /**
-   * Named roots resolved from `settings.roots` in harness.yaml.
-   * Each entry maps a logical name to an absolute resolved path.  Template
-   * strings may reference any named root as `{{roots.NAME}}` — generic,
-   * with no project-specific names required in harness defaults.
-   */
-  namedRoots?: Record<string, string>;
+/** Injected file-read port for provenance hashing. */
+export interface FileReadPort {
+  /** Read a file as a Buffer. Returns null on ENOENT or any error. */
+  readFile(filePath: string): Buffer | null;
+  /** Stat a file. Returns null on ENOENT or any error. */
+  statFile(filePath: string): { isFile(): boolean } | null;
 }
 
-function unique(values: string[]): string[] {
-  return [...new Set(values.filter(value => value.trim().length > 0))];
-}
-
-function resolveProjectPath(projectRoot: string, configuredPath: string): string {
-  return path.isAbsolute(configuredPath)
-    ? configuredPath
-    : path.resolve(projectRoot, configuredPath);
-}
-
-export function resolveTemplateString(value: string, context: TemplateContext): string {
-  const replacements: Array<[string, string | undefined]> = [
-    [TemplateToken.PROJECT_ROOT, context.projectRoot],
-    [TemplateToken.WORKTREE_PATH, context.worktreePath],
-    [TemplateToken.FRAMEWORK_ROOT, context.frameworkRoot],
-    [TemplateToken.CONFIG_PATH, context.configPath],
-    [TemplateToken.BEAD_ID, context.beadId],
-    [TemplateToken.STATE_ID, context.stateId],
-    [TemplateToken.ACTION_ID, context.actionId],
-    [TemplateToken.TOOL_NAME, context.toolName],
-    [TemplateToken.TOOL_INVOCATION_ID, context.toolInvocationId],
-    [TemplateToken.TOOL_CALL_DIR, context.toolCallDir],
-    [TemplateToken.TOOL_OUTPUT_DIR, context.toolOutputDir],
-    [TemplateToken.TOOL_OUTPUT_FILE, context.toolOutputFile],
-    [TemplateToken.TOOL_TMP_DIR, context.toolTmpDir]
-  ];
-
-  let resolved = replacements.reduce(
-    (acc, [token, replacement]) => replacement === undefined ? acc : acc.replaceAll(token, replacement),
-    value
-  );
-
-  // Expand {{roots.NAME}} tokens from namedRoots
-  if (context.namedRoots && resolved.includes(NAMED_ROOT_TOKEN_PREFIX)) {
-    for (const [name, rootPath] of Object.entries(context.namedRoots)) {
-      const token = `${NAMED_ROOT_TOKEN_PREFIX}${name}${NAMED_ROOT_TOKEN_SUFFIX}`;
-      if (resolved.includes(token)) {
-        resolved = resolved.replaceAll(token, rootPath);
+/** Default production implementation backed by the real fs module. */
+export function nodeFileReadPort(): FileReadPort {
+  return {
+    readFile(filePath: string): Buffer | null {
+      try {
+        return fs.readFileSync(filePath);
+      } catch {
+        return null;
+      }
+    },
+    statFile(filePath: string): { isFile(): boolean } | null {
+      try {
+        return fs.statSync(filePath);
+      } catch {
+        return null;
       }
     }
-  }
-
-  return resolved;
-}
-
-export function getConfiguredPiToolNames(config: HarnessConfig): string[] {
-  return unique(config.settings.pi?.tools || []);
-}
-
-export function getObservedPiToolNames(config: HarnessConfig): string[] {
-  return unique([
-    ...DEFAULT_OBSERVED_PI_TOOLS,
-    ...(config.settings.pi?.tools || []),
-    ...(config.settings.pi?.observedTools || [])
-  ]);
-}
-
-export function resolveWorkerExtensionPaths(
-  config: HarnessConfig,
-  projectRoot: string,
-  primaryExtensionPath: string
-): string[] {
-  const configuredPaths = unique([
-    primaryExtensionPath,
-    ...(config.settings.pi?.workerExtensions || [])
-  ]);
-
-  return configuredPaths.map(configuredPath => {
-    const resolvedPath = resolveProjectPath(projectRoot, configuredPath);
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`Configured Pi worker extension does not exist: ${configuredPath} (${resolvedPath})`);
-    }
-    return resolvedPath;
-  });
-}
-
-export function resolvePiSkillPaths(config: HarnessConfig, projectRoot: string): string[] {
-  return unique(config.settings.pi?.skillPaths || []).map(configuredPath => {
-    const resolvedPath = resolveProjectPath(projectRoot, configuredPath);
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`Configured Pi skill path does not exist: ${configuredPath} (${resolvedPath})`);
-    }
-    return resolvedPath;
-  });
-}
-
-/**
- * Convention: skill name "foo" maps to <projectRoot>/.pi/skills/foo/SKILL.md
- */
-const SKILL_FILE_NAME = 'SKILL.md';
-const SKILLS_BASE_DIR = '.pi/skills';
-
-export interface ResolvedSkill {
-  name: string;
-  path: string;
-}
-
-/**
- * Resolve skill paths for a specific state worker.
- *
- * Resolution order:
- *  1. If the named state exists and has a non-empty `skills` array, resolve each
- *     skill name to <projectRoot>/.pi/skills/<name>/SKILL.md. Missing skills throw.
- *  2. Global skills from settings.pi.skillPaths are appended after state skills.
- *  3. Fallback (no stateId, unknown state, or empty state.skills): behaves like
- *     resolvePiSkillPaths — returns only the global skillPaths list.
- *
- * The existing resolvePiSkillPaths is left unchanged so extension.ts callers are
- * unaffected.
- */
-function resolveGlobalSkills(config: HarnessConfig, projectRoot: string, excludePaths?: Set<string>): ResolvedSkill[] {
-  return unique(config.settings.pi?.skillPaths || []).flatMap(configuredPath => {
-    const resolvedPath = resolveProjectPath(projectRoot, configuredPath);
-    if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`Configured Pi skill path does not exist: ${configuredPath} (${resolvedPath})`);
-    }
-    if (excludePaths?.has(resolvedPath)) return [];
-    return [{ name: path.basename(path.dirname(resolvedPath)), path: resolvedPath }];
-  });
-}
-
-export function resolvePiSkillPathsForState(
-  config: HarnessConfig,
-  projectRoot: string,
-  stateId?: string
-): ResolvedSkill[] {
-  const skillsBaseDir = path.resolve(projectRoot, SKILLS_BASE_DIR);
-  const state = stateId ? config.states?.[stateId] : undefined;
-  const stateSkillNames = state?.skills && state.skills.length > 0 ? state.skills : undefined;
-
-  if (stateSkillNames) {
-    // State-scoped resolution: map each skill name to its SKILL.md path.
-    const stateSkills: ResolvedSkill[] = unique(stateSkillNames).map(skillName => {
-      const skillPath = path.join(projectRoot, SKILLS_BASE_DIR, skillName, SKILL_FILE_NAME);
-      // Guard against path-traversal: the resolved path must remain inside .pi/skills.
-      if (!path.resolve(skillPath).startsWith(skillsBaseDir + path.sep)) {
-        throw new Error(
-          `State "${stateId}" references skill "${skillName}" whose resolved path escapes the skills directory. ` +
-          `Skill names must not contain path separators or ".." segments.`
-        );
-      }
-      if (!fs.existsSync(skillPath)) {
-        throw new Error(
-          `State "${stateId}" references skill "${skillName}" but no SKILL.md was found at: ${skillPath}`
-        );
-      }
-      return { name: skillName, path: skillPath };
-    });
-
-    // Append global skills (settings.pi.skillPaths), deduplicating by resolved path.
-    const statePaths = new Set(stateSkills.map(s => s.path));
-    return [...stateSkills, ...resolveGlobalSkills(config, projectRoot, statePaths)];
-  }
-
-  // Fallback: behave exactly like the global resolvePiSkillPaths.
-  return resolveGlobalSkills(config, projectRoot);
-}
-
-export function resolveWorkerArgs(
-  config: HarnessConfig,
-  context: TemplateContext
-): string[] {
-  return (config.settings.pi?.workerArgs || []).map(arg => resolveTemplateString(arg, context));
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Prompt Provenance
+// Types
 // ---------------------------------------------------------------------------
 
 /**
@@ -269,14 +103,19 @@ export interface PromptProvenance {
   configuredSourceFailed?: true;
 }
 
+// ---------------------------------------------------------------------------
+// Internal helpers (verbatim from PiIntegration.ts)
+// ---------------------------------------------------------------------------
+
 /**
  * Hash a file's contents with SHA-256 and return the hex string.
  * Returns an empty string and sets `missing: true` when the file is absent.
  * Never throws.
  */
-function hashFile(filePath: string): { sha256: string; missing?: true } {
+function hashFile(filePath: string, filePort: FileReadPort): { sha256: string; missing?: true } {
   try {
-    const content = fs.readFileSync(filePath);
+    const content = filePort.readFile(filePath);
+    if (content === null) return { sha256: PromptProvenanceDefaults.MISSING_HASH, missing: true };
     const sha256 = crypto
       .createHash(PromptProvenanceDefaults.HASH_ALGORITHM)
       .update(content)
@@ -300,10 +139,11 @@ function hashFile(filePath: string): { sha256: string; missing?: true } {
  * the raw authored values keeps the state-config hash stable as long as the
  * author's intent (the harness.yaml lines for this state) has not changed.
  */
-function readRawStateSubtree(configPath: string, stateId: string): unknown | undefined {
+function readRawStateSubtree(configPath: string, stateId: string, filePort: FileReadPort): unknown | undefined {
   try {
-    const raw = fs.readFileSync(configPath, 'utf8');
-    const parsed = yaml.parse(raw);
+    const raw = filePort.readFile(configPath);
+    if (raw === null) return undefined;
+    const parsed = yaml.parse(raw.toString('utf8'));
     const state = parsed?.states?.[stateId];
     return state ?? undefined;
   } catch {
@@ -332,10 +172,14 @@ function readRawStateSubtree(configPath: string, stateId: string): unknown | und
  * @returns `{ sha256, missing: true }` if the state is absent or unparseable.
  * Never throws.
  */
-function hashStateConfigSubtree(configPath: string, stateId: string | undefined): { sha256: string; missing?: true } {
+function hashStateConfigSubtree(
+  configPath: string,
+  stateId: string | undefined,
+  filePort: FileReadPort
+): { sha256: string; missing?: true } {
   if (!stateId) return { sha256: PromptProvenanceDefaults.MISSING_HASH, missing: true };
   try {
-    const rawState = readRawStateSubtree(configPath, stateId);
+    const rawState = readRawStateSubtree(configPath, stateId, filePort);
     if (rawState === undefined) return { sha256: PromptProvenanceDefaults.MISSING_HASH, missing: true };
     // Extract only the prompt/behavior-defining fields from the raw subtree.
     const subtree = rawState as Record<string, unknown>;
@@ -383,12 +227,12 @@ function stableStringify(value: unknown): string {
  * if the trimmed value resolves to an existing regular file on disk, it is a
  * file reference.
  */
-function resolveFileReference(value: string | undefined, projectRoot: string): string | undefined {
+function resolveFileReference(value: string | undefined, projectRoot: string, filePort: FileReadPort): string | undefined {
   if (!value || !value.trim()) return undefined;
   const candidate = path.isAbsolute(value) ? value : path.resolve(projectRoot, value.trim());
   try {
-    const stat = fs.statSync(candidate);
-    return stat.isFile() ? candidate : undefined;
+    const stat = filePort.statFile(candidate);
+    return stat?.isFile() ? candidate : undefined;
   } catch {
     // Value is not a path that exists on disk — treat as inline text.
     return undefined;
@@ -422,6 +266,10 @@ function looksLikeFilePath(value: string): boolean {
   return ['.md', '.txt', '.yaml', '.yml', '.json', '.prompt', '.instructions'].includes(ext);
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 /**
  * Resolve the prompt provenance for a single run.
  *
@@ -446,12 +294,16 @@ function looksLikeFilePath(value: string): boolean {
  * @param projectRoot  Absolute path to the project root.
  * @param stateId      Current state identifier (selects the action prompt).
  * @param configPath   Absolute path to the harness.yaml config file.
+ * @param filePort     Injected file-read port (defaults to real fs).
+ * @param fsPort       Injected existsSync port for skill resolution (defaults to real fs).
  */
 export function resolvePromptProvenance(
   config: HarnessConfig,
   projectRoot: string,
   stateId: string | undefined,
-  configPath: string
+  configPath: string,
+  filePort: FileReadPort = nodeFileReadPort(),
+  fsPort: FileSystemPort = nodeFileSystemPort()
 ): PromptProvenance {
   const entries: PromptProvenanceEntry[] = [];
 
@@ -460,7 +312,7 @@ export function resolvePromptProvenance(
   // Editing other states' config or unrelated settings does NOT affect this hash.
   {
     const subtreeId = stateId ? `stateConfig:${stateId}` : 'stateConfig:<unknown>';
-    const { sha256, missing } = hashStateConfigSubtree(configPath, stateId);
+    const { sha256, missing } = hashStateConfigSubtree(configPath, stateId, filePort);
     const entry: PromptProvenanceEntry = {
       kind: STATE_CONFIG_KIND,
       path: subtreeId,
@@ -475,7 +327,7 @@ export function resolvePromptProvenance(
   // Recorded for full-file auditability, but excluded from the STALE gate so
   // that edits to unrelated states or settings never reject this run.
   {
-    const { sha256, missing } = hashFile(configPath);
+    const { sha256, missing } = hashFile(configPath, filePort);
     const entry: PromptProvenanceEntry = {
       kind: PromptProvenanceKind.HARNESS_CONFIG,
       path: configPath,
@@ -497,9 +349,9 @@ export function resolvePromptProvenance(
   try {
     const goalValue = config.settings.projectObjective;
     if (goalValue && goalValue.trim()) {
-      const goalRef = resolveFileReference(goalValue, projectRoot);
+      const goalRef = resolveFileReference(goalValue, projectRoot, filePort);
       if (goalRef) {
-        const { sha256, missing } = hashFile(goalRef);
+        const { sha256, missing } = hashFile(goalRef, filePort);
         const entry: PromptProvenanceEntry = { kind: PromptProvenanceKind.GOAL_PROMPT, path: goalRef, sha256 };
         if (missing) entry.missing = true;
         entries.push(entry);
@@ -538,15 +390,15 @@ export function resolvePromptProvenance(
   // entry and set configuredSourceFailed so the gate hard-blocks SUCCESS.
   if (stateId) {
     try {
-      const rawState = readRawStateSubtree(configPath, stateId) as Record<string, unknown> | undefined;
+      const rawState = readRawStateSubtree(configPath, stateId, filePort) as Record<string, unknown> | undefined;
       const rawActions: unknown[] = Array.isArray(rawState?.['actions']) ? rawState['actions'] as unknown[] : [];
       for (const rawAction of rawActions) {
         try {
           const promptValue = (rawAction as Record<string, unknown>)?.['prompt'];
           if (typeof promptValue === 'string') {
-            const actionPromptRef = resolveFileReference(promptValue, projectRoot);
+            const actionPromptRef = resolveFileReference(promptValue, projectRoot, filePort);
             if (actionPromptRef) {
-              const { sha256, missing } = hashFile(actionPromptRef);
+              const { sha256, missing } = hashFile(actionPromptRef, filePort);
               const entry: PromptProvenanceEntry = {
                 kind: PromptProvenanceKind.STATE_PROMPT,
                 path: actionPromptRef,
@@ -591,9 +443,9 @@ export function resolvePromptProvenance(
   // gracefully (unexpected I/O error on a file that DID resolve) to avoid
   // aborting provenance for a transient read fault.
   try {
-    const skills = resolvePiSkillPathsForState(config, projectRoot, stateId);
+    const skills = resolvePiSkillPathsForState(config, projectRoot, stateId, fsPort);
     for (const skill of skills) {
-      const { sha256, missing } = hashFile(skill.path);
+      const { sha256, missing } = hashFile(skill.path, filePort);
       const entry: PromptProvenanceEntry = {
         kind: PromptProvenanceKind.SKILL_PROMPT,
         path: skill.path,
@@ -637,7 +489,10 @@ export function resolvePromptProvenance(
  *
  * Returns an empty array when all checked entries are fresh.
  */
-export function detectStaleProvenanceEntries(entries: PromptProvenanceEntry[]): string[] {
+export function detectStaleProvenanceEntries(
+  entries: PromptProvenanceEntry[],
+  filePort: FileReadPort = nodeFileReadPort()
+): string[] {
   const stale: string[] = [];
   for (const entry of entries) {
     // Skip audit-only (non-blocking) entries.
@@ -645,7 +500,7 @@ export function detectStaleProvenanceEntries(entries: PromptProvenanceEntry[]): 
     // Skip state-config-subtree entries — staleness checked by the gate directly.
     if (entry.kind === STATE_CONFIG_KIND) continue;
 
-    const { sha256: current, missing } = hashFile(entry.path);
+    const { sha256: current, missing } = hashFile(entry.path, filePort);
     const wasRecordedMissing = entry.missing === true;
     if (current !== entry.sha256 || (missing === true) !== wasRecordedMissing) {
       stale.push(entry.path);
@@ -661,15 +516,17 @@ export function detectStaleProvenanceEntries(entries: PromptProvenanceEntry[]): 
  *
  * @param configPath  Absolute path to the harness.yaml file (read raw).
  * @param stateId     The state whose config subtree to hash.
+ * @param filePort    Injected file-read port (defaults to real fs).
  *
  * Returns `{ sha256, identifier }` where `identifier` is the logical path
  * key used in the provenance entry (e.g. `stateConfig:<stateId>` where stateId comes from harness.yaml config, not any built-in name).
  */
 export function computeCurrentStateConfigHash(
   configPath: string,
-  stateId: string
+  stateId: string,
+  filePort: FileReadPort = nodeFileReadPort()
 ): { sha256: string; identifier: string; missing?: true } {
   const identifier = `stateConfig:${stateId}`;
-  const { sha256, missing } = hashStateConfigSubtree(configPath, stateId);
+  const { sha256, missing } = hashStateConfigSubtree(configPath, stateId, filePort);
   return missing ? { sha256, identifier, missing } : { sha256, identifier };
 }

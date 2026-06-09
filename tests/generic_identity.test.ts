@@ -35,7 +35,6 @@ const MODULES_UNDER_TEST: string[] = [
   'src/core/FlowManager.ts',
   'src/core/Scheduler.ts',
   'src/core/BeadStateProjection.ts',
-  'src/core/PiIntegration.ts',
   'src/extension/CoordinatorController.ts',
   'src/extension/WorkerRunController.ts',
 ];

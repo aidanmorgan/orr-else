@@ -12,7 +12,7 @@ import type { RuntimeServices } from '../composition/createRuntimeServices.js';
 import type { ActiveRun } from './SessionTypes.js';
 import { resolveActiveToolSet } from '../core/ActiveToolSetResolver.js';
 import { describeConfiguredProjectTools, resolveToolPromptProfileId } from '../plugins/projectTools.js';
-import { getConfiguredPiToolNames, resolvePiSkillPathsForState } from '../core/PiIntegration.js';
+import { getConfiguredPiToolNames, resolvePiSkillPathsForState } from '../core/WorkerResourceResolver.js';
 import { type StableBootstrapInputs } from '../core/BootstrapDigest.js';
 import { EnvVars } from '../constants/index.js';
 

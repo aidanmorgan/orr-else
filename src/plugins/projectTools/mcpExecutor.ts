@@ -11,7 +11,7 @@ import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.j
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'fs/promises';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
-import { resolveTemplateString } from '../../core/PiIntegration.js';
+import { resolveTemplateString } from '../../core/TemplateResolver.js';
 import type { ProjectMcpToolConfig } from '../../core/domain/StateModels.js';
 import { Logger } from '../../core/Logger.js';
 import { Component, Defaults, ToolResultStatus } from '../../constants/index.js';
@@ -164,19 +164,19 @@ function getMcpServers(config: McpConfigFile): Record<string, McpServerDefinitio
   return config[MCP_SERVER_CONFIG_KEY] || {};
 }
 
-function resolveConfiguredPath(value: string, templateContext: import('../../core/PiIntegration.js').TemplateContext): string {
+function resolveConfiguredPath(value: string, templateContext: import('../../core/TemplateResolver.js').TemplateContext): string {
   const resolved = resolveTemplateString(value, templateContext);
   return path.isAbsolute(resolved) ? resolved : path.resolve(templateContext.projectRoot, resolved);
 }
 
-function resolveRecordTemplates(record: Record<string, string> | undefined, templateContext: import('../../core/PiIntegration.js').TemplateContext): Record<string, string> | undefined {
+function resolveRecordTemplates(record: Record<string, string> | undefined, templateContext: import('../../core/TemplateResolver.js').TemplateContext): Record<string, string> | undefined {
   if (!record) return undefined;
   return Object.fromEntries(
     Object.entries(record).map(([key, value]) => [key, resolveTemplateString(value, templateContext)])
   );
 }
 
-function resolveArgumentTemplates(value: unknown, templateContext: import('../../core/PiIntegration.js').TemplateContext): unknown {
+function resolveArgumentTemplates(value: unknown, templateContext: import('../../core/TemplateResolver.js').TemplateContext): unknown {
   if (typeof value === 'string') return resolveTemplateString(value, templateContext);
   if (Array.isArray(value)) return value.map(item => resolveArgumentTemplates(item, templateContext));
   if (!value || typeof value !== 'object') return value;
@@ -221,7 +221,7 @@ function operationArgumentDefaults(
   definition: ProjectMcpToolConfig,
   requested: unknown,
   operation: string,
-  templateContext: import('../../core/PiIntegration.js').TemplateContext
+  templateContext: import('../../core/TemplateResolver.js').TemplateContext
 ): Record<string, unknown> {
   const defaults = definition.argumentDefaults || {};
   const requestedOperation = typeof requested === 'string' && requested.trim()

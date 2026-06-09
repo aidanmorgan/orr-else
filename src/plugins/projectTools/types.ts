@@ -2,7 +2,7 @@
  * Internal shared types for the projectTools plugin modules.
  * These are package-internal; do not import from outside src/plugins/.
  */
-import type { TemplateContext } from '../../core/PiIntegration.js';
+import type { TemplateContext } from '../../core/TemplateResolver.js';
 import type { ProjectToolConfig, ProjectMcpToolConfig, ProjectCommandArgumentPathConfig } from '../../core/domain/StateModels.js';
 
 export interface ProjectToolExecutionContext {

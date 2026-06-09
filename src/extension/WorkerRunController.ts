@@ -26,7 +26,7 @@ import {
   PromptProvenanceDefaults,
   ReviewArtifactKind
 } from '../constants/index.js';
-import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PiIntegration.js';
+import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PromptProvenanceService.js';
 import { projectToolFailureLimitSuggestedOutcome } from '../plugins/projectTools.js';
 import { isRecord } from './PiEventAdapters.js';
 import { resolveActionHandoverRequired } from './CoordinatorController.js';

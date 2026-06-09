@@ -127,7 +127,8 @@ import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 // resolveActiveToolSet moved to ./extension/WorkerContextResolver.ts
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
-import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
+import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/WorkerResourceResolver.js';
+import { resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PromptProvenanceService.js';
 // resolvePiSkillPathsForState moved to ./extension/WorkerContextResolver.ts
 // digestStableBlock / StableBootstrapInputs moved to ./extension/WorkerContextResolver.ts
 import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';

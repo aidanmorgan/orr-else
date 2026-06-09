@@ -18,7 +18,7 @@
  *    built-in verifiers via src/tools/index.ts at its own load).
  */
 
-import { resolveWorkerExtensionPaths } from './PiIntegration.js';
+import { resolveWorkerExtensionPaths } from './WorkerResourceResolver.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Component } from '../constants/index.js';

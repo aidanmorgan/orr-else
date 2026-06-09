@@ -4,7 +4,7 @@
  */
 import path from 'path';
 import { v7 as uuidv7 } from 'uuid';
-import { resolveTemplateString, type TemplateContext } from '../../core/PiIntegration.js';
+import { resolveTemplateString, type TemplateContext } from '../../core/TemplateResolver.js';
 import { ToolCallPathFactory } from '../../core/ToolCallPathFactory.js';
 import type { ProjectToolConfig, ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
 import type { InFlightProjectToolCall, ProjectToolBackpressure } from '../../core/RuntimeServices.js';

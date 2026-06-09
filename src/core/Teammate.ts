@@ -17,7 +17,7 @@ import {
 import { FlowManager } from './FlowManager.js';
 import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';
-import { getConfiguredPiToolNames } from './PiIntegration.js';
+import { getConfiguredPiToolNames } from './WorkerResourceResolver.js';
 import { resolveActiveToolSet } from './ActiveToolSetResolver.js';
 import * as path from 'node:path';
 import {

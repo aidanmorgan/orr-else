@@ -23,7 +23,7 @@ import * as crypto from 'node:crypto';
 import {
   resolvePromptProvenance,
   detectStaleProvenanceEntries
-} from '../src/core/PiIntegration.js';
+} from '../src/core/PromptProvenanceService.js';
 import { PromptProvenanceKind, PromptProvenanceDefaults, EventStoreDefaults } from '../src/constants/index.js';
 import orrElseExtension from '../src/extension.js';
 import {

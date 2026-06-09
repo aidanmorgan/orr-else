@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as os from 'os';
 import * as path from 'path';
 import { ToolCallPathFactory, type ToolCallPathAllocation } from '../src/core/ToolCallPathFactory.js';
-import type { TemplateContext } from '../src/core/PiIntegration.js';
+import type { TemplateContext } from '../src/core/TemplateResolver.js';
 
 function context(overrides: Partial<TemplateContext> = {}): TemplateContext {
   const projectRoot = path.join(os.tmpdir(), 'orr-else-tool-call-paths');

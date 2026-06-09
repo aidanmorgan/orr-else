@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { resolvePiSkillPaths, resolvePiSkillPathsForState } from '../src/core/PiIntegration.js';
+import { resolvePiSkillPaths, resolvePiSkillPathsForState } from '../src/core/WorkerResourceResolver.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 
 // ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
-import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/PiIntegration.js';
+import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/WorkerResourceResolver.js';
 import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
 import {
