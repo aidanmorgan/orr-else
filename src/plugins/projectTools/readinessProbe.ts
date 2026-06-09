@@ -29,6 +29,11 @@ import { systemClock } from '../../core/Clock.js';
 import type { EventStore } from '../../core/EventStore.js';
 import { DomainEventName, ProjectToolType } from '../../constants/domain.js';
 import { EnvVars } from '../../constants/infra.js';
+import {
+  ProbeStatus as ProbeStatusVocab,
+  GateDecision as GateDecisionVocab,
+  assertNever
+} from '../../core/vocabulary.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -46,6 +51,7 @@ export const PROBE_MAX_OUTPUT_BYTES = 512 * 1024; // 512 KiB
 
 /**
  * Outcome of a single readiness-probe execution attempt.
+ * Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary).
  *
  * PASSED   — tool ran, output within bounds.
  * REJECTED — tool ran but exited with a non-zero code.
@@ -53,15 +59,18 @@ export const PROBE_MAX_OUTPUT_BYTES = 512 * 1024; // 512 KiB
  * TIMEOUT  — tool exceeded PROBE_TIMEOUT_MS; process was terminated.
  * OVERSIZE — tool output exceeded PROBE_MAX_OUTPUT_BYTES; output rejected.
  */
-export type ProbeStatus = 'PASSED' | 'REJECTED' | 'UNSAFE' | 'TIMEOUT' | 'OVERSIZE';
+export type ProbeStatus = ProbeStatusVocab;
+export const ProbeStatus = ProbeStatusVocab;
 
 /**
  * Startup admission gate decision for this probe.
+ * Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary).
  *
  * ADMIT — probe passed (or is not required); harness may start.
  * DENY  — probe failed and the tool is required; harness must NOT start.
  */
-export type GateDecision = 'ADMIT' | 'DENY';
+export type GateDecision = GateDecisionVocab;
+export const GateDecision = GateDecisionVocab;
 
 /**
  * Structured failure taxonomy for a probe outcome (pi-experiment-85bl, AC4).
@@ -169,9 +178,9 @@ export async function runReadinessProbe(
     const result: ProbeResult = {
       tool: definition.name,
       configPath,
-      probeStatus: 'UNSAFE',
+      probeStatus: ProbeStatus.UNSAFE,
       elapsedMs,
-      gateDec: required ? 'DENY' : 'ADMIT',
+      gateDec: required ? GateDecision.DENY : GateDecision.ADMIT,
       diagnostic,
       failureTaxonomy: 'PROBE_UNSAFE'
     };
@@ -186,9 +195,9 @@ export async function runReadinessProbe(
     const result: ProbeResult = {
       tool: definition.name,
       configPath,
-      probeStatus: 'UNSAFE',
+      probeStatus: ProbeStatus.UNSAFE,
       elapsedMs,
-      gateDec: required ? 'DENY' : 'ADMIT',
+      gateDec: required ? GateDecision.DENY : GateDecision.ADMIT,
       diagnostic,
       failureTaxonomy: 'PROBE_UNSUPPORTED_TYPE'
     };
@@ -215,7 +224,7 @@ export async function runReadinessProbe(
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
 
-  let probeStatus: ProbeStatus = 'PASSED';
+  let probeStatus: ProbeStatus = ProbeStatus.PASSED;
   let rawOutput = '';
   let timedOut = false;
 
@@ -232,11 +241,11 @@ export async function runReadinessProbe(
     if (result.isCanceled) {
       timedOut = true;
     } else if (result.isMaxBuffer) {
-      probeStatus = 'OVERSIZE';
+      probeStatus = ProbeStatus.OVERSIZE;
     } else {
       rawOutput = (result.stdout ?? '') + (result.stderr ?? '');
       if (result.exitCode !== 0) {
-        probeStatus = 'REJECTED';
+        probeStatus = ProbeStatus.REJECTED;
       }
     }
   } catch {
@@ -246,21 +255,21 @@ export async function runReadinessProbe(
   }
 
   if (timedOut) {
-    probeStatus = 'TIMEOUT';
+    probeStatus = ProbeStatus.TIMEOUT;
   }
 
   const elapsedMs = clock.now() - startMs;
-  const passed = probeStatus === 'PASSED';
+  const passed = probeStatus === ProbeStatus.PASSED;
 
   // ── Compute evidence (only when probe ran and output is within bounds) ─────
   let bytes: number | undefined;
   let sha256: string | undefined;
-  if (passed || probeStatus === 'REJECTED') {
+  if (passed || probeStatus === ProbeStatus.REJECTED) {
     bytes = Buffer.byteLength(rawOutput, 'utf8');
     sha256 = createHash('sha256').update(rawOutput).digest('hex');
   }
 
-  const gateDec: GateDecision = (!passed && required) ? 'DENY' : 'ADMIT';
+  const gateDec: GateDecision = (!passed && required) ? GateDecision.DENY : GateDecision.ADMIT;
 
   const diagnostic = passed ? undefined : buildDiagnostic(definition.name, configPath, probeStatus, timeoutMs, maxOutputBytes);
 
@@ -324,7 +333,7 @@ export async function runStartupProbeAdmission(
     results.push(r);
   }
 
-  const denied = results.filter(r => r.gateDec === 'DENY');
+  const denied = results.filter(r => r.gateDec === GateDecision.DENY);
   if (denied.length === 0) return { admitted: true, results };
 
   const names = denied.map(r => `"${r.tool}" (${r.probeStatus})`).join(', ');
@@ -361,29 +370,34 @@ function buildDiagnostic(
   maxOutputBytes: number
 ): string {
   switch (probeStatus) {
-    case 'TIMEOUT':
+    case ProbeStatus.TIMEOUT:
       return `Tool "${toolName}" (${configPath}) probe timed out after ${timeoutMs}ms.`;
-    case 'OVERSIZE':
+    case ProbeStatus.OVERSIZE:
       return `Tool "${toolName}" (${configPath}) probe output exceeded ${maxOutputBytes} bytes limit.`;
-    case 'REJECTED':
+    case ProbeStatus.REJECTED:
       return `Tool "${toolName}" (${configPath}) probe exited with a non-zero exit code.`;
-    case 'UNSAFE':
+    case ProbeStatus.UNSAFE:
       return `Tool "${toolName}" (${configPath}) is not declared safe for readiness probing.`;
-    default:
-      return `Tool "${toolName}" (${configPath}) probe failed with status "${probeStatus}".`;
+    case ProbeStatus.PASSED:
+      return `Tool "${toolName}" (${configPath}) probe status was PASSED but diagnostic was requested.`;
   }
 }
 
 /**
  * Maps a ProbeStatus to the structured failure taxonomy row (pi-experiment-85bl).
  * Returns undefined for PASSED (no failure).
+ *
+ * assertNever in the default position makes an unhandled ProbeStatus member
+ * a compile error — TypeScript will reject the build if a new member is added
+ * to the ProbeStatus vocabulary and this switch is not updated (amq0.11).
  */
 function probeStatusToTaxonomy(status: ProbeStatus): ProbeFailureTaxonomy | undefined {
   switch (status) {
-    case 'UNSAFE':   return 'PROBE_UNSAFE';
-    case 'TIMEOUT':  return 'PROBE_TIMEOUT';
-    case 'OVERSIZE': return 'PROBE_OVERSIZE';
-    case 'REJECTED': return 'PROBE_NONZERO_EXIT';
-    case 'PASSED':   return undefined;
+    case ProbeStatus.UNSAFE:   return 'PROBE_UNSAFE';
+    case ProbeStatus.TIMEOUT:  return 'PROBE_TIMEOUT';
+    case ProbeStatus.OVERSIZE: return 'PROBE_OVERSIZE';
+    case ProbeStatus.REJECTED: return 'PROBE_NONZERO_EXIT';
+    case ProbeStatus.PASSED:   return undefined;
+    default: return assertNever(status);
   }
 }

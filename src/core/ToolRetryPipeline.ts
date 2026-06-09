@@ -26,6 +26,10 @@ import type { ToolRetryPolicy } from './domain/StateModels.js';
 import type { EventStore } from './EventStore.js';
 import { DomainEventName } from '../constants/domain.js';
 import type { RtkIdempotencyClass } from './RtkContract.js';
+import {
+  RetryDecision as RetryDecisionVocab,
+  RetryNextRoute as RetryNextRouteVocab
+} from './vocabulary.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,25 +43,25 @@ const RETRIABLE_IDEMPOTENCY_CLASSES = new Set<RtkIdempotencyClass>(['idempotent'
 
 /**
  * Outcome of a retry pipeline decision.
+ * Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary).
  *
  * RETRY                       — retry is admitted; the tool should be re-invoked.
  * SUPPRESS                    — non-idempotent tool; body suppressed, not retried.
  * EXHAUSTED                   — configured limit reached; no more retries.
  * REJECT_NO_IDEMPOTENCY_CLASS — tool has no/unknown idempotencyClass; retry rejected.
  */
-export type RetryDecision =
-  | 'RETRY'
-  | 'SUPPRESS'
-  | 'EXHAUSTED'
-  | 'REJECT_NO_IDEMPOTENCY_CLASS';
+export type RetryDecision = RetryDecisionVocab;
+export const RetryDecision = RetryDecisionVocab;
 
 /**
  * The next route after a retry decision.
+ * Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary).
  *
  * 'retry' — the caller should re-invoke the tool body.
  * 'fail'  — the caller should propagate the failure.
  */
-export type RetryNextRoute = 'retry' | 'fail';
+export type RetryNextRoute = RetryNextRouteVocab;
+export const RetryNextRoute = RetryNextRouteVocab;
 
 /**
  * Result of evaluateRetry.
@@ -117,28 +121,28 @@ export async function evaluateRetry(
 
   if (!retryPolicy) {
     // No policy: zero retries. Treat as exhausted at attempt 1.
-    decision = 'EXHAUSTED';
-    nextRoute = 'fail';
+    decision = RetryDecisionVocab.EXHAUSTED;
+    nextRoute = RetryNextRouteVocab.FAIL;
   } else if (idempotencyClass === undefined) {
     // AC3: missing idempotencyClass rejects before retry admission.
-    decision = 'REJECT_NO_IDEMPOTENCY_CLASS';
-    nextRoute = 'fail';
+    decision = RetryDecisionVocab.REJECT_NO_IDEMPOTENCY_CLASS;
+    nextRoute = RetryNextRouteVocab.FAIL;
   } else if (!RETRIABLE_IDEMPOTENCY_CLASSES.has(idempotencyClass)) {
     // AC4: non_idempotent tools are NEVER retried — suppress before body runs.
-    decision = 'SUPPRESS';
-    nextRoute = 'fail';
+    decision = RetryDecisionVocab.SUPPRESS;
+    nextRoute = RetryNextRouteVocab.FAIL;
   } else if (!retryPolicy.retriableCategories.includes(failureCategory)) {
     // Failure category is not in the retriable set — treat as exhausted.
-    decision = 'EXHAUSTED';
-    nextRoute = 'fail';
+    decision = RetryDecisionVocab.EXHAUSTED;
+    nextRoute = RetryNextRouteVocab.FAIL;
   } else if (attempt >= configuredLimit) {
     // AC6: limit reached — no more retries.
-    decision = 'EXHAUSTED';
-    nextRoute = 'fail';
+    decision = RetryDecisionVocab.EXHAUSTED;
+    nextRoute = RetryNextRouteVocab.FAIL;
   } else {
     // All guards passed — admit retry.
-    decision = 'RETRY';
-    nextRoute = 'retry';
+    decision = RetryDecisionVocab.RETRY;
+    nextRoute = RetryNextRouteVocab.RETRY;
   }
 
   // AC5: emit schema-valid event with all required fields.

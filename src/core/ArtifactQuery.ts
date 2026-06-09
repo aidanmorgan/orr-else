@@ -24,6 +24,7 @@ import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/infra.js';
 import { projections, type ProjectionDef } from '../contract.js';
+import { ArtifactQueryStatus } from './vocabulary.js';
 
 // ─── Path-safety helpers ──────────────────────────────────────────────────────
 
@@ -510,7 +511,7 @@ export interface ArtifactQueryInput {
 }
 
 export interface ArtifactQueryRejection {
-  status: 'rejected';
+  status: typeof ArtifactQueryStatus.REJECTED;
   reason: string;
   validProjections?: string[];
   artifactPath?: string;
@@ -530,7 +531,7 @@ export interface SizeEstimate {
 }
 
 export interface ArtifactQuerySuccess {
-  status: 'ok';
+  status: typeof ArtifactQueryStatus.OK;
   artifactId: string;
   artifactPath: string;
   selector: string;
@@ -567,7 +568,7 @@ export interface ProjectionSummaryEntry {
 }
 
 export interface ArtifactSummary {
-  status: 'summary';
+  status: typeof ArtifactQueryStatus.SUMMARY;
   artifactId: string;
   artifactPath: string;
   /**
@@ -587,7 +588,7 @@ export interface ArtifactSummary {
 
 /** Result returned by schema mode. */
 export interface ArtifactSchemaResult {
-  status: 'schema';
+  status: typeof ArtifactQueryStatus.SCHEMA;
   artifactId: string;
   artifactPath: string;
   /**
@@ -731,7 +732,7 @@ export class ArtifactQuery {
         const hint = closestProjection(input.projection, validProjections);
         const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
         return {
-          status: 'rejected',
+          status: ArtifactQueryStatus.REJECTED,
           reason: `Unknown projection "${input.projection}" for artifact type "${resolvedId}". This projection is not registered; use one of the validProjections listed, or provide a dot-path "selector" instead.${hintLine}`,
           ...(validProjections.length > 0 ? { validProjections } : {}),
           artifactPath: resolvedPath,
@@ -749,7 +750,7 @@ export class ArtifactQuery {
           const validProjections = this.validProjectionNames(resolvedId);
           const candidateList = projDef.selectors.join('", "');
           return {
-            status: 'rejected',
+            status: ArtifactQueryStatus.REJECTED,
             reason: `Projection "${input.projection}" is registered but its selector(s) ["${candidateList}"] did not match any key in artifact "${resolvedId}". The artifact may use a different schema version. Try the "schema" or "summary" modes to inspect the actual artifact shape.`,
             ...(validProjections.length > 0 ? { validProjections } : {}),
             artifactPath: resolvedPath,
@@ -768,7 +769,7 @@ export class ArtifactQuery {
         const hint = closestProjection(effectiveSelector, validProjections);
         const hintLine = hint ? ` Retry hint: projection=${hint}` : '';
         return {
-          status: 'rejected',
+          status: ArtifactQueryStatus.REJECTED,
           reason: `Selector "${effectiveSelector}" did not match any value in artifact "${resolvedId}".${validProjections.length > 0 ? ' Use a named projection for schema-aware access.' : ''}${hintLine}`,
           validProjections: validProjections.length > 0 ? validProjections : undefined,
           artifactPath: resolvedPath,
@@ -784,7 +785,7 @@ export class ArtifactQuery {
     // 8. Return success with size estimate
     const serialized = serializeForMeasure(value);
     return {
-      status: 'ok',
+      status: ArtifactQueryStatus.OK,
       artifactId: resolvedId,
       artifactPath: resolvedPath,
       selector: effectiveSelector,
@@ -848,7 +849,7 @@ export class ArtifactQuery {
     }
 
     return {
-      status: 'summary',
+      status: ArtifactQueryStatus.SUMMARY,
       artifactId,
       artifactPath,
       schemaAware,
@@ -902,7 +903,7 @@ export class ArtifactQuery {
 
     const finalSerialized = serializeForMeasure(finalShape);
     return {
-      status: 'schema',
+      status: ArtifactQueryStatus.SCHEMA,
       artifactId,
       artifactPath,
       selector,
@@ -940,7 +941,7 @@ export class ArtifactQuery {
       const inScope = roots.some(root => isPathInside(resolved, root));
       if (!inScope) {
         const scopeRejection: ArtifactQueryRejection = {
-          status: 'rejected',
+          status: ArtifactQueryStatus.REJECTED,
           reason:
             'artifactPath is outside the allowed artifact and worktree roots for this bead. ' +
             'Provide a path inside the bead artifact directory or the active worktree.',
@@ -985,7 +986,7 @@ export class ArtifactQuery {
   ): ArtifactQueryRejection {
     const validProjections = artifactId ? this.validProjectionNames(artifactId) : undefined;
     return {
-      status: 'rejected',
+      status: ArtifactQueryStatus.REJECTED,
       reason,
       ...(validProjections && validProjections.length > 0 ? { validProjections } : {}),
       ...(artifactPath !== undefined ? { artifactPath } : {}),

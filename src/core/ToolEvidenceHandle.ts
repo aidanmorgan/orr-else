@@ -64,6 +64,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { ToolResultBase, ToolRunStatus } from '../contract.js';
+import {
+  ToolEvidenceSummaryMode as ToolEvidenceSummaryModeVocab,
+  parseToolEvidenceSummaryMode
+} from './vocabulary.js';
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -105,11 +109,13 @@ export type ToolEvidenceVerifierVerdict = 'PASS' | 'FAIL' | 'NOT_APPLICABLE';
 
 /**
  * How this handle summarises the tool's semantic output for the model.
+ * Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary).
  *
  *   summary — a deterministic, code-owned RTK summary is available.
  *   none    — no RTK summary; noSummaryReason explains why.
  */
-export type ToolEvidenceSummaryMode = 'summary' | 'none';
+export type ToolEvidenceSummaryMode = ToolEvidenceSummaryModeVocab;
+export const ToolEvidenceSummaryMode = ToolEvidenceSummaryModeVocab;
 
 // ---------------------------------------------------------------------------
 // RTK summary shape (owned by each tool, validated by this contract)
@@ -558,11 +564,17 @@ export function validateToolEvidenceHandle(
     }
   }
 
-  // ---- summaryMode ----
-  const summaryMode = record['summaryMode'];
-  if (summaryMode !== 'summary' && summaryMode !== 'none') {
-    errors.push(`summaryMode: must be 'summary' or 'none', got ${JSON.stringify(summaryMode)}`);
+  // ---- summaryMode — parsed fail-closed via vocabulary boundary parser ----
+  // parseToolEvidenceSummaryMode is the LOAD-BEARING boundary: unknown/case-folded/
+  // missing values are REJECTED here BEFORE they can satisfy a gate or advance state.
+  // Removing this call (falling back to a raw cast) would break the wiring test in
+  // tool_evidence_handle.test.ts that feeds an unknown summaryMode and expects rejection.
+  const rawSummaryMode = record['summaryMode'];
+  const summaryModeParseResult = parseToolEvidenceSummaryMode(rawSummaryMode);
+  if (!summaryModeParseResult.ok) {
+    errors.push(`summaryMode: ${summaryModeParseResult.diagnostic}`);
   }
+  const summaryMode = summaryModeParseResult.ok ? summaryModeParseResult.value : undefined;
 
   // ---- rtkSummary + noSummaryReason (conditional on summaryMode) ----
   const rtkSummary = record['rtkSummary'];

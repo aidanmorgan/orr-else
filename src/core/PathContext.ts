@@ -23,6 +23,7 @@ import * as path from 'path';
 import { EnvVars } from '../constants/infra.js';
 import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
 import { skeletons } from '../contract.js';
+import { PathContextStatus } from './vocabulary.js';
 
 // ─── Caps (named constants — no magic numbers) ────────────────────────────────
 
@@ -334,14 +335,14 @@ export interface PathContextInput {
 
 /** Returned when the resolved path is outside the allowed scope. */
 export interface PathContextOutOfScope {
-  status: 'out_of_scope';
+  status: typeof PathContextStatus.OUT_OF_SCOPE;
   reason: string;
   recovery: string[];
 }
 
 /** Returned when the path does not exist. */
 export interface PathContextNotFound {
-  status: 'not_found';
+  status: typeof PathContextStatus.NOT_FOUND;
   exists: false;
   /** Path as provided (not resolved, to avoid leaking canonical system paths). */
   providedPath: string;
@@ -351,7 +352,7 @@ export interface PathContextNotFound {
 
 /** Returned for a successful path resolution (file exists). */
 export interface PathContextFound {
-  status: 'found';
+  status: typeof PathContextStatus.FOUND;
   exists: true;
   /** Canonical path relative to the matched root (stable reference for the model). */
   canonicalRelativePath: string;
@@ -418,7 +419,7 @@ export class PathContext {
     } catch (error) {
       // Defensive catch — should never be reached given internal try/catch guards.
       return {
-        status: 'not_found',
+        status: PathContextStatus.NOT_FOUND,
         exists: false,
         providedPath: input.filePath,
         nearestMatches: [],
@@ -440,7 +441,7 @@ export class PathContext {
     const inScope = roots.some(root => isPathInside(resolved, root));
     if (!inScope) {
       return {
-        status: 'out_of_scope',
+        status: PathContextStatus.OUT_OF_SCOPE,
         reason:
           'The requested path is outside the allowed roots for this context ' +
           '(active worktree and project root). ' +
@@ -458,7 +459,7 @@ export class PathContext {
     if (!exists) {
       const candidates = nearestMatches(resolved, roots);
       return {
-        status: 'not_found',
+        status: PathContextStatus.NOT_FOUND,
         exists: false,
         providedPath: input.filePath,
         nearestMatches: candidates,
@@ -545,7 +546,7 @@ export class PathContext {
     }
 
     return {
-      status: 'found',
+      status: PathContextStatus.FOUND,
       exists: true,
       canonicalRelativePath,
       totalLines,

@@ -30,7 +30,7 @@ import type { HarnessConfig } from '../core/ConfigLoader.js';
 import type { RuntimeServices } from '../composition/createRuntimeServices.js';
 import type { ToolExecutionSession } from './SessionTypes.js';
 import { ToolResultRecorder } from '../core/ToolResultRecorder.js';
-import { evaluateRetry } from '../core/ToolRetryPipeline.js';
+import { evaluateRetry, RetryNextRoute } from '../core/ToolRetryPipeline.js';
 import {
   assembleAndWriteBuiltInHandle,
   buildRejectedBuiltInHandle,
@@ -737,7 +737,7 @@ export function wrapPluginTool(
                 retryPolicy,
                 idempotencyClass
               }, services.eventStore);
-              if (retryDecision.nextRoute === 'retry') {
+              if (retryDecision.nextRoute === RetryNextRoute.RETRY) {
                 attempt++;
                 // Generate a new invocationId for the retry attempt.
                 toolInvocationId = uuidv7();
@@ -838,7 +838,7 @@ export function wrapPluginTool(
               retryPolicy,
               idempotencyClass
             }, services.eventStore);
-            if (retryDecision.nextRoute === 'retry') {
+            if (retryDecision.nextRoute === RetryNextRoute.RETRY) {
               attempt++;
               toolInvocationId = uuidv7();
               continue;

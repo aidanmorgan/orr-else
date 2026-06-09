@@ -29,6 +29,7 @@ import {
   type VerifierGateContext
 } from '../core/VerifierGate.js';
 import type { ActiveRun } from './SessionTypes.js';
+import { RequiredToolAuditState } from '../core/vocabulary.js';
 
 // 0yt5.33: resultIndicatesSuccess / resultIndicatesFailure are NO LONGER imported
 // here. The pre_signal_audit + evaluateGateReadiness required-tool readiness
@@ -208,7 +209,8 @@ export async function terminalFailureLimitRejection(
 
 export interface RequiredToolAuditEntry {
   name: string;
-  state: 'passed' | 'failed' | 'never_invoked' | 'unavailable';
+  /** Typed via code-owned vocabulary (amq0.11). */
+  state: RequiredToolAuditState;
   /** Set when state is 'unavailable'. Describes the infra blocker and remediation. */
   reason?: string;
 }
@@ -372,7 +374,7 @@ async function auditRequiredToolsArtifactPresence(
     if (!failure) {
       // No failure for this tool ⇒ it ran (presence satisfied) and its verify()
       // returned PASS / NOT_APPLICABLE (or there was no callback).
-      entries.push({ name: toolName, state: 'passed' });
+      entries.push({ name: toolName, state: RequiredToolAuditState.PASSED });
       continue;
     }
 
@@ -380,7 +382,7 @@ async function auditRequiredToolsArtifactPresence(
 
     if (failure.kind === VerifierGateBlockKind.TOOL_NOT_INVOKED) {
       // Artifact ABSENT — the tool did not run this attempt.
-      entries.push({ name: toolName, state: 'never_invoked' });
+      entries.push({ name: toolName, state: RequiredToolAuditState.NEVER_INVOKED });
       toolAuditFailures.push(`Tool \`${toolName}\` was NEVER invoked.`);
       blockingEvidence.push(`Required tool \`${toolName}\` was never invoked: ${reasonText}`);
       continue;
@@ -390,7 +392,7 @@ async function auditRequiredToolsArtifactPresence(
     // registered verify() returned FAIL. Surface the tool name + reason(s) and,
     // when present, the verify() verdict.
     const verdictLabel = failure.verdict ? ` (verdict=${failure.verdict})` : '';
-    entries.push({ name: toolName, state: 'failed' });
+    entries.push({ name: toolName, state: RequiredToolAuditState.FAILED });
     toolAuditFailures.push(`Tool \`${toolName}\` did not pass${verdictLabel}: ${reasonText}`);
     blockingEvidence.push(`Required tool \`${toolName}\` did not pass${verdictLabel}: ${reasonText}`);
   }

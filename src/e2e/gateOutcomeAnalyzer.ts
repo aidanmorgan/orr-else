@@ -27,6 +27,7 @@
 import type { DomainEvent } from '../core/EventStoreTypes.js';
 import { DomainEventName } from '../constants/domain.js';
 import { VerifyVerdict } from '../contract.js';
+import { GateOutcomeKind as GateOutcomeKindVocab } from '../core/vocabulary.js';
 
 /** A tool that contributed to BLOCKING a transition, with its durable diagnostics. */
 export interface BlockingTool {
@@ -36,7 +37,8 @@ export interface BlockingTool {
   reasons: string[];
 }
 
-export type GateOutcomeKind = 'advanced' | 'blocked_absent' | 'blocked_fail';
+/** Re-exported from core vocabulary (amq0.11 — code-owned typed vocabulary). */
+export type GateOutcomeKind = GateOutcomeKindVocab;
 
 /** One classified gated transition, keyed by (beadId, stateId, actionId). */
 export interface GateTransitionAnalysis {
@@ -148,7 +150,7 @@ export function analyzeGateOutcomes(events: DomainEvent[]): GateOutcomeAnalysis 
     if (!blocked) {
       // Not blocked ⇒ the gate passed (all perTool PASS / NOT_APPLICABLE) and a
       // real advance must follow in the durable log.
-      outcome = 'advanced';
+      outcome = GateOutcomeKindVocab.ADVANCED;
       blockingTools = [];
     } else {
       // Blocked. Distinguish absent (no verdict) from present-but-FAIL.
@@ -157,17 +159,17 @@ export function analyzeGateOutcomes(events: DomainEvent[]): GateOutcomeAnalysis 
         p => p.verdict === undefined && p.reasons.some(r => /not\s+invoked|did[\s-]?not[\s-]?run/i.test(r))
       );
       if (fails.length > 0) {
-        outcome = 'blocked_fail';
+        outcome = GateOutcomeKindVocab.BLOCKED_FAIL;
         blockingTools = fails.map(p => ({ tool: p.tool, verdict: p.verdict, reasons: p.reasons }));
       } else {
         // Treat any verdict-less blocking entry as an absent/did-not-run block.
         const absentEntries = absent.length > 0 ? absent : perTool.filter(p => p.verdict === undefined);
-        outcome = 'blocked_absent';
+        outcome = GateOutcomeKindVocab.BLOCKED_ABSENT;
         blockingTools = absentEntries.map(p => ({ tool: p.tool, verdict: p.verdict, reasons: p.reasons }));
       }
     }
 
-    const advanced = outcome === 'advanced' && hasAdvanceAfter(events, i, beadId, stateId, actionId);
+    const advanced = outcome === GateOutcomeKindVocab.ADVANCED && hasAdvanceAfter(events, i, beadId, stateId, actionId);
 
     byKey.set(transitionKey(beadId, stateId, actionId), {
       beadId,
@@ -203,7 +205,7 @@ function describe(analysis: GateOutcomeAnalysis): string {
  */
 export function assertAdvancedOnValid(analysis: GateOutcomeAnalysis, beadId: string): GateTransitionAnalysis {
   const candidates = transitionsForBead(analysis, beadId);
-  const hit = candidates.find(t => t.outcome === 'advanced' && t.advanced);
+  const hit = candidates.find(t => t.outcome === GateOutcomeKindVocab.ADVANCED && t.advanced);
   if (!hit) {
     throw new Error(
       `assertAdvancedOnValid FAILED for bead ${beadId}: expected a gated transition with ` +
@@ -227,7 +229,7 @@ export function assertBlockedOnAbsentArtifact(
   const candidates = transitionsForBead(analysis, beadId);
   const hit = candidates.find(
     t =>
-      t.outcome === 'blocked_absent' &&
+      t.outcome === GateOutcomeKindVocab.BLOCKED_ABSENT &&
       !t.advanced &&
       t.blockingTools.some(bt => bt.tool === toolName && bt.verdict === undefined)
   );
@@ -256,7 +258,7 @@ export function assertBlockedOnPresentButFail(
   const candidates = transitionsForBead(analysis, beadId);
   const hit = candidates.find(
     t =>
-      t.outcome === 'blocked_fail' &&
+      t.outcome === GateOutcomeKindVocab.BLOCKED_FAIL &&
       !t.advanced &&
       t.blockingTools.some(
         bt => bt.tool === toolName && bt.verdict === VerifyVerdict.FAIL && bt.reasons.length > 0

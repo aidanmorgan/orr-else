@@ -103,6 +103,7 @@ import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { HarnessEventQuery } from './core/HarnessEventQuery.js';
 import { ToolOutputQuery } from './core/ToolOutputQuery.js';
 import { PathContext } from './core/PathContext.js';
+import { PathContextStatus } from './core/vocabulary.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
 import {
   isRecord,
@@ -3628,9 +3629,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           // Emit a bounded domain event recording the avoided-retry category.
           // Best-effort: never blocks the tool response.
           services.eventStore.record(DomainEventName.PATH_CONTEXT_RESOLVED, {
-            exists: result.status === 'found',
-            outOfScope: result.status === 'out_of_scope',
-            offsetCorrected: result.status === 'found' && result.correctedOffset !== null,
+            exists: result.status === PathContextStatus.FOUND,
+            outOfScope: result.status === PathContextStatus.OUT_OF_SCOPE,
+            offsetCorrected: result.status === PathContextStatus.FOUND && result.correctedOffset !== null,
             beadId: process.env[EnvVars.BEAD_ID],
             stateId: process.env[EnvVars.STATE_ID]
           }).catch(() => {});
