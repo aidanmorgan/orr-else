@@ -2,7 +2,7 @@
  * Plugin-layer extensions for the project-tool root kind vocabulary.
  *
  * pi-experiment-amq0.19: The authoritative ProjectToolRootKind const and
- * ProjectToolBuiltinRootKind type live in src/constants/index.ts (shared
+ * ProjectToolBuiltinRootKind type live in src/constants/domain.ts (shared
  * layer). This module re-exports them for plugin-internal convenience and
  * adds the plugin-only resolved-root kind type and builtin-kind set.
  *
@@ -10,7 +10,7 @@
  */
 
 // Re-export the shared-layer vocabulary so plugin modules can import from here.
-export { ProjectToolRootKind, type ProjectToolBuiltinRootKind } from '../../constants/index.js';
+export { ProjectToolRootKind, type ProjectToolBuiltinRootKind } from '../../constants/domain.js';
 
 /**
  * Set of all built-in root kind values (for fast membership tests at runtime).
@@ -28,4 +28,4 @@ export const BUILTIN_ROOT_KINDS = new Set<string>(['worktree', 'project', 'frame
  *
  * There is NO 'configured' variant — that fallback was removed with no backcompat.
  */
-export type ResolvedRootKind = import('../../constants/index.js').ProjectToolBuiltinRootKind | string;
+export type ResolvedRootKind = import('../../constants/domain.js').ProjectToolBuiltinRootKind | string;

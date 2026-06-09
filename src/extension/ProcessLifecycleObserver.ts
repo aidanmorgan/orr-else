@@ -10,7 +10,7 @@
  * fresh orrElseExtension() call, causing a second call to re-register.
  */
 import { Logger } from '../core/Logger.js';
-import { Component, ProcessEventName } from '../constants/index.js';
+import { Component, ProcessEventName } from '../constants/infra.js';
 
 /** Injected port: resolves whether the current process is a worker. */
 export interface ProcessLifecycleObserverPorts {

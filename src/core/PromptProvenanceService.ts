@@ -12,7 +12,8 @@ import * as path from 'path';
 import * as crypto from 'node:crypto';
 import * as yaml from 'yaml';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { PromptProvenanceKind, PromptProvenanceDefaults } from '../constants/index.js';
+import { PromptProvenanceKind } from '../constants/domain.js';
+import { PromptProvenanceDefaults } from '../constants/infra.js';
 import { resolvePiSkillPathsForState, type FileSystemPort, nodeFileSystemPort } from './WorkerResourceResolver.js';
 
 // ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ export function nodeFileReadPort(): FileReadPort {
 /**
  * Local kind identifier for the state-config-subtree entry.
  *
- * We cannot add to PromptProvenanceKind in constants/index.ts (another bead
+ * We cannot add to PromptProvenanceKind in constants/domain.ts (another bead
  * owns it), so we define a local constant that is stored as the `kind` string
  * on STATE_CONFIG entries.  Kept as a plain string so it round-trips through
  * JSON without any import requirement.

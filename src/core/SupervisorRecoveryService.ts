@@ -12,7 +12,8 @@
  */
 
 import { Logger } from './Logger.js';
-import { Component, DomainEventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/index.js';
+import { DomainEventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 import type { DomainEvent, ProjectionCapableStore } from './EventStoreTypes.js';
 
 export class SupervisorRecoveryService {

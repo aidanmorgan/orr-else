@@ -41,7 +41,8 @@ import * as path from 'node:path';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 
 import orrElseExtension from '../src/extension.js';
-import { EnvVars, ProcessFlag, PiEventName, DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { Logger } from '../src/core/Logger.js';
 import { evaluateRetry } from '../src/core/ToolRetryPipeline.js';
 import type { RetryInput } from '../src/core/ToolRetryPipeline.js';

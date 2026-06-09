@@ -52,7 +52,7 @@ import {
 } from '../src/core/ToolEvidenceHandle.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
-import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
+import { DomainEventName, ToolResultStatus } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 // ── A fake coordinator-readable store keyed by (bead,state,action,tool) ───────

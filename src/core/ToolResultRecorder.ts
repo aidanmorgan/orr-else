@@ -69,7 +69,8 @@ import { createHash } from 'node:crypto';
 import type { ToolResultBase } from '../contract.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
 import { Logger } from './Logger.js';
-import { Component, ToolResultStatus } from '../constants/index.js';
+import { ToolResultStatus } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Constants

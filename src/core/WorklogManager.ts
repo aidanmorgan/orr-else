@@ -4,7 +4,8 @@ import { BeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { EventStore } from './EventStore.js';
 import { resolveProjectFrom } from './Paths.js';
-import { Component, DomainEventName, OperationalLogPath } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
+import { Component, OperationalLogPath } from '../constants/infra.js';
 
 const readFileAsync = fs.promises.readFile;
 const appendFileAsync = fs.promises.appendFile;

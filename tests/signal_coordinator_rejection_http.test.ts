@@ -12,7 +12,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { EnvVars } from '../src/constants/index.js';
+import { EnvVars } from '../src/constants/infra.js';
 import type { TeammateEvent } from '../src/core/TeammateEvents.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 import { postHarnessSignal, CoordinatorRejectionError } from '../src/core/HarnessApiClient.js';

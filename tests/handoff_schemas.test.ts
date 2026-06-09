@@ -41,7 +41,7 @@ import {
   type TeammateEventValidationResult
 } from '../src/core/TeammateEvents.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import { TeammateEventType } from '../src/constants/index.js';
+import { TeammateEventType } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // AC1 — Named schemas registered in SchemaRegistry

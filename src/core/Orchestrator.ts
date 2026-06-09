@@ -3,7 +3,8 @@ import { Scheduler, ScoredBead } from './Scheduler.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
-import { App, BeadsDefaults, BeadsIssueStatus, Component, Defaults, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { App, BeadsIssueStatus, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/domain.js';
+import { BeadsDefaults, Component, Defaults } from '../constants/infra.js';
 import { FlowManager } from './FlowManager.js';
 import type { BeadsPort } from './OrchestrationPorts.js';
 

@@ -44,7 +44,8 @@ import {
   createRuntimeBudgetTracker,
 } from '../src/core/RuntimeBudgetTracker.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { DomainEventName, EnvVars, PiEventName, ProcessFlag, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
+import { DomainEventName, TeammateEventType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import orrElseExtension from '../src/extension.js';
 import { Logger } from '../src/core/Logger.js';
 import type { Clock } from '../src/core/Clock.js';

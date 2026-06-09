@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execa } from 'execa';
-import { CommandExitCode, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/index.js';
+import { CommandExitCode, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/infra.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
 

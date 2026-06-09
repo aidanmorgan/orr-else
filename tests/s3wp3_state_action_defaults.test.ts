@@ -20,15 +20,8 @@ import {
   actionRunContext
 } from '../src/extension/CoordinatorController.js';
 import { evaluateGateReadiness } from '../src/extension/WorkerRunController.js';
-import {
-  ActionContextMode,
-  ActionRunContext,
-  ActionType,
-  DomainEventName,
-  EventName,
-  HandoverRequiredDefaults,
-  ToolResultStatus
-} from '../src/constants/index.js';
+import { ActionContextMode, ActionRunContext, ActionType, DomainEventName, EventName, ToolResultStatus } from '../src/constants/domain.js';
+import { HandoverRequiredDefaults } from '../src/constants/infra.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
 import type { ActiveRun } from '../src/extension/SessionTypes.js';

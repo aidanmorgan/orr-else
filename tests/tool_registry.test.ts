@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { BuiltInToolName, PluginToolName } from '../src/constants/index.js';
+import { BuiltInToolName, PluginToolName } from '../src/constants/domain.js';
 import { createRuntimeServices } from '../src/composition/createRuntimeServices.js';
 import { createToolRegistryComposition, requireTool, ToolRegistry } from '../src/core/ToolRegistry.js';
 import type { RuntimePlugin } from '../src/core/RuntimeServices.js';

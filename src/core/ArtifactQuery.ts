@@ -22,7 +22,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
-import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/index.js';
+import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/infra.js';
 import { projections, type ProjectionDef } from '../contract.js';
 
 // ─── Path-safety helpers ──────────────────────────────────────────────────────

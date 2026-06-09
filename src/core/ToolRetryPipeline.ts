@@ -24,7 +24,7 @@
 import type { ToolFailureCategory } from '../contract.js';
 import type { ToolRetryPolicy } from './domain/StateModels.js';
 import type { EventStore } from './EventStore.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 import type { RtkIdempotencyClass } from './RtkContract.js';
 
 // ---------------------------------------------------------------------------

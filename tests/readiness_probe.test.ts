@@ -25,7 +25,8 @@ import * as path from 'node:path';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore, EventStoreValidationError } from '../src/core/EventStore.js';
-import { DomainEventName, EnvVars, ProjectToolType } from '../src/constants/index.js';
+import { DomainEventName, ProjectToolType } from '../src/constants/domain.js';
+import { EnvVars } from '../src/constants/infra.js';
 import type { ProjectCommandToolConfig, ProjectToolConfig } from '../src/core/domain/StateModels.js';
 import {
   runReadinessProbe,

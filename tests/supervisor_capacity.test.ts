@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { Logger } from '../src/core/Logger.js';
-import { BeadStatus, DomainEventName, EventName, SupervisorDefaults, TimeMs } from '../src/constants/index.js';
+import { BeadStatus, DomainEventName, EventName } from '../src/constants/domain.js';
+import { SupervisorDefaults, TimeMs } from '../src/constants/infra.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 import { Supervisor } from '../src/core/Supervisor.js';

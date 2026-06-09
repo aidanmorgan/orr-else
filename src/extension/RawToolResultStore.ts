@@ -25,7 +25,7 @@ import { v7 as uuidv7 } from 'uuid';
 import type { ToolResultBase } from '../contract.js';
 import type { ToolCallPathFactory } from '../core/ToolCallPathFactory.js';
 import { Logger } from '../core/Logger.js';
-import { Component } from '../constants/index.js';
+import { Component } from '../constants/infra.js';
 import { PLUGIN_RAW_FILE_NAME } from '../plugins/projectTools/constants.js';
 
 /**

@@ -24,7 +24,7 @@ import {
   PI_TOOL_INVENTORY_SCHEMA_ID,
 } from '../src/core/PiHostInventory.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
-import { ProjectToolType } from '../src/constants/index.js';
+import { ProjectToolType } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

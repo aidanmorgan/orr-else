@@ -4,10 +4,7 @@ import * as path from 'path';
 import { stdin as input } from 'process';
 import { v7 as uuidv7 } from 'uuid';
 import { Command } from 'commander';
-import {
-  FileMutationPolicyDefaults,
-  OperationalArtifactPath
-} from '../constants/index.js';
+import { FileMutationPolicyDefaults, OperationalArtifactPath } from '../constants/infra.js';
 
 interface TrashCliArgs {
   projectRoot: string;

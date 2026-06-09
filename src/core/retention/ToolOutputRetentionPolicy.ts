@@ -7,7 +7,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup.
  */
 
-import { ProjectToolDefaults } from '../../constants/index.js';
+import { ProjectToolDefaults } from '../../constants/infra.js';
 
 /**
  * Sanitize a state/action identifier into the on-disk path segment produced by

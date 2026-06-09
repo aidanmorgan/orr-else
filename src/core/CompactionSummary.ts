@@ -27,7 +27,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 import type { DomainEvent } from './EventStoreTypes.js';
 
 // ---------------------------------------------------------------------------

@@ -7,7 +7,8 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import type { Observability } from '../src/core/Observability.js';
 import { createGitPlugin } from '../src/plugins/git.js';
-import { DomainEventName, PluginToolName, SpanName, WorktreePreserveReason } from '../src/constants/index.js';
+import { DomainEventName, PluginToolName, WorktreePreserveReason } from '../src/constants/domain.js';
+import { SpanName } from '../src/constants/infra.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });

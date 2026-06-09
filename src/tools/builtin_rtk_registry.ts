@@ -35,7 +35,7 @@
  */
 
 import type { ToolEvidenceRtkSummary } from '../core/ToolEvidenceHandle.js';
-import { BuiltInToolName } from '../constants/index.js';
+import { BuiltInToolName } from '../constants/domain.js';
 import { buildHarnessStatusRtkSummary } from './harness_status.js';
 import { buildPreSignalAuditRtkSummary } from './pre_signal_audit.js';
 import { buildGetArtifactPathsRtkSummary } from './get_artifact_paths.js';

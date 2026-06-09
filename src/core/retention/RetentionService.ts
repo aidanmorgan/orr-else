@@ -12,7 +12,7 @@
  */
 
 import { Logger } from '../Logger.js';
-import { Component, OperationalArtifactPath } from '../../constants/index.js';
+import { Component, OperationalArtifactPath } from '../../constants/infra.js';
 import { resolveProjectFrom } from '../Paths.js';
 import {
   scanArea,

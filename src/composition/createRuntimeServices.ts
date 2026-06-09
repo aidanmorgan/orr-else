@@ -20,7 +20,7 @@ import { EventStore } from '../core/EventStore.js';
 import { Observability } from '../core/Observability.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { assembleRuntimeServices, createBeadCompletionPort } from '../core/RuntimeServices.js';
-import { EnvVars } from '../constants/index.js';
+import { EnvVars } from '../constants/infra.js';
 import type { TeammateSpawner } from '../core/OrchestrationPorts.js';
 import type { ApiAddress } from '../types/index.js';
 

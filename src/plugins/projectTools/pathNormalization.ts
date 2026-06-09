@@ -9,7 +9,7 @@ import type {
   ProjectMcpToolConfig,
   ProjectToolPathArgumentConfig
 } from '../../core/domain/StateModels.js';
-import { CwdMode } from '../../constants/index.js';
+import { CwdMode } from '../../constants/domain.js';
 import {
   PathArgumentConfigKey,
   PROJECT_TOOL_CONTROL_PARAMETERS,

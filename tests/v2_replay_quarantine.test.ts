@@ -44,7 +44,7 @@ import {
   type V2ReplayProjectionOptions,
   type RouteEventQuarantinedPayload,
 } from '../src/core/RouteEventContract.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import { DOMAIN_EVENT_SCHEMA_METADATA, DOMAIN_EVENT_SCHEMAS } from '../src/core/DomainEventSchemas.js';
 
 // ---------------------------------------------------------------------------
@@ -954,7 +954,7 @@ describe('AC5: quarantine diagnostic schema validity + DomainEventName registrat
   });
 
   it('V2_ROUTE_EVENT_QUARANTINED is NOT in REPLAY_CRITICAL_EVENT_TYPES (diagnostic only)', async () => {
-    const { REPLAY_CRITICAL_EVENT_TYPES } = await import('../src/constants/index.js');
+    const { REPLAY_CRITICAL_EVENT_TYPES } = await import('../src/constants/domain.js');
     expect(REPLAY_CRITICAL_EVENT_TYPES.has(DomainEventName.V2_ROUTE_EVENT_QUARANTINED)).toBe(false);
   });
 

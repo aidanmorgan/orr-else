@@ -68,54 +68,10 @@ import { ProgressManager } from './core/ProgressManager.js';
 import { WorklogManager } from './core/WorklogManager.js';
 import type { DomainEvent } from './core/EventStore.js';
 import { SDLCState, TeammateAction, RequiredTool } from './core/domain/StateModels.js';
-import {
-  BeadStatus,
-  DomainEventName,
-  EventName,
-  ExtensionCommandAction,
-  RestartKind,
-  TeammateEventDecisionAction,
-  TeammateEventType,
-  EnvVars,
-  Component,
-  Defaults,
-  BuiltInToolName,
-  ActionRunContext,
-  ActionContextMode,
-  ActionType,
-  PluginToolName,
-  ToolResultStatus,
-  ToolEvidenceSource,
-  // ToolValidationCondition moved to ./extension/ToolExecutionWrapper.ts
-  ChecklistItemType,
-  WorkerDefaults,
-  SupervisorDefaults,
-  CliOption,
-  Numeric,
-  TimeMs,
-  App,
-  ProcessFlag,
-  HttpHeader,
-  PiEventName,
-  NativePiToolName,
-  PiToolPolicyDefaults,
-  ActionCompletionKey,
-  ProjectToolType,
-  AgentFailureCode,
-  AgentFailureSummary,
-  OperationalLogPath,
-  OperationalArtifactPath,
-  NativeReadPolicyDefaults,
-  FileMutationPolicyDefaults,
-  ReviewArtifactKind,
-  ReviewArtifactStore,
-  // ToolDefaults moved to ./extension/ToolExecutionWrapper.ts
-  ProjectToolDefaults,
-  LLMProviderName,
-  OtelAttr,
-  PathContextDefaults,
-  PromptProvenanceDefaults
-} from './constants/index.js';
+import { ActionCompletionKey, ActionContextMode, ActionRunContext, ActionType, App, BeadStatus, BuiltInToolName, ChecklistItemType, CliOption, DomainEventName, EventName, ExtensionCommandAction, LLMProviderName, PluginToolName, ProjectToolType, RestartKind, ReviewArtifactKind, ReviewArtifactStore, TeammateEventDecisionAction, TeammateEventType, ToolEvidenceSource, ToolResultStatus } from './constants/domain.js';
+// ToolValidationCondition moved to ./extension/ToolExecutionWrapper.ts
+// ToolDefaults moved to ./extension/ToolExecutionWrapper.ts
+import { AgentFailureCode, AgentFailureSummary, Component, Defaults, EnvVars, FileMutationPolicyDefaults, HttpHeader, NativePiToolName, NativeReadPolicyDefaults, Numeric, OperationalArtifactPath, OperationalLogPath, PathContextDefaults, PiEventName, PiToolPolicyDefaults, ProcessFlag, ProjectToolDefaults, PromptProvenanceDefaults, SupervisorDefaults, TimeMs, WorkerDefaults, OtelAttr } from './constants/infra.js';
 import { Supervisor } from './core/Supervisor.js';
 import { Orchestrator } from './core/Orchestrator.js';
 import { RetentionScheduler } from './core/RetentionScheduler.js';

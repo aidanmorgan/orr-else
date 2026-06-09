@@ -57,7 +57,7 @@ import {
   SOURCE_EVENT_IDS_CAP,
   type CompactionSummaryInput
 } from '../src/core/CompactionSummary.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 // ---------------------------------------------------------------------------

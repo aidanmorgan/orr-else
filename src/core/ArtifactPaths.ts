@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { ConfigLoader } from './ConfigLoader.js';
 import { resolveProjectFrom } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { EnvVars } from '../constants/index.js';
+import { EnvVars } from '../constants/infra.js';
 import type { ArtifactTemplate, ArtifactTemplateConfig } from './domain/StateModels.js';
 
 export interface ArtifactPathContext {

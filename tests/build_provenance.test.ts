@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { computeBuildProvenance, runStalenessPreflightWarn } from '../src/core/BuildProvenance.js';
-import { BuildProvenanceDefaults, DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { BuildProvenanceDefaults } from '../src/constants/infra.js';
 import { Logger } from '../src/core/Logger.js';
 import { SignalNoiseCoalescer } from '../src/core/SignalNoiseCoalescer.js';
 

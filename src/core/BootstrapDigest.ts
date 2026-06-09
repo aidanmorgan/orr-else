@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 // ---------------------------------------------------------------------------
 // Tuning constants — exported so callers and tests can reference them without
-// hard-coding magic numbers. Do NOT import from constants/index.ts (another
+// hard-coding magic numbers. Do NOT import from constants/domain.ts (another
 // bead owns that file this wave).
 // ---------------------------------------------------------------------------
 

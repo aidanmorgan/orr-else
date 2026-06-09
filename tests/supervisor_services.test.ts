@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { DomainEventName, TeammateEventDecisionAction, QuarantineReason } from '../src/constants/index.js';
+import { DomainEventName, QuarantineReason, TeammateEventDecisionAction } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStore.js';
 import { SupervisorRecoveryService } from '../src/core/SupervisorRecoveryService.js';
 import { BeadSpawnCoordinator } from '../src/core/BeadSpawnCoordinator.js';
@@ -453,7 +453,7 @@ describe('RetentionScheduler — interval gating, fake-port (amq0.2)', () => {
     // Spy on RetentionService.run() — RetentionScheduler constructs it directly.
     const runMock = vi.spyOn(RetentionService.prototype, 'run').mockImplementation(runSpy);
 
-    const { RetentionDefaults } = await import('../src/constants/index.js');
+    const { RetentionDefaults } = await import('../src/constants/infra.js');
     let nowMs = NOW_MS;
     const clock = { now: () => nowMs, date: (ms?: number) => new Date(ms ?? nowMs) };
     const configLoader = { load: vi.fn(async () => ({ settings: {}, retention: undefined })), getConfigPath: vi.fn(() => '/fake') };

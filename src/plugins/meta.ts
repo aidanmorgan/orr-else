@@ -2,7 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Type } from "@earendil-works/pi-ai";
 import { EventStore } from '../core/EventStore.js';
-import { DomainEventName, MetaPluginDefaults, PluginToolName } from '../constants/index.js';
+import { DomainEventName, PluginToolName } from '../constants/domain.js';
+import { MetaPluginDefaults } from '../constants/infra.js';
 import { resolveProjectFrom } from '../core/Paths.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 

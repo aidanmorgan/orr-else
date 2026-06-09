@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Orchestrator } from '../src/core/Orchestrator.js';
 import { FlowManager } from '../src/core/FlowManager.js';
-import { App, BeadsDefaults, BeadsIssueStatus, PluginToolName } from '../src/constants/index.js';
+import { App, BeadsIssueStatus, PluginToolName } from '../src/constants/domain.js';
+import { BeadsDefaults } from '../src/constants/infra.js';
 import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
 import type { Bead } from '../src/types/index.js';
 

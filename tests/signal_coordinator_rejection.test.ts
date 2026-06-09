@@ -15,7 +15,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { TeammateEvent } from '../src/core/TeammateEvents.js';
 import type { RuntimeServices } from '../src/core/RuntimeServices.js';
 

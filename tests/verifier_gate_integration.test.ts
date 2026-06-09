@@ -61,7 +61,7 @@ import { EventStore } from '../src/core/EventStore.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { RequiredToolResolver } from '../src/core/RequiredToolResolver.js';
-import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
+import { DomainEventName, ToolResultStatus } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 
 // ── registry cleanup (module-level singleton, last-wins, no removal API) ──────

@@ -37,7 +37,7 @@ import type { Clock } from './Clock.js';
 import type { RuntimeBudgetPolicy } from './domain/StateModels.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 
 export type { RuntimeBudgetPolicy };
 

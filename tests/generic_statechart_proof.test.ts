@@ -46,7 +46,7 @@ import {
 } from '../src/core/ChecklistRequirements.js';
 import { resolvePiSkillPathsForState } from '../src/core/WorkerResourceResolver.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
-import { BeadStatus, EventName } from '../src/constants/index.js';
+import { BeadStatus, EventName } from '../src/constants/domain.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures

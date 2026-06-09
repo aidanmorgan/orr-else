@@ -35,12 +35,8 @@ import {
 } from '../src/core/ToolSurfaceCatalog.js';
 import { validateRequiredToolVerifiers, validateRequiredToolsNotCommands } from '../src/core/CoordinatorVerifierGate.js';
 import { checkRtkInventoryCoverageFromCatalog } from '../src/core/RtkContract.js';
-import {
-  BuiltInToolName,
-  DEFAULT_OBSERVED_PI_TOOLS,
-  NativePiToolName,
-  PluginToolName,
-} from '../src/constants/index.js';
+import { BuiltInToolName, PluginToolName } from '../src/constants/domain.js';
+import { DEFAULT_OBSERVED_PI_TOOLS, NativePiToolName } from '../src/constants/infra.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 
 // ---------------------------------------------------------------------------

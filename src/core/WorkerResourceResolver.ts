@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { DEFAULT_OBSERVED_PI_TOOLS } from '../constants/index.js';
+import { DEFAULT_OBSERVED_PI_TOOLS } from '../constants/infra.js';
 import { resolveTemplateString, type TemplateContext } from './TemplateResolver.js';
 
 /** Injected filesystem port — allows testing without real disk I/O. */

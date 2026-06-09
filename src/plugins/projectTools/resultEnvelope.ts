@@ -16,7 +16,8 @@ import path from 'path';
 import { readdir, rm, stat, writeFile } from 'fs/promises';
 import { Logger } from '../../core/Logger.js';
 import type { ProjectToolConfig } from '../../core/domain/StateModels.js';
-import { Component, ProjectToolDefaults, ToolResultStatus, WorkerDefaults } from '../../constants/index.js';
+import { ToolResultStatus } from '../../constants/domain.js';
+import { Component, ProjectToolDefaults, WorkerDefaults } from '../../constants/infra.js';
 import {
   MODEL_HIDDEN_RESULT_KEYS,
   ProjectToolResultKey

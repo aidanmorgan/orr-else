@@ -15,7 +15,8 @@ import { EventStore } from '../src/core/EventStore.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { ShellCommandParser } from '../src/core/ShellCommandParser.js';
-import { DomainEventName, EnvVars, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, NativePiToolName, ProcessFlag } from '../src/constants/infra.js';
 
 describe('FileAccessPolicy — declared writable system artifacts (g9ye)', () => {
   let tempRoot: string;

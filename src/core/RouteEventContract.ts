@@ -41,7 +41,7 @@
  */
 
 import { v7 as uuidv7 } from 'uuid';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Emitter type vocabulary

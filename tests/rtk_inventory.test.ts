@@ -25,12 +25,8 @@ import {
   type RtkRawOutputLocation,
   type RtkToolClass
 } from '../src/core/RtkContract.js';
-import {
-  BuiltInToolName,
-  DEFAULT_OBSERVED_PI_TOOLS,
-  NativePiToolName,
-  PluginToolName
-} from '../src/constants/index.js';
+import { BuiltInToolName, PluginToolName } from '../src/constants/domain.js';
+import { DEFAULT_OBSERVED_PI_TOOLS, NativePiToolName } from '../src/constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

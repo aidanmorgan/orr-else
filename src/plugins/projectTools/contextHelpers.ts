@@ -11,7 +11,8 @@ import type { InFlightProjectToolCall, ProjectToolBackpressure } from '../../cor
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../../core/RuntimeEnvironment.js';
 import { Logger } from '../../core/Logger.js';
 import type { ResolvedHarnessConfig } from '../../core/ConfigLoader.js';
-import { Component, CwdMode, EnvVars, ProjectToolDefaults, ProjectToolType, ToolDefaults, ToolResultStatus } from '../../constants/index.js';
+import { CwdMode, ProjectToolType, ToolResultStatus } from '../../constants/domain.js';
+import { Component, EnvVars, ProjectToolDefaults, ToolDefaults } from '../../constants/infra.js';
 import {
   PathArgumentConfigKey,
   ProjectToolNextAction,

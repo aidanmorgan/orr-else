@@ -27,12 +27,7 @@ import { ConfigValidator } from '../src/core/ConfigValidator.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import type { ResolvedHarnessConfig, RawHarnessConfig } from '../src/core/ConfigLoader.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
-import {
-  ActionContextMode,
-  ActionRunContext,
-  StateContextPolicy,
-  ThinkingLevel,
-} from '../src/constants/index.js';
+import { ActionContextMode, ActionRunContext, StateContextPolicy, ThinkingLevel } from '../src/constants/domain.js';
 
 // ── Temp dir for YAML fixture files (D1: unknown tool type + unknown root kind) ──
 

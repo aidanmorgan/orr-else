@@ -31,7 +31,7 @@
  * failure domain.  No failure is allowed to be unclassified at routing time.
  *
  * Do NOT add values to this enum from parallel beads — extend here only.
- * Do NOT put these constants in src/constants/index.ts; they live here to
+ * Do NOT put these constants in src/constants/domain.ts; they live here to
  * avoid merge conflicts with parallel beads that modify that file.
  */
 export enum FailureClass {

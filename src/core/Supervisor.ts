@@ -3,7 +3,8 @@ import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
-import { Component, Defaults, DomainEventName, EventName, QuarantineReason, RestartKind, SupervisorDefaults, TeammateEventDecisionAction, TeammateEventType, TERMINAL_BEAD_STATUSES } from '../constants/index.js';
+import { DomainEventName, EventName, QuarantineReason, RestartKind, TERMINAL_BEAD_STATUSES, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
+import { Component, Defaults, SupervisorDefaults } from '../constants/infra.js';
 import { Orchestrator } from './Orchestrator.js';
 import type { ScoredBead } from './Scheduler.js';
 import type { DomainEvent, ProjectionCapableStore } from './EventStore.js';

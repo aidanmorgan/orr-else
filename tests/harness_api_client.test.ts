@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { Defaults, EnvVars } from '../src/constants/index.js';
+import { Defaults, EnvVars } from '../src/constants/infra.js';
 import { harnessApiBase, harnessApiRequest } from '../src/core/HarnessApiClient.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 

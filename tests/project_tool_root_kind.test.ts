@@ -11,7 +11,7 @@
  *   G. Startup validation: known named rootKind declared in settings.roots → passes.
  *   H. Startup validation: MCP tool pathArguments unknown rootKind → startup failure.
  *   I. Structured rejection diagnostics: PathArgumentEscapeGuidance.rootKind is typed.
- *   J. ProjectToolRootKind from constants/index.ts is the single source (no duplicate).
+ *   J. ProjectToolRootKind from constants/domain.ts is the single source (no duplicate).
  *   K. Cerdiwen artifact/root template tests: read-only in-repo fixture untouched.
  */
 
@@ -19,10 +19,8 @@ import { describe, expect, it } from 'vitest';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
-import {
-  ProjectToolRootKind,
-  type ProjectToolBuiltinRootKind
-} from '../src/constants/index.js';
+import { ProjectToolRootKind } from '../src/constants/domain.js';
+import type { ProjectToolBuiltinRootKind } from '../src/constants/domain.js';
 import {
   BUILTIN_ROOT_KINDS,
   type ResolvedRootKind
@@ -498,7 +496,7 @@ describe('I. Structured rejection diagnostics use typed rootKind', () => {
 });
 
 // ---------------------------------------------------------------------------
-// J. ProjectToolRootKind from constants/index.ts is the single source
+// J. ProjectToolRootKind from constants/domain.ts is the single source
 // ---------------------------------------------------------------------------
 
 describe('J. Single source of truth: ProjectToolRootKind from constants/index.ts', () => {

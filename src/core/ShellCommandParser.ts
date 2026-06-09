@@ -1,6 +1,6 @@
 import * as path from 'path';
 import parseShell, { type BashAstNode } from 'bash-parser';
-import { FileMutationPolicyDefaults } from '../constants/index.js';
+import { FileMutationPolicyDefaults } from '../constants/infra.js';
 
 export interface ParsedShellWord {
   text: string;

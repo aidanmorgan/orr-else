@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { execa } from 'execa';
-import { DomainEventName, EnvVars, PiCliFlag, SpanName, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, Defaults } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { Defaults, EnvVars, PiCliFlag, SpanName, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue } from '../src/constants/infra.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
@@ -1303,7 +1304,7 @@ states:
 // ---------------------------------------------------------------------------
 
 import { teammatePlugin } from '../src/plugins/teammates.js';
-import { PluginToolName } from '../src/constants/index.js';
+import { PluginToolName } from '../src/constants/domain.js';
 
 describe('teammatePlugin — no-cap minimal schema (s3wp.27e)', () => {
   const root = path.join(os.tmpdir(), 'orr-else-teammate-nocap-test');

@@ -5,7 +5,8 @@ import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createMailboxPlugin } from '../src/plugins/mailbox.js';
-import { Defaults, EnvVars, PluginToolName } from '../src/constants/index.js';
+import { PluginToolName } from '../src/constants/domain.js';
+import { Defaults, EnvVars } from '../src/constants/infra.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 import type { MailboxListResult } from '../src/core/Mailbox.js';
 

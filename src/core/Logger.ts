@@ -2,7 +2,8 @@ import * as winston from 'winston';
 import 'winston-daily-rotate-file';
 import { resolveProjectFrom } from './Paths.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { App, EnvVars, LoggingDefaults } from '../constants/index.js';
+import { App } from '../constants/domain.js';
+import { EnvVars, LoggingDefaults } from '../constants/infra.js';
 
 /**
  * Orr Else structured logger.

@@ -47,7 +47,7 @@ import {
   type RouteEventStore,
   type V2RouteEventResult,
 } from '../src/core/RouteEventContract.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers

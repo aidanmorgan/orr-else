@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execa } from 'execa';
 import { createBdPlugin } from '../src/plugins/bd.js';
-import { PluginToolName } from '../src/constants/index.js';
+import { PluginToolName } from '../src/constants/domain.js';
 
 // fs/promises mock — only the JSONL export writes/reads are stubbed. mkdir/open
 // stay real so the bd-cli lock file can be created (the claim path acquires it).

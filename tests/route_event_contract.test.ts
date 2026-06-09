@@ -39,7 +39,7 @@ import {
 } from '../src/core/RouteEventContract.js';
 import { buildV2EventVocabulary, v2ApplyTransition } from '../src/core/FlowManager.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES } from '../src/constants/index.js';
+import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES } from '../src/constants/domain.js';
 import { DOMAIN_EVENT_SCHEMAS, DOMAIN_EVENT_SCHEMA_METADATA } from '../src/core/DomainEventSchemas.js';
 import { schemaRegistry, SchemaId, REQUIRED_BOUNDARY_IDS } from '../src/core/SchemaRegistry.js';
 import { EventStore, EventStoreValidationError } from '../src/core/EventStore.js';

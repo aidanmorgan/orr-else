@@ -5,7 +5,7 @@ import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createMetaPlugin } from '../src/plugins/meta.js';
-import { DomainEventName, PluginToolName } from '../src/constants/index.js';
+import { DomainEventName, PluginToolName } from '../src/constants/domain.js';
 import type { CreatePluginResult } from '../src/plugins/meta.js';
 
 // ---------------------------------------------------------------------------

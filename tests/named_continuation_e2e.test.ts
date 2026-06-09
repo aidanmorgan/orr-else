@@ -33,7 +33,7 @@ import {
   type ContextPolicyTableRow,
   type ContextKeyRecord
 } from '../src/extension/CoordinatorController.js';
-import { StateContextPolicy, ActionContextMode } from '../src/constants/index.js';
+import { ActionContextMode, StateContextPolicy } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';

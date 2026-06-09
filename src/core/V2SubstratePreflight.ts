@@ -25,7 +25,7 @@
 
 import { execa } from 'execa';
 import type { EventStore } from './EventStore.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Types

@@ -22,7 +22,7 @@ import {
   type PromptCacheObservabilityEvent,
 } from '../src/core/TokenUsage.js';
 import { digestStableBlock, digestIdentity, type StableBootstrapInputs, DIGEST_ID_LENGTH } from '../src/core/BootstrapDigest.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import { DOMAIN_EVENT_SCHEMAS, DOMAIN_EVENT_SCHEMA_METADATA } from '../src/core/DomainEventSchemas.js';
 import { recordTurnUsage } from '../src/extension/PiObservers.js';
 

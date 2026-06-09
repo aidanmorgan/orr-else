@@ -27,7 +27,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import orrElseExtension from '../src/extension.js';
-import { EnvVars, ProcessFlag, PiEventName, DomainEventName, ToolResultStatus, ProjectToolType } from '../src/constants/index.js';
+import { DomainEventName, ProjectToolType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';

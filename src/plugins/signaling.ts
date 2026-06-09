@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { postHarnessSignal, CoordinatorRejectionError } from '../core/HarnessApiClient.js';
-import { BuiltInToolName } from '../constants/index.js';
+import { BuiltInToolName } from '../constants/domain.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 
 /**

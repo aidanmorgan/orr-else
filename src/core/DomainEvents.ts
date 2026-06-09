@@ -1,6 +1,7 @@
 import { EventStore } from './EventStore.js';
 import { Logger } from './Logger.js';
-import { Component, DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 
 export const DomainEvent = {
   BEAD_CLAIMED: DomainEventName.BEAD_CLAIMED,

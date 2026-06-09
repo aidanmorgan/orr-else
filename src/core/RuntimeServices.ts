@@ -20,8 +20,9 @@ import { ShellCommandParser } from './ShellCommandParser.js';
 import { TelemetryStore } from './Telemetry.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
 import { TransactionalStateGuard } from './TransactionalStateGuard.js';
-import { EnvVars, PluginToolName } from '../constants/index.js';
-import type { BeadStatus } from '../constants/index.js';
+import { PluginToolName } from '../constants/domain.js';
+import { EnvVars } from '../constants/infra.js';
+import type { BeadStatus } from '../constants/domain.js';
 import type { BeadsPort, BeadCompletionPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
 // WorktreeResult is defined in OrchestrationPorts; re-exported here for

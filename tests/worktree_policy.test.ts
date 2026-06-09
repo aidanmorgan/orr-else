@@ -14,7 +14,7 @@
  */
 
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';
 import { Supervisor } from '../src/core/Supervisor.js';

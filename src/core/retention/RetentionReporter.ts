@@ -8,7 +8,8 @@
  */
 
 import { Logger } from '../Logger.js';
-import { Component, DomainEventName } from '../../constants/index.js';
+import { DomainEventName } from '../../constants/domain.js';
+import { Component } from '../../constants/infra.js';
 import type { RetentionAreaSummary, RetentionCleanupResult } from './RetentionTypes.js';
 import type { CompactionRunSummary } from './EventLogCompactor.js';
 

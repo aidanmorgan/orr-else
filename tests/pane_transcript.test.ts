@@ -31,7 +31,7 @@ import {
   detectFinalBlockedState,
   SCAN_FINAL_TAIL_LINES,
 } from '../src/core/PaneTranscriptScanner.js';
-import { PaneTranscriptDefaults, OperationalArtifactPath, EnvVars } from '../src/constants/index.js';
+import { EnvVars, OperationalArtifactPath, PaneTranscriptDefaults } from '../src/constants/infra.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Observability } from '../src/core/Observability.js';

@@ -39,7 +39,8 @@ import {
   type RtkCancellationPolicy,
   type RtkIdempotencyClass,
 } from '../src/core/RtkContract.js';
-import { BuiltInToolName, EnvVars, NativePiToolName, PluginToolName, ProjectToolType, ToolResultStatus } from '../src/constants/index.js';
+import { BuiltInToolName, PluginToolName, ProjectToolType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, NativePiToolName } from '../src/constants/infra.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig } from '../src/core/domain/StateModels.js';
 
 // ── MCP SDK mock (hoisted so Scenario 7 can capture callTool RequestOptions) ──

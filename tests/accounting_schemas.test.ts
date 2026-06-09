@@ -32,7 +32,7 @@ import {
   buildModelTurnIdempotencyKey,
   buildToolPayloadIdempotencyKey,
 } from '../src/core/TokenUsage.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // AC1 — Distinct event types registered in DomainEventName and DOMAIN_EVENT_SCHEMAS

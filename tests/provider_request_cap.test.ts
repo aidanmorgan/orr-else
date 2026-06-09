@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens } from '../src/core/ProviderRequestCap.js';
-import { ProviderRequestLimits } from '../src/constants/index.js';
+import { ProviderRequestLimits } from '../src/constants/infra.js';
 
 describe('capAnthropicMaxTokens', () => {
   it('caps max_tokens above the cap and returns the mutated payload', () => {

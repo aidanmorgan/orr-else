@@ -7,7 +7,8 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 import { BeadEventIndex } from '../src/core/BeadEventIndex.js';
 import { Logger } from '../src/core/Logger.js';
-import { DomainEventName, EventName, EventStoreDefaults, PluginToolName, TeammateEventType } from '../src/constants/index.js';
+import { DomainEventName, EventName, PluginToolName, TeammateEventType } from '../src/constants/domain.js';
+import { EventStoreDefaults } from '../src/constants/infra.js';
 import type { Clock } from '../src/core/Clock.js';
 
 // Helper to compute the collision-resistant index filename for a bead ID.

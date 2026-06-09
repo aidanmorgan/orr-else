@@ -23,7 +23,7 @@ import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Supervisor } from '../src/core/Supervisor.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
 

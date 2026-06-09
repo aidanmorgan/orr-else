@@ -9,7 +9,8 @@ import { verifier, VerifyVerdict } from '../src/contract.js';
 import { FlowManager } from '../src/core/FlowManager.js';
 import { Teammate } from '../src/core/Teammate.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';
-import { BuiltInToolName, DomainEventName, EnvVars, NativePiToolName, PiEventName, PluginToolName, ProcessFlag } from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName, PluginToolName } from '../src/constants/domain.js';
+import { EnvVars, NativePiToolName, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
 import { ContextInjector } from '../src/core/ContextInjector.js';
 

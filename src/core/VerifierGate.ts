@@ -50,7 +50,7 @@ import {
   type VerifyResult,
   type ToolRunStatus
 } from '../contract.js';
-import { DomainEventName, ToolResultStatus } from '../constants/index.js';
+import { DomainEventName, ToolResultStatus } from '../constants/domain.js';
 import { isRecord } from './RecordUtils.js';
 import type { DomainEvent } from './EventStoreTypes.js';
 import { asToolName, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';

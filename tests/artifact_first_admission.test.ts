@@ -54,14 +54,8 @@ import { RequiredToolResolver } from '../src/core/RequiredToolResolver.js';
 import { Observability } from '../src/core/Observability.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import {
-  DomainEventName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag,
-  TeammateEventType,
-  ToolResultStatus,
-} from '../src/constants/index.js';
+import { DomainEventName, TeammateEventType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import orrElseExtension from '../src/extension.js';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { TeammateFactory } from '../src/plugins/teammates.js';

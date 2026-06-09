@@ -6,7 +6,8 @@
  */
 
 import type { ToolCallEvent, ToolResultEvent } from '@earendil-works/pi-coding-agent';
-import { WorkerDefaults, ToolResultStatus } from '../constants/index.js';
+import { ToolResultStatus } from '../constants/domain.js';
+import { WorkerDefaults } from '../constants/infra.js';
 
 // ── shared ───────────────────────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { TransactionalStateGuard } from '../src/core/TransactionalStateGuard.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });

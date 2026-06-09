@@ -9,7 +9,8 @@ import { EventStore } from '../src/core/EventStore.js';
 import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { ShellCommandParser } from '../src/core/ShellCommandParser.js';
-import { DomainEventName, EnvVars, FileMutationPolicyDefaults, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, FileMutationPolicyDefaults, NativePiToolName, ProcessFlag } from '../src/constants/infra.js';
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });

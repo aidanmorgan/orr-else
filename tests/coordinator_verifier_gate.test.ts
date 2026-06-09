@@ -50,7 +50,7 @@ import { RequiredToolResolver } from '../src/core/RequiredToolResolver.js';
 import { Observability } from '../src/core/Observability.js';
 import { SignalingServer, type SignalAck, type SignalGateVerdict } from '../src/core/SignalingServer.js';
 import { createTeammateEventIdempotencyKey, type TeammateEvent } from '../src/core/TeammateEvents.js';
-import { DomainEventName, ToolResultStatus, TeammateEventType } from '../src/constants/index.js';
+import { DomainEventName, TeammateEventType, ToolResultStatus } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 

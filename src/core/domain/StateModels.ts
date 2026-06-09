@@ -1,15 +1,6 @@
 import { ChecklistItem } from '../ProtocolParser.js';
-import {
-  ActionContextMode,
-  ActionRunContext,
-  ActionType,
-  ProjectToolType,
-  CwdMode,
-  StateContextPolicy,
-  ThinkingLevel,
-  ToolValidationCondition,
-  type ProjectToolBuiltinRootKind
-} from '../../constants/index.js';
+import { ActionContextMode, ActionRunContext, ActionType, CwdMode, ProjectToolType, StateContextPolicy, ThinkingLevel, ToolValidationCondition } from '../../constants/domain.js';
+import type { ProjectToolBuiltinRootKind } from '../../constants/domain.js';
 import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.js';
 
 /**

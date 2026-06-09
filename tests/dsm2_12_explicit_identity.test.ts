@@ -37,7 +37,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { DomainEventName, ToolResultStatus } from '../src/constants/index.js';
+import { DomainEventName, ToolResultStatus } from '../src/constants/domain.js';
 import { Logger } from '../src/core/Logger.js';
 import { mapPiToolCallIdToInvocationId } from '../src/extension/PiEventAdapters.js';
 

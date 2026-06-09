@@ -1,7 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import { NativeMailbox } from '../core/Mailbox.js';
 import { EventStore } from '../core/EventStore.js';
-import { EnvVars, PluginToolName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
+import { MailboxMessageType, PluginToolName } from '../constants/domain.js';
+import { EnvVars, MailboxDefaults } from '../constants/infra.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
 

@@ -24,17 +24,8 @@ import { resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord } from './RecordUtils.js';
-import {
-  ActionContextMode,
-  ActionRunContext,
-  BeadStatus,
-  Component,
-  EventName,
-  ProjectToolRootKind,
-  RECOGNIZED_COARSE_SINK_STATUSES,
-  StateContextPolicy,
-  ThinkingLevel
-} from '../constants/index.js';
+import { ActionContextMode, ActionRunContext, BeadStatus, EventName, ProjectToolRootKind, RECOGNIZED_COARSE_SINK_STATUSES, StateContextPolicy, ThinkingLevel } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 import { lintActiveToolSets } from './ActiveToolSetResolver.js';
 
 const Ajv = AjvModule.default || AjvModule;
@@ -3169,7 +3160,7 @@ export class ConfigValidator {
    * (per amq0.19 scope: minimize conflict with concurrent amq0.10).
    */
   public validateNamedRoots(config: HarnessConfig): void {
-    // pi-experiment-amq0.19: derived from the single source in constants/index.ts — not a hand-typed copy.
+    // pi-experiment-amq0.19: derived from the single source in constants/domain.ts — not a hand-typed copy.
     const BUILTIN_KINDS: Set<string> = new Set(Object.values(ProjectToolRootKind));
     const declaredRoots = new Set(Object.keys(config.settings?.roots ?? {}));
 

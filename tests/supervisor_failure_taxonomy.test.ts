@@ -35,7 +35,8 @@ import {
   RetryBudget,
   AuthorityLevel,
 } from '../src/core/FailureTaxonomy.js';
-import { DomainEventName, SupervisorDefaults, TimeMs } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { SupervisorDefaults, TimeMs } from '../src/constants/infra.js';
 import { setBridgeProbeForTest, resetMcpBridgeHealthCache } from '../src/core/McpTransportPreflight.js';
 
 // ---------------------------------------------------------------------------
@@ -332,7 +333,8 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
 
   it('AGENT_TURN_FAILED events for worker process loss carry taxonomy fields (WORKER_PROCESS_LOSS → BOUNDED_RETRY)', async () => {
     const { Supervisor } = await import('../src/core/Supervisor.js');
-    const { TimeMs, DomainEventName: DEN } = await import('../src/constants/index.js');
+    const { TimeMs } = await import('../src/constants/infra.js');
+    const { DomainEventName: DEN } = await import('../src/constants/domain.js');
 
     const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
     const STALE_PROGRESS_AGE_MS = TimeMs.MINUTE;
@@ -422,7 +424,7 @@ describe('AC1+AC2: supervisor taxonomy fields on failure events', () => {
     // The capacity-pause path records SCHEDULING_PAUSED (sole event after j0tp).
     // l3k4 taxonomy fields are preserved on SCHEDULING_PAUSED.
     const { Supervisor } = await import('../src/core/Supervisor.js');
-    const { TimeMs } = await import('../src/constants/index.js');
+    const { TimeMs } = await import('../src/constants/infra.js');
 
     const NOW_MS = Date.parse('2026-01-02T03:04:05.000Z');
     const records: Array<{ event: string; data: any }> = [];

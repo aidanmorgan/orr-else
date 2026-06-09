@@ -43,12 +43,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import orrElseExtension from '../src/extension.js';
-import {
-  BuiltInToolName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag
-} from '../src/constants/index.js';
+import { BuiltInToolName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal fake Pi surface (mirrors pi_extension.test.ts)

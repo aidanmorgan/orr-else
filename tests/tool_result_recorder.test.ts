@@ -35,7 +35,7 @@ import {
   isEvidenceBearingProjectToolFailedEvent,
 } from '../src/core/ToolResultRecorder.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
-import { ToolResultStatus } from '../src/constants/index.js';
+import { ToolResultStatus } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -227,8 +227,8 @@ describe('VerifierGate — short-circuit rejection treated as INVOKED-BUT-FAILED
   it('gate sees TOOL_REJECTED (not TOOL_NOT_INVOKED) for a REJECTED event with outputFile', async () => {
     // Import gate and the block kind enum
     const { runVerifierGate, VerifierGateBlockKind } = await import('../src/core/VerifierGate.js');
-    const { DomainEventName } = await import('../src/constants/index.js');
-    const { ToolResultStatus } = await import('../src/constants/index.js');
+    const { DomainEventName } = await import('../src/constants/domain.js');
+    const { ToolResultStatus } = await import('../src/constants/domain.js');
 
     // Fake store: provides a REJECTED event WITH outputFile (written by recorder)
     const fakeProjectOutputFile = '/fake/.pi/tool-output/bead1/Implementing/code/my_tool/inv-001/output/short-circuit.json';
@@ -277,7 +277,7 @@ describe('VerifierGate — short-circuit rejection treated as INVOKED-BUT-FAILED
 
   it('gate sees TOOL_NOT_INVOKED when event lacks toolResult.outputFile (the old bug)', async () => {
     const { runVerifierGate, VerifierGateBlockKind } = await import('../src/core/VerifierGate.js');
-    const { DomainEventName, ToolResultStatus } = await import('../src/constants/index.js');
+    const { DomainEventName, ToolResultStatus } = await import('../src/constants/domain.js');
 
     // Old-style event: no toolResult.outputFile — gate cannot match it
     const store = {

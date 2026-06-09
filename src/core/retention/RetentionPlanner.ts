@@ -8,7 +8,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup.
  */
 
-import { OperationalArtifactPath, RetentionDefaults } from '../../constants/index.js';
+import { OperationalArtifactPath, RetentionDefaults } from '../../constants/infra.js';
 
 /**
  * A single harness-owned area to clean up.

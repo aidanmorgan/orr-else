@@ -22,7 +22,7 @@
  *   - Failure category:   src/plugins/projectTools/failureCategory.ts
  */
 import type { ResolvedHarnessConfig } from '../core/ConfigLoader.js';
-import { ProjectToolType } from '../constants/index.js';
+import { ProjectToolType } from '../constants/domain.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, SDLCState, TeammateAction } from '../core/domain/StateModels.js';
 import {
   normalizeConfiguredCliFlag,

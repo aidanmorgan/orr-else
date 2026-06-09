@@ -11,19 +11,8 @@
 
 import { isRecord, mergeReplacingArraysAndDeletingUndefined } from './RecordUtils.js';
 import { isRestartTransition } from './EventUtils.js';
-import {
-  ActionCompletionKey,
-  AgentFailureCode,
-  AgentFailureSummary,
-  BeadStatus,
-  DomainEventName,
-  EventName,
-  EventProjectionDefaults,
-  MergeAndCommitStatus,
-  RestartKind,
-  ReviewArtifactKind,
-  TeammateEventType
-} from '../constants/index.js';
+import { ActionCompletionKey, BeadStatus, DomainEventName, EventName, MergeAndCommitStatus, RestartKind, ReviewArtifactKind, TeammateEventType } from '../constants/domain.js';
+import { AgentFailureCode, AgentFailureSummary, EventProjectionDefaults } from '../constants/infra.js';
 import type { HarnessBeadMetadata } from '../types/index.js';
 import type {
   DomainEvent,

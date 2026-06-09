@@ -34,7 +34,7 @@ import {
   type CompactionPointer
 } from '../src/core/RestartHandoffValidation.js';
 import { BeadStateProjection } from '../src/core/BeadStateProjection.js';
-import { DomainEventName, RestartKind } from '../src/constants/index.js';
+import { DomainEventName, RestartKind } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 // Import HandoffSchemas so schema registration side effects run.
 import '../src/core/HandoffSchemas.js';

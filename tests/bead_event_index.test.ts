@@ -5,7 +5,7 @@ import * as path from 'path';
 import { createHash } from 'node:crypto';
 import { BeadEventIndex } from '../src/core/BeadEventIndex.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
-import { EventStoreDefaults } from '../src/constants/index.js';
+import { EventStoreDefaults } from '../src/constants/infra.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 const BEAD_CLAIMED = 'BEAD_CLAIMED';

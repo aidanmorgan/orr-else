@@ -386,7 +386,7 @@ states:
     const state: SDLCState = {
       id: 'Implement',
       identity: { role: 'R', expertise: 'E', constraints: [] },
-      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/index.js').ActionType }],
+      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/domain.js').ActionType }],
       transitions: {
         SUCCESS: 'completed',
         FAILURE: 'Implement'
@@ -410,7 +410,7 @@ states:
     const state: SDLCState = {
       id: 'Implement',
       identity: { role: 'R', expertise: 'E', constraints: [] },
-      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/index.js').ActionType }],
+      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/domain.js').ActionType }],
       transitions: {
         SUCCESS: 'completed',
         FAILURE: 'Implement'
@@ -429,7 +429,7 @@ states:
     const state: SDLCState = {
       id: 'Implement',
       identity: { role: 'R', expertise: 'E', constraints: [] },
-      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/index.js').ActionType }],
+      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/domain.js').ActionType }],
       transitions: {
         SUCCESS: 'completed'
       }
@@ -453,7 +453,7 @@ states:
     const state: SDLCState = {
       id: 'Implement',
       identity: { role: 'R', expertise: 'E', constraints: [] },
-      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/index.js').ActionType }],
+      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/domain.js').ActionType }],
       transitions: {
         SUCCESS: 'completed',
         FAILURE: 'Implement',
@@ -479,7 +479,7 @@ states:
     const state: SDLCState = {
       id: 'Implement',
       identity: { role: 'R', expertise: 'E', constraints: [] },
-      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/index.js').ActionType }],
+      actions: [{ id: 'a1', type: 'prompt' as import('../src/constants/domain.js').ActionType }],
       transitions: {
         SUCCESS: 'completed',
         FAILURE: 'Implement'

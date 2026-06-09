@@ -4,7 +4,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { JsonlSpanExporter, Observability, SpanStatusValue } from '../src/core/Observability.js';
-import { EnvVars, ObservabilityDefaults, OtelAttr, SpanName, ToolResultStatus } from '../src/constants/index.js';
+import { ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, ObservabilityDefaults, OtelAttr, SpanName } from '../src/constants/infra.js';
 
 describe('Observability', () => {
   const root = path.join(os.tmpdir(), 'orr-else-observability-test');

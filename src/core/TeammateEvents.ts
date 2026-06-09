@@ -1,12 +1,7 @@
 import { createHash } from 'node:crypto';
 import { BeadId, WorkerId, StateId } from '../types/ids.js';
-import {
-  DomainEventName,
-  EventName,
-  EventProjectionDefaults,
-  TeammateEventDecisionAction,
-  TeammateEventType
-} from '../constants/index.js';
+import { DomainEventName, EventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
+import { EventProjectionDefaults } from '../constants/infra.js';
 import { validateHandoffPayload, HandoffSchemaId } from './HandoffSchemas.js';
 
 export { TeammateEventType };

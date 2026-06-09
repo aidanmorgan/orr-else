@@ -1,5 +1,6 @@
 import { execa } from 'execa';
-import { Component, DomainEventName, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
+import { Component, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/infra.js';
 import type { BeadId } from '../types/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';

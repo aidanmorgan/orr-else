@@ -2,7 +2,8 @@ import { execFileSync } from 'child_process';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 import { Logger } from '../core/Logger.js';
-import { Component, ClaudeCodeAuth, LLMProviderName } from '../constants/index.js';
+import { LLMProviderName } from '../constants/domain.js';
+import { ClaudeCodeAuth, Component } from '../constants/infra.js';
 
 interface ClaudeCodeKeychainCredential {
   accessToken?: string;

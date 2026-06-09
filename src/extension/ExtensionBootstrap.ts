@@ -21,10 +21,11 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import type { RuntimeServices } from '../composition/createRuntimeServices.js';
 import { registerBuiltInVerifiers } from '../tools/index.js';
 import { Logger } from '../core/Logger.js';
-import { Component, App } from '../constants/index.js';
+import { App } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 import { registerProcessLifecycleObservers } from './ProcessLifecycleObserver.js';
 import { registerPiLifecycleCallbacks, type PiLifecycleHandlers } from './PiRegistrationService.js';
-import type { PiEventName } from '../constants/index.js';
+import type { PiEventName } from '../constants/infra.js';
 
 /**
  * Injected ports for ExtensionBootstrap.

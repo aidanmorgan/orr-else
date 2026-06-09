@@ -23,7 +23,7 @@ import {
   resolveStateContextPolicy,
   type ContextKeyRecord
 } from '../src/extension/CoordinatorController.js';
-import { StateContextPolicy } from '../src/constants/index.js';
+import { StateContextPolicy } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import type { BeadsPort, WorktreePort } from '../src/core/OrchestrationPorts.js';

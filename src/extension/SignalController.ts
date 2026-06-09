@@ -13,8 +13,9 @@ import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { createTeammateEventIdempotencyKey, findAppliedTeammateSignal } from '../core/TeammateEvents.js';
 import { postHarnessSignal, CoordinatorRejectionError } from '../core/HarnessApiClient.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
-import { DomainEventName, OtelAttr, SpanName } from '../constants/index.js';
-import type { TeammateEventType } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
+import { OtelAttr, SpanName } from '../constants/infra.js';
+import type { TeammateEventType } from '../constants/domain.js';
 
 // ── worker env resolved by the composition root ──────────────────────────────
 

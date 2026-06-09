@@ -2,7 +2,8 @@ import { Bead } from '../types/index.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { FlowManager } from './FlowManager.js';
 import { Logger } from './Logger.js';
-import { App, BeadStatus, Component, SchedulerDefaults } from '../constants/index.js';
+import { App, BeadStatus } from '../constants/domain.js';
+import { Component, SchedulerDefaults } from '../constants/infra.js';
 import type { ResolvedHarnessConfig } from './ConfigLoader.js';
 
 /** Default terminal states when no statechart block is configured. */

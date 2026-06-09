@@ -2,16 +2,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { quote as quoteShellArgs } from 'shell-quote';
-import {
-  Component,
-  DomainEventName,
-  EnvVars,
-  FileMutationPolicyDefaults,
-  NativePiToolName,
-  OperationalArtifactPath,
-  OperationalLogPath,
-  ProcessFlag
-} from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
+import { Component, EnvVars, FileMutationPolicyDefaults, NativePiToolName, OperationalArtifactPath, OperationalLogPath, ProcessFlag } from '../constants/infra.js';
 import { Logger } from './Logger.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';

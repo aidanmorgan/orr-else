@@ -14,15 +14,7 @@ import * as path from 'path';
 import type { ToolCallEvent } from '@earendil-works/pi-coding-agent';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
-import {
-  NativePiToolName,
-  OperationalArtifactPath,
-  OperationalLogPath,
-  FileMutationPolicyDefaults,
-  NativeReadPolicyDefaults,
-  PiToolPolicyDefaults,
-  EnvVars
-} from '../constants/index.js';
+import { EnvVars, FileMutationPolicyDefaults, NativePiToolName, NativeReadPolicyDefaults, OperationalArtifactPath, OperationalLogPath, PiToolPolicyDefaults } from '../constants/infra.js';
 
 // ── constants copied verbatim from extension.ts ──────────────────────────────
 

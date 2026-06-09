@@ -6,19 +6,8 @@ import { Logger } from './Logger.js';
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import {
-  Component,
-  DEFAULT_OBSERVED_PI_TOOLS,
-  DefaultModelName,
-  Defaults,
-  EnvVars,
-  EventName,
-  LLMProviderName,
-  ModelProviderKey,
-  SchedulerDefaults,
-  SubscriptionProviderToken,
-  ThinkingLevel
-} from '../constants/index.js';
+import { EventName, LLMProviderName, ModelProviderKey, SubscriptionProviderToken, ThinkingLevel } from '../constants/domain.js';
+import { Component, DEFAULT_OBSERVED_PI_TOOLS, DefaultModelName, Defaults, EnvVars, SchedulerDefaults } from '../constants/infra.js';
 import { ConfigFileSource } from './ConfigFileSource.js';
 import { ConfigParser } from './ConfigParser.js';
 import { ConfigNormalizer } from './ConfigNormalizer.js';

@@ -37,15 +37,8 @@ import {
 } from '../tools/builtin_handles.js';
 import { getBuiltInRtkSummaryFactory } from '../tools/builtin_rtk_registry.js';
 import { persistPluginToolRawResult } from './RawToolResultStore.js';
-import {
-  DomainEventName,
-  PluginToolName,
-  ToolResultStatus,
-  ToolValidationCondition,
-  ToolDefaults,
-  EnvVars,
-  OtelAttr,
-} from '../constants/index.js';
+import { DomainEventName, PluginToolName, ToolResultStatus, ToolValidationCondition } from '../constants/domain.js';
+import { EnvVars, OtelAttr, ToolDefaults } from '../constants/infra.js';
 import { buildToolTokenAccounting, serializeToolResultText } from '../core/TokenUsage.js';
 import { evaluateToolPayloadBudget } from '../core/ToolPayloadBudget.js';
 import type { Observability, SpanAttributes, SpanCompletion } from '../core/Observability.js';

@@ -14,18 +14,8 @@
 import { asBeadId } from '../types/index.js';
 import { Logger } from './Logger.js';
 import { SignalingServer } from './SignalingServer.js';
-import {
-  AgentFailureSummary,
-  BeadStatus,
-  Component,
-  DomainEventName,
-  EventName,
-  PluginToolName,
-  QuarantineReason,
-  SupervisorDefaults,
-  TeammateEventType,
-  TERMINAL_BEAD_STATUSES,
-} from '../constants/index.js';
+import { BeadStatus, DomainEventName, EventName, PluginToolName, QuarantineReason, TERMINAL_BEAD_STATUSES, TeammateEventType } from '../constants/domain.js';
+import { AgentFailureSummary, Component, SupervisorDefaults } from '../constants/infra.js';
 import { detectFinalBlockedState, ScanCategory } from './PaneTranscriptScanner.js';
 import { deriveRestartId } from './RestartCorrelation.js';
 import {

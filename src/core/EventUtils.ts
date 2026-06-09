@@ -1,4 +1,4 @@
-import { EventName } from '../constants/index.js';
+import { EventName } from '../constants/domain.js';
 
 /**
  * Returns true when the given transition event value represents any kind of restart

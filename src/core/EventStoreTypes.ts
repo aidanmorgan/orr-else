@@ -6,9 +6,9 @@
  * EventStore re-exports all of these so existing callers are unaffected.
  */
 
-import type { DomainEventName } from '../constants/index.js';
+import type { DomainEventName } from '../constants/domain.js';
 import type { HarnessBeadMetadata } from '../types/index.js';
-import type { RestartKind, MergeAndCommitStatus } from '../constants/index.js';
+import type { MergeAndCommitStatus, RestartKind } from '../constants/domain.js';
 import type { BeadId, EventId, SessionId, StateId, ActionId, ToolName } from '../types/ids.js';
 
 /**

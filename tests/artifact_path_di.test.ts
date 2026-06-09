@@ -19,7 +19,8 @@ import { WorklogManager } from '../src/core/WorklogManager.js';
 import { Observability } from '../src/core/Observability.js';
 import { createQualityPlugin } from '../src/plugins/quality.js';
 import { resolveExportOutputPath } from '../src/plugins/bd.js';
-import { EnvVars, OperationalArtifactPath, OperationalLogPath, PluginToolName } from '../src/constants/index.js';
+import { PluginToolName } from '../src/constants/domain.js';
+import { EnvVars, OperationalArtifactPath, OperationalLogPath } from '../src/constants/infra.js';
 import type { BeadId } from '../src/types/index.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 

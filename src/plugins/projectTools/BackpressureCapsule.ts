@@ -8,7 +8,7 @@
  * Pure module — no external package imports; importable in tests without node_modules.
  */
 
-import { ToolResultStatus } from '../../constants/index.js';
+import { ToolResultStatus } from '../../constants/domain.js';
 import { ProjectToolFailureCategory } from './failureCategory.js';
 
 /**

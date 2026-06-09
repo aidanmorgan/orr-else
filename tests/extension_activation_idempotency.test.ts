@@ -33,7 +33,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import orrElseExtension from '../src/extension.js';
-import { PiEventName, BuiltInToolName } from '../src/constants/index.js';
+import { BuiltInToolName } from '../src/constants/domain.js';
+import { PiEventName } from '../src/constants/infra.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

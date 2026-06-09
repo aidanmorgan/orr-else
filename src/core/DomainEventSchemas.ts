@@ -58,7 +58,7 @@
  *   EventStore.validateProductionPayload() is UNCHANGED.
  */
 
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // pi-experiment-kutb: per-event schema metadata
@@ -612,7 +612,7 @@ export function getDomainEventMeta(eventType: string): DomainEventSchemaMetadata
  *        production write of that event (synthetic writes are rejected — 824i).
  *
  * Source of truth for which events are covered:
- *   REPLAY_CRITICAL_EVENT_TYPES (src/constants/index.ts) — events that must
+ *   REPLAY_CRITICAL_EVENT_TYPES (src/constants/domain.ts) — events that must
  *   never be compacted. All of those are covered here, plus startup/substrate
  *   events that feed monitoring (HARNESS_STARTED/STOPPED, BEAD_CREATED, etc.).
  */

@@ -76,12 +76,8 @@ import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Teammate, type WorkerContext } from '../src/core/Teammate.js';
 import { Logger } from '../src/core/Logger.js';
-import {
-  DomainEventName,
-  PiEventName,
-  PluginToolName,
-  WorkerDefaults
-} from '../src/constants/index.js';
+import { DomainEventName, PluginToolName } from '../src/constants/domain.js';
+import { PiEventName, WorkerDefaults } from '../src/constants/infra.js';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { BeadId } from '../src/types/index.js';

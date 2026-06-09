@@ -7,7 +7,8 @@ import { execa } from 'execa';
 import { open, readFile, stat } from 'fs/promises';
 import { resolveTemplateString } from '../../core/TemplateResolver.js';
 import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
-import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults, ProjectToolType, ToolResultStatus } from '../../constants/index.js';
+import { ProjectToolType, ToolResultStatus } from '../../constants/domain.js';
+import { CommandErrorCode, CommandExitCode, Defaults, ProjectToolDefaults } from '../../constants/infra.js';
 import {
   COMMAND_STDERR_FILE_NAME,
   COMMAND_STDOUT_FILE_NAME,

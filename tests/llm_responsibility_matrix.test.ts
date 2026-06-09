@@ -67,7 +67,7 @@ import {
   buildCompactionSummary,
 } from '../src/core/CompactionSummary.js';
 
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import type { BeadId, StateId, ActionId, ToolName } from '../src/types/ids.js';
 

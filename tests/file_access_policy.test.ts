@@ -19,7 +19,8 @@ import { FileAccessPolicy } from '../src/core/FileAccessPolicy.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { PlanWriteSet } from '../src/core/PlanWriteSet.js';
 import { ShellCommandParser } from '../src/core/ShellCommandParser.js';
-import { DomainEventName, EnvVars, NativePiToolName, ProcessFlag } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, NativePiToolName, ProcessFlag } from '../src/constants/infra.js';
 
 describe('FileAccessPolicy — framework-root write-set early rejection (Part B mis)', () => {
   let tempRoot: string;

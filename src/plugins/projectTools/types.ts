@@ -115,7 +115,7 @@ export interface PathArgumentEscapeGuidance {
 
 export interface CommandResultInput {
   definition: import('../../core/domain/StateModels.js').ProjectCommandToolConfig;
-  status: import('../../constants/index.js').ToolResultStatus;
+  status: import('../../constants/domain.js').ToolResultStatus;
   exitCode: number | undefined;
   maxBufferExceeded: boolean;
   timedOut?: boolean;

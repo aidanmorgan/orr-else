@@ -19,14 +19,8 @@ import * as path from 'path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
-import {
-  DomainEventName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag,
-  ProjectToolType,
-  ToolResultStatus
-} from '../src/constants/index.js';
+import { DomainEventName, ProjectToolType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { executeConfiguredProjectTool } from '../src/plugins/projectTools.js';
 import type { ProjectCommandToolConfig } from '../src/core/domain/StateModels.js';
 import orrElseExtension from '../src/extension.js';
@@ -424,7 +418,7 @@ states:
 
 describe('toolInvocationId constant wiring (dl9r)', () => {
   it('OtelAttr.ORR_ELSE_TOOL_INVOCATION_ID is defined and has the expected value', async () => {
-    const { OtelAttr } = await import('../src/constants/index.js');
+    const { OtelAttr } = await import('../src/constants/infra.js');
     expect(OtelAttr.ORR_ELSE_TOOL_INVOCATION_ID).toBe('orr_else.tool_invocation_id');
   });
 

@@ -26,7 +26,7 @@ import * as path from 'path';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import { writeFixtureEvent } from './support/TestEventStore.js';
 import { JsonlEventLog } from '../src/core/JsonlEventLog.js';
 

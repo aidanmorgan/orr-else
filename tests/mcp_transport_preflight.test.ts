@@ -22,7 +22,7 @@ import {
 } from '../src/core/McpTransportPreflight.js';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
-import { DomainEventName, ProjectToolType } from '../src/constants/index.js';
+import { DomainEventName, ProjectToolType } from '../src/constants/domain.js';
 import type { Clock } from '../src/core/Clock.js';
 
 // ── helpers ───────────────────────────────────────────────────────────────────

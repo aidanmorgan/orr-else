@@ -4,12 +4,8 @@ import * as path from 'path';
 import * as os from 'os';
 import { RetentionService } from '../src/core/retention/RetentionService.js';
 import { resolveRetentionConfig } from '../src/core/retention/RetentionPlanner.js';
-import {
-  DomainEventName,
-  EventStoreDefaults,
-  REPLAY_CRITICAL_EVENT_TYPES,
-  RetentionDefaults
-} from '../src/constants/index.js';
+import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES } from '../src/constants/domain.js';
+import { EventStoreDefaults, RetentionDefaults } from '../src/constants/infra.js';
 import { BeadStateProjection } from '../src/core/BeadStateProjection.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';

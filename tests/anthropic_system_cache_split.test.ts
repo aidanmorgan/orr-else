@@ -15,7 +15,7 @@ import {
   ANTHROPIC_VOLATILE_BOUNDARY,
   type ProviderRequestCapSession
 } from '../src/extension/PiObservers.js';
-import { PiEventName } from '../src/constants/index.js';
+import { PiEventName } from '../src/constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

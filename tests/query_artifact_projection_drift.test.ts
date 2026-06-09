@@ -28,7 +28,7 @@ import * as path from 'path';
 import { ArtifactQuery } from '../src/core/ArtifactQuery.js';
 import { ArtifactPaths } from '../src/core/ArtifactPaths.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { EnvVars } from '../src/constants/index.js';
+import { EnvVars } from '../src/constants/infra.js';
 import { projections, type ProjectionDef } from '../src/contract.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-query-artifact-drift-test');

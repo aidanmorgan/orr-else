@@ -251,7 +251,8 @@ import {
   computeCurrentStateConfigHash,
   type FileReadPort
 } from '../src/core/PromptProvenanceService.js';
-import { PromptProvenanceKind, PromptProvenanceDefaults } from '../src/constants/index.js';
+import { PromptProvenanceKind } from '../src/constants/domain.js';
+import { PromptProvenanceDefaults } from '../src/constants/infra.js';
 
 function sha256hex(content: string | Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');

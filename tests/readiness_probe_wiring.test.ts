@@ -16,7 +16,8 @@ import * as path from 'node:path';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 
 import orrElseExtension from '../src/extension.js';
-import { BuiltInToolName, EnvVars, PiEventName, ProjectToolType } from '../src/constants/index.js';
+import { BuiltInToolName, ProjectToolType } from '../src/constants/domain.js';
+import { EnvVars, PiEventName } from '../src/constants/infra.js';
 
 // ── Minimal fake Pi surface ───────────────────────────────────────────────────
 

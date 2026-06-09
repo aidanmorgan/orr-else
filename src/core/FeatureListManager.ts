@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { EventStore } from './EventStore.js';
-import { Component, DomainEventName, FeatureStatus } from '../constants/index.js';
+import { DomainEventName, FeatureStatus } from '../constants/domain.js';
+import { Component } from '../constants/infra.js';
 import { Logger } from './Logger.js';
 
 export interface Feature {

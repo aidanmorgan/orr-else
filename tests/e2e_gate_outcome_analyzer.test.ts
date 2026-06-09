@@ -17,7 +17,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import { VerifyVerdict } from '../src/contract.js';
 import {
   analyzeGateOutcomes,

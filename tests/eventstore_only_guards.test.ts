@@ -25,7 +25,7 @@
  *   appear in src/**. These field-access patterns would read runtime statechart
  *   state out of Beads native metadata instead of the event-store projections.
  *
- * Guard 5: MUTATING_BEADS_COMMANDS (src/constants/index.ts) must contain exactly
+ * Guard 5: MUTATING_BEADS_COMMANDS (src/constants/domain.ts) must contain exactly
  *   the coarse set {close, create, import, update} — no more, no less.
  *   Additionally, no `bd update` invocation in src/ may include `--metadata`.
  *
@@ -355,11 +355,11 @@ describe('EventStore-only guard 5: MUTATING_BEADS_COMMANDS membership is exactly
    * were added and included in the Set literal, the extracted set would differ from
    * EXPECTED_MUTATING_BEADS_COMMANDS and the assertion would fail.
    */
-  it('MUTATING_BEADS_COMMANDS contains exactly {close, create, import, update} in constants/index.ts', () => {
-    const constantsPath = path.join(SRC_DIR, 'constants', 'index.ts');
+  it('MUTATING_BEADS_COMMANDS contains exactly {close, create, import, update} in constants/domain.ts', () => {
+    const constantsPath = path.join(SRC_DIR, 'constants', 'domain.ts');
     expect(
       fs.existsSync(constantsPath),
-      'src/constants/index.ts not found — cannot verify MUTATING_BEADS_COMMANDS'
+      'src/constants/domain.ts not found — cannot verify MUTATING_BEADS_COMMANDS'
     ).toBe(true);
 
     const source = fs.readFileSync(constantsPath, 'utf8');
@@ -371,7 +371,7 @@ describe('EventStore-only guard 5: MUTATING_BEADS_COMMANDS membership is exactly
     );
     expect(
       setBlock,
-      'Could not parse the MUTATING_BEADS_COMMANDS Set literal in src/constants/index.ts — the guard needs updating if the declaration format changed'
+      'Could not parse the MUTATING_BEADS_COMMANDS Set literal in src/constants/domain.ts — the guard needs updating if the declaration format changed'
     ).not.toBeNull();
 
     // Extract each BeadsCliCommand.* member from the block.

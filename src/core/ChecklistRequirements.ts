@@ -1,4 +1,4 @@
-import { CHECKLIST_PROMPT_SUFFIXES } from '../constants/index.js';
+import { CHECKLIST_PROMPT_SUFFIXES } from '../constants/domain.js';
 import type { ChecklistItem } from './ProtocolParser.js';
 import type { HarnessConfig, SDLCState, TeammateAction, ValidationGateConfig } from './domain/StateModels.js';
 

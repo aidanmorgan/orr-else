@@ -13,7 +13,7 @@ import * as path from 'path';
 import { createHash } from 'node:crypto';
 import { Logger } from './Logger.js';
 import { JsonlEventLog } from './JsonlEventLog.js';
-import { Component, EventStoreDefaults } from '../constants/index.js';
+import { Component, EventStoreDefaults } from '../constants/infra.js';
 import { systemClock, type Clock } from './Clock.js';
 import { systemUniqueId, type UniqueId } from './UniqueId.js';
 import type { DomainEvent } from './EventStoreTypes.js';

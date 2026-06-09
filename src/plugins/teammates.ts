@@ -21,26 +21,8 @@ import { resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/WorkerRe
 import { WorkerPromptIdentityBuilder, formatSkillDuplicationDiagnostic } from '../core/WorkerPromptIdentityBuilder.js';
 import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
-import {
-  Component,
-  EnvVars,
-  Defaults,
-  ThinkingLevel,
-  PluginToolName,
-  ProcessFlag,
-  DomainEventName,
-  OtelAttr,
-  PiCliCommand,
-  PiCliFlag,
-  TmuxCommand,
-  TmuxFormat,
-  TmuxOption,
-  TmuxOptionValue,
-  TeammatePaneCleanupReason,
-  WorktreeDefaults,
-  OperationalArtifactPath,
-  PaneTranscriptDefaults
-} from '../constants/index.js';
+import { DomainEventName, PiCliCommand, PluginToolName, ThinkingLevel } from '../constants/domain.js';
+import { Component, Defaults, EnvVars, OperationalArtifactPath, OtelAttr, PaneTranscriptDefaults, PiCliFlag, ProcessFlag, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, WorktreeDefaults } from '../constants/infra.js';
 
 /**
  * Format the Orr Else worker identity string stored in the @orr_worker pane

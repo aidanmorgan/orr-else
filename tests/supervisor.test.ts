@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { Logger } from '../src/core/Logger.js';
-import { BeadStatus, Defaults, DomainEventName, SpanName, TeammateEventDecisionAction, PluginToolName, TimeMs } from '../src/constants/index.js';
+import { BeadStatus, DomainEventName, PluginToolName, TeammateEventDecisionAction } from '../src/constants/domain.js';
+import { Defaults, SpanName, TimeMs } from '../src/constants/infra.js';
 import type { Clock } from '../src/core/Clock.js';
 import type { DomainEvent } from '../src/core/EventStore.js';
 import type { BeadsPort } from '../src/core/OrchestrationPorts.js';
@@ -2432,7 +2433,8 @@ describe('SignalNoiseCoalescer — r06o AC1+AC3', () => {
     const { SignalingServer } = await import('../src/core/SignalingServer.js');
     const { TeammateFactory } = await import('../src/plugins/teammates.js');
     const { createTeammateEventIdempotencyKey } = await import('../src/core/TeammateEvents.js');
-    const { PiEventName, BuiltInToolName } = await import('../src/constants/index.js');
+    const { BuiltInToolName } = await import('../src/constants/domain.js');
+const { PiEventName } = await import('../src/constants/infra.js');
     const orrElseExtension = (await import('../src/extension.js')).default;
 
     // Prevent the Supervisor's polling loop from running (avoids real tmux calls).

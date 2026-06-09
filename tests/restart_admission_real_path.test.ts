@@ -37,12 +37,8 @@ import {
   createTeammateEventIdempotencyKey,
   type TeammateEvent
 } from '../src/core/TeammateEvents.js';
-import {
-  DomainEventName,
-  TeammateEventType,
-  EnvVars,
-  PiEventName
-} from '../src/constants/index.js';
+import { DomainEventName, TeammateEventType } from '../src/constants/domain.js';
+import { EnvVars, PiEventName } from '../src/constants/infra.js';
 import orrElseExtension from '../src/extension.js';
 import { setSubstrateProbesForTest, resetSubstrateProbes } from '../src/core/V2SubstratePreflight.js';
 

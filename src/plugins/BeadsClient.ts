@@ -20,11 +20,7 @@ import { execa } from 'execa';
 import lockfile from 'proper-lockfile';
 import { Logger } from '../core/Logger.js';
 import type { Observability } from '../core/Observability.js';
-import {
-  BeadsDefaults,
-  Component,
-  SpanName
-} from '../constants/index.js';
+import { BeadsDefaults, Component, SpanName } from '../constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Named constants — no magic numbers

@@ -54,7 +54,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import orrElseExtension from '../src/extension.js';
-import { DomainEventName, EnvVars, PiEventName, ProcessFlag } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { PiLifecycleState, RunMode, SupervisorHealthStage } from '../src/core/PiLifecycleStateMachine.js';
 
 // ---------------------------------------------------------------------------

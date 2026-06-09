@@ -26,7 +26,8 @@
  * registered tool has no inventory entry.  See tests/rtk_inventory.test.ts.
  */
 
-import { BuiltInToolName, NativePiToolName, PluginToolName } from '../constants/index.js';
+import { BuiltInToolName, PluginToolName } from '../constants/domain.js';
+import { NativePiToolName } from '../constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -790,13 +791,13 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
 
   // =========================================================================
   // NATIVE PI tools — Pi's own built-in tools observed by harness policy
-  // Policy defined in: src/constants/index.ts (DEFAULT_OBSERVED_PI_TOOLS)
+  // Policy defined in: src/constants/domain.ts (DEFAULT_OBSERVED_PI_TOOLS)
   // =========================================================================
 
   {
     toolName: NativePiToolName.BASH,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -812,7 +813,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.EDIT,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',
@@ -828,7 +829,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.FIND,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -844,7 +845,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.GREP,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -860,7 +861,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.LS,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -876,7 +877,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.MCP,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -892,7 +893,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.READ,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'tool_calls_dir',
@@ -908,7 +909,7 @@ export const RTK_INVENTORY: readonly RtkContractEntry[] = [
   {
     toolName: NativePiToolName.WRITE,
     toolClass: 'native_pi',
-    owningFile: 'src/constants/index.ts',
+    owningFile: 'src/constants/domain.ts',
     schemaTypeName: 'untyped_record',
     skillPath: '.pi/skills/tool-routing/SKILL.md',
     rawOutputLocation: 'none_minimal',

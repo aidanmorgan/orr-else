@@ -13,7 +13,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { execa } from 'execa';
 import { createBdPlugin } from '../src/plugins/bd.js';
-import { BeadStatus } from '../src/constants/index.js';
+import { BeadStatus } from '../src/constants/domain.js';
 
 // ---- fs/promises mock (same pattern as bd_jsonl.test.ts) ----
 const fsMock = vi.hoisted(() => ({

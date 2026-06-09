@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BuiltInToolName } from '../src/constants/index.js';
+import { BuiltInToolName } from '../src/constants/domain.js';
 import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, normalizeChecklistTickText, resolveChecklistTickText } from '../src/core/ChecklistRequirements.js';
 import { ProtocolInjector } from '../src/core/ProtocolInjector.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';

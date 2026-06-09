@@ -32,12 +32,8 @@ import {
 } from '../src/core/PiBasePromptAdmission.js';
 import { DIGEST_ID_LENGTH } from '../src/core/BootstrapDigest.js';
 import orrElseExtension from '../src/extension.js';
-import {
-  DomainEventName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag,
-} from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

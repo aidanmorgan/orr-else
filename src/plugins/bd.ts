@@ -8,23 +8,8 @@ import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { getHarnessHeartbeats, postHarnessSignal } from '../core/HarnessApiClient.js';
 import { createTeammateEventIdempotencyKey, type HeartbeatEvent } from '../core/TeammateEvents.js';
-import {
-  App,
-  BeadStatus,
-  BeadsDefaults,
-  BeadsIssueStatus,
-  BeadsCliCommand,
-  Component,
-  DomainEventName,
-  EnvVars,
-  Defaults,
-  MUTATING_BEADS_COMMANDS,
-  OperationalArtifactPath,
-  TeammateEventType,
-  PluginToolName,
-  StateChartToolDefaults,
-  WorkerDefaults
-} from '../constants/index.js';
+import { App, BeadStatus, BeadsCliCommand, BeadsIssueStatus, DomainEventName, MUTATING_BEADS_COMMANDS, PluginToolName, TeammateEventType } from '../constants/domain.js';
+import { BeadsDefaults, Component, Defaults, EnvVars, OperationalArtifactPath, StateChartToolDefaults, WorkerDefaults } from '../constants/infra.js';
 import type { BeadStateChartProjection } from '../core/EventStore.js';
 import type { Observability } from '../core/Observability.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';

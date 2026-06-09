@@ -242,7 +242,8 @@ import {
   handleAgentLifecycleFailure
 } from '../src/extension/AgentLifecycleController.js';
 import { postWorkerSignal } from '../src/extension/SignalController.js';
-import { PiEventName, DomainEventName, TeammateEventType } from '../src/constants/index.js';
+import { DomainEventName, TeammateEventType } from '../src/constants/domain.js';
+import { PiEventName } from '../src/constants/infra.js';
 
 describe('AgentLifecycleController', () => {
   describe('isContextOverflowFailure', () => {
@@ -493,7 +494,7 @@ describe('AgentLifecycleController', () => {
 // ── SignalController ──────────────────────────────────────────────────────────
 
 import { buildWorkerEventFrom, teammateSignalEventData } from '../src/extension/SignalController.js';
-import { WorkerDefaults } from '../src/constants/index.js';
+import { WorkerDefaults } from '../src/constants/infra.js';
 
 describe('SignalController', () => {
   describe('buildWorkerEventFrom', () => {

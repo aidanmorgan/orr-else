@@ -10,7 +10,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { resolveProjectFrom } from './Paths.js';
-import { EnvVars } from '../constants/index.js';
+import { EnvVars } from '../constants/infra.js';
 import { type RuntimeEnvironment } from './RuntimeEnvironment.js';
 
 const DEFAULT_CONFIG_FILE = 'harness.yaml';

@@ -5,7 +5,7 @@ import {
   findAppliedTeammateSignal,
   validateTeammateEvent
 } from '../src/core/TeammateEvents.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 function transitionedEvent(overrides: Record<string, unknown> = {}) {
   const base = {

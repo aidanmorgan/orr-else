@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { mkdir, open } from 'fs/promises';
 import lockfile from 'proper-lockfile';
 import { Logger } from '../../core/Logger.js';
-import { Component } from '../../constants/index.js';
+import { Component } from '../../constants/infra.js';
 import {
   SERIAL_MCP_LOCK_RETRIES,
   SERIAL_MCP_LOCK_RETRY_MAX_MS,

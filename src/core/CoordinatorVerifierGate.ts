@@ -33,7 +33,7 @@
  */
 
 import { verifier as defaultVerifier, type Registry, type VerifyCallback } from '../contract.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 import {
   runVerifierGate,
   type VerifierGateContext,
@@ -44,7 +44,7 @@ import {
 import type { RequiredTool } from './domain/StateModels.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
-import { Component } from '../constants/index.js';
+import { Component } from '../constants/infra.js';
 import { asBeadId, asStateId, asActionId } from '../types/ids.js';
 import { checkRequiredToolsForCommandCollisions, type ToolSurfaceCatalog } from './ToolSurfaceCatalog.js';
 

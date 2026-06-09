@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import TransportStream from 'winston-transport';
 import { LoggerService } from '../src/core/Logger.js';
-import { EnvVars, LoggingDefaults } from '../src/constants/index.js';
+import { EnvVars, LoggingDefaults } from '../src/constants/infra.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 
 // ---------------------------------------------------------------------------

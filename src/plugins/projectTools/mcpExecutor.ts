@@ -14,7 +14,8 @@ import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { resolveTemplateString } from '../../core/TemplateResolver.js';
 import type { ProjectMcpToolConfig } from '../../core/domain/StateModels.js';
 import { Logger } from '../../core/Logger.js';
-import { Component, Defaults, ToolResultStatus } from '../../constants/index.js';
+import { ToolResultStatus } from '../../constants/domain.js';
+import { Component, Defaults } from '../../constants/infra.js';
 import {
   DEFAULT_MCP_CONFIG_PATH,
   MCP_RAW_FILE_NAME,

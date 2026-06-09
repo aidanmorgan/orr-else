@@ -46,7 +46,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import orrElseExtension from '../src/extension.js';
-import { DomainEventName, EnvVars, PiEventName, BuiltInToolName } from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName } from '../src/constants/infra.js';
 
 import {
   validateToolEvidenceHandle,

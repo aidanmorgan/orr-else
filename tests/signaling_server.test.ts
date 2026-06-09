@@ -7,7 +7,8 @@ import { Observability } from '../src/core/Observability.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { createTeammateEventIdempotencyKey } from '../src/core/TeammateEvents.js';
-import { EnvVars, BuiltInToolName, DomainEventName } from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName } from '../src/constants/domain.js';
+import { EnvVars } from '../src/constants/infra.js';
 import type { RuntimeEnvironment } from '../src/core/RuntimeEnvironment.js';
 import type { SignalAck } from '../src/core/SignalingServer.js';
 

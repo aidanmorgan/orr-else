@@ -23,7 +23,7 @@ import {
   resolveActiveToolSet,
   lintActiveToolSets,
 } from '../src/core/ActiveToolSetResolver.js';
-import { EventName } from '../src/constants/index.js';
+import { EventName } from '../src/constants/domain.js';
 import type { HarnessConfig, SDLCState } from '../src/core/domain/StateModels.js';
 
 // ---------------------------------------------------------------------------

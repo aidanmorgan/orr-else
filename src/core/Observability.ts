@@ -28,7 +28,8 @@ import { Logger } from './Logger.js';
 import { resolveProjectFrom } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { App, Component, EnvVars, Numeric, ObservabilityDefaults, OperationalArtifactPath, OtelAttr, ToolResultStatus } from '../constants/index.js';
+import { App, ToolResultStatus } from '../constants/domain.js';
+import { Component, EnvVars, Numeric, ObservabilityDefaults, OperationalArtifactPath, OtelAttr } from '../constants/infra.js';
 
 export interface SpanContext {
   traceId: string;

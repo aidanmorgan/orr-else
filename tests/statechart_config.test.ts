@@ -28,7 +28,7 @@ import { Scheduler } from '../src/core/Scheduler.js';
 import { FlowManager } from '../src/core/FlowManager.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { evaluateGateReadiness } from '../src/extension/WorkerRunController.js';
-import { BeadStatus, EventName, TeammateEventType } from '../src/constants/index.js';
+import { BeadStatus, EventName, TeammateEventType } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState } from '../src/core/domain/StateModels.js';
 import type { ActiveRun } from '../src/extension/SessionTypes.js';

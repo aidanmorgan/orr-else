@@ -20,7 +20,7 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import {
   describeConfiguredProjectTools,
 } from '../src/plugins/projectTools.js';
-import { ProjectToolType } from '../src/constants/index.js';
+import { ProjectToolType } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { ProjectCommandToolConfig } from '../src/core/domain/StateModels.js';
 

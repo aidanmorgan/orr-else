@@ -43,7 +43,7 @@ import {
   toolResultBaseToMigrationDebt,
 } from '../src/core/ToolEvidenceHandle.js';
 
-import { ToolResultStatus, DomainEventName } from '../src/constants/index.js';
+import { DomainEventName, ToolResultStatus } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import type { ToolResultBase } from '../src/contract.js';
 

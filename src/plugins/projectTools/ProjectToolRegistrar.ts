@@ -34,7 +34,7 @@ import { EventStore } from '../../core/EventStore.js';
 import { ToolCallPathFactory } from '../../core/ToolCallPathFactory.js';
 import type { RuntimeEnvironment } from '../../core/RuntimeEnvironment.js';
 import type { ResolvedHarnessConfig } from '../../core/ConfigLoader.js';
-import { ProjectToolType } from '../../constants/index.js';
+import { ProjectToolType } from '../../constants/domain.js';
 import type { ProjectCommandToolConfig, ProjectToolConfig } from '../../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { frameworkRootFromConfig, namedRootsFromConfig } from './contextHelpers.js';

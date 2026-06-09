@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as ndjson from 'ndjson';
 import lockfile from 'proper-lockfile';
-import { EventLogDefaults } from '../constants/index.js';
+import { EventLogDefaults } from '../constants/infra.js';
 
 const appendFileAsync = fs.promises.appendFile;
 const readdirAsync = fs.promises.readdir;

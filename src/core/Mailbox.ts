@@ -4,7 +4,8 @@ import { v7 as uuidv7 } from 'uuid';
 import { resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
 import { EventStore } from './EventStore.js';
-import { Component, DomainEventName, MailboxDefaults, MailboxMessageType } from '../constants/index.js';
+import { DomainEventName, MailboxMessageType } from '../constants/domain.js';
+import { Component, MailboxDefaults } from '../constants/infra.js';
 
 const readFileAsync = fs.promises.readFile;
 const writeFileAsync = fs.promises.writeFile;

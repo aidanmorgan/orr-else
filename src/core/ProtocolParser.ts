@@ -1,4 +1,4 @@
-import { BuiltInToolName, ChecklistItemType, ChecklistPromptSuffix } from '../constants/index.js';
+import { BuiltInToolName, ChecklistItemType, ChecklistPromptSuffix } from '../constants/domain.js';
 
 export type ChecklistType = ChecklistItemType;
 

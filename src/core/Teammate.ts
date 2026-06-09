@@ -4,16 +4,8 @@ import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { postHarnessSignal } from './HarnessApiClient.js';
-import {
-  TeammateEventType,
-  Component,
-  BuiltInToolName,
-  PluginToolName,
-  EventName,
-  DomainEventName,
-  WorkerDefaults,
-  PiEventName
-} from '../constants/index.js';
+import { BuiltInToolName, DomainEventName, EventName, PluginToolName, TeammateEventType } from '../constants/domain.js';
+import { Component, PiEventName, WorkerDefaults } from '../constants/infra.js';
 import { FlowManager } from './FlowManager.js';
 import { ConfigLoader, type HarnessConfig } from './ConfigLoader.js';
 import { createTeammateEventIdempotencyKey, type ContextRestartRequestedEvent } from './TeammateEvents.js';

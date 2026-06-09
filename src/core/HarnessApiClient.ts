@@ -1,6 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import ky from 'ky';
-import { ApiPath, Defaults, EnvVars, HttpMethod, HttpStatus, WorkerDefaults } from '../constants/index.js';
+import { ApiPath, HttpMethod } from '../constants/domain.js';
+import { Defaults, EnvVars, HttpStatus, WorkerDefaults } from '../constants/infra.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { TeammateEvent } from './TeammateEvents.js';
 

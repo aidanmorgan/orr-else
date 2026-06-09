@@ -56,15 +56,8 @@ import {
   createTeammateEventIdempotencyKey,
   type TeammateEvent
 } from '../src/core/TeammateEvents.js';
-import {
-  DomainEventName,
-  TeammateEventType,
-  EnvVars,
-  PiEventName,
-  ProcessFlag,
-  ToolResultStatus,
-  BuiltInToolName
-} from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName, TeammateEventType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { applyV2RouteEvent, computeConfigFingerprint } from '../src/core/RouteEventContract.js';
 import { buildV2EventVocabulary, v2ApplyTransition } from '../src/core/FlowManager.js';
 import orrElseExtension from '../src/extension.js';
@@ -1032,7 +1025,7 @@ describe('AC3: V2_MODEL_ROUTE_REJECTED is diagnostic only — no state/bead muta
   });
 
   it('V2_MODEL_ROUTE_REJECTED is NOT in REPLAY_CRITICAL_EVENT_TYPES (diagnostic only)', async () => {
-    const { REPLAY_CRITICAL_EVENT_TYPES } = await import('../src/constants/index.js');
+    const { REPLAY_CRITICAL_EVENT_TYPES } = await import('../src/constants/domain.js');
     expect(REPLAY_CRITICAL_EVENT_TYPES.has(DomainEventName.V2_MODEL_ROUTE_REJECTED)).toBe(false);
   });
 });

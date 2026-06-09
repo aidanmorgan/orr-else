@@ -37,13 +37,7 @@ import { EventStore, EventStoreValidationError } from '../src/core/EventStore.js
 import { BeadStateProjection } from '../src/core/BeadStateProjection.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
-import {
-  DomainEventName,
-  EventName,
-  REPLAY_CRITICAL_EVENT_TYPES,
-  RestartKind,
-  TeammateEventType
-} from '../src/constants/index.js';
+import { DomainEventName, EventName, REPLAY_CRITICAL_EVENT_TYPES, RestartKind, TeammateEventType } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 // ---------------------------------------------------------------------------

@@ -131,13 +131,8 @@ import {
   checkRtkInventoryCoverage,
   type RtkContractEntry
 } from '../src/core/RtkContract.js';
-import {
-  BuiltInToolName,
-  DEFAULT_OBSERVED_PI_TOOLS,
-  NativePiToolName,
-  PluginToolName,
-  ToolResultStatus
-} from '../src/constants/index.js';
+import { BuiltInToolName, PluginToolName, ToolResultStatus } from '../src/constants/domain.js';
+import { DEFAULT_OBSERVED_PI_TOOLS, NativePiToolName } from '../src/constants/infra.js';
 import {
   buildCommandResult
 } from '../src/plugins/projectTools/commandExecutor.js';

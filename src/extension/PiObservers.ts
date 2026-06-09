@@ -33,17 +33,8 @@ import { type Observability, SpanStatusValue } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
 import type { HarnessConfig } from '../core/ConfigLoader.js';
 import type { TeammateEvent } from '../core/TeammateEvents.js';
-import {
-  DomainEventName,
-  Component,
-  EnvVars,
-  App,
-  OtelAttr,
-  PiEventName,
-  SpanName,
-  ToolResultStatus,
-  TeammateEventType
-} from '../constants/index.js';
+import { App, DomainEventName, TeammateEventType, ToolResultStatus } from '../constants/domain.js';
+import { Component, EnvVars, OtelAttr, PiEventName, SpanName } from '../constants/infra.js';
 import {
   isRecord,
   summarizeForEvent,

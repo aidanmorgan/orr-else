@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isRestartTransition } from '../src/core/EventUtils.js';
-import { EventName } from '../src/constants/index.js';
+import { EventName } from '../src/constants/domain.js';
 
 describe('isRestartTransition', () => {
   it('returns true for RESTART', () => {

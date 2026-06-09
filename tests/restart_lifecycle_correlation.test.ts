@@ -13,7 +13,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { BeadStateProjection } from '../src/core/BeadStateProjection.js';
-import { DomainEventName, EventName, RestartKind } from '../src/constants/index.js';
+import { DomainEventName, EventName, RestartKind } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import {
   extractRestartCorrelation,

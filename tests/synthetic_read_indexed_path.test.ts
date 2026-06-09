@@ -32,7 +32,8 @@ import { createHash } from 'node:crypto';
 import { EventStore, EventStoreSyntheticReadError } from '../src/core/EventStore.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
-import { DomainEventName, EventStoreDefaults } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { EventStoreDefaults } from '../src/constants/infra.js';
 import type { BeadId } from '../src/types/ids.js';
 
 // ---------------------------------------------------------------------------

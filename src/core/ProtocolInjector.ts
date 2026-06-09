@@ -1,13 +1,6 @@
 import { HarnessConfig, SDLCState } from './domain/StateModels.js';
-import {
-  BuiltInToolName,
-  NativePiToolName,
-  NativeReadPolicyDefaults,
-  OperationalArtifactPath,
-  OperationalLogPath,
-  PluginToolName,
-  ProjectToolType
-} from '../constants/index.js';
+import { BuiltInToolName, PluginToolName, ProjectToolType } from '../constants/domain.js';
+import { NativePiToolName, NativeReadPolicyDefaults, OperationalArtifactPath, OperationalLogPath } from '../constants/infra.js';
 
 export class ProtocolInjector {
   /**

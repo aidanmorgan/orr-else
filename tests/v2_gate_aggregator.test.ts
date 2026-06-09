@@ -32,7 +32,7 @@ import {
   type RouteEvidenceRef,
   type RouteEventStore,
 } from '../src/core/RouteEventContract.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { V2GateConfig, V2GateCheckResult } from '../src/core/domain/StateModels.js';
 
 // ---------------------------------------------------------------------------

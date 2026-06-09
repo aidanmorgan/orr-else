@@ -20,7 +20,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { EnvVars } from '../constants/index.js';
+import { EnvVars } from '../constants/infra.js';
 import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
 import { skeletons } from '../contract.js';
 

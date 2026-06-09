@@ -14,7 +14,7 @@ import { resolveActiveToolSet } from '../core/ActiveToolSetResolver.js';
 import { describeConfiguredProjectTools, resolveToolPromptProfileId } from '../plugins/projectTools.js';
 import { WorkerPromptIdentityBuilder, formatSkillDuplicationDiagnostic } from '../core/WorkerPromptIdentityBuilder.js';
 import { Logger } from '../core/Logger.js';
-import { EnvVars, Component } from '../constants/index.js';
+import { Component, EnvVars } from '../constants/infra.js';
 import type { ToolSurfaceCatalog } from '../core/ToolSurfaceCatalog.js';
 
 /**

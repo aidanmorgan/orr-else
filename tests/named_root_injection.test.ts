@@ -32,7 +32,7 @@ import {
   normalizePathArgumentValue
 } from '../src/plugins/projectTools/pathNormalization.js';
 import { normalizeMcpPathArguments } from '../src/plugins/projectTools.js';
-import { ProjectToolType } from '../src/constants/index.js';
+import { ProjectToolType } from '../src/constants/domain.js';
 import type { HarnessConfig } from '../src/core/domain/StateModels.js';
 import type { ProjectToolExecutionContext } from '../src/plugins/projectTools/types.js';
 

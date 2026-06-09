@@ -18,7 +18,7 @@ import {
   resetSubstrateProbes,
   type SubstrateProbe
 } from '../src/core/V2SubstratePreflight.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Fake probes

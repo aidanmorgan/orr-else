@@ -10,11 +10,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
-import {
-  DomainEventName,
-  EventStoreDefaults,
-  REPLAY_CRITICAL_EVENT_TYPES
-} from '../../constants/index.js';
+import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES } from '../../constants/domain.js';
+import { EventStoreDefaults } from '../../constants/infra.js';
 import { BeadEventIndex } from '../BeadEventIndex.js';
 import { JsonlEventLog } from '../JsonlEventLog.js';
 

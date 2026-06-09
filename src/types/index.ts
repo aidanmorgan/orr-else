@@ -1,4 +1,4 @@
-import { BeadStatus, EventName, RestartKind, TeammateEventType } from '../constants/index.js';
+import { BeadStatus, EventName, RestartKind, TeammateEventType } from '../constants/domain.js';
 import type { BeadId } from './ids.js';
 
 export type {

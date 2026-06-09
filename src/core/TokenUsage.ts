@@ -2,9 +2,9 @@ import type { TurnTelemetry } from './Telemetry.js';
 
 // ---- Per-tool token accounting (s3wp.16) ----
 //
-// Local constant — intentionally NOT imported from src/constants/index.ts so that
+// Local constant — intentionally NOT imported from src/constants/domain.ts so that
 // this module can be used and tested without a constants dependency.  The value (4)
-// matches TOKEN_ESTIMATE_CHARS_PER_TOKEN in both constants/index.ts and
+// matches TOKEN_ESTIMATE_CHARS_PER_TOKEN in both constants/domain.ts and
 // plugins/projectTools/constants.ts.
 const TOOL_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 

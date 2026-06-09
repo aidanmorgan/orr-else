@@ -27,13 +27,8 @@ import * as path from 'node:path';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
-import {
-  CwdMode,
-  DomainEventName,
-  EnvVars,
-  ProjectToolType,
-  ToolResultStatus,
-} from '../src/constants/index.js';
+import { CwdMode, DomainEventName, ProjectToolType, ToolResultStatus } from '../src/constants/domain.js';
+import { EnvVars } from '../src/constants/infra.js';
 import type { ProjectCommandToolConfig } from '../src/core/domain/StateModels.js';
 import { executeConfiguredProjectTool } from '../src/plugins/projectTools.js';
 import { TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION } from '../src/core/ToolEvidenceHandle.js';

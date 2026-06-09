@@ -1,5 +1,5 @@
 import { Logger } from './Logger.js';
-import { Component, TelemetryDefaults } from '../constants/index.js';
+import { Component, TelemetryDefaults } from '../constants/infra.js';
 
 export interface TurnTelemetry {
   beadId: string;

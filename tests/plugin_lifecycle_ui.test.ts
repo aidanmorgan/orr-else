@@ -18,7 +18,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { SignalingServer } from '../src/core/SignalingServer.js';
-import { DomainEventName, PiEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
+import { PiEventName } from '../src/constants/infra.js';
 import orrElseExtension from '../src/extension.js';
 
 // ---------------------------------------------------------------------------

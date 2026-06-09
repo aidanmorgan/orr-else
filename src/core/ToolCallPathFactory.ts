@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { OperationalArtifactPath, ProjectToolDefaults } from '../constants/index.js';
+import { OperationalArtifactPath, ProjectToolDefaults } from '../constants/infra.js';
 import { resolveTemplateString, type TemplateContext } from './TemplateResolver.js';
 
 export interface ToolCallPathAllocation {

@@ -1,4 +1,4 @@
-import { ProviderRequestLimits } from '../constants/index.js';
+import { ProviderRequestLimits } from '../constants/infra.js';
 
 interface AnthropicThinking {
   type?: string;

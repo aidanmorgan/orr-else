@@ -27,7 +27,7 @@
 import { createHash } from 'node:crypto';
 import type { HarnessConfig } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 import type { DomainEvent } from './EventStoreTypes.js';
 
 // ---------------------------------------------------------------------------

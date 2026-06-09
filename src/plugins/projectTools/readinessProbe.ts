@@ -27,7 +27,8 @@ import type { ProjectToolConfig, ProjectCommandToolConfig } from '../../core/dom
 import type { Clock } from '../../core/Clock.js';
 import { systemClock } from '../../core/Clock.js';
 import type { EventStore } from '../../core/EventStore.js';
-import { DomainEventName, EnvVars, ProjectToolType } from '../../constants/index.js';
+import { DomainEventName, ProjectToolType } from '../../constants/domain.js';
+import { EnvVars } from '../../constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Constants

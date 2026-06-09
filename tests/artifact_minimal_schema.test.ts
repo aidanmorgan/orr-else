@@ -20,7 +20,7 @@ import * as path from 'path';
 import { ArtifactPaths, type ArtifactPathContext } from '../src/core/ArtifactPaths.js';
 import { ArtifactQuery } from '../src/core/ArtifactQuery.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
-import { ArtifactQueryDefaults, EnvVars } from '../src/constants/index.js';
+import { ArtifactQueryDefaults, EnvVars } from '../src/constants/infra.js';
 
 const root = path.join(os.tmpdir(), 'orr-else-artifact-minimal-schema-test');
 

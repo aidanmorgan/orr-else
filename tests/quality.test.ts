@@ -14,7 +14,8 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createQualityPlugin, reduceSessionLogs } from '../src/plugins/quality.js';
-import { EnvVars, PluginToolName } from '../src/constants/index.js';
+import { PluginToolName } from '../src/constants/domain.js';
+import { EnvVars } from '../src/constants/infra.js';
 
 // ── mock fs/promises so tests never write to disk ────────────────────────────
 

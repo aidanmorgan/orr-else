@@ -46,15 +46,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import orrElseExtension from '../src/extension.js';
-import {
-  DomainEventName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag,
-  BuiltInToolName,
-  PluginToolName,
-  TeammateEventType
-} from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName, PluginToolName, TeammateEventType } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Observability } from '../src/core/Observability.js';

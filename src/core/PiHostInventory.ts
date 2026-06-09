@@ -31,7 +31,7 @@
 import type { HarnessConfig } from './ConfigLoader.js';
 import { schemaRegistry, SchemaRegistryError } from './SchemaRegistry.js';
 import type { SchemaRegistryEntry } from './SchemaRegistry.js';
-import { ProjectToolType } from '../constants/index.js';
+import { ProjectToolType } from '../constants/domain.js';
 import type { ProjectExtensionToolConfig } from './domain/StateModels.js';
 
 // ---------------------------------------------------------------------------

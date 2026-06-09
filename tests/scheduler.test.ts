@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Scheduler } from '../src/core/Scheduler.js';
 import { FlowManager } from '../src/core/FlowManager.js';
-import { App, BeadStatus } from '../src/constants/index.js';
+import { App, BeadStatus } from '../src/constants/domain.js';
 
 function scheduler(): Scheduler {
   const configLoader = {

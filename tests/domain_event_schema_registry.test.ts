@@ -28,7 +28,7 @@ import { EventStore, EventStoreValidationError, EventStoreSyntheticRejectedError
 import { DOMAIN_EVENT_SCHEMAS } from '../src/core/DomainEventSchemas.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
-import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES, TeammateEventType } from '../src/constants/index.js';
+import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES, TeammateEventType } from '../src/constants/domain.js';
 import { writeFixtureEvent } from './support/TestEventStore.js';
 
 // ---------------------------------------------------------------------------

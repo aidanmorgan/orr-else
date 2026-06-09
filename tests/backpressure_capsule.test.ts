@@ -17,7 +17,7 @@ import {
   CAPSULE_COLLISION_THRESHOLD,
   type BackpressureCapsuleResult
 } from '../src/plugins/projectTools/BackpressureCapsule.js';
-import { ToolResultStatus, ProjectToolType } from '../src/constants/index.js';
+import { ProjectToolType, ToolResultStatus } from '../src/constants/domain.js';
 import { ProjectToolFailureCategory } from '../src/plugins/projectTools/failureCategory.js';
 import { projectToolBackpressureResult } from '../src/plugins/projectTools/contextHelpers.js';
 import { attachFailureCategory } from '../src/plugins/projectTools/resultEnvelope.js';

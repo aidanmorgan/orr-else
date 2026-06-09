@@ -25,7 +25,7 @@ import type { ToolExecutionWrapperPorts } from '../src/extension/ToolExecutionWr
 import type { ToolExecutionSession } from '../src/extension/SessionTypes.js';
 import type { TeammateEventType } from '../src/core/TeammateEvents.js';
 import type { TeammateEvent } from '../src/core/TeammateEvents.js';
-import { DomainEventName, PluginToolName } from '../src/constants/index.js';
+import { DomainEventName, PluginToolName } from '../src/constants/domain.js';
 
 // ─── Temp directory (one per test run) ───────────────────────────────────────
 

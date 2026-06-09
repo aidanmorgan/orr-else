@@ -17,15 +17,8 @@ import { asStateId, asActionId, asBeadId, asToolName } from '../types/ids.js';
 import { Logger } from '../core/Logger.js';
 import { missingMandatoryChecklistItems } from '../core/ChecklistRequirements.js';
 import { isAdvanceOutcome, assertDeclaredOutcome } from '../core/FlowManager.js';
-import {
-  DomainEventName,
-  EventName,
-  BuiltInToolName,
-  Component,
-  HandoverRequiredDefaults,
-  PromptProvenanceDefaults,
-  ReviewArtifactKind
-} from '../constants/index.js';
+import { BuiltInToolName, DomainEventName, EventName, ReviewArtifactKind } from '../constants/domain.js';
+import { Component, HandoverRequiredDefaults, PromptProvenanceDefaults } from '../constants/infra.js';
 import { detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from '../core/PromptProvenanceService.js';
 import { projectToolFailureLimitSuggestedOutcome } from '../plugins/projectTools.js';
 import { isRecord } from './PiEventAdapters.js';

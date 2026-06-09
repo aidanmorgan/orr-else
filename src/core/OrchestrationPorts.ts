@@ -10,7 +10,7 @@
  */
 
 import type { Bead } from '../types/index.js';
-import type { BeadsIssueStatus, BeadStatus } from '../constants/index.js';
+import type { BeadStatus, BeadsIssueStatus } from '../constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Shared result contract for git worktree provisioning.

@@ -21,16 +21,8 @@ import type { ScoredBead } from './Scheduler.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Observability } from './Observability.js';
-import {
-  App,
-  Component,
-  Defaults,
-  DomainEventName,
-  OtelAttr,
-  QuarantineReason,
-  SpanName,
-  StateContextPolicy,
-} from '../constants/index.js';
+import { App, DomainEventName, QuarantineReason, StateContextPolicy } from '../constants/domain.js';
+import { Component, Defaults, OtelAttr, SpanName } from '../constants/infra.js';
 import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
 import {
   resolveStateContextPolicy,

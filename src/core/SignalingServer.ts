@@ -5,7 +5,8 @@ import { TeammateEvent, validateTeammateEvent } from './TeammateEvents.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
-import { ApiPath, Component, EnvVars, Defaults, DomainEventName, HttpStatus, Numeric, OtelAttr, TeammateEventType, TimeMs, WorkerDefaults } from '../constants/index.js';
+import { ApiPath, DomainEventName, TeammateEventType } from '../constants/domain.js';
+import { Component, Defaults, EnvVars, HttpStatus, Numeric, OtelAttr, TimeMs, WorkerDefaults } from '../constants/infra.js';
 import { SignalNoiseCoalescer } from './SignalNoiseCoalescer.js';
 
 /**

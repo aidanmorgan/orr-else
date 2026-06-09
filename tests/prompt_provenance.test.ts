@@ -24,15 +24,11 @@ import {
   resolvePromptProvenance,
   detectStaleProvenanceEntries
 } from '../src/core/PromptProvenanceService.js';
-import { PromptProvenanceKind, PromptProvenanceDefaults, EventStoreDefaults } from '../src/constants/index.js';
+import { PromptProvenanceKind } from '../src/constants/domain.js';
+import { EventStoreDefaults, PromptProvenanceDefaults } from '../src/constants/infra.js';
 import orrElseExtension from '../src/extension.js';
-import {
-  BuiltInToolName,
-  DomainEventName,
-  EnvVars,
-  PiEventName,
-  ProcessFlag
-} from '../src/constants/index.js';
+import { BuiltInToolName, DomainEventName } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 
 // ---------------------------------------------------------------------------
 // Test helpers

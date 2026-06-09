@@ -25,7 +25,7 @@
  */
 
 import type { DomainEvent } from '../core/EventStoreTypes.js';
-import { DomainEventName } from '../constants/index.js';
+import { DomainEventName } from '../constants/domain.js';
 import { VerifyVerdict } from '../contract.js';
 
 /** A tool that contributed to BLOCKING a transition, with its durable diagnostics. */

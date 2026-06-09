@@ -1,6 +1,6 @@
 import { SDLCState } from "./domain/StateModels.js";
 import { Bead } from "../types/index.js";
-import { BeadStatus, EventName, RestartKind } from "../constants/index.js";
+import { BeadStatus, EventName, RestartKind } from '../constants/domain.js';
 import { HarnessConfig, type ResolvedHarnessConfig } from "./ConfigLoader.js";
 import { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 

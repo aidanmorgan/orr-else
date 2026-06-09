@@ -42,11 +42,8 @@ import { reportRetentionResult } from '../src/core/retention/RetentionReporter.j
 
 // ── Production class imports (wiring proof) ────────────────────────────────
 import { RetentionService } from '../src/core/retention/RetentionService.js';
-import {
-  DomainEventName,
-  RetentionDefaults,
-  REPLAY_CRITICAL_EVENT_TYPES
-} from '../src/constants/index.js';
+import { DomainEventName, REPLAY_CRITICAL_EVENT_TYPES } from '../src/constants/domain.js';
+import { RetentionDefaults } from '../src/constants/infra.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 import type { Clock } from '../src/core/Clock.js';
 

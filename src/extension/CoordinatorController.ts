@@ -14,15 +14,7 @@ import type { ChecklistItem } from '../core/ProtocolParser.js';
 import type { Bead } from '../types/index.js';
 import { SDLCState, TeammateAction, type StateContextPolicyConfig } from '../core/domain/StateModels.js';
 import { outcomeCategory } from '../core/FlowManager.js';
-import {
-  TeammateEventType,
-  BeadStatus,
-  ActionRunContext,
-  ActionContextMode,
-  ActionType,
-  ActionCompletionKey,
-  StateContextPolicy
-} from '../constants/index.js';
+import { ActionCompletionKey, ActionContextMode, ActionRunContext, ActionType, BeadStatus, StateContextPolicy, TeammateEventType } from '../constants/domain.js';
 
 // ── state context policy ──────────────────────────────────────────────────────
 

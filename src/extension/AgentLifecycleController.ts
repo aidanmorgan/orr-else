@@ -12,19 +12,8 @@ import type { AgentEndEvent, TurnEndEvent, ExtensionContext } from '@earendil-wo
 import type { TeammateEvent } from '../core/TeammateEvents.js';
 import { Logger } from '../core/Logger.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
-import {
-  DomainEventName,
-  Component,
-  TeammateEventType,
-  EventName,
-  WorkerDefaults,
-  SupervisorDefaults,
-  PiEventName,
-  AgentFailureCode,
-  AgentFailureSummary,
-  Numeric,
-  TimeMs
-} from '../constants/index.js';
+import { DomainEventName, EventName, TeammateEventType } from '../constants/domain.js';
+import { AgentFailureCode, AgentFailureSummary, Component, Numeric, PiEventName, SupervisorDefaults, TimeMs, WorkerDefaults } from '../constants/infra.js';
 import type { ActiveRun } from './SessionTypes.js';
 import { postWorkerSignal } from './SignalController.js';
 import { agentEventError } from './PiEventAdapters.js';

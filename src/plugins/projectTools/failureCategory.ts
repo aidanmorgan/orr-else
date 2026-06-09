@@ -2,7 +2,7 @@
  * ProjectToolFailureCategory — exported public type + classification logic.
  * Package-internal types live here; the facade re-exports them for callers.
  */
-import { ToolResultStatus } from '../../constants/index.js';
+import { ToolResultStatus } from '../../constants/domain.js';
 import {
   TRANSIENT_PROJECT_TOOL_FAILURE_PATTERN,
   TOOL_INPUT_PROJECT_TOOL_FAILURE_PATTERN,

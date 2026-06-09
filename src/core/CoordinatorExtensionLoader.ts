@@ -21,7 +21,7 @@
 import { resolveWorkerExtensionPaths } from './WorkerResourceResolver.js';
 import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
-import { Component } from '../constants/index.js';
+import { Component } from '../constants/infra.js';
 
 /** A dynamic-import seam so tests can inject a fake loader. */
 export type ExtensionImporter = (resolvedPath: string) => Promise<unknown>;

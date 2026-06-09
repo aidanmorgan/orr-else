@@ -9,13 +9,8 @@ import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnviro
 import { systemClock, type Clock } from './Clock.js';
 import { isRecord } from './RecordUtils.js';
 import { isRestartTransition } from './EventUtils.js';
-import {
-  Component,
-  DomainEventName,
-  EnvVars,
-  EventStoreDefaults,
-  TeammateEventType
-} from '../constants/index.js';
+import { DomainEventName, TeammateEventType } from '../constants/domain.js';
+import { Component, EnvVars, EventStoreDefaults } from '../constants/infra.js';
 import { asEventId, asSessionId, type BeadId, type StateId, type ActionId, type ToolName } from '../types/ids.js';
 import { BeadEventIndex } from './BeadEventIndex.js';
 import { BeadStateProjection } from './BeadStateProjection.js';

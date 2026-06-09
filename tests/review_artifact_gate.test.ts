@@ -21,16 +21,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { evaluateGateReadiness } from '../src/extension/WorkerRunController.js';
-import {
-  ActionType,
-  BuiltInToolName,
-  DomainEventName,
-  EnvVars,
-  EventName,
-  PiEventName,
-  ProcessFlag,
-  ReviewArtifactKind
-} from '../src/constants/index.js';
+import { ActionType, BuiltInToolName, DomainEventName, EventName, ReviewArtifactKind } from '../src/constants/domain.js';
+import { EnvVars, PiEventName, ProcessFlag } from '../src/constants/infra.js';
 import type { HarnessConfig } from '../src/core/ConfigLoader.js';
 import type { SDLCState, TeammateAction } from '../src/core/domain/StateModels.js';
 import type { ActiveRun } from '../src/extension/SessionTypes.js';

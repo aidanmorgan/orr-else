@@ -21,7 +21,7 @@ import {
   PATH_CONTEXT_MAX_SLICE_LINES,
   SKELETON_MAX_BYTES
 } from '../src/core/PathContext.js';
-import { EnvVars } from '../src/constants/index.js';
+import { EnvVars } from '../src/constants/infra.js';
 import { skeletons } from '../src/contract.js';
 
 // ─── Test helpers ─────────────────────────────────────────────────────────────

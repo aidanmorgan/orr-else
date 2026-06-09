@@ -44,7 +44,7 @@ import {
   TOOL_EVIDENCE_HANDLE_SCHEMA_VERSION,
   type ToolEvidenceHandle,
 } from '../src/core/ToolEvidenceHandle.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 import type { DomainEvent } from '../src/core/EventStoreTypes.js';
 
 // ── Minimal fake store ─────────────────────────────────────────────────────────

@@ -4,7 +4,8 @@ import { createBdPlugin, parseFlatListOutput, parseReadyPlainOutput } from '../s
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import type { Observability } from '../src/core/Observability.js';
-import { App, BeadsDefaults, DomainEventName, SpanName, StateChartToolDefaults, ToolDefaults } from '../src/constants/index.js';
+import { App, DomainEventName } from '../src/constants/domain.js';
+import { BeadsDefaults, SpanName, StateChartToolDefaults, ToolDefaults } from '../src/constants/infra.js';
 
 // --- fs/promises mock ---
 // BD_EXPORT_JSONL writes to a file and reads it back to compute count + checksum.

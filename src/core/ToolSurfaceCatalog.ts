@@ -47,13 +47,8 @@
  */
 
 import type { HarnessConfig } from './ConfigLoader.js';
-import {
-  BuiltInToolName,
-  DEFAULT_OBSERVED_PI_TOOLS,
-  NativePiToolName,
-  PluginToolName,
-  ProjectToolType,
-} from '../constants/index.js';
+import { BuiltInToolName, PluginToolName, ProjectToolType } from '../constants/domain.js';
+import { DEFAULT_OBSERVED_PI_TOOLS, NativePiToolName } from '../constants/infra.js';
 import type { ProjectToolConfig } from './domain/StateModels.js';
 
 // ---------------------------------------------------------------------------

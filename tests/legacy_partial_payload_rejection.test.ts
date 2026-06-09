@@ -26,7 +26,7 @@ import { EventStore, EventStoreValidationError } from '../src/core/EventStore.js
 import { DOMAIN_EVENT_SCHEMAS } from '../src/core/DomainEventSchemas.js';
 import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { Logger } from '../src/core/Logger.js';
-import { DomainEventName } from '../src/constants/index.js';
+import { DomainEventName } from '../src/constants/domain.js';
 
 // ---------------------------------------------------------------------------
 // Shared test helpers
