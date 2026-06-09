@@ -1378,7 +1378,8 @@ states:
 
   it('SPAWN_TEAMMATE result returns only { success, paneId } with no inline content or preview fields', async () => {
     const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
-    const plugin = teammatePlugin(factory);
+    const openGate: import('../src/plugins/teammates.js').SpawnTeammateGate = { isApiBound: () => true, hasSupervisor: () => true };
+    const plugin = teammatePlugin(factory, openGate);
     const spawnTool = plugin.tools.find(tool => tool.name === PluginToolName.SPAWN_TEAMMATE)!;
     expect(spawnTool).toBeDefined();
 
@@ -1426,7 +1427,8 @@ states:
     });
 
     const factory = new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, currentExtensionPath);
-    const plugin = teammatePlugin(factory);
+    const openGate: import('../src/plugins/teammates.js').SpawnTeammateGate = { isApiBound: () => true, hasSupervisor: () => true };
+    const plugin = teammatePlugin(factory, openGate);
     const spawnTool = plugin.tools.find(tool => tool.name === PluginToolName.SPAWN_TEAMMATE)!;
 
     const result = await spawnTool.execute({
@@ -2176,4 +2178,230 @@ describe('postWorkerSignal — signal_ack span', () => {
     const recordCalls = (services.eventStore.record as ReturnType<typeof vi.fn>).mock.calls;
     expect(recordCalls.some(([event]: [string]) => event === DomainEventName.SIGNAL_ACKNOWLEDGED)).toBe(true);
   });
+});
+
+// ---------------------------------------------------------------------------
+// pi-experiment-amq0.9: spawn_teammate admission gate
+//
+// spawn_teammate is a coordinator-owned operation.  It MUST be rejected with
+// no tmux side effects when HARNESS_API_BOUND has not fired or no active
+// supervisor exists.  Supervisor-owned spawning AFTER /orr-else starts must
+// still work unchanged.
+//
+// LOAD-BEARING: the pre-start test proves the gate is in the code path.
+// Removing the gate (gate === undefined in teammatePlugin) would allow the
+// tmux split-window call to proceed, making the "no tmux" assertion fail.
+// ---------------------------------------------------------------------------
+
+import { teammatePlugin as importedTeammatePlugin, type SpawnTeammateGate } from '../src/plugins/teammates.js';
+
+describe('amq0.9 — spawn_teammate admission gate (fail-closed pre-start)', () => {
+  const root = path.join(os.tmpdir(), 'orr-else-amq09-gate-test');
+  const worktreePath = path.join(root, 'worktrees', 'gate-bead');
+  const configPath = path.join(root, 'harness.yaml');
+  const extPath = path.join(root, 'orr-else-ext.ts');
+
+  let configLoader: ConfigLoader;
+  let eventStore: EventStore;
+  let observability: Observability;
+  let previousProjectRoot: string | undefined;
+
+  const makeFactory = () =>
+    new TeammateFactory(observability, configLoader, eventStore, {}, 6, undefined, extPath);
+
+  const makePlugin = (gate: SpawnTeammateGate) =>
+    importedTeammatePlugin(makeFactory(), gate);
+
+  const getSpawnTool = (gate: SpawnTeammateGate) => {
+    const plugin = makePlugin(gate);
+    const tool = plugin.tools.find(t => t.name === 'spawn_teammate');
+    if (!tool) throw new Error('spawn_teammate tool not found');
+    return tool;
+  };
+
+  const spawnParams = {
+    beadId: 'gate-bead',
+    stateId: 'Planning',
+    worktreePath
+  };
+
+  beforeEach(async () => {
+    fs.mkdirSync(path.join(root, 'state', 'logs'), { recursive: true });
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.writeFileSync(extPath, 'export default {};\n');
+    previousProjectRoot = process.env[EnvVars.PROJECT_ROOT];
+    process.env[EnvVars.PROJECT_ROOT] = root;
+    fs.writeFileSync(configPath, `
+settings:
+  maxConcurrentSlots: 6
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+  worktreePolicy:
+    default: always
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed }
+`);
+    configLoader = new ConfigLoader(undefined, root);
+    configLoader.setConfigPath(configPath);
+    eventStore = new EventStore(configLoader, undefined, undefined, root);
+    observability = new Observability(configLoader, undefined, root);
+    await observability.initialize();
+    vi.mocked(execa).mockReset();
+    vi.mocked(execa).mockImplementation(async (bin: string, args: string[]) => {
+      if (bin !== 'tmux') throw new Error(`unexpected binary: ${bin}`);
+      if (args.includes('list-windows')) return { stdout: 'Agents\n', stderr: '' };
+      if (args.includes('list-panes')) return { stdout: '', stderr: '' };
+      if (args.includes('split-window')) return { stdout: '%77\n', stderr: '' };
+      return { stdout: '', stderr: '' };
+    });
+  });
+
+  afterEach(() => {
+    observability.shutdown();
+    configLoader.reset();
+    if (previousProjectRoot === undefined) {
+      delete process.env[EnvVars.PROJECT_ROOT];
+    } else {
+      process.env[EnvVars.PROJECT_ROOT] = previousProjectRoot;
+    }
+    vi.restoreAllMocks();
+  });
+
+  // Scenario 1 (LOAD-BEARING): pre-start call — API not bound, no supervisor.
+  // The tmux mock proves no spawn was attempted: if the gate were removed,
+  // split-window would be called and the "no tmux" assertion would fail.
+  it('pre-start call is rejected with no tmux side effects (gate: api not bound, no supervisor)', async () => {
+    const gate: SpawnTeammateGate = {
+      isApiBound: () => false,
+      hasSupervisor: () => false
+    };
+    const tool = getSpawnTool(gate);
+
+    const result = await tool.execute(spawnParams) as Record<string, unknown>;
+
+    // Deterministic rejection
+    expect(result.success).toBe(false);
+    expect(typeof result.error).toBe('string');
+    expect((result.error as string)).toContain('spawn_teammate unavailable');
+    expect((result.error as string)).toContain('HARNESS_API_BOUND');
+
+    // NO tmux split-window call — proves gate fires before any tmux side effect.
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).includes('split-window')
+    );
+    expect(splitCalls).toHaveLength(0);
+  });
+
+  // Scenario 2: stopped-coordinator call — API is bound but supervisor was stopped.
+  it('stopped-coordinator call is rejected with no tmux side effects (gate: api bound, no supervisor)', async () => {
+    const gate: SpawnTeammateGate = {
+      isApiBound: () => true,
+      hasSupervisor: () => false
+    };
+    const tool = getSpawnTool(gate);
+
+    const result = await tool.execute(spawnParams) as Record<string, unknown>;
+
+    expect(result.success).toBe(false);
+    expect(typeof result.error).toBe('string');
+    expect((result.error as string)).toContain('spawn_teammate unavailable');
+    expect((result.error as string)).toContain('supervisor is null');
+
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).includes('split-window')
+    );
+    expect(splitCalls).toHaveLength(0);
+  });
+
+  // Scenario 3: active-coordinator call — gate open, spawn proceeds normally.
+  // This is the behavior-preserving path: supervisor-owned spawn after /orr-else.
+  it('active-coordinator call succeeds when both gate conditions are met', async () => {
+    const gate: SpawnTeammateGate = {
+      isApiBound: () => true,
+      hasSupervisor: () => true
+    };
+    const tool = getSpawnTool(gate);
+
+    const result = await tool.execute(spawnParams) as Record<string, unknown>;
+
+    expect(result.success).toBe(true);
+
+    // Tmux split-window was called — normal spawn path executed.
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).includes('split-window')
+    );
+    expect(splitCalls).toHaveLength(1);
+  });
+
+  // Scenario 4: API-bind-failure — API not bound even though supervisor exists
+  // (edge: supervisor constructed before server bind completed).
+  it('API-bind-failure path is rejected with no tmux side effects (api not bound, supervisor present)', async () => {
+    const gate: SpawnTeammateGate = {
+      isApiBound: () => false,
+      hasSupervisor: () => true
+    };
+    const tool = getSpawnTool(gate);
+
+    const result = await tool.execute(spawnParams) as Record<string, unknown>;
+
+    expect(result.success).toBe(false);
+    expect(typeof result.error).toBe('string');
+    expect((result.error as string)).toContain('HARNESS_API_BOUND');
+
+    const splitCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).includes('split-window')
+    );
+    expect(splitCalls).toHaveLength(0);
+  });
+
+  // Scenario 5: restart/reload — gate re-evaluates live state on each call.
+  // Simulates a sequence: gate closed → gate opens → gate closes again (stop).
+  it('gate re-evaluates live state on each call (restart/reload behavior)', async () => {
+    let apiBound = false;
+    let supervisorActive = false;
+    const gate: SpawnTeammateGate = {
+      isApiBound: () => apiBound,
+      hasSupervisor: () => supervisorActive
+    };
+    const tool = getSpawnTool(gate);
+
+    // Phase 1: before /orr-else — rejected
+    const r1 = await tool.execute(spawnParams) as Record<string, unknown>;
+    expect(r1.success).toBe(false);
+    expect(vi.mocked(execa).mock.calls.filter(([, a]) => (a as string[]).includes('split-window'))).toHaveLength(0);
+
+    // Phase 2: after /orr-else starts — gate opens, spawn allowed
+    apiBound = true;
+    supervisorActive = true;
+    vi.mocked(execa).mockClear();
+    const r2 = await tool.execute(spawnParams) as Record<string, unknown>;
+    expect(r2.success).toBe(true);
+    expect(vi.mocked(execa).mock.calls.filter(([, a]) => (a as string[]).includes('split-window'))).toHaveLength(1);
+
+    // Phase 3: after /orr-else stop — supervisor null, gate closes again
+    supervisorActive = false;
+    vi.mocked(execa).mockClear();
+    const r3 = await tool.execute(spawnParams) as Record<string, unknown>;
+    expect(r3.success).toBe(false);
+    expect(vi.mocked(execa).mock.calls.filter(([, a]) => (a as string[]).includes('split-window'))).toHaveLength(0);
+  });
+
 });

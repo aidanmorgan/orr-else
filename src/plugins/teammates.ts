@@ -959,7 +959,25 @@ export class TeammateFactory {
   }
 }
 
-export const teammatePlugin = (factory: TeammateFactory): RuntimePlugin => ({
+/**
+ * pi-experiment-amq0.9: Admission gate for spawn_teammate.
+ *
+ * spawn_teammate is a coordinator-owned operation that MUST NOT execute before
+ * the SignalingServer has bound (HARNESS_API_BOUND) and an active supervisor
+ * session exists.  A call before either condition is met must be rejected
+ * with NO tmux side effects and a compact diagnostic.
+ *
+ * The gate is REQUIRED. teammatePlugin always checks both conditions before
+ * any tmux call is attempted (fail-closed).
+ */
+export interface SpawnTeammateGate {
+  /** Returns true when HARNESS_API_BOUND has fired and apiAddress.port is set. */
+  isApiBound(): boolean;
+  /** Returns true when an active supervisor/coordinator session exists. */
+  hasSupervisor(): boolean;
+}
+
+export const teammatePlugin = (factory: TeammateFactory, gate: SpawnTeammateGate): RuntimePlugin => ({
   name: 'orr-else-teammates',
   tools: [
     {
@@ -971,6 +989,23 @@ export const teammatePlugin = (factory: TeammateFactory): RuntimePlugin => ({
         worktreePath: Type.String({ description: 'Mandatory dedicated worktree path for the state worker.' })
       }),
       execute: async (params: unknown, ctx?: unknown) => {
+        // pi-experiment-amq0.9: admission gate — fail closed before any tmux call.
+        // BOTH conditions must hold: API must be bound and an active supervisor
+        // must exist.  A pre-start or post-stop call returns a deterministic
+        // rejection with no tmux side effects and no canonical evidence handle
+        // (so it cannot satisfy requiredTools / pass a coordinator gate).
+        if (!gate.isApiBound()) {
+          return {
+            success: false,
+            error: 'spawn_teammate unavailable: signaling server not yet bound (HARNESS_API_BOUND has not fired). Call /orr-else first.'
+          };
+        }
+        if (!gate.hasSupervisor()) {
+          return {
+            success: false,
+            error: 'spawn_teammate unavailable: no active coordinator session (supervisor is null). Call /orr-else first.'
+          };
+        }
         const { beadId, stateId, worktreePath } = (params && typeof params === 'object' ? params : {}) as { beadId: string; stateId: string; worktreePath: string };
         return factory.spawnTeammateInTmux(beadId as BeadId, stateId, worktreePath, ctx);
       }

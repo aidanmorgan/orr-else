@@ -108,7 +108,6 @@ export interface RuntimeServices {
   plugins: {
     bd: RuntimePlugin;
     git: RuntimePlugin;
-    teammates: RuntimePlugin;
     mailbox: RuntimePlugin;
     quality: RuntimePlugin;
     signaling: RuntimePlugin;
@@ -235,7 +234,6 @@ class WorktreePortAdapter implements WorktreePort {
 export interface PluginBundle {
   bd: RuntimePlugin;
   git: RuntimePlugin;
-  teammates: RuntimePlugin;
   mailbox: RuntimePlugin;
   quality: RuntimePlugin;
   signaling: RuntimePlugin;
@@ -347,7 +345,6 @@ export function assembleRuntimeServices(
     plugins: {
       bd: plugins.bd,
       git: plugins.git,
-      teammates: plugins.teammates,
       mailbox: plugins.mailbox,
       quality: plugins.quality,
       signaling: plugins.signaling,

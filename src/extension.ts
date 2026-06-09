@@ -22,7 +22,7 @@ import { Command } from 'commander';
 import { parse as parseShellCommand } from 'shell-quote';
 import { z } from 'zod';
 import escapeStringRegexp from 'escape-string-regexp';
-import { teammatePlugin, TeammateFactory } from './plugins/teammates.js';
+import { teammatePlugin, TeammateFactory, type SpawnTeammateGate } from './plugins/teammates.js';
 import type { MergeResult } from './core/RuntimeServices.js';
 import {
   executeConfiguredProjectTool,
@@ -3836,10 +3836,19 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       Defaults.TMUX_SESSION,
       fileURLToPath(import.meta.url)
     );
+    // pi-experiment-amq0.9: admission gate for spawn_teammate.
+    // Closes over session + services.apiAddress so the gate reads REAL runtime
+    // state at each execute() call — not a snapshot baked in at SESSION_START.
+    // The gate is created once here and shared by reference; both conditions must
+    // hold at call time: API bound (HARNESS_API_BOUND fired) + active supervisor.
+    const spawnTeammateGate: SpawnTeammateGate = {
+      isApiBound: () => Boolean(services.apiAddress.port),
+      hasSupervisor: () => session.supervisor !== null
+    };
     const harnessPlugins = [
       services.plugins.bd,
       services.plugins.git,
-      teammatePlugin(session.teammateFactory),
+      teammatePlugin(session.teammateFactory, spawnTeammateGate),
       services.plugins.mailbox,
       services.plugins.quality,
       services.plugins.meta

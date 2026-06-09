@@ -1499,9 +1499,13 @@ describe('WI-20 — TeammateFactory dedup', () => {
     instancesCaptured = [];
     // Spy on ensureAgentsWindow (public, called only in startOrrElse).
     // Capture `this` so we can check instance identity later.
+    // Must return { ok: true } so startOrrElse proceeds past the window-setup
+    // check and reaches session.supervisor assignment — required by the
+    // amq0.9 admission gate (hasSupervisor() must be true for spawn to proceed).
     ensureWindowSpy = vi.spyOn(TeammateFactory.prototype, 'ensureAgentsWindow').mockImplementation(
       async function (this: TeammateFactory) {
         instancesCaptured.push(this);
+        return { ok: true };
       }
     );
   });

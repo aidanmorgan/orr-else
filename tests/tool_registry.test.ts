@@ -25,7 +25,6 @@ describe('ToolRegistry composition', () => {
       PluginToolName.CREATE_WORKTREE,
       PluginToolName.REMOVE_WORKTREE,
       PluginToolName.MERGE_AND_COMMIT,
-      PluginToolName.SPAWN_TEAMMATE,
       PluginToolName.SEND_MAILBOX_MESSAGE,
       PluginToolName.CHECK_MAILBOX,
       'fetch_mailbox_message',
@@ -44,7 +43,6 @@ describe('ToolRegistry composition', () => {
   it('keeps the RuntimeServices constructor path behavior-compatible', () => {
     const registry = new ToolRegistry(createRuntimeServices());
 
-    expect(registry.getAllTools().map(tool => tool.name)).toContain(PluginToolName.SPAWN_TEAMMATE);
     expect(registry.getAllTools().map(tool => tool.name)).toContain(BuiltInToolName.SIGNAL_COMPLETION);
   });
 });

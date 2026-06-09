@@ -30,7 +30,6 @@ export function createToolRegistryComposition(services: RuntimePluginProvider): 
     orchestratorPlugins: [
       services.plugins.bd,
       services.plugins.git,
-      services.plugins.teammates,
       services.plugins.mailbox,
       services.plugins.meta
     ],

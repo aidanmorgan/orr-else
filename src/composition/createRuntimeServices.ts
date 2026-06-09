@@ -14,7 +14,7 @@ import { createMailboxPlugin } from '../plugins/mailbox.js';
 import { createMetaPlugin } from '../plugins/meta.js';
 import { createQualityPlugin } from '../plugins/quality.js';
 import { signalingPlugin } from '../plugins/signaling.js';
-import { TeammateFactory, teammatePlugin } from '../plugins/teammates.js';
+import { TeammateFactory } from '../plugins/teammates.js';
 import { ConfigLoader } from '../core/ConfigLoader.js';
 import { EventStore } from '../core/EventStore.js';
 import { Observability } from '../core/Observability.js';
@@ -110,7 +110,6 @@ export function createRuntimeServices(
     {
       bd: bdPlugin,
       git: gitPlugin,
-      teammates: teammatePlugin(teammateFactory),
       mailbox: createMailboxPlugin(eventStore, projectRoot, env),
       quality: createQualityPlugin(env, projectRoot),
       signaling: signalingPlugin,
