@@ -1,12 +1,12 @@
-import { execa } from 'execa';
 import { DomainEventName } from '../constants/domain.js';
-import { Component, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/infra.js';
+import { Component, TransactionalStateDefaults } from '../constants/infra.js';
 import type { BeadId } from '../types/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
 import { Logger } from './Logger.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
+import { nodeGitWorkingTreePort, type GitWorkingTreePort } from './GitWorkingTreePort.js';
 
 export interface TransactionalStateValidation {
   passed: boolean;
@@ -23,7 +23,8 @@ export class TransactionalStateGuard {
     private readonly configLoader: ConfigLoader,
     private readonly artifactPaths: ArtifactPaths,
     private readonly eventStore: EventStore,
-    private readonly planWriteSet: PlanWriteSet
+    private readonly planWriteSet: PlanWriteSet,
+    private readonly git: GitWorkingTreePort = nodeGitWorkingTreePort
   ) {}
 
   /**
@@ -214,15 +215,7 @@ export class TransactionalStateGuard {
   }
 
   private async changedWorktreePaths(worktreePath: string): Promise<string[]> {
-    const { stdout } = await execa('git', [
-      'status',
-      '--porcelain=v1',
-      '--untracked-files=all',
-      '-z'
-    ], {
-      cwd: worktreePath,
-      maxBuffer: TransactionalStateDefaults.GIT_STATUS_MAX_BUFFER_BYTES
-    });
+    const stdout = await this.git.porcelainStatus(worktreePath);
 
     const entries = stdout.split('\0').filter(Boolean);
     const paths = new Set<string>();
@@ -276,16 +269,7 @@ export class TransactionalStateGuard {
     }).catch(() => {});
 
     try {
-      await execa(FileMutationPolicyDefaults.GIT_COMMAND, [
-        FileMutationPolicyDefaults.GIT_RESTORE_SUBCOMMAND,
-        TransactionalStateDefaults.GIT_SOURCE_OPTION,
-        TransactionalStateDefaults.GIT_HEAD_REF,
-        FileMutationPolicyDefaults.ARG_SEPARATOR,
-        ...restorablePaths
-      ], {
-        cwd: worktreePath,
-        maxBuffer: TransactionalStateDefaults.GIT_STATUS_MAX_BUFFER_BYTES
-      });
+      await this.git.restoreFromHead(worktreePath, restorablePaths);
       await this.eventStore.record(DomainEventName.TRANSACTIONAL_STATE_AUTO_RESTORE_SUCCEEDED, {
         beadId,
         stateId,

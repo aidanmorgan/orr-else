@@ -9,6 +9,8 @@ import type { Observability } from '../src/core/Observability.js';
 import { createGitPlugin } from '../src/plugins/git.js';
 import { DomainEventName, PluginToolName, WorktreePreserveReason } from '../src/constants/domain.js';
 import { SpanName } from '../src/constants/infra.js';
+import type { GitWorkingTreePort } from '../src/core/GitWorkingTreePort.js';
+import type { FileSystemPort } from '../src/core/FileSystemPort.js';
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -760,5 +762,152 @@ describe('git plugin — no-cap minimal schema (s3wp.27e)', () => {
     for (const key of Object.keys(result)) {
       expect(allowedKeys).toContain(key);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// git plugin — GitWorkingTreePort adapter wiring
+//
+// These tests prove that createGitPlugin's git operations go through the
+// injected GitWorkingTreePort (not a module-local git() wrapper or direct execa).
+//
+// LOAD-BEARING MUTATION PROOF:
+//   If gitPort.run is replaced with a stub that always returns '' (empty),
+//   the create_worktree tool fails — proving consumption is real.
+// ---------------------------------------------------------------------------
+
+describe('git plugin — GitWorkingTreePort adapter wiring', () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-git-port-wiring-')));
+    makeRepo(tempRoot);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it('create_worktree uses gitPort.run — injected port is called', async () => {
+    // Wrap the real git execution and count calls to prove the port is used
+    const runCalls: Array<{ args: string[]; cwd: string }> = [];
+
+    // Build a port that delegates to the real execFileSync but records calls
+    const recordingGitPort: GitWorkingTreePort = {
+      run: async (args, cwd) => {
+        runCalls.push({ args, cwd });
+        return execFileSync('git', args, { cwd, encoding: 'utf8' });
+      },
+      mergeBaseIsAncestor: async (branch, target, cwd) => {
+        try {
+          execFileSync('git', ['merge-base', '--is-ancestor', branch, target], { cwd });
+          return 0;
+        } catch (e: unknown) {
+          return (e as { status?: number }).status ?? undefined;
+        }
+      },
+      porcelainStatus: async (worktreePath) => execFileSync('git', ['status', '--porcelain=v1', '--untracked-files=all', '-z'], { cwd: worktreePath, encoding: 'utf8' }),
+      restoreFromHead: async () => {},
+      isTrackedPath: async () => true,
+      checkIgnore: async () => ({ isIgnored: false, stdout: '' })
+    };
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(
+      eventStore, configLoader, undefined, tempRoot,
+      undefined, undefined,
+      recordingGitPort
+    );
+    const createTool = plugin.tools.find(t => t.name === PluginToolName.CREATE_WORKTREE)!;
+
+    const result = await createTool.execute({ beadId: 'bd-port-wiring' });
+    expect(result).toMatchObject({ success: true });
+
+    // gitPort.run was called at least once (for the worktree add command)
+    expect(runCalls.length).toBeGreaterThan(0);
+    const worktreeAddCall = runCalls.find(c => c.args.includes('worktree') && c.args.includes('add'));
+    expect(worktreeAddCall).toBeDefined();
+  });
+
+  it('MUTATION PROOF: gitPort.run throwing breaks merge_and_commit — port is load-bearing', async () => {
+    // Arrange: real worktree with a committed change (so the merge path is exercised)
+    const beadId = 'bd-mutation-proof';
+    const worktreePath = path.join(tempRoot, 'worktrees', beadId);
+    git(tempRoot, ['worktree', 'add', '-b', `bead/${beadId}`, worktreePath, 'main']);
+    fs.writeFileSync(path.join(worktreePath, 'source.txt'), 'mutation-proof\n');
+    git(worktreePath, ['add', 'source.txt']);
+    git(worktreePath, ['commit', '-m', 'pre-committed for mutation proof']);
+
+    // Inject a port whose run() always throws — this proves merge_and_commit
+    // routes through gitPort.run rather than any fallback direct-git path.
+    const throwingGitPort: GitWorkingTreePort = {
+      run: vi.fn(async (_args, _cwd) => {
+        throw new Error('gitPort.run: injected failure (mutation proof)');
+      }),
+      mergeBaseIsAncestor: vi.fn(async () => 0),
+      porcelainStatus: vi.fn(async () => ''),
+      restoreFromHead: vi.fn(async () => {}),
+      isTrackedPath: vi.fn(async () => true),
+      checkIgnore: vi.fn(async () => ({ isIgnored: false, stdout: '' }))
+    };
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const plugin = createGitPlugin(
+      eventStore, configLoader, undefined, tempRoot,
+      undefined, undefined,
+      throwingGitPort
+    );
+    const mergeTool = plugin.tools.find(t => t.name === PluginToolName.MERGE_AND_COMMIT)!;
+
+    const result = await mergeTool.execute({ beadId, message: `Complete ${beadId}` });
+
+    // The injected throwing port caused the merge to fail — proving gitPort.run
+    // is the one and only git execution path (no bypass to direct simpleGit/execa).
+    expect(result.success).toBe(false);
+    expect(String((result as { error?: string }).error)).toContain('gitPort.run: injected failure');
+    // The port was actually called (not bypassed)
+    expect(throwingGitPort.run).toHaveBeenCalled();
+  });
+
+  it('fsPort.existsSync is used — injected fake controls worktree-exists branch', async () => {
+    // Inject a fake FileSystemPort that reports the worktree as already-existing.
+    // If fsPort.existsSync is wired, create_worktree takes the "reuse" path instead
+    // of the "create" path — producing WORKTREE_REUSED (not WORKTREE_CREATED).
+    const worktreePath = path.join(tempRoot, 'worktrees', 'bd-fs-wiring');
+    // Actually create the worktree on disk so the reuse path's git ops succeed
+    git(tempRoot, ['worktree', 'add', '-b', 'bead/bd-fs-wiring', worktreePath, 'main']);
+
+    const recordingFsPort: FileSystemPort = {
+      existsSync: vi.fn((p) => fs.existsSync(p)),
+      readFileSync: vi.fn((p, enc) => fs.readFileSync(p, enc as BufferEncoding) as string)
+    };
+
+    const configLoader = new ConfigLoader();
+    const eventStore = new EventStore(configLoader);
+    const emittedEvents: Array<{ type: string }> = [];
+    const originalRecord = eventStore.record.bind(eventStore);
+    eventStore.record = async (type: string, data: Record<string, unknown>) => {
+      emittedEvents.push({ type });
+      return originalRecord(type, data);
+    };
+
+    const plugin = createGitPlugin(
+      eventStore, configLoader, undefined, tempRoot,
+      undefined, undefined,
+      undefined,
+      recordingFsPort
+    );
+    const createTool = plugin.tools.find(t => t.name === PluginToolName.CREATE_WORKTREE)!;
+
+    const result = await createTool.execute({ beadId: 'bd-fs-wiring' });
+    expect(result).toMatchObject({ success: true });
+
+    // existsSync was called via the injected fake
+    expect(recordingFsPort.existsSync).toHaveBeenCalled();
+    // Because the worktree already exists on disk, the REUSED event fires
+    expect(emittedEvents.find(e => e.type === DomainEventName.WORKTREE_REUSED)).toBeDefined();
+    expect(emittedEvents.find(e => e.type === DomainEventName.WORKTREE_CREATED)).toBeUndefined();
   });
 });

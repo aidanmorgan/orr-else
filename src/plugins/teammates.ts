@@ -2,7 +2,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Type } from "@earendil-works/pi-ai";
 import { v7 as uuidv7 } from 'uuid';
-import { execa } from 'execa';
 import { parse as parseShellCommand, quote as quoteShellArgs } from 'shell-quote';
 import type { ApiAddress, BeadId } from '../types/index.js';
 
@@ -23,6 +22,8 @@ import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
 import { DomainEventName, PiCliCommand, PluginToolName, ThinkingLevel } from '../constants/domain.js';
 import { Component, Defaults, EnvVars, OperationalArtifactPath, OtelAttr, PaneTranscriptDefaults, PiCliFlag, ProcessFlag, TeammatePaneCleanupReason, TmuxCommand, TmuxFormat, TmuxOption, TmuxOptionValue, WorktreeDefaults } from '../constants/infra.js';
+import { nodeTmuxClient, type TmuxClient } from './TmuxClient.js';
+import { nodeWorkerCommandBuilder, type WorkerCommandBuilder } from './WorkerCommandBuilder.js';
 
 /**
  * Format the Orr Else worker identity string stored in the @orr_worker pane
@@ -95,11 +96,6 @@ interface TmuxPane {
   orrWorker: string;
 }
 
-async function tmux(args: string[]): Promise<string> {
-  const result = await execa('tmux', args);
-  return result.stdout;
-}
-
 /**
  * Return the exact-match tmux target prefix for a session name.
  *
@@ -124,9 +120,9 @@ export function exactSession(sessionName: string): string {
  * string on some tmux builds even when the exact session exists. `has-session`
  * is the purpose-built existence probe and exits non-zero when absent.
  */
-async function verifyExactSession(sessionName: string): Promise<boolean> {
+async function verifyExactSession(sessionName: string, tmuxClient: TmuxClient): Promise<boolean> {
   try {
-    await tmux([TmuxCommand.HAS_SESSION, '-t', exactSession(sessionName)]);
+    await tmuxClient.run([TmuxCommand.HAS_SESSION, '-t', exactSession(sessionName)]);
     return true;
   } catch {
     return false;
@@ -169,7 +165,9 @@ export class TeammateFactory {
     private readonly sessionName: string = Defaults.TMUX_SESSION,
     private readonly extensionPath?: string,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    private readonly tmuxClient: TmuxClient = nodeTmuxClient,
+    private readonly workerCommandBuilder: WorkerCommandBuilder = nodeWorkerCommandBuilder
   ) {}
 
   public async getActiveTeammateCount(): Promise<number> {
@@ -235,7 +233,7 @@ export class TeammateFactory {
       TmuxFormat.PANE_DEAD,            // index 5
       TmuxFormat.PANE_ORR_WORKER       // index 6
     ].join(TmuxFormat.FIELD_SEPARATOR);
-    const output = await tmux([TmuxCommand.LIST_PANES, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
+    const output = await this.tmuxClient.run([TmuxCommand.LIST_PANES, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-F', fields]);
     return output.trim().split('\n').filter(Boolean).map(line => {
       const parts = line.split(TmuxFormat.FIELD_SEPARATOR);
       const [paneId = '', paneTitle = '', currentCommand = '', startCommand = ''] = parts;
@@ -275,7 +273,7 @@ export class TeammateFactory {
       const beadId = this.beadIdFromPane(pane);
       if (beadId) beadIds.add(beadId);
       try {
-        await tmux([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
+        await this.tmuxClient.run([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
         removedPaneIds.push(pane.paneId);
       } catch (error) {
         Logger.warn(Component.FACTORY, 'Unable to remove dead Orr Else teammate pane', {
@@ -361,7 +359,7 @@ export class TeammateFactory {
    * @returns Redacted pane text (reasoning blocks replaced with a placeholder).
    */
   public async capturePaneText(paneId: string): Promise<string> {
-    const raw = await tmux([TmuxCommand.CAPTURE_PANE, '-p', '-t', paneId]);
+    const raw = await this.tmuxClient.run([TmuxCommand.CAPTURE_PANE, '-p', '-t', paneId]);
     const cleaned = redactPaneText(raw);
     // Best-effort: write transcript + pointer; never blocks on failure.
     this.writeCurrentTranscript(paneId, cleaned).catch(() => {});
@@ -512,10 +510,10 @@ export class TeammateFactory {
   public async ensureAgentsWindow(): Promise<{ ok: boolean; error?: string }> {
     // Step 1: ensure the session exists. Use exact-match targeting so
     // "has-session -t =orr-else" never resolves "orr-else-coordinator".
-    const sessionExists = await verifyExactSession(this.sessionName);
+    const sessionExists = await verifyExactSession(this.sessionName, this.tmuxClient);
     if (!sessionExists) {
       try {
-        await tmux([TmuxCommand.NEW_SESSION, '-d', '-s', this.sessionName, '-n', Defaults.TMUX_COORDINATOR_WINDOW]);
+        await this.tmuxClient.run([TmuxCommand.NEW_SESSION, '-d', '-s', this.sessionName, '-n', Defaults.TMUX_COORDINATOR_WINDOW]);
       } catch (error) {
         const msg = `Failed to create tmux session "${this.sessionName}": ${String(error)}`;
         this.agentsWindowSetupFailed = true;
@@ -531,7 +529,7 @@ export class TeammateFactory {
     // Step 2: ensure the Agents window exists.
     let windowAlreadyExists = false;
     try {
-      const windows = (await tmux([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
+      const windows = (await this.tmuxClient.run([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
       windowAlreadyExists = windows.includes(Defaults.TMUX_AGENTS_WINDOW);
     } catch (error) {
       const msg = `Failed to list windows for session "${this.sessionName}": ${String(error)}`;
@@ -546,7 +544,7 @@ export class TeammateFactory {
 
     if (!windowAlreadyExists) {
       try {
-        await tmux([TmuxCommand.NEW_WINDOW, '-t', exactSession(this.sessionName), '-n', Defaults.TMUX_AGENTS_WINDOW]);
+        await this.tmuxClient.run([TmuxCommand.NEW_WINDOW, '-t', exactSession(this.sessionName), '-n', Defaults.TMUX_AGENTS_WINDOW]);
       } catch (error) {
         const msg = `Failed to create Agents window in session "${this.sessionName}": ${String(error)}`;
         this.agentsWindowSetupFailed = true;
@@ -562,7 +560,7 @@ export class TeammateFactory {
       // fork/device error might silently succeed from tmux's perspective while
       // the window was never actually created.
       try {
-        const windowsAfter = (await tmux([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
+        const windowsAfter = (await this.tmuxClient.run([TmuxCommand.LIST_WINDOWS, '-t', exactSession(this.sessionName), '-F', '#{window_name}'])).trim().split('\n');
         if (!windowsAfter.includes(Defaults.TMUX_AGENTS_WINDOW)) {
           const msg = `Agents window not found in session "${this.sessionName}" after creation`;
           this.agentsWindowSetupFailed = true;
@@ -586,7 +584,7 @@ export class TeammateFactory {
 
     // Step 4: apply window options. remain-on-exit is required; pane-border-status is best-effort.
     try {
-      await tmux([
+      await this.tmuxClient.run([
         TmuxCommand.SET_WINDOW_OPTION,
         '-t',
         `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`,
@@ -602,7 +600,7 @@ export class TeammateFactory {
     // This is a window-level option: setting it here (rather than per-spawn)
     // ensures N concurrent spawns do not issue N redundant window-option writes.
     // Non-fatal: a rejection from an older tmux must not prevent spawn.
-    tmux([
+    this.tmuxClient.run([
       TmuxCommand.SET_OPTION,
       '-w',
       '-t',
@@ -775,7 +773,7 @@ export class TeammateFactory {
         `Orr Else teammate bootstrap for ${beadId}/${stateId}.`
       ];
 
-      const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
+      const command = this.workerCommandBuilder.build({ env, args });
       const skillNames = resolvedSkills.map(s => s.name);
 
       // pi-experiment-amq0.10: spawn-time identity digest via the single builder.
@@ -847,13 +845,13 @@ export class TeammateFactory {
         ...(piSessionPath ? { piSessionPath, isResumption: !!spawnOptions?.contextKey } : {})
       });
 
-      const paneId = (await tmux([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
+      const paneId = (await this.tmuxClient.run([TmuxCommand.SPLIT_WINDOW, '-P', '-F', '#{pane_id}', '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, '-c', runDir, command])).trim();
       if (paneId) {
         // Set the visible pane title (backward compat: slot-counter reads #{pane_title}
         // via AGENT_PANE_PREFIX prefix; Pi may overwrite this, but the @orr_worker
         // user-option and start-command/worktree-path fallbacks in
         // isTeammatePane/beadIdFromPane handle that case).
-        await tmux([TmuxCommand.SELECT_PANE, '-t', paneId, '-T', `${Defaults.AGENT_PANE_PREFIX}${beadId}`]);
+        await this.tmuxClient.run([TmuxCommand.SELECT_PANE, '-t', paneId, '-T', `${Defaults.AGENT_PANE_PREFIX}${beadId}`]);
 
         // Store the full worker identity as a pane user-option (fire-and-forget).
         // tmux user options (prefixed with @) are internal tmux state; Pi cannot
@@ -866,17 +864,17 @@ export class TeammateFactory {
         // options. A rejection here must never fail a live spawn — the worker
         // process is already running. Wrap each observability call independently.
         const orrWorkerValue = formatOrrWorkerPaneOption(workerId, beadId, stateId);
-        tmux([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.ORR_WORKER_PANE_OPTION, orrWorkerValue])
+        this.tmuxClient.run([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.ORR_WORKER_PANE_OPTION, orrWorkerValue])
           .catch(() => {});
 
         // Wire the pane border to display the durable @orr_worker value (fire-and-forget).
         // set-option -p scopes the option to this pane only, so other panes in the
         // window are unaffected. pane-border-format reads #{@orr_worker} which
         // expands to the pane-scoped user-option set above.
-        tmux([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.PANE_BORDER_FORMAT, ORR_WORKER_BORDER_FORMAT])
+        this.tmuxClient.run([TmuxCommand.SET_OPTION, '-p', '-t', paneId, TmuxOption.PANE_BORDER_FORMAT, ORR_WORKER_BORDER_FORMAT])
           .catch(() => {});
       }
-      await tmux([TmuxCommand.SELECT_LAYOUT, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, 'tiled']);
+      await this.tmuxClient.run([TmuxCommand.SELECT_LAYOUT, '-t', `${exactSession(this.sessionName)}:${Defaults.TMUX_AGENTS_WINDOW}`, 'tiled']);
       await this.eventStore.record(DomainEventName.TEAMMATE_SPAWNED, {
         beadId,
         stateId,
@@ -916,7 +914,7 @@ export class TeammateFactory {
 
     for (const pane of matchingPanes) {
       try {
-        await tmux([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
+        await this.tmuxClient.run([TmuxCommand.KILL_PANE, '-t', pane.paneId]);
         terminatedPaneIds.push(pane.paneId);
       } catch (error) {
         Logger.warn(Component.FACTORY, 'Unable to kill Orr Else teammate pane', {

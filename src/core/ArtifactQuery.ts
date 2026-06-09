@@ -19,56 +19,14 @@
  *   so path logic is never duplicated (req 6).
  */
 
-import * as fs from 'fs';
 import * as path from 'path';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import { ArtifactQueryDefaults, EnvVars, OperationalArtifactPath } from '../constants/infra.js';
 import { projections, type ProjectionDef } from '../contract.js';
 import { ArtifactQueryStatus } from './vocabulary.js';
-
-// ─── Path-safety helpers ──────────────────────────────────────────────────────
-
-/**
- * Canonicalize a path: resolve symlinks via realpathSync where the file
- * exists; for a non-existent path, canonicalize the deepest existing ancestor
- * and re-join the missing tail segments.
- *
- * Mirrors the private `canonicalPath` logic in FileAccessPolicy so the two
- * implementations stay consistent.
- */
-function canonicalPath(value: string): string {
-  const resolvedPath = path.resolve(value);
-  try {
-    return fs.realpathSync(resolvedPath);
-  } catch {
-    let currentPath = resolvedPath;
-    const missingSegments: string[] = [];
-    while (!fs.existsSync(currentPath)) {
-      const parentPath = path.dirname(currentPath);
-      if (parentPath === currentPath) return resolvedPath;
-      missingSegments.unshift(path.basename(currentPath));
-      currentPath = parentPath;
-    }
-    try {
-      return path.join(fs.realpathSync(currentPath), ...missingSegments);
-    } catch {
-      return resolvedPath;
-    }
-  }
-}
-
-/**
- * Returns true iff `childPath` is inside (or equal to) `rootPath`.
- *
- * Uses canonicalized paths and a separator-boundary check so that
- * `/artifacts-evil` does NOT match a root of `/artifacts`.
- *
- * Mirrors the private `isInside` logic in FileAccessPolicy.
- */
-function isPathInside(childPath: string, rootPath: string): boolean {
-  const rel = path.relative(canonicalPath(rootPath), canonicalPath(childPath));
-  return !rel || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
+import { nodePathScopeService, type PathScopeService } from './PathScopeService.js';
+import { nodeFileSystemPort, type FileSystemPort } from './FileSystemPort.js';
+import { nodeArtifactReader, type ArtifactReader } from './ArtifactReader.js';
 
 /**
  * Build the list of allowed roots for an explicit artifactPath:
@@ -78,7 +36,7 @@ function isPathInside(childPath: string, rootPath: string): boolean {
  *
  * Both roots are canonicalized so symlinks in the config/env cannot widen scope.
  */
-function allowedArtifactRoots(beadId: string): string[] {
+function allowedArtifactRoots(beadId: string, pathScope: PathScopeService): string[] {
   const projectRoot = process.env[EnvVars.PROJECT_ROOT] || process.cwd();
   const worktreePath =
     process.env[EnvVars.WORKTREE_PATH] ||
@@ -87,7 +45,7 @@ function allowedArtifactRoots(beadId: string): string[] {
 
   const beadArtifactDir = path.join(projectRoot, OperationalArtifactPath.PI_ARTIFACTS_DIR, beadId);
 
-  return [canonicalPath(beadArtifactDir), canonicalPath(worktreePath)];
+  return [pathScope.canonicalPath(beadArtifactDir), pathScope.canonicalPath(worktreePath)];
 }
 
 // ─── Named projection resolution ─────────────────────────────────────────────
@@ -621,7 +579,12 @@ export type ArtifactQueryResult = ArtifactQuerySuccess | ArtifactQueryRejection 
 // ─── ArtifactQuery class ──────────────────────────────────────────────────────
 
 export class ArtifactQuery {
-  constructor(private readonly artifactPaths: ArtifactPaths) {}
+  constructor(
+    private readonly artifactPaths: ArtifactPaths,
+    private readonly pathScope: PathScopeService = nodePathScopeService,
+    private readonly fsPort: FileSystemPort = nodeFileSystemPort,
+    private readonly artifactReader: ArtifactReader = nodeArtifactReader
+  ) {}
 
   public async query(input: ArtifactQueryInput): Promise<ArtifactQueryResult> {
     // 1. Validate mutual exclusivity of (artifactId / artifactPath) and (projection / selector / summary / schema)
@@ -682,7 +645,7 @@ export class ArtifactQuery {
       );
     }
 
-    const exists = fs.existsSync(resolvedPath);
+    const exists = this.fsPort.existsSync(resolvedPath);
 
     if (!exists) {
       return this.rejection(
@@ -696,8 +659,7 @@ export class ArtifactQuery {
     // 3. Parse artifact JSON
     let parsed: unknown;
     try {
-      const raw = fs.readFileSync(resolvedPath, 'utf8');
-      parsed = JSON.parse(raw);
+      parsed = this.artifactReader.readJson(resolvedPath);
     } catch (error) {
       return this.rejection(
         `Failed to read/parse artifact at "${resolvedPath}": ${String(error)}`,
@@ -937,8 +899,8 @@ export class ArtifactQuery {
         ? input.artifactPath
         : path.resolve(input.artifactPath);
 
-      const roots = allowedArtifactRoots(input.beadId);
-      const inScope = roots.some(root => isPathInside(resolved, root));
+      const roots = allowedArtifactRoots(input.beadId, this.pathScope);
+      const inScope = roots.some(root => this.pathScope.isPathInside(resolved, root));
       if (!inScope) {
         const scopeRejection: ArtifactQueryRejection = {
           status: ArtifactQueryStatus.REJECTED,

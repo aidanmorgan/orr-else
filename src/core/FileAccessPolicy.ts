@@ -10,6 +10,7 @@ import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellC
 import type { EventStore } from './EventStore.js';
 import type { PlanWriteSet } from './PlanWriteSet.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
+import { nodePathScopeService, type PathScopeService } from './PathScopeService.js';
 
 interface MutationContext {
   beadId?: string;
@@ -74,7 +75,8 @@ export class FileAccessPolicy {
     private readonly planWriteSet: PlanWriteSet,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
     private readonly projectRoot: string = process.cwd(),
-    private readonly artifactPaths?: ArtifactPaths
+    private readonly artifactPaths?: ArtifactPaths,
+    private readonly pathScope: PathScopeService = nodePathScopeService
   ) {}
 
   public async apply(event: any): Promise<PolicyResult | null> {
@@ -435,10 +437,10 @@ export class FileAccessPolicy {
   ): string | null {
     if (!context.frameworkRoot) return null;
     const resolvedPath = this.resolvePath(targetPath, context.cwd);
-    if (!this.isInside(resolvedPath, context.frameworkRoot)) return null;
+    if (!this.pathScope.isPathInside(resolvedPath, context.frameworkRoot)) return null;
     // Path IS under the framework root. If it's also inside the worktree,
     // allow it to proceed through normal policy (no early rejection needed).
-    if (context.worktreePath && this.isInside(resolvedPath, context.worktreePath)) return null;
+    if (context.worktreePath && this.pathScope.isPathInside(resolvedPath, context.worktreePath)) return null;
     // Path is under framework root but outside the active worktree.
     // Give an explicit early rejection naming the read-only-evidence contract.
     return [
@@ -462,7 +464,7 @@ export class FileAccessPolicy {
       return `PROTOCOL VIOLATION: ${toolLabel} attempted to ${operation} \`${targetPath}\`, but no mandatory WORKTREE_PATH is configured for this teammate.`;
     }
     const resolvedPath = this.resolvePath(targetPath, context.cwd);
-    if (this.isInside(resolvedPath, context.worktreePath)) return null;
+    if (this.pathScope.isPathInside(resolvedPath, context.worktreePath)) return null;
     return `PROTOCOL VIOLATION: ${toolLabel} may only ${operation} files inside this Bead worktree. Target \`${targetPath}\` resolves outside \`${context.worktreePath}\`.`;
   }
 
@@ -476,7 +478,7 @@ export class FileAccessPolicy {
     if (!context.beadId) return false;
     const resolvedPath = this.resolvePath(targetPath, context.cwd);
     const artifactsRoot = path.join(context.projectRoot, OperationalArtifactPath.PI_ARTIFACTS_DIR, context.beadId);
-    return this.isInside(resolvedPath, artifactsRoot);
+    return this.pathScope.isPathInside(resolvedPath, artifactsRoot);
   }
 
   private async writeSetRejection(targetPath: string, context: MutationContext, toolLabel: string): Promise<string | null> {
@@ -498,7 +500,7 @@ export class FileAccessPolicy {
    */
   private async declaredWritableArtifactMatch(targetPath: string, context: MutationContext): Promise<string | null> {
     if (!this.artifactPaths || !context.beadId) return null;
-    const resolvedTarget = this.canonicalPath(this.resolvePath(targetPath, context.cwd));
+    const resolvedTarget = this.pathScope.canonicalPath(this.resolvePath(targetPath, context.cwd));
     const actionId = this.env.env(EnvVars.ACTION_ID);
     const writablePaths = await this.artifactPaths.resolveWritableArtifactPaths({
       beadId: context.beadId,
@@ -507,7 +509,7 @@ export class FileAccessPolicy {
       includeContent: false
     }).catch(() => [] as string[]);
     for (const candidate of writablePaths) {
-      if (this.canonicalPath(candidate) === resolvedTarget) return candidate;
+      if (this.pathScope.canonicalPath(candidate) === resolvedTarget) return candidate;
     }
     return null;
   }
@@ -595,9 +597,9 @@ export class FileAccessPolicy {
     if (!trimmed) return '';
     if (!path.isAbsolute(trimmed)) return this.toSlashPath(trimmed).replace(/^\.\//, '');
 
-    const absolutePath = this.canonicalPath(trimmed);
+    const absolutePath = this.pathScope.canonicalPath(trimmed);
     for (const root of [context.worktreePath, context.projectRoot, context.cwd].filter(Boolean)) {
-      const relativePath = path.relative(this.canonicalPath(root), absolutePath);
+      const relativePath = path.relative(this.pathScope.canonicalPath(root), absolutePath);
       if (!relativePath || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))) {
         return this.toSlashPath(relativePath || '.');
       }
@@ -726,32 +728,6 @@ export class FileAccessPolicy {
 
   private resolvePath(targetPath: string, cwd: string): string {
     return path.resolve(path.isAbsolute(targetPath) ? targetPath : path.join(cwd, targetPath));
-  }
-
-  private isInside(candidatePath: string, rootPath: string): boolean {
-    const relativePath = path.relative(this.canonicalPath(rootPath), this.canonicalPath(candidatePath));
-    return !relativePath || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-  }
-
-  private canonicalPath(value: string): string {
-    const resolvedPath = path.resolve(value);
-    try {
-      return fs.realpathSync(resolvedPath);
-    } catch {
-      let currentPath = resolvedPath;
-      const missingSegments: string[] = [];
-      while (!fs.existsSync(currentPath)) {
-        const parentPath = path.dirname(currentPath);
-        if (parentPath === currentPath) return resolvedPath;
-        missingSegments.unshift(path.basename(currentPath));
-        currentPath = parentPath;
-      }
-      try {
-        return path.join(fs.realpathSync(currentPath), ...missingSegments);
-      } catch {
-        return resolvedPath;
-      }
-    }
   }
 
   private pathWithin(relativePath: string, directory: string): boolean {

@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execa } from 'execa';
-import { CommandExitCode, FileMutationPolicyDefaults, TransactionalStateDefaults } from '../constants/infra.js';
+import { TransactionalStateDefaults } from '../constants/infra.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
+import { nodeGitWorkingTreePort, type GitWorkingTreePort } from './GitWorkingTreePort.js';
 
 interface PlanContractWriteSetEntry {
   path?: string;
@@ -59,7 +59,8 @@ export class PlanWriteSet {
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly artifactPaths: ArtifactPaths,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    private readonly git: GitWorkingTreePort = nodeGitWorkingTreePort
   ) {}
 
   public async resolve(context: PlanWriteSetContext): Promise<PlanWriteSetResolution> {
@@ -282,32 +283,12 @@ export class PlanWriteSet {
   }
 
   private async isTrackedPath(worktreePath: string, filePath: string): Promise<boolean> {
-    const result = await execa(FileMutationPolicyDefaults.GIT_COMMAND, [
-      'ls-files',
-      '--error-unmatch',
-      FileMutationPolicyDefaults.ARG_SEPARATOR,
-      filePath
-    ], {
-      cwd: worktreePath,
-      reject: false,
-      maxBuffer: TransactionalStateDefaults.GIT_STATUS_MAX_BUFFER_BYTES
-    });
-    return result.exitCode === CommandExitCode.SUCCESS;
+    return this.git.isTrackedPath(worktreePath, filePath);
   }
 
   private async ignoreRuleForPath(worktreePath: string, filePath: string): Promise<IgnoredWriteSetPath | null> {
-    const result = await execa(FileMutationPolicyDefaults.GIT_COMMAND, [
-      TransactionalStateDefaults.GIT_CHECK_IGNORE_SUBCOMMAND,
-      '--verbose',
-      FileMutationPolicyDefaults.ARG_SEPARATOR,
-      filePath
-    ], {
-      cwd: worktreePath,
-      reject: false,
-      maxBuffer: TransactionalStateDefaults.GIT_STATUS_MAX_BUFFER_BYTES
-    });
-    if (result.exitCode !== CommandExitCode.SUCCESS) return null;
-
+    const result = await this.git.checkIgnore(worktreePath, filePath);
+    if (!result.isIgnored) return null;
     return this.parseIgnoreRule(result.stdout, filePath);
   }
 

@@ -4,6 +4,7 @@
  */
 import path from 'path';
 import { execa } from 'execa';
+import { nodeProcessRunner, type ProcessRunner } from '../../core/ProcessRunner.js';
 import { open, readFile, stat } from 'fs/promises';
 import { resolveTemplateString } from '../../core/TemplateResolver.js';
 import type { ProjectCommandToolConfig } from '../../core/domain/StateModels.js';
@@ -437,9 +438,9 @@ export function serializedCommandLockTimeoutResult(
   };
 }
 
-export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal) {
+export async function executeCommandTool(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal, processRunner: ProcessRunner = nodeProcessRunner) {
   if (!shouldSerializeCommandTool(definition)) {
-    return await executeCommandToolUnlocked(definition, args, context, signal);
+    return await executeCommandToolUnlocked(definition, args, context, signal, processRunner);
   }
   const projectRoot = context.templateContext.projectRoot || process.cwd();
   // zog2.9: when the tool declares a sideEffectContract.serializationKey, use that
@@ -465,7 +466,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
         }
       },
       `Timed out acquiring serialized project-tool lock for ${definition.name}`,
-      async () => executeCommandToolUnlocked(definition, args, context, signal)
+      async () => executeCommandToolUnlocked(definition, args, context, signal, processRunner)
     );
   } catch (error) {
     if (error instanceof SerializedToolLockTimeoutError) {
@@ -475,7 +476,7 @@ export async function executeCommandTool(definition: ProjectCommandToolConfig, a
   }
 }
 
-async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal) {
+async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, args: any, context: ProjectToolExecutionContext, signal?: AbortSignal, processRunner: ProcessRunner = nodeProcessRunner) {
   const templateContext = context.templateContext;
   const command = resolveTemplateString(definition.command, templateContext);
   const finalArgs = (definition.defaultArgs || []).map(arg => resolveTemplateString(arg, templateContext));
@@ -545,22 +546,21 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
   const cancelSignal = cancellationPolicy === 'supported' && signal ? signal : undefined;
 
   try {
-    const result = await execa(command, spawnArgs, {
+    const result = await processRunner.run(command, spawnArgs, {
       cwd: context.cwd,
       env: { ...context.hostEnv, ...env, ...projectToolEnvironment(context) },
       // s3wp.25: stream stdout/stderr directly to files — raw output is always
       // persisted regardless of exit code, signal, or timeout.
       stdout: { file: stdoutFile },
       stderr: { file: stderrFile },
-      reject: false,
       timeout: definition.timeoutMs || Defaults.PROCESS_REAP_INTERVAL_MS,
       ...(cancelSignal ? { cancelSignal } : {})
     });
     const stdoutInfo = await fileInfo(stdoutFile);
     const stderrInfo = await fileInfo(stderrFile);
     const structuredStdout = await jsonRecordFromFile(stdoutFile);
-    const exitCode = typeof result.exitCode === 'number' ? result.exitCode : undefined;
-    const isCanceled = (result as { isCanceled?: boolean }).isCanceled === true;
+    const exitCode = result.exitCode;
+    const isCanceled = result.isCanceled;
 
     // If a structured handler is active, parse the process output into a compact
     // structuredResult.  If parse() returns null (malformed/empty JSON), fall back
@@ -585,7 +585,7 @@ async function executeCommandToolUnlocked(definition: ProjectCommandToolConfig, 
       maxBufferExceeded: false,
       timedOut: result.timedOut,
       cancelled: isCanceled || undefined,
-      signal: result.signal,
+      signal: result.signal ?? undefined,
       stdoutFile,
       stderrFile,
       boundedStdout: { text: stdoutInfo.text, bytes: stdoutInfo.bytes, truncated: false },

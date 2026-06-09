@@ -24,6 +24,7 @@ import { EnvVars } from '../constants/infra.js';
 import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
 import { skeletons } from '../contract.js';
 import { PathContextStatus } from './vocabulary.js';
+import { nodePathScopeService, type PathScopeService } from './PathScopeService.js';
 
 // ─── Caps (named constants — no magic numbers) ────────────────────────────────
 
@@ -84,55 +85,16 @@ function extractSkeleton(filePath: string, source: string): string | null {
   return skeleton;
 }
 
-// ─── Path-safety helpers (mirrors ArtifactQuery / FileAccessPolicy) ───────────
-
-/**
- * Canonicalize a path: resolve symlinks via realpathSync where the file
- * exists; for a non-existent path, canonicalize the deepest existing ancestor
- * and re-join the missing tail segments.
- */
-function canonicalPath(value: string): string {
-  const resolvedPath = path.resolve(value);
-  try {
-    return fs.realpathSync(resolvedPath);
-  } catch {
-    let currentPath = resolvedPath;
-    const missingSegments: string[] = [];
-    while (!fs.existsSync(currentPath)) {
-      const parentPath = path.dirname(currentPath);
-      if (parentPath === currentPath) return resolvedPath;
-      missingSegments.unshift(path.basename(currentPath));
-      currentPath = parentPath;
-    }
-    try {
-      return path.join(fs.realpathSync(currentPath), ...missingSegments);
-    } catch {
-      return resolvedPath;
-    }
-  }
-}
-
-/**
- * Returns true iff `childPath` is inside (or equal to) `rootPath`.
- * Uses canonicalized paths and a separator-boundary check so that
- * `/artifacts-evil` does NOT match a root of `/artifacts`.
- */
-function isPathInside(childPath: string, rootPath: string): boolean {
-  const rel = path.relative(canonicalPath(rootPath), canonicalPath(childPath));
-  return !rel || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
+// ─── Path-safety helpers ───────────────────────────────────────────────────────
 
 /**
  * Resolve the allowed roots for path-context checks.
- * Mirrors allowedArtifactRoots in ArtifactQuery but without the bead artifact
- * sub-directory — the path-context tool scopes to the whole worktree and
- * project root because it is a general file-discovery helper.
+ * Deduplicates in case worktree and project root coincide.
  */
-function allowedRoots(projectRoot: string, worktreePath: string): string[] {
-  // Deduplicate in case worktree and project root coincide.
+function allowedRoots(projectRoot: string, worktreePath: string, pathScope: PathScopeService): string[] {
   const candidates = [
-    canonicalPath(worktreePath),
-    canonicalPath(projectRoot)
+    pathScope.canonicalPath(worktreePath),
+    pathScope.canonicalPath(projectRoot)
   ];
   const seen = new Set<string>();
   return candidates.filter(root => {
@@ -396,7 +358,8 @@ export type PathContextResult = PathContextFound | PathContextNotFound | PathCon
 export class PathContext {
   constructor(
     private readonly projectRoot: string,
-    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment
+    private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
+    private readonly pathScope: PathScopeService = nodePathScopeService
   ) {}
 
   /** The active teammate worktree root, resolved from the injected environment.
@@ -433,12 +396,12 @@ export class PathContext {
 
   private resolveInner(input: PathContextInput): PathContextResult {
     const worktreePath = this.worktreeRoot();
-    const roots = allowedRoots(this.projectRoot, worktreePath);
+    const roots = allowedRoots(this.projectRoot, worktreePath, this.pathScope);
 
     const resolved = resolveCandidatePath(input.filePath, this.projectRoot, worktreePath);
 
     // Scope check — must be inside at least one allowed root.
-    const inScope = roots.some(root => isPathInside(resolved, root));
+    const inScope = roots.some(root => this.pathScope.isPathInside(resolved, root));
     if (!inScope) {
       return {
         status: PathContextStatus.OUT_OF_SCOPE,
@@ -487,8 +450,8 @@ export class PathContext {
     }
 
     // Compute canonical relative path (relative to the first matching root).
-    const matchedRoot = roots.find(root => isPathInside(resolved, root)) ?? roots[0]!;
-    const canonicalRelativePath = path.relative(matchedRoot, canonicalPath(resolved));
+    const matchedRoot = roots.find(root => this.pathScope.isPathInside(resolved, root)) ?? roots[0]!;
+    const canonicalRelativePath = path.relative(matchedRoot, this.pathScope.canonicalPath(resolved));
 
     const validOffsetRange = { min: 1, max: Math.max(1, totalLines) };
 
