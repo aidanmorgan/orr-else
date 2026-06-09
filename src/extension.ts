@@ -15,7 +15,7 @@ import { Type } from "@earendil-works/pi-ai";
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { createHash } from 'node:crypto';
+// createHash moved to ./extension/RawToolResultStore.ts
 import { v7 as uuidv7 } from 'uuid';
 import { computeBuildProvenance, computeHarnessFingerprint, runStalenessPreflightWarn } from './core/BuildProvenance.js';
 import { Command } from 'commander';
@@ -25,27 +25,23 @@ import escapeStringRegexp from 'escape-string-regexp';
 import { teammatePlugin, TeammateFactory } from './plugins/teammates.js';
 import type { MergeResult } from './core/RuntimeServices.js';
 import {
-  describeConfiguredProjectTools,
   executeConfiguredProjectTool,
   getConfiguredProjectToolNames,
   getHarnessRegisteredProjectToolNames,
   getNativePiExtensionProjectToolNames,
   projectToolFailureLimitSuggestedOutcome,
   registerConfiguredProjectTools,
-  resolveToolPromptProfileId
 } from './plugins/projectTools.js';
-import { PLUGIN_RAW_FILE_NAME } from './plugins/projectTools/constants.js';
+// describeConfiguredProjectTools, resolveToolPromptProfileId moved to ./extension/WorkerContextResolver.ts
+// PLUGIN_RAW_FILE_NAME moved to ./extension/RawToolResultStore.ts
 import { runStartupProbeAdmission } from './plugins/projectTools/readinessProbe.js';
 import type { ToolResultBase } from './contract.js';
-import { evaluateRetry } from './core/ToolRetryPipeline.js';
-import { ToolResultRecorder } from './core/ToolResultRecorder.js';
+// evaluateRetry moved to ./extension/ToolExecutionWrapper.ts
+// ToolResultRecorder moved to ./extension/ToolExecutionWrapper.ts
 import { registerBuiltInVerifiers } from './tools/index.js';
-import {
-  assembleAndWriteBuiltInHandle,
-  buildRejectedBuiltInHandle,
-} from './tools/builtin_handles.js';
-import { getBuiltInRtkSummaryFactory } from './tools/builtin_rtk_registry.js';
-import { ToolCallPathFactory } from './core/ToolCallPathFactory.js';
+// assembleAndWriteBuiltInHandle, buildRejectedBuiltInHandle moved to ./extension/ToolExecutionWrapper.ts
+// getBuiltInRtkSummaryFactory moved to ./extension/ToolExecutionWrapper.ts
+// ToolCallPathFactory moved to ./extension/RawToolResultStore.ts (type-only)
 import type { HarnessConfig } from './core/ConfigLoader.js';
 import { resolveProviderName } from './core/ConfigLoader.js';
 import { SignalingServer, type SignalAck } from './core/SignalingServer.js';
@@ -61,11 +57,13 @@ import {
 } from './core/TeammateEvents.js';
 import { validateHandoffPayload, HandoffSchemaId } from './core/HandoffSchemas.js';
 import { capAnthropicMaxTokens, resolveMaxOutputTokens, type CappableAnthropicPayload } from './core/ProviderRequestCap.js';
-import { buildTurnUsageRecord, buildToolTokenAccounting, serializeToolResultText } from './core/TokenUsage.js';
+import { buildTurnUsageRecord } from './core/TokenUsage.js';
+// buildToolTokenAccounting, serializeToolResultText moved to ./extension/ToolExecutionWrapper.ts
 import { registerClaudeCodeLiveLogin } from './plugins/claudeCodeAuth.js';
 import { postHarnessSignal } from './core/HarnessApiClient.js';
 import { Logger } from './core/Logger.js';
-import { Observability, SpanStatusValue, type SpanAttributes, type SpanCompletion, type SpanContext } from './core/Observability.js';
+import { Observability, type SpanAttributes, type SpanContext } from './core/Observability.js';
+// SpanStatusValue, SpanCompletion moved to ./extension/ToolExecutionWrapper.ts
 import type { ChecklistItem } from './core/ProtocolParser.js';
 import { deriveChecklistItems, mergeChecklistItems, missingMandatoryChecklistItems, resolveChecklistTickText } from './core/ChecklistRequirements.js';
 import { ProgressManager } from './core/ProgressManager.js';
@@ -90,7 +88,7 @@ import {
   PluginToolName,
   ToolResultStatus,
   ToolEvidenceSource,
-  ToolValidationCondition,
+  // ToolValidationCondition moved to ./extension/ToolExecutionWrapper.ts
   ChecklistItemType,
   WorkerDefaults,
   SupervisorDefaults,
@@ -101,7 +99,6 @@ import {
   ProcessFlag,
   HttpHeader,
   PiEventName,
-  ProcessEventName,
   NativePiToolName,
   PiToolPolicyDefaults,
   ActionCompletionKey,
@@ -114,7 +111,7 @@ import {
   FileMutationPolicyDefaults,
   ReviewArtifactKind,
   ReviewArtifactStore,
-  ToolDefaults,
+  // ToolDefaults moved to ./extension/ToolExecutionWrapper.ts
   ProjectToolDefaults,
   LLMProviderName,
   OtelAttr,
@@ -128,13 +125,14 @@ import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInve
 import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
 import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
-import { resolveActiveToolSet } from './core/ActiveToolSetResolver.js';
+// resolveActiveToolSet moved to ./extension/WorkerContextResolver.ts
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
-import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
-import { digestStableBlock, type StableBootstrapInputs } from './core/BootstrapDigest.js';
+import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PiIntegration.js';
+// resolvePiSkillPathsForState moved to ./extension/WorkerContextResolver.ts
+// digestStableBlock / StableBootstrapInputs moved to ./extension/WorkerContextResolver.ts
 import { admitPiBasePrompt, PiBasePromptRuleCode } from './core/PiBasePromptAdmission.js';
 import { computePromptSizing, evaluatePromptBudgetAdmission } from './core/PromptBudgetAdmission.js';
-import { evaluateToolPayloadBudget } from './core/ToolPayloadBudget.js';
+// evaluateToolPayloadBudget moved to ./extension/ToolExecutionWrapper.ts
 import { RuntimeBudgetTracker, createRuntimeBudgetTracker, resolveRuntimeBudgetPolicy } from './core/RuntimeBudgetTracker.js';
 import { LoopDetector } from './core/LoopDetector.js';
 import { computeRequestSizing } from './core/ProviderBudgetPreflight.js';
@@ -210,6 +208,11 @@ import {
   recordTurnUsage,
   registerAgentLifecycleObservers
 } from './extension/PiObservers.js';
+import { registerProcessLifecycleObservers } from './extension/ProcessLifecycleObserver.js';
+import { persistPluginToolRawResult } from './extension/RawToolResultStore.js';
+import { buildStateSystemPrompt, type StateSystemPromptResult } from './extension/WorkerContextResolver.js';
+import { wrapPluginTool, checkToolValidationRules } from './extension/ToolExecutionWrapper.js';
+import { bootstrapExtension } from './extension/ExtensionBootstrap.js';
 import {
   isTerminalFailureLimitPayload,
   terminalFailureLimitDataFromResult,
@@ -433,17 +436,7 @@ function createExtensionSession(): ExtensionSession {
   };
 }
 
-/**
- * Process-global guard for registerProcessLifecycleObservers.
- *
- * Intentionally NOT part of ExtensionSession: it guards process.on() calls on
- * the Node.js `process` object, which is shared across all invocations within
- * the same OS process.  Moving it to ExtensionSession (always false at session
- * creation) would cause a second orrElseExtension() call to add four duplicate
- * permanent process listeners, triggering MaxListenersExceededWarning and
- * leaking listeners on every subsequent re-invocation.
- */
-let processLifecycleObserversRegistered = false;
+// processLifecycleObserversRegistered guard lives in ./extension/ProcessLifecycleObserver.ts.
 
 const TERMINAL_FAILURE_ALLOWED_TOOLS = new Set<string>([
   BuiltInToolName.ADD_CHECKLIST_ITEM,
@@ -479,30 +472,7 @@ function getObservability(services: RuntimeServices): Observability {
   return services.observability;
 }
 
-function registerProcessLifecycleObservers(): void {
-  if (processLifecycleObserversRegistered) return;
-  processLifecycleObserversRegistered = true;
-
-  process.on(ProcessEventName.BEFORE_EXIT, code => {
-    Logger.warn(Component.ORR_ELSE, 'Pi process beforeExit observed', { code, isWorker: isWorkerMode() });
-  });
-  process.on(ProcessEventName.EXIT, code => {
-    Logger.warn(Component.ORR_ELSE, 'Pi process exit observed', { code, isWorker: isWorkerMode() });
-  });
-  process.on(ProcessEventName.UNCAUGHT_EXCEPTION_MONITOR, error => {
-    Logger.error(Component.ORR_ELSE, 'Uncaught exception observed', {
-      error: String(error),
-      stack: error instanceof Error ? error.stack : undefined,
-      isWorker: isWorkerMode()
-    });
-  });
-  process.on(ProcessEventName.UNHANDLED_REJECTION, reason => {
-    Logger.error(Component.ORR_ELSE, 'Unhandled rejection observed', {
-      error: String(reason),
-      isWorker: isWorkerMode()
-    });
-  });
-}
+// registerProcessLifecycleObservers is now in ./extension/ProcessLifecycleObserver.ts.
 
 async function initializeObservability(services: RuntimeServices): Promise<Observability> {
   const runtimeObservability = getObservability(services);
@@ -511,25 +481,10 @@ async function initializeObservability(services: RuntimeServices): Promise<Obser
   return runtimeObservability;
 }
 
-/**
- * Serialize a tool result value and wrap it in the Pi-expected format.
- *
- * Uses serializeToolResultText() — the single canonical serializer shared with
- * byte accounting — so content[0].text always matches the metered bytes exactly
- * (pi-experiment-6q0y.18 AC1: no drift between accounting and payload).
- */
-function toolResult(value: unknown) {
-  const text = serializeToolResultText(value);
-  return {
-    content: [{ type: 'text' as const, text }],
-    details: value
-  };
-}
-
-// requiredToolsForRun, RequiredToolAuditEntry, TerminalFailureLimitAudit, GateReadiness,
-// evaluateGateReadiness are in ./extension/WorkerRunController.js
-
-// summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
+// toolResult, beadIdFromToolParams, activeSpanAttributes, toolSpanAttributes
+// moved to ./extension/ToolExecutionWrapper.ts.
+// beadIdFromToolParams and toolSpanAttributes remain accessible here for
+// the PiObservers callbacks — they are rebuilt as closures over `session`.
 
 function beadIdFromToolParams(params: Record<string, unknown> | undefined, session: ExtensionSession): string | undefined {
   if (!params) return session.activeRun?.beadId || process.env[EnvVars.BEAD_ID];
@@ -562,6 +517,11 @@ function toolSpanAttributes(toolName: string, params: unknown, beadId: string | 
     ...activeSpanAttributes(beadId, session)
   };
 }
+
+// requiredToolsForRun, RequiredToolAuditEntry, TerminalFailureLimitAudit, GateReadiness,
+// evaluateGateReadiness are in ./extension/WorkerRunController.js
+
+// summarizeForEvent and related helpers are imported from ./extension/PiEventAdapters.js
 
 // externalPiToolResultFromEvent, textIndicatesFailure, contentIndicatesFailure,
 // nestedResultIndicatesFailure, externalPiToolEventIndicatesFailure are imported
@@ -627,817 +587,17 @@ export function shouldPersistBlockedBeadStatus(
 
 // resultIndicatesFailure and resultIndicatesSuccess are imported from ./extension/PiEventAdapters.js
 
-function spanCompletionForToolResult(result: unknown): SpanCompletion {
-  if (!resultIndicatesFailure(result)) return { status: SpanStatusValue.OK };
-  return {
-    status: SpanStatusValue.ERROR,
-    message: stringifySpanAttribute(summarizeForEvent(result))
-  };
-}
-
-/**
- * Validates programmatic behavioral rules for a tool.
- */
-async function checkToolValidationRules(toolName: string, config: HarnessConfig, runtimeObservability: Observability): Promise<string | null> {
-  const toolConfig = (config.tools || []).find(t => t.name === toolName);
-  if (!toolConfig?.validationRules) return null;
-
-  for (const rule of toolConfig.validationRules) {
-    const result = runtimeObservability.getToolResult(rule.tool);
-    
-    if (rule.condition === ToolValidationCondition.CALLED && result === undefined) {
-      return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to be called first.`;
-    }
-
-    if (rule.condition === ToolValidationCondition.PASSED && !runtimeObservability.hasToolPassed(rule.tool)) {
-      return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to have returned a \`PASSED\` status.`;
-    }
-
-    if (rule.condition === ToolValidationCondition.SUCCEEDED && !runtimeObservability.hasToolPassed(rule.tool) && !resultIndicatesSuccess(result)) {
-      return rule.message || `PROTOCOL VIOLATION: Tool \`${toolName}\` requires \`${rule.tool}\` to have succeeded.`;
-    }
-  }
-
-  return null;
-}
+// spanCompletionForToolResult, checkToolValidationRules, lookupToolGuards, lookupRetryPolicy,
+// lookupIdempotencyClass, toolCacheKey, breakerKey, runWithWrapperTimeout
+// moved to ./extension/ToolExecutionWrapper.ts.
 
 // terminalFailureLimitContext and terminalFailureLimitRejection are imported
 // from ./extension/WorkerRunController.js
 
-function lookupToolGuards(
-  toolName: string,
-  config: HarnessConfig
-): { timeoutMs: number; maxFailures: number; cacheable: boolean } {
-  const toolConfig = config.tools?.find(t => t.name === toolName);
-  return {
-    timeoutMs: toolConfig?.wrapperTimeoutMs ?? ToolDefaults.WRAPPER_TIMEOUT_MS,
-    maxFailures: toolConfig?.maxConsecutiveFailures ?? ToolDefaults.MAX_CONSECUTIVE_FAILURES,
-    cacheable: toolConfig?.cacheable === true
-  };
-}
-
-function lookupRetryPolicy(
-  toolName: string,
-  config: HarnessConfig
-): import('./core/domain/StateModels.js').ToolRetryPolicy | undefined {
-  const toolConfig = config.tools?.find(t => t.name === toolName);
-  return (toolConfig as { retryPolicy?: import('./core/domain/StateModels.js').ToolRetryPolicy } | undefined)?.retryPolicy;
-}
-
-function lookupIdempotencyClass(
-  toolName: string,
-  config: HarnessConfig
-): 'idempotent' | 'non_idempotent' | 'at_least_once' | undefined {
-  // Project-configured tools: sideEffectContract.idempotencyClass wins.
-  const toolConfig = config.tools?.find(t => t.name === toolName);
-  if (toolConfig) {
-    const contract = (toolConfig as { sideEffectContract?: { idempotencyClass?: 'idempotent' | 'non_idempotent' | 'at_least_once' } }).sideEffectContract;
-    if (contract?.idempotencyClass) return contract.idempotencyClass;
-  }
-  return undefined;
-}
-
-function toolCacheKey(toolName: string, params: unknown): string {
-  let serialised: string;
-  try {
-    serialised = JSON.stringify(params ?? {});
-  } catch {
-    serialised = '[unserialisable]';
-  }
-  return `${toolName}|${serialised}`;
-}
-
-function breakerKey(beadId: string | undefined, toolName: string): string {
-  return `${beadId ?? '_'}|${toolName}`;
-}
-
-async function runWithWrapperTimeout<T>(toolName: string, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      fn(),
-      new Promise<T>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`Tool ${toolName} exceeded harness wrapper timeout of ${timeoutMs}ms`));
-        }, timeoutMs);
-      })
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 // ---- Raw plugin-tool result persistence (s3wp.26) ----
-//
-// Every plugin tool wrapped by wrapPluginTool (built-in control-plane tools,
-// bundled runtime plugin tools) must have its complete raw execute() return value
-// written to harness-managed storage BEFORE compaction.  This is the generic
-// archival invariant from docs/raw-output-contract.md.
-//
-// The call dir follows the same CALL_DIR_TEMPLATE as projectTools (command/MCP)
-// so all tool-call archives live in a single consistent tree.  Errors here are
-// swallowed — a persistence failure must never prevent the model from receiving
-// its result.
-//
-// Native Pi tools observed through Orr Else policy are NOT wrapped via this path
-// (they are registered by the Pi runtime, not by wrapPluginTool).  The Pi runtime
-// emits ToolCallEvent / ToolResultEvent which are observed by registerPiToolObservers.
-// Those events carry the full result payload in the event data.  Raw archival for
-// native Pi tools is therefore handled at the event-observer level (pi tool
-// observer), not here.  This note documents explicitly that the observe-only path
-// cannot use the wrapPluginTool hook.
-// 0yt5.27: the plugin path now persists its raw result to the SAME single
-// PROJECT-scoped tool-output location used by command/MCP tools — via the shared
-// ToolCallPathFactory — and returns the typed ToolResultBase so wrapPluginTool can
-// record outputFile/status in the tool-result event (no throwaway id, no
-// double-persist across .pi/tool-output AND .tmp/tool-calls).
-async function persistPluginToolRawResult(
-  factory: ToolCallPathFactory,
-  toolName: string,
-  beadId: string | undefined,
-  stateId: string | undefined,
-  actionId: string | undefined,
-  projectRoot: string,
-  payload: unknown,
-  status: ToolResultBase['status'],
-  failureCategory?: ToolResultBase['failureCategory'],
-  toolInvocationId?: string
-): Promise<ToolResultBase> {
-  const invocationId = toolInvocationId ?? uuidv7();
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(payload);
-  } catch {
-    serialized = JSON.stringify({ serializationError: 'payload could not be JSON-serialized', toolName });
-  }
-  const rawBytes = Buffer.byteLength(serialized, 'utf8');
+// persistPluginToolRawResult is now in ./extension/RawToolResultStore.ts.
 
-  // Allocate the single canonical per-invocation path under
-  // {PROJECT_ROOT}/.pi/tool-output/{bead}/{state}/{action}/{tool}/{invocationId}.
-  // The raw file lives in the allocation's output dir as plugin-raw.json so the
-  // coordinator gate can locate it deterministically.
-  const allocation = factory.allocate({
-    beadId,
-    stateId,
-    actionId,
-    toolName,
-    toolInvocationId: invocationId,
-    projectRoot,
-    // Tool-output is PROJECT-scoped; worktreePath is unused by the factory's
-    // path math but TemplateContext requires it.
-    worktreePath: projectRoot
-  });
-  const rawFile = path.join(allocation.outputDir, PLUGIN_RAW_FILE_NAME);
-
-  try {
-    await fs.promises.mkdir(allocation.outputDir, { recursive: true });
-    await fs.promises.writeFile(rawFile, serialized);
-    const rawChecksum = createHash('sha256').update(serialized).digest('hex').slice(0, 16);
-    Logger.debug(Component.PROJECT_TOOLS, 'Persisted plugin tool raw result', {
-      tool: toolName, toolInvocationId: invocationId, rawFile, rawBytes, rawChecksum
-    });
-  } catch (error) {
-    Logger.warn(Component.PROJECT_TOOLS, 'Failed to persist plugin tool raw result', {
-      tool: toolName, toolInvocationId: invocationId, error: String(error)
-    });
-  }
-
-  return { tool: toolName, status, outputFile: rawFile, outputFileBytes: rawBytes, ...(failureCategory ? { failureCategory } : {}) };
-}
-
-/**
- * Evaluate the optional tool-payload budget and build the model-facing result.
- *
- * When no budget is configured, behaves identically to toolResult(value) (AC2 no-op).
- * When a budget IS configured and the payload exceeds the limit, emits a
- * TOOL_PAYLOAD_BUDGET_REJECTED event and returns a semantic rejection message
- * instead of the raw payload (AC5). The rejection message includes the artifact
- * path (outputFile) when available so the coordinator gate can still reach the
- * artifact without the model receiving the raw body (AC6).
- *
- * The exact byte count from evaluateToolPayloadBudget() equals the byte length
- * of content[0].text because both use serializeToolResultText() (AC1).
- */
-async function applyToolPayloadBudget(
-  toolName: string,
-  value: unknown,
-  config: HarnessConfig,
-  context: {
-    beadId: string | undefined;
-    stateId: string | undefined;
-    actionId: string | undefined;
-    toolInvocationId: string;
-    outputFile?: string;
-  },
-  eventStore: RuntimeServices['eventStore']
-): Promise<ReturnType<typeof toolResult>> {
-  const budget = evaluateToolPayloadBudget(toolName, value, config);
-
-  if (!budget.exceeded) {
-    // No-op: return the normal result using the pre-computed serialized text.
-    return {
-      content: [{ type: 'text' as const, text: budget.serializedText }],
-      details: value
-    };
-  }
-
-  // Budget exceeded — emit rejection event (no raw body, AC6) and return semantic rejection.
-  await eventStore.record(DomainEventName.TOOL_PAYLOAD_BUDGET_REJECTED, {
-    tool: toolName,
-    beadId: context.beadId,
-    stateId: context.stateId,
-    actionId: context.actionId,
-    toolInvocationId: context.toolInvocationId,
-    actualBytes: budget.actualBytes,
-    limitBytes: budget.resolvedPolicy!.maxBytes,
-    outputFile: context.outputFile,
-    decision: 'REJECTED',
-    route: budget.route,
-  }).catch(() => {});
-
-  // Return semantic rejection: route + byte info + artifact ref when available (AC5).
-  const artifactRef = context.outputFile ? ` Artifact: ${context.outputFile}.` : '';
-  const rejection = `TOOL_PAYLOAD_BUDGET_EXCEEDED: \`${toolName}\` result is ${budget.actualBytes} bytes, exceeding the configured limit of ${budget.resolvedPolicy!.maxBytes} bytes. The model-facing payload has been suppressed.${artifactRef} Route: ${budget.route}.`;
-  return toolResult(rejection);
-}
-
-function wrapPluginTool(
-  tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> },
-  runtimeObservability: Observability,
-  services: RuntimeServices,
-  session: ExtensionSession
-) {
-  return {
-    name: tool.name,
-    label: tool.name,
-    description: tool.description,
-    parameters: tool.parameters || Type.Object({}),
-    execute: async (_toolCallId: string, params: any, _signal: AbortSignal | undefined, _onUpdate: any, ctx: ExtensionContext) => {
-      // zog2.16: generate toolInvocationId and resolve context vars at invocation
-      // start so ALL exit paths (early short-circuits included) can record durable
-      // evidence artifacts via the ToolResultRecorder.
-      // pi-experiment-t6gw: let (not const) so retry attempts can generate a new invocationId.
-      let toolInvocationId = uuidv7();
-      const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-      const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
-      const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
-      const toolResultRecorder = new ToolResultRecorder(services.toolCallPathFactory, projectRoot);
-
-      // 1. Programmatic Behavioral Rules (Pre-conditions)
-      const config = await services.configLoader.load();
-      const ruleError = await checkToolValidationRules(tool.name, config, runtimeObservability);
-      if (ruleError) {
-        const beadIdEarly = beadIdFromToolParams(params, session);
-        // zog2.16: persist durable evidence so verifier gate sees INVOKED-BUT-REJECTED
-        const validationHandle = await toolResultRecorder.recordShortCircuit({
-          toolName: tool.name, invocationId: toolInvocationId,
-          beadId: beadIdEarly, stateId: stateIdForPersist, actionId: actionIdForPersist,
-          status: ToolResultStatus.REJECTED, failureCategory: 'INPUT',
-          rejectionReason: ruleError,
-        });
-        runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: ruleError });
-        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId: beadIdEarly, tool: tool.name, toolName: tool.name, toolInvocationId,
-          stateId: stateIdForPersist, actionId: actionIdForPersist,
-          result: { status: ToolResultStatus.REJECTED, isError: true, message: ruleError, reason: 'validation-reject' },
-          toolResult: validationHandle,
-        }).catch(() => {});
-        if (ctx.hasUI) ctx.ui.notify(ruleError, 'error');
-        return toolResult(ruleError);
-      }
-
-      // Framework-level safety: teammates cannot merge
-      if (tool.name === PluginToolName.MERGE_AND_COMMIT && isWorkerMode()) {
-        const error = `PROTOCOL VIOLATION: \`${PluginToolName.MERGE_AND_COMMIT}\` is team-leader/harness-only and cannot be called by a teammate.`;
-        const beadIdEarly = beadIdFromToolParams(params, session);
-        // zog2.16: persist durable evidence so verifier gate sees INVOKED-BUT-REJECTED
-        const mergeGuardHandle = await toolResultRecorder.recordShortCircuit({
-          toolName: tool.name, invocationId: toolInvocationId,
-          beadId: beadIdEarly, stateId: stateIdForPersist, actionId: actionIdForPersist,
-          status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
-          rejectionReason: error,
-        });
-        runtimeObservability.recordToolInvocation(tool.name, { status: ToolResultStatus.REJECTED, isError: true, message: error });
-        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId: beadIdEarly, tool: tool.name, toolName: tool.name, toolInvocationId,
-          stateId: stateIdForPersist, actionId: actionIdForPersist,
-          result: { status: ToolResultStatus.REJECTED, isError: true, message: error, reason: 'worker-merge-guard' },
-          toolResult: mergeGuardHandle,
-        }).catch(() => {});
-        if (ctx.hasUI) ctx.ui.notify(error, 'error');
-        return toolResult(error);
-      }
-
-      const beadId = beadIdFromToolParams(params, session);
-      const { timeoutMs, maxFailures, cacheable } = lookupToolGuards(tool.name, config);
-      const breakerEnabled = isWorkerMode();
-      const key = breakerKey(beadId, tool.name);
-      const cacheKey = toolCacheKey(tool.name, params);
-      // dl9r: toolInvocationId already generated above (moved to top for zog2.16 short-circuit coverage).
-
-      // Serve cacheable tools from the in-session memo when present. Any call
-      // to a non-cacheable tool below will clear the memo before executing,
-      // because we treat non-cacheable tools as potentially mutating.
-      if (cacheable && isWorkerMode()) {
-        const hit = session.toolResultCache.get(cacheKey);
-        if (hit) {
-          const ageMs = Date.now() - hit.recordedAt;
-          runtimeObservability.recordToolInvocation(tool.name, hit.result);
-          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-            beadId,
-            tool: tool.name,
-            toolName: tool.name,
-            toolInvocationId,
-            stateId: stateIdForPersist,
-            actionId: actionIdForPersist,
-            result: summarizeForEvent(hit.result),
-            toolResult: hit.toolResult,
-            cached: true,
-            cacheAgeMs: ageMs
-          }).catch(() => {});
-          // s3wp.16: record token accounting for cached result — fire-and-forget, never blocks.
-          void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
-            tool.name, beadId,
-            process.env[EnvVars.STATE_ID] || session.activeRun?.stateId,
-            process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id,
-            hit.result, true, toolInvocationId
-          )).catch(() => {});
-          // pi-experiment-6q0y.18: enforce optional payload budget on cache-hit path (AC3).
-          return applyToolPayloadBudget(
-            tool.name, hit.result, config,
-            { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
-              toolInvocationId, outputFile: hit.toolResult.outputFile },
-            services.eventStore
-          );
-        }
-      } else if (isWorkerMode() && session.toolResultCache.size > 0) {
-        session.toolResultCache.clear();
-      }
-
-      // Circuit breaker: short-circuit if this tool has failed maxFailures
-      // times in a row for this bead within the session.
-      if (breakerEnabled) {
-        const failures = session.toolBreakerFailures.get(key) ?? 0;
-        if (failures >= maxFailures) {
-          const message = `REJECTED: \`${tool.name}\` circuit open after ${failures} consecutive failures. Pick a different approach; the breaker resets when the bead transitions.`;
-          runtimeObservability.recordToolInvocation(tool.name, {
-            status: ToolResultStatus.REJECTED,
-            isError: true,
-            message
-          });
-          // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
-          const circuitHandle = await toolResultRecorder.recordShortCircuit({
-            toolName: tool.name, invocationId: toolInvocationId,
-            beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
-            status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
-            rejectionReason: message,
-          });
-          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-            beadId,
-            tool: tool.name,
-            toolName: tool.name,
-            toolInvocationId,
-            stateId: stateIdForPersist,
-            actionId: actionIdForPersist,
-            result: { status: ToolResultStatus.REJECTED, isError: true, message, reason: 'circuit-open' },
-            toolResult: circuitHandle,
-          }).catch(() => {});
-          if (ctx.hasUI) ctx.ui.notify(message, 'error');
-          return toolResult(message);
-        }
-      }
-
-      // pi-experiment-6q0y.48: check tool-failure budget BEFORE the tool runs.
-      // This is the pre-spend hook for accumulated tool failures: if the bead has
-      // already reached the configured maxToolFailures, block before the next attempt.
-      {
-        const preToolBudgetCheck = session.runtimeBudgetTracker?.checkPreToolResult({ toolFailures: true });
-        if (preToolBudgetCheck?.exceeded) {
-          await session.runtimeBudgetTracker!.emitExceededEvent(preToolBudgetCheck, services.eventStore);
-          const activeRun = session.activeRun;
-          if (activeRun && preToolBudgetCheck.route) {
-            const summary = `Runtime budget exceeded (${preToolBudgetCheck.dimension}: ${preToolBudgetCheck.currentValue} >= ${preToolBudgetCheck.limit}). Route: ${preToolBudgetCheck.route}`;
-            const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(preToolBudgetCheck.route, config), {
-              beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-              transitionEvent: preToolBudgetCheck.route, summary, evidence: summary, handover: summary,
-            });
-            await postWorkerSignal(services, routeEvent).catch(() => {});
-          }
-          return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${preToolBudgetCheck.dimension} limit (${preToolBudgetCheck.limit}) reached. Route: ${preToolBudgetCheck.route}`);
-        }
-      }
-
-      await services.eventStore.record(DomainEventName.TOOL_INVOCATION_STARTED, {
-        beadId,
-        tool: tool.name,
-        toolInvocationId,
-        params: summarizeForEvent(params)
-      });
-
-      // pi-experiment-6q0y.49: always-on loop detection for tool calls (AC2/AC3).
-      // Fires BEFORE the tool executes — stops repeated spend at the point of call.
-      // Checks both identical (exact args) and semantic (structural args) fingerprints.
-      {
-        const loopDetector = session.loopDetector;
-        if (loopDetector) {
-          const loopCtx = { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist };
-          const loopArgs = { toolName: tool.name, args: params, ...loopCtx };
-
-          // Check identical fingerprint (AC3 class 1)
-          const identicalCheck = loopDetector.checkToolCall(loopArgs);
-          if (identicalCheck.exceeded) {
-            // AC5: emit route exactly once per fingerprint (routed-once guard).
-            const firstRoute = await loopDetector.emitLoopDetected(identicalCheck, loopCtx);
-            if (firstRoute) {
-              const activeRun = session.activeRun;
-              if (activeRun && identicalCheck.routeEvent) {
-                const summary = `Loop detected (${identicalCheck.scope}): repeated identical tool call "${tool.name}" (${identicalCheck.count}/${identicalCheck.max}). Route: ${identicalCheck.routeEvent}`;
-                const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(identicalCheck.routeEvent, config), {
-                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-                  transitionEvent: identicalCheck.routeEvent, summary, evidence: summary, handover: summary,
-                });
-                await postWorkerSignal(services, loopRouteEvent).catch(() => {});
-              }
-            }
-            // Still BLOCK the repeated call to the model (return LOOP_DETECTED) even after first route.
-            return toolResult(`LOOP_DETECTED: repeated identical tool call "${tool.name}" (${identicalCheck.count}/${identicalCheck.max}). Route: ${identicalCheck.routeEvent}`);
-          } else if (identicalCheck.fingerprint && !identicalCheck.warningEmitted && identicalCheck.count !== undefined && identicalCheck.max !== undefined && identicalCheck.count >= identicalCheck.max - 1 && identicalCheck.max > 1) {
-            await loopDetector.emitWarning(identicalCheck, loopCtx);
-          }
-
-          // Check semantic fingerprint (AC3 class 2)
-          const semanticCheck = loopDetector.checkToolCallSemantic(loopArgs);
-          if (semanticCheck.exceeded) {
-            // AC5: emit route exactly once per fingerprint (routed-once guard).
-            const firstRoute = await loopDetector.emitLoopDetected(semanticCheck, loopCtx);
-            if (firstRoute) {
-              const activeRun = session.activeRun;
-              if (activeRun && semanticCheck.routeEvent) {
-                const summary = `Loop detected (${semanticCheck.scope}): repeated semantically-equivalent tool call "${tool.name}" (${semanticCheck.count}/${semanticCheck.max}). Route: ${semanticCheck.routeEvent}`;
-                const loopRouteEvent = buildWorkerEvent(teammateEventTypeForOutcome(semanticCheck.routeEvent, config), {
-                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-                  transitionEvent: semanticCheck.routeEvent, summary, evidence: summary, handover: summary,
-                });
-                await postWorkerSignal(services, loopRouteEvent).catch(() => {});
-              }
-            }
-            // Still BLOCK the repeated call to the model (return LOOP_DETECTED) even after first route.
-            return toolResult(`LOOP_DETECTED: repeated semantically-equivalent tool call "${tool.name}" (${semanticCheck.count}/${semanticCheck.max}). Route: ${semanticCheck.routeEvent}`);
-          } else if (semanticCheck.fingerprint && !semanticCheck.warningEmitted && semanticCheck.count !== undefined && semanticCheck.max !== undefined && semanticCheck.count >= semanticCheck.max - 1 && semanticCheck.max > 1) {
-            await loopDetector.emitWarning(semanticCheck, loopCtx);
-          }
-        }
-      }
-
-      const terminalRejection = await terminalFailureLimitRejection(tool.name, services, session, isWorkerMode(), TERMINAL_FAILURE_ALLOWED_TOOLS);
-      if (terminalRejection) {
-        runtimeObservability.recordToolInvocation(tool.name, {
-          status: ToolResultStatus.REJECTED,
-          isError: true,
-          message: terminalRejection
-        });
-        // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
-        const terminalHandle = await toolResultRecorder.recordShortCircuit({
-          toolName: tool.name, invocationId: toolInvocationId,
-          beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
-          status: ToolResultStatus.REJECTED, failureCategory: 'INFRA',
-          rejectionReason: terminalRejection,
-        });
-        await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-          beadId,
-          tool: tool.name,
-          toolName: tool.name,
-          toolInvocationId,
-          stateId: stateIdForPersist,
-          actionId: actionIdForPersist,
-          result: {
-            status: ToolResultStatus.REJECTED,
-            isError: true,
-            message: terminalRejection
-          },
-          toolResult: terminalHandle,
-        });
-        if (ctx.hasUI) ctx.ui.notify(terminalRejection, 'error');
-        return toolResult(terminalRejection);
-      }
-
-      // zog2.16: projectRoot, stateIdForPersist, actionIdForPersist are declared
-      // at the top of the execute closure (moved up to serve short-circuit exits).
-
-      // pi-experiment-t6gw: retry pipeline — wrap execution in a loop.
-      // Default: zero retries (no retryPolicy). Non-idempotent tools: SUPPRESS (body ran once).
-      // idempotencyClass check is load-bearing: evaluateRetry returns REJECT_NO_IDEMPOTENCY_CLASS
-      // when absent for a retry attempt, and SUPPRESS for non_idempotent tools.
-      const retryPolicy = lookupRetryPolicy(tool.name, config);
-      const idempotencyClass = lookupIdempotencyClass(tool.name, config);
-      let attempt = 1;
-      // pi-experiment-6q0y.18: capture the last persisted outputFile so the
-      // payload-budget rejection event can reference the semantic artifact (AC6).
-      // Reset each iteration of the retry loop alongside currentInvocationId.
-      let capturedOutputFile: string | undefined;
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        // Rebuild tracedExecute each attempt so span attributes and all closures
-        // capture the current toolInvocationId (pi-experiment-t6gw retry loop).
-        capturedOutputFile = undefined;
-        const currentInvocationId = toolInvocationId;
-        const tracedExecute = runtimeObservability.tracedAsync(
-          `tool:${tool.name}`,
-          toolSpanAttributes(tool.name, params, beadId, session, false, currentInvocationId),
-          async (p: any, c: ExtensionContext) => {
-            if (c.hasUI) c.ui.setWorkingMessage(`Executing ${tool.name}...`);
-            const result = await runWithWrapperTimeout(tool.name, timeoutMs, () => Promise.resolve(tool.execute(p || {}, c, _signal)));
-            if (c.hasUI) c.ui.setWorkingMessage(undefined);
-
-            // Record invocation and result for audit
-            runtimeObservability.recordToolInvocation(tool.name, result);
-            const terminalFailureLimitData = terminalFailureLimitDataFromResult(result);
-            const run = session.activeRun;
-            if (terminalFailureLimitData && run !== null && run.beadId === beadId) {
-              run.terminalFailureLimitResult = terminalFailureLimitData;
-              run.terminalFailureLimitScanned = true;
-            }
-
-            const failed = resultIndicatesFailure(result);
-            // 0yt5.27: persist the raw result to the single PROJECT-scoped tool-output
-            // location and record the typed ToolResultBase (tool/status/outputFile/
-            // outputFileBytes) ON the tool-result event — like command/MCP. status here
-            // means "did the tool RUN to completion". A returned failure result still
-            // RAN (status PASSED); only a thrown exception (catch block below) is a
-            // REJECTED run. The semantic verdict is the verifier's job, not this field.
-            const toolResultHandle = await persistPluginToolRawResult(
-              services.toolCallPathFactory,
-              tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot, result,
-              ToolResultStatus.PASSED, undefined, currentInvocationId
-            );
-            // pi-experiment-6q0y.18: capture for payload-budget rejection event (AC6).
-            capturedOutputFile = toolResultHandle.outputFile;
-
-            // zog2.2 (producer-side): look up this tool's RTK summary factory in the
-            // registry. If registered, call the factory with the result + params to get
-            // the tool-local summary, assemble the canonical ToolEvidenceHandle, write
-            // the semantic artifact to disk, and attach the handle to the event-store
-            // record. The model-facing result is never modified — the handle is coordinator/
-            // event-store only (AC: MODEL-FACING responses contain NO raw artifact paths
-            // or the full canonical handle).
-            //
-            // runStatus correctness (AC5 / zog2.2): two distinct paths:
-            //   SUCCEEDED — assembleAndWriteBuiltInHandle with runStatus='PASSED' (tool ran, result is good).
-            //   FAILED    — buildRejectedBuiltInHandle with runStatus='REJECTED' (tool ran but returned
-            //               failure; replay/verifier must see REJECTED, not a PASSED summary handle).
-            let succeededEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
-            let failedEvidenceHandle: import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle | undefined;
-            // yhec: for command tools that emit a canonical evidenceHandle in their
-            // stdout JSON, projectTools.ts attaches _canonicalEvidenceHandle to the
-            // result. Thread it into the TOOL_INVOCATION_SUCCEEDED event so the gate
-            // can find it regardless of which event is "latest".
-            if (!failed && isRecord(result) && isRecord(result['_canonicalEvidenceHandle'])) {
-              succeededEvidenceHandle = result['_canonicalEvidenceHandle'] as import('./core/ToolEvidenceHandle.js').ToolEvidenceHandle;
-            }
-            // yhec zog2.2: strip _canonicalEvidenceHandle from the model-facing result
-            // AFTER extracting it into succeededEvidenceHandle above. The handle is
-            // recorded coordinator-side on the TOOL_INVOCATION_SUCCEEDED event; it must
-            // NOT appear in the model-facing response (content/details/serialized text),
-            // which would expose absolute semanticArtifactPath, toolOutputRoot,
-            // semanticArtifactSha256, and admittedHarnessFingerprint to the model.
-            const resultForModel = (isRecord(result) && '_canonicalEvidenceHandle' in result)
-              ? (() => { const { _canonicalEvidenceHandle: _s, ...rest } = result as Record<string, unknown>; return rest; })() as typeof result
-              : result;
-            const rtkFactory = getBuiltInRtkSummaryFactory(tool.name);
-            if (rtkFactory && !succeededEvidenceHandle) {
-              try {
-                const outputDir = toolResultHandle.outputFile
-                  ? path.dirname(toolResultHandle.outputFile)
-                  : undefined;
-                if (!failed && outputDir) {
-                  // SUCCEEDED path: assemble a full PASSED handle with the RTK summary.
-                  const rtkSummary = rtkFactory(result, params);
-                  succeededEvidenceHandle = assembleAndWriteBuiltInHandle({
-                    toolName: tool.name,
-                    invocationId: currentInvocationId,
-                    outputDir,
-                    rtkSummary,
-                  });
-                } else if (failed) {
-                  // FAILED path: the tool ran but returned failure — record a REJECTED handle
-                  // so replay/verifiers see the correct runStatus, not a misleading PASSED summary.
-                  failedEvidenceHandle = buildRejectedBuiltInHandle({
-                    toolName: tool.name,
-                    invocationId: currentInvocationId,
-                    noSummaryReason: 'tool ran to completion but returned a failure result',
-                  });
-                }
-              } catch {
-                // RTK handle build failure is swallowed — the tool result is never blocked.
-              }
-            }
-
-            if (failed) {
-              if (breakerEnabled) {
-                session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
-              }
-              await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-                beadId,
-                tool: tool.name,
-                toolName: tool.name,
-                toolInvocationId: currentInvocationId,
-                stateId: stateIdForPersist,
-                actionId: actionIdForPersist,
-                result: summarizeForEvent(result),
-                toolResult: toolResultHandle,
-                ...(failedEvidenceHandle ? { evidenceHandle: failedEvidenceHandle } : {}),
-              });
-              if (typeof result === 'string') {
-                if (c.hasUI) c.ui.notify(result, 'error');
-              } else if (isRecord(result)) {
-                if (c.hasUI) c.ui.notify(result.error || `Tool ${tool.name} failed`, 'error');
-              }
-            } else {
-              if (breakerEnabled) session.toolBreakerFailures.delete(key);
-              if (cacheable && isWorkerMode()) {
-                session.toolResultCache.set(cacheKey, { result: resultForModel, recordedAt: Date.now(), toolResult: toolResultHandle });
-              }
-              await services.eventStore.record(DomainEventName.TOOL_INVOCATION_SUCCEEDED, {
-                beadId,
-                tool: tool.name,
-                toolName: tool.name,
-                toolInvocationId: currentInvocationId,
-                stateId: stateIdForPersist,
-                actionId: actionIdForPersist,
-                result: summarizeForEvent(result),
-                toolResult: toolResultHandle,
-                ...(succeededEvidenceHandle ? { evidenceHandle: succeededEvidenceHandle } : {}),
-              });
-            }
-            return resultForModel;
-          },
-          spanCompletionForToolResult
-        );
-
-        try {
-          const result = await tracedExecute(params, ctx);
-          // 0yt5.27: raw persistence + typed ToolResultBase event already happened
-          // inside tracedExecute (success branch). No second persist here — the
-          // single PROJECT-scoped tool-output archive is written exactly once.
-          // s3wp.16: record per-tool model-facing token estimate as telemetry — fire-and-forget.
-          // Does NOT mutate `result`; accounting is harness-side only.
-          void services.eventStore.record(DomainEventName.TOKEN_USAGE_RECORDED, buildToolTokenAccounting(
-            tool.name, beadId, stateIdForPersist, actionIdForPersist, result, false, currentInvocationId
-          )).catch(() => {});
-
-          if (resultIndicatesFailure(result)) {
-            // pi-experiment-6q0y.48: accumulate tool failure count for runtime budget.
-            // The PRE-TOOL check (above) fires on the NEXT invocation after this failure.
-            session.runtimeBudgetTracker?.recordToolFailure();
-
-            // Tool ran but returned a failure — consult the retry pipeline only
-            // when a retryPolicy is configured. No policy → plain failure return
-            // with no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
-            if (retryPolicy) {
-              // pi-experiment-6q0y.48: check retry budget BEFORE admitting the retry.
-              const retryBudgetCheck = session.runtimeBudgetTracker?.checkPreRetry();
-              if (retryBudgetCheck?.exceeded) {
-                await session.runtimeBudgetTracker!.emitExceededEvent(retryBudgetCheck, services.eventStore);
-                const activeRun = session.activeRun;
-                if (activeRun && retryBudgetCheck.route) {
-                  const summary = `Runtime budget exceeded (${retryBudgetCheck.dimension}: ${retryBudgetCheck.currentValue} >= ${retryBudgetCheck.limit}). Route: ${retryBudgetCheck.route}`;
-                  const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(retryBudgetCheck.route, config), {
-                    beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-                    transitionEvent: retryBudgetCheck.route, summary, evidence: summary, handover: summary,
-                  });
-                  await postWorkerSignal(services, routeEvent).catch(() => {});
-                }
-                return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${retryBudgetCheck.dimension} limit (${retryBudgetCheck.limit}) reached. Route: ${retryBudgetCheck.route}`);
-              }
-              // Admit retry: record the retry attempt in the tracker.
-              session.runtimeBudgetTracker?.recordRetry();
-              const retryDecision = await evaluateRetry({
-                tool: tool.name,
-                invocationId: currentInvocationId,
-                attempt,
-                failureCategory: 'INFRA',
-                retryPolicy,
-                idempotencyClass
-              }, services.eventStore);
-              if (retryDecision.nextRoute === 'retry') {
-                attempt++;
-                // Generate a new invocationId for the retry attempt.
-                toolInvocationId = uuidv7();
-                continue;
-              }
-            }
-          }
-
-          // pi-experiment-6q0y.18: enforce optional tool-payload budget BEFORE
-          // the result reaches the model. No-op when no budget is configured (AC2).
-          // pi-experiment-6q0y.48: also check runtime tool-payload-bytes budget.
-          if (session.runtimeBudgetTracker && !resultIndicatesFailure(result)) {
-            const serializedText = serializeToolResultText(result);
-            const payloadBytes = Buffer.byteLength(serializedText, 'utf8');
-            const payloadBudgetCheck = session.runtimeBudgetTracker.checkPreToolResult({ payloadBytes });
-            if (payloadBudgetCheck.exceeded) {
-              await session.runtimeBudgetTracker.emitExceededEvent(payloadBudgetCheck, services.eventStore);
-              const activeRun = session.activeRun;
-              if (activeRun && payloadBudgetCheck.route) {
-                const summary = `Runtime budget exceeded (${payloadBudgetCheck.dimension}: ${payloadBudgetCheck.currentValue} >= ${payloadBudgetCheck.limit}). Route: ${payloadBudgetCheck.route}`;
-                const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(payloadBudgetCheck.route, config), {
-                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-                  transitionEvent: payloadBudgetCheck.route, summary, evidence: summary, handover: summary,
-                });
-                await postWorkerSignal(services, routeEvent).catch(() => {});
-              }
-              return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${payloadBudgetCheck.dimension} limit (${payloadBudgetCheck.limit}) reached. Route: ${payloadBudgetCheck.route}`);
-            }
-            // Accumulate payload bytes now that we've cleared the check.
-            session.runtimeBudgetTracker.recordToolPayloadBytes(payloadBytes);
-          }
-
-          return applyToolPayloadBudget(
-            tool.name, result, config,
-            { beadId, stateId: stateIdForPersist, actionId: actionIdForPersist,
-              toolInvocationId: currentInvocationId, outputFile: capturedOutputFile },
-            services.eventStore
-          );
-        } catch (error) {
-          if (breakerEnabled) {
-            session.toolBreakerFailures.set(key, (session.toolBreakerFailures.get(key) ?? 0) + 1);
-          }
-          // 0yt5.27: a thrown exception is a tool that could NOT run to completion —
-          // persist the error envelope to the single PROJECT-scoped location and
-          // record the typed ToolResultBase with status:REJECTED + failureCategory:INFRA.
-          const errorHandle = await persistPluginToolRawResult(
-            services.toolCallPathFactory,
-            tool.name, beadId, stateIdForPersist, actionIdForPersist, projectRoot,
-            {
-              error: String(error),
-              errorType: error instanceof Error ? error.constructor.name : typeof error,
-              tool: tool.name
-            },
-            ToolResultStatus.REJECTED,
-            'INFRA',
-            currentInvocationId
-          );
-          await services.eventStore.record(DomainEventName.TOOL_INVOCATION_FAILED, {
-            beadId,
-            tool: tool.name,
-            toolName: tool.name,
-            toolInvocationId: currentInvocationId,
-            stateId: stateIdForPersist,
-            actionId: actionIdForPersist,
-            error: String(error),
-            toolResult: errorHandle
-          }).catch(() => {});
-
-          // pi-experiment-6q0y.48: accumulate tool failure count (exception path).
-          // The PRE-TOOL check fires on the NEXT invocation.
-          session.runtimeBudgetTracker?.recordToolFailure();
-
-          // Consult the retry pipeline for thrown exceptions only when a
-          // retryPolicy is configured. No policy → plain error return with
-          // no TOOL_RETRY_DECISION event (no-op-when-unconfigured intent).
-          if (retryPolicy) {
-            // pi-experiment-6q0y.48: check retry budget before admitting the retry (exception path).
-            const retryBudgetCheckEx = session.runtimeBudgetTracker?.checkPreRetry();
-            if (retryBudgetCheckEx?.exceeded) {
-              await session.runtimeBudgetTracker!.emitExceededEvent(retryBudgetCheckEx, services.eventStore);
-              const activeRun = session.activeRun;
-              if (activeRun && retryBudgetCheckEx.route) {
-                const sum = `Runtime budget exceeded (${retryBudgetCheckEx.dimension}: ${retryBudgetCheckEx.currentValue} >= ${retryBudgetCheckEx.limit}). Route: ${retryBudgetCheckEx.route}`;
-                const routeEvent = buildWorkerEvent(teammateEventTypeForOutcome(retryBudgetCheckEx.route, config), {
-                  beadId: activeRun.beadId, stateId: activeRun.stateId, actionId: activeRun.action.id,
-                  transitionEvent: retryBudgetCheckEx.route, summary: sum, evidence: sum, handover: sum,
-                });
-                await postWorkerSignal(services, routeEvent).catch(() => {});
-              }
-              return toolResult(`RUNTIME_BUDGET_EXCEEDED: ${retryBudgetCheckEx.dimension} limit (${retryBudgetCheckEx.limit}) reached. Route: ${retryBudgetCheckEx.route}`);
-            }
-            session.runtimeBudgetTracker?.recordRetry();
-            const retryDecision = await evaluateRetry({
-              tool: tool.name,
-              invocationId: currentInvocationId,
-              attempt,
-              failureCategory: 'INFRA',
-              retryPolicy,
-              idempotencyClass
-            }, services.eventStore);
-            if (retryDecision.nextRoute === 'retry') {
-              attempt++;
-              toolInvocationId = uuidv7();
-              continue;
-            }
-          }
-
-          if (ctx.hasUI) {
-            ctx.ui.setWorkingMessage(undefined);
-            ctx.ui.notify(`Tool ${tool.name} error: ${String(error)}`, 'error');
-          }
-          return toolResult(`Error: ${String(error)}`);
-        }
-      }
-    }
-  };
-}
+// applyToolPayloadBudget and wrapPluginTool moved to ./extension/ToolExecutionWrapper.ts.
 
 function isWorkerMode(): boolean {
   return process.env[EnvVars.WORKER_MODE] === ProcessFlag.TRUE && !!process.env[EnvVars.BEAD_ID] && !!process.env[EnvVars.STATE_ID];
@@ -1980,140 +1140,7 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
   };
 }
 
-interface StateSystemPromptResult {
-  /** Fully assembled worker system prompt: stable block + volatile suffix. */
-  prompt: string;
-  /** Leading, cache-eligible span of the prompt. Byte-identical across same-identity runs. */
-  stableBlock: string;
-  /**
-   * The volatile suffix rendered by ContextInjector: beadId, workdir, run paths, checklist.
-   * Exposed so the BEFORE_AGENT_START handler can compose the final worker prompt as
-   * stableBlock + Pi-base-prompt + volatileSuffix, ensuring stableBlock leads contiguously.
-   */
-  volatileSuffix: string;
-  /** Deterministic digest over the stable identity + stableBlock text. */
-  digestId: string;
-  /** Rough token estimate for the stable block. */
-  estimatedTokens: number;
-  /** True when estimatedTokens exceeds the default budget. */
-  overBudget: boolean;
-  /**
-   * Sorted active tool names included in the assembled prompt, or undefined when the full
-   * default tool set is used (no activeTools declared on the state/action).
-   * 6q0y.2: recorded on STATE_PROMPT_ASSEMBLED for observability (no prompt body).
-   */
-  activeToolNames: string[] | undefined;
-}
-
-/**
- * Assembles the worker system prompt and computes the stable-block digest.
- *
- * The returned prompt is exactly [stableBlock]+[volatileSuffix].  The stableBlock
- * is the leading, cache-eligible span — byte-identical across any two runs that
- * share the same (projectRoot, configPath, stateId, toolNames, skillNames,
- * rulePaths) but differ only in beadId/worktreePath.  The digest is computed
- * by digestStableBlock() over the ACTUAL assembled stableBlock text (no duplicate
- * rendering of tool/skill/rule guidance).
- *
- * Callers (BEFORE_AGENT_START) should record digestId + estimatedTokens +
- * overBudget on the STATE_RUN_INITIALIZED event and Logger.warn when overBudget.
- */
-function buildStateSystemPrompt(config: HarnessConfig, services: RuntimeServices, session: ExtensionSession): StateSystemPromptResult | null {
-  const activeRun = session.activeRun;
-  if (!activeRun) return null;
-  const stateInstructions = services.instructionLoader.assemble(activeRun.state, config);
-  const protocol = services.protocolInjector.inject(activeRun.state, config);
-  const checklistProtocol = services.protocolParser.generatePrompt(activeRun.requiredItems);
-  const profileId = resolveToolPromptProfileId(config, activeRun.state, activeRun.action);
-
-  // pi-experiment-6q0y.2: resolve the active tool set for this state/action pair so
-  // only active tools appear in the stable prompt (token reduction for narrow states).
-  //
-  // Sentinel handling mirrors 6q0y.3 (Teammate.startInner): at the BEFORE_AGENT_START
-  // boundary the action has already been selected by initializeWorkerRun via
-  // selectActiveAction, so activeRun.action.id is a real action ID — not the sentinel.
-  // We resolve at state+action level directly.  If the state is absent from
-  // config.states (e.g. minimal test configs), fall back to the full tool set.
-  let activeToolNamesSet: ReadonlySet<string> | undefined;
-  let resolvedActiveToolNames: string[] | undefined;
-  if (config.states[activeRun.stateId]) {
-    try {
-      const resolved = resolveActiveToolSet(activeRun.stateId, activeRun.action.id, config);
-      if (!resolved.isDefault) {
-        activeToolNamesSet = new Set(resolved.toolNames);
-        resolvedActiveToolNames = resolved.toolNames; // already sorted
-      }
-    } catch {
-      // Resolver errors (unknown names, duplicates) are startup-fatal at lint time;
-      // if one slips through here, fall back to full tool set rather than crashing.
-    }
-  }
-
-  const projectTools = describeConfiguredProjectTools(config, profileId, activeToolNamesSet);
-  const actionPrompt = activeRun.action.prompt || '';
-  const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
-  const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-  const configPath = services.configLoader.getConfigPath();
-  // Resolve skill names for the stable identity — best-effort; empty on error.
-  let skillNames: string[] = [];
-  try {
-    skillNames = resolvePiSkillPathsForState(config, projectRoot, activeRun.stateId).map(s => s.name);
-  } catch {
-    skillNames = [];
-  }
-
-  // Build the stable identity for digest computation.  Arrays are sorted inside
-  // digestStableBlock / canonicalise so insertion order is irrelevant.
-  // The protocolLabel folds in the resolved profile ID so different profiles produce
-  // different digest/cache-keys while identical runs remain deterministic.
-  // 6q0y.2: also fold the sorted active tool names into the label so that two states
-  // with different active sets always produce different digest/cache-keys (AC3).
-  let protocolLabel = profileId ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}` : 'ORR_ELSE_PROTOCOL_v1';
-  if (resolvedActiveToolNames !== undefined) {
-    // Append sorted active-tool fingerprint so cache-key changes when the active set changes.
-    protocolLabel = `${protocolLabel}|activeTools:${resolvedActiveToolNames.join(',')}`;
-  }
-  const identity: StableBootstrapInputs = {
-    projectRoot,
-    configIdentity: configPath,
-    stateId: activeRun.stateId,
-    toolNames: getConfiguredPiToolNames(config),
-    skillNames,
-    ruleCategories: [],
-    protocolLabel
-  };
-
-  const injected = services.contextInjector.injectWithDigest(
-    [stateInstructions, protocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),
-    {
-      beadId: activeRun.beadId,
-      projectRoot,
-      workdir: activeRun.worktreePath || process.cwd(),
-      configPath,
-      actionId: activeRun.action.id,
-      identity: activeRun.state.identity.role,
-      phase: activeRun.stateId,
-      llmProviderKey: llm.providerKey,
-      llmProvider: llm.provider,
-      llmModel: llm.model,
-      llmThinking: llm.thinking,
-      progressPath: activeRun.worktreePath ? path.join(activeRun.worktreePath, 'PROGRESS.md') : undefined,
-      historyPath: activeRun.worklogManager.getWorklogPath(activeRun.beadId),
-      outstandingChecklist: checklistProtocol
-    },
-    identity
-  );
-
-  return {
-    prompt: injected.prompt,
-    stableBlock: injected.stableBlock,
-    volatileSuffix: injected.volatileSuffix,
-    digestId: injected.digestId,
-    estimatedTokens: injected.estimatedTokens,
-    overBudget: injected.overBudget,
-    activeToolNames: resolvedActiveToolNames
-  };
-}
+// StateSystemPromptResult and buildStateSystemPrompt moved to ./extension/WorkerContextResolver.ts.
 
 /**
  * Combined state + completed-action + route-level requiredTools for the
@@ -3816,19 +2843,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   // orrElseExtension(pi2, services) re-registers tools on the new pi instance.
   const session = createExtensionSession();
 
-  // Self-register the harness's OWN built-in tools' verify() callbacks (e.g.
-  // git_history). The harness registers these via the contract's verifier
-  // registry directly — distinct from CONSUMER tools, which register through
-  // the consuming-project extension. Idempotent (last-wins).
-  registerBuiltInVerifiers();
-
   const services = providedServices || createRuntimeServices();
-  // Point the Logger's rotating-file transport at the injected project root so
-  // log files land under the correct directory regardless of process.cwd().
-  Logger.configureProjectRoot(services.projectRoot);
-  registerProcessLifecycleObservers();
-  Logger.info(Component.ORR_ELSE, 'Orr Else extension loading', { version: App.VERSION });
-
   const seenTools = new Set<string>();
 
   pi.registerCommand(BuiltInToolName.ORR_ELSE, {
@@ -3865,7 +2880,37 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     }
   });
 
-  pi.on(PiEventName.SESSION_SHUTDOWN, () => {
+  // ── ExtensionBootstrap: initial setup ────────────────────────────────────────
+  // bootstrapExtension handles registerBuiltInVerifiers, Logger config,
+  // processLifecycleObservers, and Logger.info.  Pi lifecycle callbacks are
+  // registered below via the PiRegistrationService (registerPiLifecycleCallbacks)
+  // called from bootstrapExtension with the inline handler closures.
+  //
+  // The handler closures are constructed first so they capture session/services
+  // at orrElseExtension() call time.  bootstrapExtension then calls
+  // registerPiLifecycleCallbacks which invokes pi.on() for each handler.
+  bootstrapExtension(pi, {
+    services,
+    isWorkerMode,
+    piEventNames: {
+      SESSION_SHUTDOWN: PiEventName.SESSION_SHUTDOWN,
+      BEFORE_AGENT_START: PiEventName.BEFORE_AGENT_START,
+      RESOURCES_DISCOVER: PiEventName.RESOURCES_DISCOVER,
+      SESSION_START: PiEventName.SESSION_START,
+    }
+  }, {
+    onSessionShutdown: sessionShutdownHandler,
+    onBeforeAgentStart: beforeAgentStartHandler,
+    onResourcesDiscover: resourcesDiscoverHandler,
+    onSessionStart: sessionStartHandler,
+  });
+
+  // ── Pi lifecycle handler implementations ─────────────────────────────────────
+  // These handler functions are passed to bootstrapExtension (which routes them
+  // through PiRegistrationService / pi.on()) and defined here as named functions
+  // so they are hoisted and available at the bootstrapExtension call site above.
+
+  function sessionShutdownHandler() {
     // pi-experiment-1elr.10: transition the lifecycle machine before side effects.
     // SESSION_SHUTDOWN always proceeds even on violation — cleanup must never be blocked.
     const shutdownResult = transition(session.lifecycleMachine, PiLifecycleEvent.SESSION_SHUTDOWN);
@@ -3899,9 +2944,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     // On failure the promise resolves anyway (finally) — a bounded shutdown-failure
     // that does NOT block replacement/reload.
     return runtimeObservability?.forceFlush().finally(() => runtimeObservability.shutdown());
-  });
+  }
 
-  pi.on(PiEventName.BEFORE_AGENT_START, async (event: BeforeAgentStartEvent) => {
+  async function beforeAgentStartHandler(event: BeforeAgentStartEvent) {
     if (!isWorkerMode()) return;
 
     // pi-experiment-1elr.10: transition the lifecycle machine BEFORE initialising
@@ -3923,8 +2968,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     const config = await services.configLoader.load();
     if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
-    const promptResult = buildStateSystemPrompt(config, services, session);
-    if (!promptResult) return;
+    if (!session.activeRun) return;
+    const projectRootForPrompt = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+    const promptResult = buildStateSystemPrompt(config, { projectRoot: projectRootForPrompt, services }, session.activeRun);
 
     // ── Pi base prompt admission + fingerprinting (pi-experiment-1elr.9) ────
     //
@@ -4158,9 +3204,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       ? `${promptResult.stableBlock}\n\n${piBase}\n\n${promptResult.volatileSuffix}`
       : `${promptResult.stableBlock}\n\n${promptResult.volatileSuffix}`;
     return { systemPrompt: finalPrompt };
-  });
+  }
 
-  pi.on(PiEventName.RESOURCES_DISCOVER, async () => {
+  async function resourcesDiscoverHandler() {
     // pi-experiment-1elr.10: transition the lifecycle machine before resolving skills.
     const rdResult = transition(session.lifecycleMachine, PiLifecycleEvent.RESOURCES_DISCOVER);
     if (!rdResult.ok) {
@@ -4185,9 +3231,9 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
     const skillPaths = resolvePiSkillPaths(config, projectRoot);
     return skillPaths.length > 0 ? { skillPaths } : {};
-  });
+  }
 
-  pi.on(PiEventName.SESSION_START, async (_event: SessionStartEvent, ctx: ExtensionContext) => {
+  async function sessionStartHandler(_event: SessionStartEvent, ctx: ExtensionContext) {
     // pi-experiment-1elr.10: transition the lifecycle machine BEFORE registering tools,
     // initialising observability, or constructing the TeammateFactory. A duplicate
     // SESSION_START (invalid ordering) produces a LIFECYCLE_VIOLATION diagnostic and
@@ -4337,8 +3383,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       registerClaudeCodeLiveLogin(pi);
     }
 
+    const projectRootForWrap = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
+    const wrapperPorts = {
+      eventStore: services.eventStore,
+      toolCallPathFactory: services.toolCallPathFactory,
+      configLoader: services.configLoader,
+      services,
+      isWorkerMode,
+      projectRoot: projectRootForWrap,
+      terminalFailureAllowedTools: TERMINAL_FAILURE_ALLOWED_TOOLS as Set<string>,
+      buildWorkerEvent,
+    };
+    const beadIdFromParamsForWrap = (params: Record<string, unknown> | undefined) => beadIdFromToolParams(params, session);
+    const toolSpanAttrsForWrap = (toolName: string, params: unknown, beadId: string | undefined, externalPiTool?: boolean, toolInvocationId?: string) =>
+      toolSpanAttributes(toolName, params, beadId, session, externalPiTool, toolInvocationId);
     const wrapRuntimeTool = (tool: { name: string, description: string, parameters: unknown, execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> }) =>
-      wrapPluginTool(tool, runtimeObservability, services, session);
+      wrapPluginTool(tool, runtimeObservability, wrapperPorts, session, beadIdFromParamsForWrap, toolSpanAttrsForWrap);
 
     if (!session.artifactPathsToolRegistered) {
       session.artifactPathsToolRegistered = true;
@@ -5245,5 +4305,5 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       ...getConfiguredProjectToolNames(config),
       ...getConfiguredPiToolNames(config)
     ]);
-  });
+  }
 }

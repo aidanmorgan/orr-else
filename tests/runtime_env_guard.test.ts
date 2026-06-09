@@ -78,6 +78,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     file: 'src/plugins/projectTools/readinessProbe.ts',
     reason: 'pi-experiment-85bl AC3: cwd/root-scope bound pins the probe subprocess cwd to the project root (PI_PROJECT_ROOT). This is a child-process launch boundary read — the env var is used as the cwd argument to execa, not for branching logic. Tests inject the root via the overrides.projectRoot parameter, bypassing the env read entirely. Same pattern as PathContext.ts and ArtifactQuery.ts.',
     deferredWI: undefined
+  },
+  {
+    file: 'src/extension/ToolExecutionWrapper.ts',
+    reason: 'pi-experiment-amq0.1: reads PROJECT_ROOT, STATE_ID, ACTION_ID, STATE_ID (token accounting), ACTION_ID (token accounting), WORKER_ID (span attributes), BEAD_ID (breaker key) at tool invocation time — the same reads that were in extension.ts wrapPluginTool before extraction. These are runtime-context reads that move with the extracted function. To be threaded through injected ports in a follow-up.',
+    deferredWI: undefined
   }
 ];
 

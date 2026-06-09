@@ -9,6 +9,9 @@ import type { ChecklistItem } from '../core/ProtocolParser.js';
 import type { ProgressManager } from '../core/ProgressManager.js';
 import type { WorklogManager } from '../core/WorklogManager.js';
 import type { DomainEvent } from '../core/EventStore.js';
+import type { RuntimeBudgetTracker } from '../core/RuntimeBudgetTracker.js';
+import type { LoopDetector } from '../core/LoopDetector.js';
+import type { ToolResultBase } from '../contract.js';
 
 export interface ActiveRun {
   beadId: BeadId;
@@ -35,4 +38,24 @@ export interface ActiveRun {
   terminalFailureLimitScan?: Promise<DomainEvent | undefined>;
   terminalFailureLimitEvent?: DomainEvent;
   terminalFailureLimitResult?: Record<string, unknown>;
+}
+
+/**
+ * The subset of per-invocation session state that ToolExecutionWrapper needs.
+ *
+ * pi-experiment-amq0.1: extracted so ToolExecutionWrapper can type its `session`
+ * parameter without importing the full ExtensionSession from extension.ts.
+ *
+ * Only the fields actually READ or MUTATED by wrapPluginTool are included.
+ */
+export interface ToolExecutionSession {
+  activeRun: ActiveRun | null;
+  /** Per-(bead, tool) consecutive-failure counter.  Worker mode only. */
+  toolBreakerFailures: Map<string, number>;
+  /** In-session result memoisation for cacheable project tools. */
+  toolResultCache: Map<string, { result: unknown; recordedAt: number; toolResult: ToolResultBase }>;
+  /** Per-worker-run runtime budget tracker (6q0y.48). Null when no policy configured. */
+  runtimeBudgetTracker: RuntimeBudgetTracker | null;
+  /** Always-on structural loop detector (6q0y.49). Null before SESSION_START. */
+  loopDetector: LoopDetector | null;
 }

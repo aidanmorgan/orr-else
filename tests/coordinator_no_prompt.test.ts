@@ -222,13 +222,19 @@ describe('Coordinator no-prompt static guard (extension.ts source scan)', () => 
     ).toEqual([]);
   });
 
-  it('guard is non-vacuous: `buildStateSystemPrompt` exists in the file (not just in comments)', () => {
-    // Ensures the scan above is not trivially passing because the function was removed.
-    const lines = readExtensionSource().split('\n');
-    const definition = scanLines(lines, /^function buildStateSystemPrompt\b/, 1, lines.length);
+  it('guard is non-vacuous: `buildStateSystemPrompt` exists in WorkerContextResolver (not just in comments)', () => {
+    // pi-experiment-amq0.1: buildStateSystemPrompt was moved to
+    // src/extension/WorkerContextResolver.ts as part of the injectable-services extraction.
+    // The guard above (checking extension.ts) is still valid — it confirms the function
+    // is not called inside the coordinator paths of extension.ts. This non-vacuousness
+    // check now verifies the function exists in its new canonical location.
+    const resolverFile = path.join(ROOT_DIR, 'src', 'extension', 'WorkerContextResolver.ts');
+    const resolverSource = fs.readFileSync(resolverFile, 'utf8');
+    const lines = resolverSource.split('\n');
+    const definition = scanLines(lines, /^export function buildStateSystemPrompt\b/, 1, lines.length);
     expect(
       definition.length,
-      '`buildStateSystemPrompt` function definition not found in extension.ts — the guard above is vacuous; update if the function was renamed/removed.'
+      '`buildStateSystemPrompt` function definition not found in WorkerContextResolver.ts — the guard above is vacuous; update if the function was renamed/removed.'
     ).toBeGreaterThan(0);
   });
 });
