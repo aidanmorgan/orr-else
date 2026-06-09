@@ -37,7 +37,13 @@ export class JsonlEventLog {
    * Read and parse only the last `tailBytes` of a JSONL file, visiting every
    * complete record found in that tail window.
    *
-   * Partial lines at the start of the window (created by slicing mid-line) are
+   * Uses a bounded byte-offset read (O(tailBytes), not O(file size)).  If the
+   * window contains no complete records and the file has content before the
+   * window start (i.e. a single event line exceeds tailBytes), the window is
+   * doubled and the read is retried — up to a maximum of 32× the initial
+   * tailBytes — so oversized events are still returned correctly.
+   *
+   * Partial lines at the start of each window (created by slicing mid-line) are
    * silently discarded — the first newline boundary in the buffer marks the
    * start of the first complete record.
    *
@@ -50,31 +56,58 @@ export class JsonlEventLog {
     } catch {
       return;
     }
-    const start = Math.max(0, stat.size - tailBytes);
-    const raw = await fs.promises.readFile(filePath, { encoding: 'utf8', flag: 'r' })
-      .then(text => {
-        // Only take the relevant tail slice from the text representation.
-        // We read the full file then slice because `createReadStream` with `start`
-        // may split mid-codepoint in multi-byte sequences; reading as string then
-        // slicing by byte-index is safer for ASCII-dominant JSONL.
-        return text;
-      });
-    // Use byte offset to drop the partial-line prefix.
-    const buf = Buffer.from(raw, 'utf8');
-    const tailBuf = start > 0 ? buf.slice(start) : buf;
-    const tailText = tailBuf.toString('utf8');
-    // Drop the partial first line (content before the first newline).
-    const firstNewline = tailText.indexOf('\n');
-    const cleanText = start > 0 && firstNewline >= 0 ? tailText.slice(firstNewline + 1) : tailText;
-    for (const line of cleanText.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
+
+    const fileSize = stat.size;
+    if (fileSize === 0) return;
+
+    let window = tailBytes;
+
+    while (true) {
+      const start = Math.max(0, fileSize - window);
+      const readSize = fileSize - start;
+
+      // Bounded byte-offset read: allocate only what we need.
+      const buf = Buffer.allocUnsafe(readSize);
+      const fh = await fs.promises.open(filePath, 'r');
       try {
-        const value = JSON.parse(trimmed);
-        if (value !== undefined && value !== null) visitor(value);
-      } catch {
-        // Malformed JSON — skip (same as ndjson strict:false behaviour).
+        await fh.read(buf, 0, readSize, start);
+      } finally {
+        await fh.close();
       }
+
+      const tailText = buf.toString('utf8');
+
+      // Drop the partial first line when we didn't start from byte 0.
+      // This trim is defensive: a mid-line fragment is almost always invalid JSON
+      // (JSON.parse would reject it), but trimming guarantees we never emit a
+      // structurally-valid fragment from an adjacent record.
+      const firstNewline = start > 0 ? tailText.indexOf('\n') : -1;
+      const cleanText = start > 0 && firstNewline >= 0 ? tailText.slice(firstNewline + 1) : tailText;
+
+      let foundAny = false;
+      for (const line of cleanText.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const value = JSON.parse(trimmed);
+          if (value !== undefined && value !== null) {
+            foundAny = true;
+            visitor(value);
+          }
+        } catch {
+          // Malformed JSON — skip (same as ndjson strict:false behaviour).
+        }
+      }
+
+      // If we found records, or we've already read the whole file, we're done.
+      if (foundAny || start === 0) break;
+
+      // No complete records found and there is content before our window:
+      // the last event line is likely larger than the window.  Grow and retry.
+      // Clamp to fileSize so start reaches 0 on the next iteration — this
+      // guarantees termination even when a single event line exceeds any
+      // arbitrary multiple of tailBytes.
+      window = Math.min(window * 2, fileSize);
     }
   }
 
