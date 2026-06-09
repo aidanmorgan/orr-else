@@ -12,9 +12,9 @@ import type { RuntimeServices } from '../composition/createRuntimeServices.js';
 import type { ActiveRun } from './SessionTypes.js';
 import { resolveActiveToolSet } from '../core/ActiveToolSetResolver.js';
 import { describeConfiguredProjectTools, resolveToolPromptProfileId } from '../plugins/projectTools.js';
-import { resolvePiSkillPathsForState } from '../core/WorkerResourceResolver.js';
-import { type StableBootstrapInputs } from '../core/BootstrapDigest.js';
-import { EnvVars } from '../constants/index.js';
+import { WorkerPromptIdentityBuilder, formatSkillDuplicationDiagnostic } from '../core/WorkerPromptIdentityBuilder.js';
+import { Logger } from '../core/Logger.js';
+import { EnvVars, Component } from '../constants/index.js';
 import type { ToolSurfaceCatalog } from '../core/ToolSurfaceCatalog.js';
 
 /**
@@ -125,38 +125,42 @@ export function buildStateSystemPrompt(
   const actionPrompt = activeRun.action.prompt || '';
   const llm = services.configLoader.resolveLLMConfig(activeRun.stateId, config);
   const configPath = services.configLoader.getConfigPath();
-  // Resolve skill names for the stable identity — best-effort; empty on error.
-  let skillNames: string[] = [];
-  try {
-    skillNames = resolvePiSkillPathsForState(config, projectRoot, activeRun.stateId).map(s => s.name);
-  } catch {
-    skillNames = [];
+
+  // Compute the base protocol label at state+action level (includes action.toolPromptProfile).
+  // The caller (WorkerContextResolver, in the composition layer) resolves this — the core
+  // builder receives it as a pre-resolved string, keeping core free of plugin imports.
+  const baseProtocolLabel = profileId
+    ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}`
+    : 'ORR_ELSE_PROTOCOL_v1';
+
+  // pi-experiment-amq0.10: build the stable identity via the single WorkerPromptIdentityBuilder.
+  // This replaces the prior ad-hoc skill resolution + identity assembly and ensures
+  // the prompt-assembly identity uses the same inputs as the spawn bootstrap digest.
+  // The catalog is passed so Pi tool names come from the single source of truth.
+  const promptIdentity = WorkerPromptIdentityBuilder.build({
+    projectRoot,
+    configPath,
+    stateId: activeRun.stateId,
+    config,
+    toolSurfaceCatalog: ports.toolSurfaceCatalog,
+    protocolLabel: baseProtocolLabel
+  });
+  if (promptIdentity.skillDuplications.length > 0) {
+    Logger.warn(Component.TEAMMATE, formatSkillDuplicationDiagnostic(promptIdentity.skillDuplications), {
+      beadId: activeRun.beadId,
+      stateId: activeRun.stateId,
+      duplications: promptIdentity.skillDuplications
+    });
   }
 
-  // Build the stable identity for digest computation.  Arrays are sorted inside
-  // digestStableBlock / canonicalise so insertion order is irrelevant.
-  // The protocolLabel folds in the resolved profile ID so different profiles produce
-  // different digest/cache-keys while identical runs remain deterministic.
-  // 6q0y.2: also fold the sorted active tool names into the label so that two states
+  // 6q0y.2: fold sorted active tool names into the protocol label so that two states
   // with different active sets always produce different digest/cache-keys (AC3).
-  let protocolLabel = profileId ? `ORR_ELSE_PROTOCOL_v1|profile:${profileId}` : 'ORR_ELSE_PROTOCOL_v1';
+  let { protocolLabel } = promptIdentity.identity;
   if (resolvedActiveToolNames !== undefined) {
     // Append sorted active-tool fingerprint so cache-key changes when the active set changes.
     protocolLabel = `${protocolLabel}|activeTools:${resolvedActiveToolNames.join(',')}`;
   }
-  // pi-experiment-amq0.15: read configured Pi tool names FROM the catalog (single source of truth).
-  // The catalog is required — built at SESSION_START, guaranteed present before BEFORE_AGENT_START.
-  const configuredPiToolNames = Array.from(ports.toolSurfaceCatalog.getConfiguredPiToolNames());
-
-  const identity: StableBootstrapInputs = {
-    projectRoot,
-    configIdentity: configPath,
-    stateId: activeRun.stateId,
-    toolNames: configuredPiToolNames,
-    skillNames,
-    ruleCategories: [],
-    protocolLabel
-  };
+  const identity = { ...promptIdentity.identity, protocolLabel };
 
   const injected = services.contextInjector.injectWithDigest(
     [stateInstructions, protocol, projectTools, actionPrompt].filter(Boolean).join('\n\n'),

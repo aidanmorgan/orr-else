@@ -127,7 +127,7 @@ import { requireTool } from './core/ToolRegistry.js';
 import { Teammate, type WorkerContext } from './core/Teammate.js';
 // resolveActiveToolSet moved to ./extension/WorkerContextResolver.ts
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
-import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/WorkerResourceResolver.js';
+import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths, resolvePiSkillPathsForState } from './core/WorkerResourceResolver.js';
 import { buildToolSurfaceCatalog, assertCatalogValid, type ToolSurfaceCatalog } from './core/ToolSurfaceCatalog.js';
 import { resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PromptProvenanceService.js';
 // resolvePiSkillPathsForState moved to ./extension/WorkerContextResolver.ts
@@ -3309,7 +3309,18 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       return {};
     }
     const projectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-    const skillPaths = resolvePiSkillPaths(config, projectRoot);
+    // pi-experiment-amq0.10: use state-aware skill resolution so RESOURCES_DISCOVER
+    // delivers the same skill set as spawn (resolvePiSkillPathsForState includes
+    // both global and state-specific skills, de-duplicated by resolved path).
+    // The stateId is available from the worker environment variable (set at spawn time).
+    const stateIdForSkills = process.env[EnvVars.STATE_ID];
+    let skillPaths: string[];
+    try {
+      skillPaths = resolvePiSkillPathsForState(config, projectRoot, stateIdForSkills).map(s => s.path);
+    } catch {
+      // Best-effort: fall back to global-only skills on resolution error.
+      skillPaths = resolvePiSkillPaths(config, projectRoot);
+    }
     return skillPaths.length > 0 ? { skillPaths } : {};
   }
 

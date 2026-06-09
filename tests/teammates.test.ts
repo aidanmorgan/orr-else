@@ -1163,6 +1163,135 @@ states:
     // Both list-windows calls were made (check + verify).
     expect(listWindowsCallCount).toBeGreaterThanOrEqual(2);
   });
+
+  // ---------------------------------------------------------------------------
+  // D1 — LOAD-BEARING: skill-duplication diagnostic is emitted on the spawn path
+  // ---------------------------------------------------------------------------
+
+  it('(amq0.10/D1-load-bearing) emits Logger.warn with duplication diagnostic when a skill appears globally AND in a state skills list', async () => {
+    // Config: "quality" is in both global skillPaths AND Planning's skills list.
+    // State skills resolve from .pi/skills/<name>/SKILL.md; global skillPaths can
+    // point to any path.  We create the skill at .pi/skills/quality/SKILL.md so
+    // the state skill resolver finds it, and configure the global skillPath to the
+    // same location so detectSkillDuplication sees the overlap.
+    const piSkillPath = path.join(root, '.pi', 'skills', 'quality', 'SKILL.md');
+    fs.mkdirSync(path.dirname(piSkillPath), { recursive: true });
+    fs.writeFileSync(piSkillPath, '# Quality\n');
+
+    const dupConfigPath = path.join(root, 'harness-dup.yaml');
+    fs.writeFileSync(dupConfigPath, `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  pi:
+    skillPaths:
+      - .pi/skills/quality/SKILL.md
+    workerExtensions:
+      - configured-worker-extension.ts
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+  worktreePolicy:
+    default: always
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    skills:
+      - quality
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed }
+`);
+    const dupConfigLoader = new ConfigLoader(undefined, root);
+    dupConfigLoader.setConfigPath(dupConfigPath);
+
+    const warnCalls: Array<Parameters<typeof Logger.warn>> = [];
+    vi.spyOn(Logger, 'warn').mockImplementation((...args) => { warnCalls.push(args); });
+
+    const factory = new TeammateFactory(observability, dupConfigLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('bead-dup-diag' as any, 'Planning', worktreePath);
+
+    // Spawn must succeed (duplication is a warning, not a hard abort).
+    expect(result.success).toBe(true);
+
+    // LOAD-BEARING: a Logger.warn containing the duplication diagnostic must have been emitted.
+    // Removing the formatSkillDuplicationDiagnostic emission from the spawn path makes this fail.
+    const dupWarn = warnCalls.find(([, msg]) =>
+      typeof msg === 'string' && msg.includes('Skill duplication detected')
+    );
+    expect(dupWarn).toBeDefined();
+    const [, diagMsg, diagMeta] = dupWarn!;
+    expect(diagMsg).toContain('quality');
+    expect((diagMeta as any)?.duplications).toBeDefined();
+    expect(Array.isArray((diagMeta as any).duplications)).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // D2 — LOAD-BEARING: missing referenced state skill aborts spawn (fail-closed)
+  // ---------------------------------------------------------------------------
+
+  it('(amq0.10/D2-load-bearing) spawn returns { success: false } when a referenced state skill file is missing', async () => {
+    // Config: Planning declares a skill "ghost-skill" that does not exist on disk.
+    const missingSkillConfigPath = path.join(root, 'harness-missing-skill.yaml');
+    fs.writeFileSync(missingSkillConfigPath, `
+settings:
+  maxConcurrentSlots: 1
+  handoverTemplate: "handover"
+  startState: Planning
+  defaultModel: "gpt-5.5"
+  pi:
+    workerExtensions:
+      - configured-worker-extension.ts
+  eventStore:
+    enabled: false
+  observability:
+    enabled: false
+  worktreePolicy:
+    default: always
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  Planning:
+    identity: { role: planner, expertise: planning, constraints: [] }
+    baseInstructions: plan
+    skills:
+      - ghost-skill
+    actions:
+      - id: a1
+        type: prompt
+    transitions: { SUCCESS: completed }
+`);
+    const missingSkillConfigLoader = new ConfigLoader(undefined, root);
+    missingSkillConfigLoader.setConfigPath(missingSkillConfigPath);
+
+    const factory = new TeammateFactory(observability, missingSkillConfigLoader, eventStore, {}, 6, undefined, currentExtensionPath);
+    const result = await factory.spawnTeammateInTmux('bead-missing-skill' as any, 'Planning', worktreePath);
+
+    // LOAD-BEARING: spawn must fail-closed — a missing referenced skill is a config error.
+    // Removing the try/catch removal from the builder would cause the error to be swallowed
+    // and spawn to SUCCEED with skill-stripped config (the old regression).
+    expect(result.success).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(typeof result.error).toBe('string');
+    expect((result.error as string).length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

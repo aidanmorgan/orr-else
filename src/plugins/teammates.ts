@@ -17,7 +17,8 @@ import { EventStore } from '../core/EventStore.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../core/RuntimeEnvironment.js';
 import { computeBuildProvenance } from '../core/BuildProvenance.js';
 import type { RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
-import { resolvePiSkillPathsForState, resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/WorkerResourceResolver.js';
+import { resolveWorkerArgs, resolveWorkerExtensionPaths } from '../core/WorkerResourceResolver.js';
+import { WorkerPromptIdentityBuilder, formatSkillDuplicationDiagnostic } from '../core/WorkerPromptIdentityBuilder.js';
 import { resolveToolPromptProfileId } from './projectTools.js';
 import { digestIdentity } from '../core/BootstrapDigest.js';
 import {
@@ -688,9 +689,35 @@ export class TeammateFactory {
       const config = await this.configLoader.load();
       const llm = this.configLoader.resolveLLMConfig(stateId, config);
       const workerExtensions = resolveWorkerExtensionPaths(config, projectRoot, extensionPath);
-      const resolvedSkills = resolvePiSkillPathsForState(config, projectRoot, stateId);
-      const skillPaths = resolvedSkills.map(s => s.path);
       const configPath = this.configLoader.getConfigPath();
+      // Resolve the effective tool prompt profile for this state at spawn time.
+      // At spawn, there is no specific action in scope — only state + settings levels apply.
+      const spawnProfileId = resolveToolPromptProfileId(config, config.states?.[stateId]);
+      const spawnProtocolLabel = spawnProfileId
+        ? `ORR_ELSE_PROTOCOL_v1|profile:${spawnProfileId}`
+        : 'ORR_ELSE_PROTOCOL_v1';
+
+      // pi-experiment-amq0.10: use the single WorkerPromptIdentityBuilder to derive
+      // skill resolution + spawn-time identity.  This replaces the prior direct calls
+      // to resolvePiSkillPathsForState + a WRONG toolNames (workerExtensions paths)
+      // and ensures the spawn digest uses the same Pi tool names as the prompt-assembly
+      // digest (Pi tool names from config, not extension file paths).
+      const spawnIdentity = WorkerPromptIdentityBuilder.build({
+        projectRoot,
+        configPath,
+        stateId,
+        config,
+        protocolLabel: spawnProtocolLabel
+      });
+      if (spawnIdentity.skillDuplications.length > 0) {
+        Logger.warn(Component.FACTORY, formatSkillDuplicationDiagnostic(spawnIdentity.skillDuplications), {
+          beadId,
+          stateId,
+          duplications: spawnIdentity.skillDuplications
+        });
+      }
+      const resolvedSkills = spawnIdentity.resolvedSkills;
+      const skillPaths = resolvedSkills.map(s => s.path);
       const workerArgs = resolveWorkerArgs(config, { configPath, projectRoot, worktreePath });
       const apiPort = this.apiAddress.port || Defaults.API_PORT;
       const apiBase = this.apiAddress.base || `http://${Defaults.API_HOST}:${apiPort}`;
@@ -769,30 +796,15 @@ export class TeammateFactory {
       const command = `${env.join(' ')} ${quoteShellArgs(args)}`;
       const skillNames = resolvedSkills.map(s => s.name);
 
-      // Resolve the effective tool prompt profile for this state at spawn time.
-      // At spawn, there is no specific action in scope — only state + settings levels apply.
-      // This ensures the spawn-time digest label stays consistent with the worker-side
-      // buildStateSystemPrompt digest once the worker selects an action.
-      const spawnProfileId = resolveToolPromptProfileId(config, config.states?.[stateId]);
-      const spawnProtocolLabel = spawnProfileId
-        ? `ORR_ELSE_PROTOCOL_v1|profile:${spawnProfileId}`
-        : 'ORR_ELSE_PROTOCOL_v1';
-
-      // Compute a lightweight identity digest for spawn-time audit.  This is
-      // derived ONLY from the canonical stable identity (no text rendering) so
+      // pi-experiment-amq0.10: spawn-time identity digest via the single builder.
+      // WorkerPromptIdentityBuilder.build() (called above) produced spawnIdentity.identity
+      // with correct Pi tool names (not workerExtension paths) and state-aware skills.
+      // digestIdentity() hashes only the canonical identity (no text rendering) so
       // it is deterministic and cache-eligible across beads in the same state.
       // The full stable-block digest (identity + actual rendered text) is
       // recorded on the worker-side STATE_PROMPT_ASSEMBLED event after the
       // worker assembles its real prompt in BEFORE_AGENT_START.
-      const spawnDigestId = digestIdentity({
-        projectRoot,
-        configIdentity: configPath,
-        stateId,
-        toolNames: [...workerExtensions].sort(),
-        skillNames: [...skillNames].sort(),
-        ruleCategories: [],
-        protocolLabel: spawnProtocolLabel
-      });
+      const spawnDigestId = digestIdentity(spawnIdentity.identity);
 
       Logger.info(Component.FACTORY, 'Spawning Orr Else teammate in tmux', {
         beadId,
