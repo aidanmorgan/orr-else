@@ -454,6 +454,115 @@ states:
 });
 
 // ---------------------------------------------------------------------------
+// pi-experiment-ckm2: runtime.adapters.* catch-all regression
+//
+// The catch-all loop in validateV2WorkerAdapterFields rejects ANY key under
+// runtime.adapters that is not one of the three explicitly named keys
+// (worker / workspace / backlog). This block locks in that behavior.
+//
+// Load-bearing: removing only the catch-all loop from ConfigLoader.ts causes
+// both tests below to fail (arbitrary keys like "gpu" and "custom" pass through
+// instead of being rejected). The three named-key tests above remain green
+// because they are handled by the named branches, not the catch-all.
+// ---------------------------------------------------------------------------
+describe('pi-experiment-ckm2: runtime.adapters.* catch-all — arbitrary sub-keys rejected in v2', () => {
+  it('rejects runtime.adapters.gpu (arbitrary key not in the named-key list)', () => {
+    const yaml = MINIMAL_V2_BASE + `
+runtime:
+  adapters:
+    gpu: some-gpu-adapter
+`;
+    const p = writeYaml('adapter_catchall_gpu.yaml', yaml);
+    const loader = new ConfigLoader(undefined, TEST_DIR);
+
+    let err: Error | undefined;
+    try { loader.load(p); } catch (e) { err = e as Error; }
+
+    expect(err).toBeDefined();
+    // Must name the exact forbidden path
+    expect(err!.message).toMatch(/runtime\.adapters\.gpu/);
+    // Must state adapter selection is not configurable (AC3)
+    expect(err!.message).toMatch(/not configurable/i);
+    // Must reference tmux workers and isolated git worktrees as mandatory (AC3)
+    expect(err!.message).toMatch(/tmux/i);
+  });
+
+  it('rejects runtime.adapters.custom (a second arbitrary key — proves catch-all, not a fixed deny-list)', () => {
+    const yaml = MINIMAL_V2_BASE + `
+runtime:
+  adapters:
+    custom: my-custom-adapter
+`;
+    const p = writeYaml('adapter_catchall_custom.yaml', yaml);
+    const loader = new ConfigLoader(undefined, TEST_DIR);
+
+    let err: Error | undefined;
+    try { loader.load(p); } catch (e) { err = e as Error; }
+
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/runtime\.adapters\.custom/);
+    expect(err!.message).toMatch(/not configurable/i);
+    expect(err!.message).toMatch(/tmux/i);
+  });
+
+  it('rejects a mix of named + arbitrary adapter keys — all appear in the diagnostic', () => {
+    // Exercises the named paths AND the catch-all in a single config.
+    const yaml = MINIMAL_V2_BASE + `
+runtime:
+  adapters:
+    worker: docker
+    gpu: some-gpu-adapter
+`;
+    const p = writeYaml('adapter_catchall_mixed.yaml', yaml);
+    const loader = new ConfigLoader(undefined, TEST_DIR);
+
+    let err: Error | undefined;
+    try { loader.load(p); } catch (e) { err = e as Error; }
+
+    expect(err).toBeDefined();
+    expect(err!.message).toMatch(/runtime\.adapters\.worker/);
+    expect(err!.message).toMatch(/runtime\.adapters\.gpu/);
+    expect(err!.message).toMatch(/not configurable/i);
+  });
+
+  it('v1 config with an arbitrary runtime.adapters sub-key is NOT rejected (v2-only gate)', () => {
+    // The catch-all is gated behind version: 2. A v1 config (no version field)
+    // is processed by preValidateV2Admission which returns early at the
+    // "versionRaw === undefined" check — validateV2WorkerAdapterFields is never called.
+    const yaml = `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+  maxConcurrentSlots: 2
+  handoverTemplate: "t"
+scheduler:
+  weights: { waitTime: 1, executionTime: 1, progress: 1, penalty: 1 }
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+runtime:
+  adapters:
+    gpu: some-gpu-adapter
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan."
+    actions:
+      - id: plan
+        type: prompt
+    transitions: { SUCCESS: completed, FAILURE: Planning }
+`;
+    const p = writeYaml('v1_arbitrary_adapter.yaml', yaml);
+    const loader = new ConfigLoader(undefined, TEST_DIR);
+
+    expect(() => loader.load(p)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // VERSION GATE: v1 configs with these fields are UNAFFECTED
 // ---------------------------------------------------------------------------
 describe('pi-experiment-ux5e: VERSION GATE — v1 configs with worktree/adapter fields load without error', () => {
