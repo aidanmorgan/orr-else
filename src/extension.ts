@@ -3639,7 +3639,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.queryTmuxTranscriptsToolRegistered) {
       session.queryTmuxTranscriptsToolRegistered = true;
-      const tmuxTranscriptQuery = new TmuxTranscriptQuery(services.projectRoot);
+      const tmuxTranscriptQuery = new TmuxTranscriptQuery(services.projectRoot, services.eventStore);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.QUERY_TMUX_TRANSCRIPTS,
         description:
@@ -3647,14 +3647,16 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           'Reasoning blocks are redacted BEFORE truncation. Path traversal is rejected. ' +
           'DEFAULT mode returns transcript metadata + at most 80 tail lines. ' +
           'SEARCH mode (search param) returns at most 10 hits with 2 context lines each. ' +
-          'IDENTITY: paneId (e.g. "%42") reads that specific pane; latest:true reads the most recently recorded pane. ' +
+          'IDENTITY: paneId (e.g. "%42") reads that specific pane; beadId resolves via the latest TEAMMATE_SPAWNED event for that bead; workerId resolves via the latest TEAMMATE_SPAWNED event for that worker; latest:true reads the most recently recorded pane. ' +
           'Missing or expired transcripts return a structured not_found response.',
         parameters: Type.Object({
-          paneId: Type.Optional(Type.String({ description: 'Pane ID (e.g. "%42") to read the transcript for. Mutually exclusive with latest.' })),
-          latest: Type.Optional(Type.Boolean({ description: 'When true, read the most recently recorded pane transcript (current.path pointer). Mutually exclusive with paneId.' })),
+          paneId: Type.Optional(Type.String({ description: 'Pane ID (e.g. "%42") to read the transcript for. Mutually exclusive with latest, beadId, workerId.' })),
+          latest: Type.Optional(Type.Boolean({ description: 'When true, read the most recently recorded pane transcript (current.path pointer). Mutually exclusive with paneId, beadId, workerId.' })),
+          beadId: Type.Optional(Type.String({ description: 'Bead ID — resolved to pane via the latest TEAMMATE_SPAWNED event for this bead. Mutually exclusive with paneId, latest, workerId.' })),
+          workerId: Type.Optional(Type.String({ description: 'Worker ID — resolved to pane via the latest TEAMMATE_SPAWNED event for this worker. Mutually exclusive with paneId, latest, beadId.' })),
           search: Type.Optional(Type.String({ description: 'Search term — return up to 10 hits with 2 context lines each. Case-insensitive. When absent, tail mode is used.' }))
         }),
-        execute: (params: any) => tmuxTranscriptQuery.query(params)
+        execute: async (params: any) => tmuxTranscriptQuery.query(params)
       }) as any);
     }
 

@@ -9,15 +9,17 @@
  *   (E) Search mode returns at most 10 hits with 2 context lines (AC3).
  *   (F) Missing / expired transcripts return not_found (AC4).
  *   (G) latest:true reads the current.path pointer.
+ *   (H) beadId/workerId resolution via persisted TEAMMATE_SPAWNED events (AC1).
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { BuiltInToolName } from '../src/constants/domain.js';
+import { BuiltInToolName, DomainEventName } from '../src/constants/domain.js';
 import { EnvVars, PiEventName, sanitizePaneId } from '../src/constants/infra.js';
 import { Logger } from '../src/core/Logger.js';
+import { writeFixtureEvent } from './support/TestEventStore.js';
 import orrElseExtension from '../src/extension.js';
 
 const HARNESS_YAML = `
@@ -297,5 +299,105 @@ describe('pi-experiment-6q0y.25: query_tmux_transcripts progressive-disclosure t
     const tool = await registeredTool();
     const result = await callTool(tool, {});
     expect(result.status).toBe('rejected');
+  });
+
+  // ── (H) beadId / workerId resolution via TEAMMATE_SPAWNED events ─────────
+
+  it('(H1) beadId resolves to the correct pane transcript', async () => {
+    const content = 'beadId resolution output';
+    writeTranscript('%30', content);
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-test-1',
+      stateId: 'Planning',
+      workerId: 'w-test-1',
+      paneId: '%30'
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-test-1' });
+    expect(result.status).toBe('found');
+    expect(result.tailLines.join('\n')).toContain('beadId resolution output');
+  });
+
+  it('(H2) workerId resolves to the correct pane transcript', async () => {
+    const content = 'workerId resolution output';
+    writeTranscript('%31', content);
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-test-2',
+      stateId: 'Planning',
+      workerId: 'w-test-2',
+      paneId: '%31'
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { workerId: 'w-test-2' });
+    expect(result.status).toBe('found');
+    expect(result.tailLines.join('\n')).toContain('workerId resolution output');
+  });
+
+  it('(H3) latest-wins: multiple TEAMMATE_SPAWNED events for same bead — last pane wins', async () => {
+    writeTranscript('%40', 'old pane content');
+    writeTranscript('%41', 'new pane content');
+    // Write first spawn, then a later spawn with a different pane.
+    // writeFixtureEvent uses new Date().toISOString() for each call; adding a small
+    // delay is not needed because we rely on event ID ordering (uuidv7 is time-ordered).
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-multi',
+      stateId: 'Planning',
+      workerId: 'w-multi-1',
+      paneId: '%40'
+    });
+    // Second spawn written after first — higher timestamp/ID, so it's "latest"
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-multi',
+      stateId: 'Planning',
+      workerId: 'w-multi-2',
+      paneId: '%41'
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-multi' });
+    expect(result.status).toBe('found');
+    // Must resolve to the LATEST spawn's pane (%41), not the first (%40)
+    expect(result.tailLines.join('\n')).toContain('new pane content');
+    expect(result.tailLines.join('\n')).not.toContain('old pane content');
+  });
+
+  it('(H4) beadId with no matching TEAMMATE_SPAWNED event returns not_found', async () => {
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-nonexistent' });
+    expect(result.status).toBe('not_found');
+    expect(result.reason).toBeDefined();
+  });
+
+  it('(H5) beadId with TEAMMATE_SPAWNED missing paneId returns not_found', async () => {
+    // Write a spawn event without a paneId field
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-no-pane',
+      stateId: 'Planning',
+      workerId: 'w-no-pane'
+      // paneId intentionally omitted
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-no-pane' });
+    expect(result.status).toBe('not_found');
+    expect(result.reason).toBeDefined();
+  });
+
+  it('(H6) beadId with TEAMMATE_SPAWNED but missing transcript file returns not_found', async () => {
+    // Record spawn event with a pane that has no transcript file on disk
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-missing-file',
+      stateId: 'Planning',
+      workerId: 'w-missing-file',
+      paneId: '%99'
+      // no transcript file written
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-missing-file' });
+    expect(result.status).toBe('not_found');
+    expect(result.reason).toBeDefined();
   });
 });
