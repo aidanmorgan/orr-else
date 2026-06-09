@@ -37,6 +37,7 @@ import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { ToolResultRecorder } from '../../core/ToolResultRecorder.js';
 import { v7 as uuidv7 } from 'uuid';
 
+import { Logger, type LoggerPort } from '../../core/Logger.js';
 import {
   classifyProjectToolFailure,
   isInfrastructureProjectToolFailure,
@@ -113,7 +114,8 @@ export async function executeConfiguredProjectTool(
   env: RuntimeEnvironment | undefined,
   backpressure: ProjectToolBackpressure,
   injectedRoot: string = process.cwd(),
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  logger: LoggerPort = Logger
 ): Promise<unknown> {
   const beadId = beadIdFromArgs(args, env);
   const context = executionContext(pathFactory, definition, args, env, injectedRoot, process.env);
@@ -133,7 +135,8 @@ export async function executeConfiguredProjectTool(
   // Returns { tag: 'ready', result } (short-circuit) OR { tag: 'proceed', failureLimit }.
   const preflight = await preflightProjectTool(
     eventStore, definition, context, backpressure, beadId, stateId, actionId,
-    { readOnlyContext: isReadOnlyContext }
+    { readOnlyContext: isReadOnlyContext },
+    logger
   );
 
   if (preflight.tag === 'ready') {
@@ -151,7 +154,7 @@ export async function executeConfiguredProjectTool(
       const result = attachFailureCategory(definition, failureLimit.result);
       // zog2.16: write durable artifact to context.outputFile so latestToolResultEvent
       // finds a readable outputFile (status=REJECTED, not absent).
-      const failureLimitRecorder = new ToolResultRecorder(pathFactory, injectedRoot);
+      const failureLimitRecorder = new ToolResultRecorder(pathFactory, injectedRoot, logger);
       const failureLimitHandle = await failureLimitRecorder.recordShortCircuit({
         toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? uuidv7(),
         beadId, stateId, actionId,

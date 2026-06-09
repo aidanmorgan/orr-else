@@ -38,6 +38,7 @@ import { ProjectToolType } from '../../constants/domain.js';
 import type { ProjectCommandToolConfig, ProjectToolConfig } from '../../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { frameworkRootFromConfig, namedRootsFromConfig } from './contextHelpers.js';
+import { Logger, type LoggerPort } from '../../core/Logger.js';
 import {
   ProjectToolParameter,
   PROJECT_TOOL_DESCRIPTION_SUFFIX,
@@ -72,7 +73,8 @@ export function registerConfiguredProjectTools(
   env: RuntimeEnvironment | undefined,
   backpressure: ProjectToolBackpressure,
   injectedRoot: string = process.cwd(),
-  catalog: ToolSurfaceCatalog
+  catalog: ToolSurfaceCatalog,
+  logger: LoggerPort = Logger
 ) {
   const toolConfigs: ProjectToolConfig[] = catalog
     .getToolEntries()
@@ -113,7 +115,7 @@ export function registerConfiguredProjectTools(
           ...hiddenContext,
           ...(configuredFrameworkRoot ? { frameworkRoot: configuredFrameworkRoot } : {}),
           ...(configuredNamedRoots ? { namedRoots: configuredNamedRoots } : {})
-        }, ctx, env, backpressure, injectedRoot, signal);
+        }, ctx, env, backpressure, injectedRoot, signal, logger);
         return result;
       }
     }));

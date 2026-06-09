@@ -892,7 +892,7 @@ async function runParentSequenceActionsBeforeActive(
       stateId: run.stateId,
       actionId: action.id,
       arguments: action.arguments || {}
-    }, ctx, undefined, services.projectToolBackpressure, services.projectRoot);
+    }, ctx, undefined, services.projectToolBackpressure, services.projectRoot, undefined, services.logger);
     runtimeObservability.recordToolInvocation(action.tool, result);
 
     // Extract framework toolCalls from the explicit inline result only.
@@ -1019,8 +1019,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     configuredRequiredItems,
     dynamicChecklistItemsForRun(beadProjection as Bead, stateId, action.id)
   ).requiredItems;
-  const worklogManager = new WorklogManager(services.eventStore, services.projectRoot);
-  const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
+  const worklogManager = new WorklogManager(services.eventStore, services.projectRoot, undefined, services.logger);
+  const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId }, services.logger);
 
   // Generate directories for declared artifact types (ensureDir:true) so a teammate
   // can write them before any plan write set exists (e.g. lesson capture). g9ye.
@@ -2668,7 +2668,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   // Build provenance: best-effort, never blocks startup.
   const buildProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
   if (buildProvenance) {
-    await runStalenessPreflightWarn(buildProvenance, services.eventStore).catch(() => {});
+    await runStalenessPreflightWarn(buildProvenance, services.eventStore, undefined, services.logger).catch(() => {});
   }
 
   // Host-SDK fingerprint: recorded alongside build provenance for audit/drift detection.
@@ -2783,7 +2783,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
 
   const server = new SignalingServer((event, ack) => handleTeammateEvent(pi, ctx, event, services, session, ack), runtimeObservability, services.eventStore, {
     allowedCustomEvents: startupConfig.statechart?.customEvents
-  });
+  }, services.logger);
   const apiPort = await server.start();
   const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
   await services.eventStore.record(DomainEventName.HARNESS_API_BOUND, {
@@ -2835,14 +2835,16 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     services.flowManager,
     services.scheduler,
     services.beadsPort,
-    options.maxSlots
+    options.maxSlots,
+    services.logger
   );
   const supervisorRetentionScheduler = new RetentionScheduler(
     services.projectRoot,
     { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) },
     services.eventStore,
     services.configLoader,
-    factory
+    factory,
+    services.logger
   );
 
   session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
@@ -3368,7 +3370,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     if (isWorkerMode()) {
       const workerProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
       if (workerProvenance) {
-        await runStalenessPreflightWarn(workerProvenance, services.eventStore).catch(() => {});
+        await runStalenessPreflightWarn(workerProvenance, services.eventStore, undefined, services.logger).catch(() => {});
         await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
           isWorker: true,
           beadId: process.env[EnvVars.BEAD_ID],
@@ -3847,7 +3849,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         stateId: session.activeRun.stateId,
         actionId: session.activeRun.action.id
       }
-      : undefined, undefined, services.projectToolBackpressure, services.projectRoot, catalog);
+      : undefined, undefined, services.projectToolBackpressure, services.projectRoot, catalog, services.logger);
     validateNativePiExtensionProjectToolInventory(pi, config);
 
     pi.registerTool(wrapRuntimeTool({

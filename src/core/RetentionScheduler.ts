@@ -60,7 +60,8 @@ export class RetentionScheduler {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.eventStore as any,
       resolvedConfig,
-      () => this.factory.getLiveTeammateBeadIds()
+      () => this.factory.getLiveTeammateBeadIds(),
+      this.logger
     );
 
     await service.run().catch(error => {

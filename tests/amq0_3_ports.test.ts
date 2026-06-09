@@ -598,6 +598,201 @@ describe('amq0.3 SELF-VERIFY — two runtimes are fully independent', () => {
   });
 });
 
+// ── 11. SELF-VERIFY: global Logger NOT called when per-runtime logger is injected ──
+//
+// Each test:
+//  a) spies on the global Logger singleton
+//  b) constructs the module with a fresh per-runtime mock logger (NOT the global)
+//  c) drives a code path that emits at least one log call
+//  d) asserts: mock logger WAS called, global Logger was NOT called
+//
+// This test MUST FAIL if the module is constructed WITHOUT the logger arg (so it falls
+// back to `logger ?? Logger`) and PASS after the composition root threads services.logger.
+
+import { afterEach as afterEachGlobal } from 'vitest';
+import { Logger } from '../src/core/Logger.js';
+import { ToolResultRecorder } from '../src/core/ToolResultRecorder.js';
+import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
+import { WorklogManager } from '../src/core/WorklogManager.js';
+import { Orchestrator } from '../src/core/Orchestrator.js';
+import { RetentionScheduler } from '../src/core/RetentionScheduler.js';
+import { RetentionService } from '../src/core/retention/RetentionService.js';
+import { reportRetentionResult, logCompactionResult } from '../src/core/retention/RetentionReporter.js';
+import { ProgressManager } from '../src/core/ProgressManager.js';
+import type { LoggerPort } from '../src/core/Logger.js';
+
+/** Minimal mock logger — records all calls so we can assert injection vs global. */
+function makeMockLogger(): LoggerPort & { calls: Array<[string, string, unknown]> } {
+  const calls: Array<[string, string, unknown]> = [];
+  return {
+    calls,
+    info:  (c: string, m: string, meta?: unknown) => { calls.push(['info',  c + ' ' + m, meta]); },
+    warn:  (c: string, m: string, meta?: unknown) => { calls.push(['warn',  c + ' ' + m, meta]); },
+    error: (c: string, m: string, meta?: unknown) => { calls.push(['error', c + ' ' + m, meta]); },
+    debug: (c: string, m: string, meta?: unknown) => { calls.push(['debug', c + ' ' + m, meta]); },
+    configure: () => {},
+    configureProjectRoot: () => {},
+    close: () => {},
+  } as unknown as LoggerPort & { calls: Array<[string, string, unknown]> };
+}
+
+describe('amq0.3 SELF-VERIFY — global Logger NOT called when per-runtime logger injected', () => {
+  afterEachGlobal(() => vi.restoreAllMocks());
+
+  // ── ToolResultRecorder ──────────────────────────────────────────────────────
+  it('ToolResultRecorder: logs via injected logger, NOT global Logger', async () => {
+    const globalWarnSpy = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
+
+    // Use a broken factory so allocate() throws → recorder calls logger.warn
+    const brokenFactory = { allocate: () => { throw new Error('test-allocate-fail'); } } as unknown as ToolCallPathFactory;
+    const recorder = new ToolResultRecorder(brokenFactory, os.tmpdir(), mockLogger);
+
+    await recorder.recordShortCircuit({
+      toolName: 'test-tool',
+      invocationId: 'inv-1',
+      beadId: 'bd-1',
+      stateId: 'Impl',
+      actionId: 'act-1',
+      status: ToolResultStatus.REJECTED,
+      failureCategory: 'INPUT',
+      rejectionReason: 'unit test',
+    });
+
+    expect(mockLogger.calls.some(([level]) => level === 'warn')).toBe(true);
+    expect(globalWarnSpy).not.toHaveBeenCalled();
+  });
+
+  // ── WorklogManager ─────────────────────────────────────────────────────────
+  it('WorklogManager: logs via injected logger, NOT global Logger', async () => {
+    const globalWarnSpy = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+    const globalErrorSpy = vi.spyOn(Logger, 'error').mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
+
+    const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'amq0-3-wlm-')));
+    try {
+      // Make the worklog file a directory so appendFile → EISDIR → logger.error
+      const beadId = 'bd-wlm' as any;
+      const worklogFilePath = path.join(tmpDir, `${beadId}.log.md`);
+      fs.mkdirSync(worklogFilePath);
+
+      const stubEventStore = { record: async () => {} } as any;
+      const wm = new WorklogManager(stubEventStore, '/fake', tmpDir, mockLogger);
+
+      await wm.appendEntry(beadId, 'test-phase', 'test-summary');
+
+      expect(mockLogger.calls.some(([level]) => level === 'error')).toBe(true);
+      expect(globalWarnSpy).not.toHaveBeenCalled();
+      expect(globalErrorSpy).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // ── RetentionReporter (reportRetentionResult) ───────────────────────────────
+  it('RetentionReporter.reportRetentionResult: logs via injected logger, NOT global Logger', async () => {
+    const globalInfoSpy  = vi.spyOn(Logger, 'info').mockImplementation(() => {});
+    const globalWarnSpy  = vi.spyOn(Logger, 'warn').mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
+
+    const stubResult = {
+      areas: [{ area: 'test', entriesScanned: 1, filesRemoved: 2, dirsRemoved: 0, bytesReclaimed: 100, errors: 0 }],
+      totalFilesRemoved: 2,
+      totalDirsRemoved: 0,
+      totalBytesReclaimed: 100,
+      totalErrors: 0,
+      eventsCompacted: 0,
+      backpressureActive: false,
+    };
+    const stubCompaction = {
+      filesProcessed: 0, eventsKept: 0, eventsDropped: 0,
+      bytesReclaimed: 0, errors: 0,
+      compactedFileBasenames: new Set<string>(),
+    };
+    const stubRecorder = { record: async () => {} };
+
+    await reportRetentionResult(
+      stubResult as any, stubCompaction, 1_000_000, 500, 100, stubRecorder, mockLogger
+    );
+
+    // totalFilesRemoved=2 → anythingRemoved=true → logger.info called
+    expect(mockLogger.calls.some(([level]) => level === 'info')).toBe(true);
+    expect(globalInfoSpy).not.toHaveBeenCalled();
+    expect(globalWarnSpy).not.toHaveBeenCalled();
+  });
+
+  // ── RetentionReporter (logCompactionResult) ─────────────────────────────────
+  it('RetentionReporter.logCompactionResult: logs via injected logger, NOT global Logger', () => {
+    const globalInfoSpy = vi.spyOn(Logger, 'info').mockImplementation(() => {});
+    const mockLogger = makeMockLogger();
+
+    logCompactionResult({
+      filesProcessed: 1, eventsKept: 10, eventsDropped: 5,
+      bytesReclaimed: 200, errors: 0,
+      compactedFileBasenames: new Set(['events.jsonl']),
+    }, mockLogger);
+
+    expect(mockLogger.calls.some(([level]) => level === 'info')).toBe(true);
+    expect(globalInfoSpy).not.toHaveBeenCalled();
+  });
+
+  // ── Orchestrator (constructor stores injected logger) ─────────────────────
+  it('Orchestrator: constructor stores injected logger (not global)', () => {
+    const mockLogger = makeMockLogger();
+    // @ts-expect-error — we pass stubs; we only test that the logger field is stored
+    const orch = new Orchestrator(
+      { tracedAsync: () => () => Promise.resolve([]) } as any,
+      { load: async () => ({ settings: {} }) } as any,
+      { stateForBead: () => 'Impl' } as any,
+      { sortBacklog: async () => [] } as any,
+      { list: async () => [] } as any,
+      2,
+      mockLogger
+    );
+    // Access the private logger field via bracket notation to verify it was stored
+    expect((orch as any).logger).toBe(mockLogger);
+    expect((orch as any).logger).not.toBe(Logger);
+  });
+
+  // ── RetentionScheduler (constructor stores injected logger) ──────────────
+  it('RetentionScheduler: constructor stores injected logger (not global)', () => {
+    const mockLogger = makeMockLogger();
+    const sched = new RetentionScheduler(
+      '/fake/root',
+      { now: () => 0, date: () => new Date() },
+      {} as any,
+      { load: async () => ({}) } as any,
+      { getLiveTeammateBeadIds: () => new Set() } as any,
+      mockLogger
+    );
+    expect((sched as any).logger).toBe(mockLogger);
+    expect((sched as any).logger).not.toBe(Logger);
+  });
+
+  // ── RetentionService (constructor stores injected logger) ─────────────────
+  it('RetentionService: constructor stores injected logger (not global)', () => {
+    const mockLogger = makeMockLogger();
+    const svc = new RetentionService(
+      os.tmpdir(),
+      { now: () => 0, date: () => new Date() },
+      { record: async () => {}, projectBeadStateChart: async () => ({}) } as any,
+      { maxAgeMs: 1000, compactionEnabled: false, compactionWindowMs: 0, diskHealthWarnBytes: 0, otelMaxBytes: 0, maxToolCallFilesPerRun: 100, maxToolCallDirsPerRun: 100 },
+      null,
+      mockLogger
+    );
+    expect((svc as any).logger).toBe(mockLogger);
+    expect((svc as any).logger).not.toBe(Logger);
+  });
+
+  // ── ProgressManager (constructor stores injected logger) ─────────────────
+  it('ProgressManager: constructor stores injected logger (not global)', () => {
+    const mockLogger = makeMockLogger();
+    const pm = new ProgressManager(os.tmpdir(), {} as any, {}, mockLogger);
+    expect((pm as any).logger).toBe(mockLogger);
+    expect((pm as any).logger).not.toBe(Logger);
+  });
+});
+
 // ── 10. buildRegistryPort last-wins semantics ─────────────────────────────────
 
 describe('amq0.3 buildRegistryPort — last-wins semantics', () => {

@@ -445,7 +445,7 @@ export function registerPiToolObservers(
     // zog2.16: write durable artifact so verifier gate sees TOOL_REJECTED, not TOOL_NOT_INVOKED
     const policyInvocationId = uuidv7();
     const policyProjectRoot = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-    const policyRecorder = new ToolResultRecorder(services.toolCallPathFactory, policyProjectRoot);
+    const policyRecorder = new ToolResultRecorder(services.toolCallPathFactory, policyProjectRoot, services.logger);
     const policyHandle = await policyRecorder.recordShortCircuit({
       toolName: event.toolName, invocationId: policyInvocationId,
       beadId, stateId: session.activeRun?.stateId, actionId: session.activeRun?.action?.id,

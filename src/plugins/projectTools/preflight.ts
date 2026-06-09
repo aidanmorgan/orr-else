@@ -27,6 +27,7 @@ import type { ProjectToolExecutionContext, ProjectToolFailureLimitResult } from 
 import { isJsonRecord } from './utils.js';
 import { ToolResultRecorder } from '../../core/ToolResultRecorder.js';
 import { ToolCallPathFactory } from '../../core/ToolCallPathFactory.js';
+import { Logger, type LoggerPort } from '../../core/Logger.js';
 // projectToolFailureLimitSuggestedOutcome lives in core so that core
 // orchestration (Supervisor) can use it without a core->plugin import.
 // Re-exported here to preserve the existing plugin/barrel import surface.
@@ -296,7 +297,8 @@ export async function preflightProjectTool(
   beadId: string | undefined,
   stateId: string | undefined,
   actionId: string | undefined,
-  opts: { readOnlyContext?: boolean; probeContext?: boolean } = {}
+  opts: { readOnlyContext?: boolean; probeContext?: boolean } = {},
+  logger: LoggerPort = Logger
 ): Promise<PreflightOutcome> {
   // 0. Side-effect contract gate (zog2.9) — no reservation needed (pure policy check)
   const contractRejection = checkSideEffectContractGates(definition, opts);
@@ -307,7 +309,7 @@ export async function preflightProjectTool(
       message: contractRejection,
       failureCategory: ProjectToolFailureCategory.TOOL_INPUT_ERROR
     });
-    const contractRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const contractRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot, logger);
     const contractHandle = await contractRecorder.recordShortCircuit({
       toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
       beadId, stateId, actionId,
@@ -338,7 +340,7 @@ export async function preflightProjectTool(
     const finalResult = attachFailureCategory(definition, result);
     // zog2.16: write durable artifact so latestToolResultEvent sees status=REJECTED,
     // not an absent event (TOOL_NOT_INVOKED)
-    const extensionRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const extensionRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot, logger);
     const extensionHandle = await extensionRecorder.recordShortCircuit({
       toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
       beadId, stateId, actionId,
@@ -371,7 +373,7 @@ export async function preflightProjectTool(
       ? rawBpResult
       : attachFailureCategory(definition, rawBpResult);
     // zog2.16: write durable artifact so latestToolResultEvent sees status=REJECTED (not absent)
-    const bpRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot);
+    const bpRecorder = new ToolResultRecorder(new ToolCallPathFactory(), context.templateContext.projectRoot, logger);
     const bpHandle = await bpRecorder.recordShortCircuit({
       toolName: definition.name, invocationId: context.templateContext.toolInvocationId ?? '',
       beadId, stateId, actionId,
