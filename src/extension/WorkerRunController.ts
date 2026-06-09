@@ -9,7 +9,7 @@
  * or runtime-services arguments.
  */
 
-import type { HarnessConfig } from '../core/ConfigLoader.js';
+import type { ResolvedHarnessConfig } from '../core/ConfigLoader.js';
 import type { DomainEvent } from '../core/EventStore.js';
 import type { Observability } from '../core/Observability.js';
 import type { RuntimeServices } from '../core/RuntimeServices.js';
@@ -438,7 +438,7 @@ export async function evaluateGateReadiness(
   services: RuntimeServices,
   session: GateReadinessSession,
   obs: Observability,
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   isWorker: boolean
 ): Promise<GateReadiness> {
   void obs;

@@ -9,7 +9,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { HarnessConfig } from '../core/ConfigLoader.js';
+import type { HarnessConfig, ResolvedHarnessConfig } from '../core/ConfigLoader.js';
 import type { ChecklistItem } from '../core/ProtocolParser.js';
 import type { Bead } from '../types/index.js';
 import { SDLCState, TeammateAction, type StateContextPolicyConfig } from '../core/domain/StateModels.js';
@@ -56,7 +56,7 @@ export interface ResolvedStateContextPolicy {
  */
 export function resolveStateContextPolicy(
   stateId: string,
-  config: HarnessConfig
+  config: ResolvedHarnessConfig
 ): ResolvedStateContextPolicy {
   const state = config.states?.[stateId];
   const raw = state?.contextPolicy;
@@ -102,7 +102,7 @@ export function resolveStateContextPolicy(
  *
  * Do NOT call this from production code — use ConfigLoader.validateSemantics instead.
  */
-export function rejectLegacySameContextMode(config: HarnessConfig): void {
+export function rejectLegacySameContextMode(config: ResolvedHarnessConfig): void {
   const rejectSame = (location: string, mode: string | undefined) => {
     if (mode === ActionContextMode.SAME) {
       throw new Error(
@@ -149,7 +149,7 @@ export interface ContextPolicyTableRow {
  *
  * Returns both the digest and the full sorted table for logging.
  */
-export function computeContextPolicyFingerprint(config: HarnessConfig): {
+export function computeContextPolicyFingerprint(config: ResolvedHarnessConfig): {
   digest: string;
   table: ContextPolicyTableRow[];
 } {
@@ -217,7 +217,7 @@ export function buildContextInstanceRecord(params: {
   contextInstanceId: string;
   beadId: string;
   stateId: string;
-  config: HarnessConfig;
+  config: ResolvedHarnessConfig;
   promptDigest?: string;
   piSessionPath?: string;
   isResumption: boolean;
@@ -370,7 +370,7 @@ export function evaluateContinuationAdmission(params: {
 export function resolveActionContextMode(
   action: TeammateAction,
   state?: SDLCState,
-  config?: HarnessConfig
+  config?: ResolvedHarnessConfig
 ): string | undefined {
   return action.contextMode
     ?? state?.defaultActionContextMode
@@ -408,7 +408,7 @@ export function resolveActionHandoverRequired(
 export function actionRunContext(
   action: TeammateAction,
   state?: SDLCState,
-  config?: HarnessConfig
+  config?: ResolvedHarnessConfig
 ): ActionRunContext {
   if (action.context === ActionRunContext.FRESH) {
     return ActionRunContext.FRESH;
@@ -423,7 +423,7 @@ export function actionRunContext(
   return ActionRunContext.PARENT;
 }
 
-export function actionCompletionKey(config: HarnessConfig, stateId: string, actionId: string): string {
+export function actionCompletionKey(config: ResolvedHarnessConfig, stateId: string, actionId: string): string {
   const workflowVersion = config.settings.workflowVersion?.trim();
   if (!workflowVersion) return actionId;
   return [
@@ -434,7 +434,7 @@ export function actionCompletionKey(config: HarnessConfig, stateId: string, acti
 }
 
 export function isActionCompleted(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   stateId: string,
   action: TeammateAction,
   completedActionIds: string[] = []
@@ -443,7 +443,7 @@ export function isActionCompleted(
 }
 
 export function selectActiveAction(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   stateId: string,
   state: SDLCState,
   actionId?: string,
@@ -461,7 +461,7 @@ export function selectActiveAction(
 }
 
 export function nextSequencedAction(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   stateId: string,
   state: SDLCState,
   justCompletedActionId: string,
@@ -482,7 +482,7 @@ export function appendCompletedActionId(
   completedActionIds: string[] | undefined,
   stateId: string,
   actionId: string,
-  config: HarnessConfig
+  config: ResolvedHarnessConfig
 ): string[] {
   return [...new Set([
     ...(completedActionIds || []),
@@ -504,14 +504,14 @@ export function dynamicChecklistItemsForRun(bead: Bead, stateId: string, actionI
  * old hard-coded literals exactly:
  *   FAILURE → STATE_FAILED, BLOCKED → STATE_BLOCKED, anything else → STATE_TRANSITIONED.
  */
-export function teammateEventTypeForOutcome(outcome: string, config: HarnessConfig): TeammateEventType {
+export function teammateEventTypeForOutcome(outcome: string, config: ResolvedHarnessConfig): TeammateEventType {
   const category = outcomeCategory(outcome, config);
   if (category === 'failed') return TeammateEventType.STATE_FAILED;
   if (category === 'blocked') return TeammateEventType.STATE_BLOCKED;
   return TeammateEventType.STATE_TRANSITIONED;
 }
 
-export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string, _config: HarnessConfig): boolean {
+export function shouldPersistBlockedBeadStatus(eventType: string, nextState: string, _config: ResolvedHarnessConfig): boolean {
   // `eventType` is a TeammateEventType (e.g. 'STATE_BLOCKED'), not an outcome string.
   // Passing it to outcomeCategory was dead code for default config and misleading.
   // The existing checks are correct and sufficient:

@@ -33,7 +33,7 @@ import type { ToolSurfaceCatalog } from '../../core/ToolSurfaceCatalog.js';
 import { EventStore } from '../../core/EventStore.js';
 import { ToolCallPathFactory } from '../../core/ToolCallPathFactory.js';
 import type { RuntimeEnvironment } from '../../core/RuntimeEnvironment.js';
-import type { HarnessConfig } from '../../core/ConfigLoader.js';
+import type { ResolvedHarnessConfig } from '../../core/ConfigLoader.js';
 import { ProjectToolType } from '../../constants/index.js';
 import type { ProjectCommandToolConfig, ProjectToolConfig } from '../../core/domain/StateModels.js';
 import type { ProjectToolBackpressure } from '../../core/RuntimeServices.js';
@@ -65,7 +65,7 @@ export function registerConfiguredProjectTools(
   eventStore: EventStore,
   pathFactory: ToolCallPathFactory,
   pi: ExtensionAPI,
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   seen: Set<string>,
   wrapper: (tool: { name: string; description: string; parameters: unknown; execute(params: unknown, ctx?: unknown, signal?: AbortSignal): unknown | Promise<unknown> }) => Parameters<ExtensionAPI['registerTool']>[0],
   runtimeContext: (() => ProjectToolRuntimeContext | undefined) | undefined,

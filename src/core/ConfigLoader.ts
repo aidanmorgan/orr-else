@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { ResolvedLLMConfig, HarnessConfig } from './domain/StateModels.js';
+import { ResolvedLLMConfig, HarnessConfig, type ResolvedHarnessConfig, type RawHarnessConfig } from './domain/StateModels.js';
 import { resolveProjectFrom } from './Paths.js';
 import { Logger } from './Logger.js';
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
@@ -233,3 +233,17 @@ export class ConfigLoader {
   }
 }
 export type { HarnessConfig };
+/**
+ * pi-experiment-amq0.12: Re-export canonical resolved/raw config types.
+ *
+ * ResolvedHarnessConfig — canonical post-admission type (= HarnessConfig).
+ *   Consumer signatures (Scheduler, FlowManager, CoordinatorController,
+ *   WorkerRunController, project-tool execution) should use this type to make
+ *   the compile-time narrowing explicit: unknown strings cannot reach them.
+ *
+ * RawHarnessConfig — untrusted input type (YAML → plain object) before
+ *   admission. Never pass this to consumers; pass it to ConfigValidator
+ *   for admission, which produces ResolvedHarnessConfig after rejection of
+ *   unknown enum values.
+ */
+export type { ResolvedHarnessConfig, RawHarnessConfig };

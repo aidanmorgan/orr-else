@@ -21,7 +21,7 @@
  *   - Context helpers:    src/plugins/projectTools/contextHelpers.ts
  *   - Failure category:   src/plugins/projectTools/failureCategory.ts
  */
-import type { HarnessConfig } from '../core/ConfigLoader.js';
+import type { ResolvedHarnessConfig } from '../core/ConfigLoader.js';
 import { ProjectToolType } from '../constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig, ProjectToolConfig, SDLCState, TeammateAction } from '../core/domain/StateModels.js';
 import {
@@ -59,7 +59,7 @@ export type { ProjectToolRuntimeContext } from './projectTools/ProjectToolRegist
 
 // ---- Config helpers ----
 
-export function getConfiguredProjectToolNames(config: HarnessConfig): string[] {
+export function getConfiguredProjectToolNames(config: ResolvedHarnessConfig): string[] {
   return (config.tools || []).map(tool => tool.name);
 }
 
@@ -124,7 +124,7 @@ function usageNotesSummary(tool: ProjectToolConfig): string {
  * Pure helper — no side effects; unit-testable and reusable.
  */
 export function resolveToolPromptProfileId(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   state?: Pick<SDLCState, 'toolPromptProfile'>,
   action?: Pick<TeammateAction, 'toolPromptProfile'>
 ): string | undefined {
@@ -132,7 +132,7 @@ export function resolveToolPromptProfileId(
 }
 
 export function describeConfiguredProjectTools(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   profileId?: string,
   activeToolNames?: ReadonlySet<string>
 ): string {

@@ -217,9 +217,23 @@ export interface AgentIdentity {
   constraints: string[];
 }
 
-export type LLMThinkingLevel = ThinkingLevel | string;
-export type ConfiguredActionContextMode = ActionContextMode | string;
-export type ConfiguredActionRunContext = ActionRunContext | string;
+/**
+ * pi-experiment-amq0.12: Raw (untrusted) type aliases used by RawHarnessConfig.
+ * These accept any string from YAML before admission validation.
+ */
+export type RawLLMThinkingLevel = ThinkingLevel | string;
+export type RawConfiguredActionContextMode = ActionContextMode | string;
+export type RawConfiguredActionRunContext = ActionRunContext | string;
+export type RawStateContextPolicyMode = StateContextPolicy | string;
+export type RawWorktreeProvisioningMode = 'always' | 'never' | string;
+
+/**
+ * Canonical resolved type aliases used by ResolvedHarnessConfig (= HarnessConfig).
+ * These only contain values that passed admission validation.
+ */
+export type LLMThinkingLevel = ThinkingLevel;
+export type ConfiguredActionContextMode = ActionContextMode;
+export type ConfiguredActionRunContext = ActionRunContext;
 
 export interface LLMProviderConfig {
   provider: string;
@@ -781,7 +795,12 @@ export type ActionDefinition = TeammateAction;
  * `contextKey` so the coordinator can resolve and thread the continuation
  * anchor into the spawn.
  */
-export type StateContextPolicyMode = StateContextPolicy | string;
+/**
+ * pi-experiment-amq0.12: canonical resolved context-policy mode.
+ * Unknown modes are hard-rejected at admission. The raw form
+ * (RawStateContextPolicyMode) widens this to `string`.
+ */
+export type StateContextPolicyMode = StateContextPolicy;
 
 export interface StateContextPolicyConfig {
   /**
@@ -815,6 +834,8 @@ export interface StateContextPolicyConfig {
 /**
  * The contextPolicy field on a state may be the string shorthand (mode only)
  * or the structured form with mode + contextKey.
+ * pi-experiment-amq0.12: Both forms use the canonical StateContextPolicyMode
+ * (narrowed to StateContextPolicy after admission — unknown mode strings are rejected).
  */
 export type StateContextPolicyDeclaration = StateContextPolicyMode | StateContextPolicyConfig;
 
@@ -826,6 +847,10 @@ export type StateContextPolicyDeclaration = StateContextPolicyMode | StateContex
  *             project root unless overridden per-state.
  *
  * Per-state `provisionWorktree` overrides this default for individual states.
+ *
+ * pi-experiment-amq0.12: canonical resolved type — unknown strings are
+ * hard-rejected at admission. The raw form (RawWorktreeProvisioningMode) widens
+ * this to `string` so untrusted YAML values can flow to the validator.
  */
 export type WorktreeProvisioningMode = 'always' | 'never';
 
@@ -1343,6 +1368,106 @@ export interface HarnessConfig {
   validationGates?: ValidationGateConfig[];
   states: Record<string, SDLCState>;
   tools?: ProjectToolConfig[];
+}
+
+/**
+ * pi-experiment-amq0.12: ResolvedHarnessConfig is the canonical post-admission
+ * config type — identical to HarnessConfig but exported under the resolved name
+ * for use in consumer signatures (Scheduler, FlowManager, CoordinatorController,
+ * WorkerRunController, project-tool execution). Consumers that take
+ * ResolvedHarnessConfig cannot receive un-narrowed raw config values.
+ *
+ * The resolution/admission step (ConfigValidator.validateSemantics +
+ * validateEnumAdmission) hard-rejects unknown enum values before any consumer
+ * receives the config, so the canonical typed fields are guaranteed to hold
+ * only valid enum members after admission.
+ */
+export type ResolvedHarnessConfig = HarnessConfig;
+
+/**
+ * pi-experiment-amq0.12: Compile-time type assertions for narrowed resolved enum aliases.
+ *
+ * These declarations are caught by `npm run build` (tsc over src/). If any resolved
+ * alias is widened back to `| string`, the corresponding function will fail to compile
+ * because `string` is not assignable to the canonical enum type.
+ *
+ * Pattern: a function that returns the canonical type from the alias — tsc errors
+ * if the alias is wider than the canonical type (e.g. ThinkingLevel | string ⊄ ThinkingLevel).
+ *
+ * Suppressed with void to prevent "unused" linter warnings.
+ */
+function _assertLLMThinkingLevelIsThinkingLevel(v: LLMThinkingLevel): ThinkingLevel { return v; }
+function _assertConfiguredActionContextModeIsActionContextMode(v: ConfiguredActionContextMode): ActionContextMode { return v; }
+function _assertConfiguredActionRunContextIsActionRunContext(v: ConfiguredActionRunContext): ActionRunContext { return v; }
+function _assertWorktreeProvisioningModeIsNarrowed(v: WorktreeProvisioningMode): 'always' | 'never' { return v; }
+// Suppress unused-function warnings — these exist solely for compile-time narrowing proof.
+void _assertLLMThinkingLevelIsThinkingLevel;
+void _assertConfiguredActionContextModeIsActionContextMode;
+void _assertConfiguredActionRunContextIsActionRunContext;
+void _assertWorktreeProvisioningModeIsNarrowed;
+
+/**
+ * pi-experiment-amq0.12: RawHarnessConfig is the untrusted input type produced
+ * by ConfigParser (YAML → plain object) before admission validation.
+ *
+ * Fields that carry enum values are widened to `string` so arbitrary YAML values
+ * can flow through parsing to the admission gate. The gate hard-rejects unknown
+ * values and coerces the remaining fields to their canonical types (producing
+ * ResolvedHarnessConfig = HarnessConfig after AJV schema + semantic validation).
+ *
+ * NEVER pass RawHarnessConfig to Scheduler, FlowManager, CoordinatorController,
+ * WorkerRunController, or project-tool execution — those consumers require the
+ * ResolvedHarnessConfig so unknown strings cannot reach them.
+ */
+export interface RawHarnessConfig {
+  version?: 2;
+  /** All other top-level fields from HarnessConfig, with enum fields widened. */
+  events?: unknown;
+  defaults?: unknown;
+  profiles?: unknown;
+  toolSets?: unknown;
+  settings?: {
+    /** Widened: may contain an unknown thinking-level string before admission. */
+    modelProviders?: Record<string, {
+      provider: string;
+      model: string;
+      /** Raw string from YAML — hard-rejected if not a ThinkingLevel member. */
+      thinking?: RawLLMThinkingLevel;
+    }>;
+    /** Widened: may contain an unknown context mode string before admission. */
+    defaultActionContextMode?: RawConfiguredActionContextMode;
+    worktreePolicy?: {
+      /** Widened: may contain an unknown provisioning mode string before admission. */
+      default?: RawWorktreeProvisioningMode;
+    };
+    [key: string]: unknown;
+  };
+  states?: Record<string, {
+    /** Widened: may contain an unknown thinking-level string before admission. */
+    thinking?: RawLLMThinkingLevel;
+    /** Widened: may contain an unknown context mode string before admission. */
+    defaultActionContextMode?: RawConfiguredActionContextMode;
+    /** Widened: may contain an unknown context policy mode before admission. */
+    contextPolicy?: RawStateContextPolicyMode | { mode?: RawStateContextPolicyMode; [key: string]: unknown };
+    actions?: Array<{
+      /** Widened: may contain an unknown context mode string before admission. */
+      contextMode?: RawConfiguredActionContextMode;
+      /** Widened: may contain an unknown run context string before admission. */
+      context?: RawConfiguredActionRunContext;
+      [key: string]: unknown;
+    }>;
+    [key: string]: unknown;
+  }>;
+  tools?: Array<{
+    /** Widened: may contain an unknown tool type string before admission. */
+    type?: string;
+    [key: string]: unknown;
+  }>;
+  statechart?: unknown;
+  validationGates?: unknown;
+  scheduler?: unknown;
+  retention?: unknown;
+  [key: string]: unknown;
 }
 
 /**

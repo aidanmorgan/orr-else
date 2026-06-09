@@ -25,12 +25,15 @@ import { Logger } from './Logger.js';
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord } from './RecordUtils.js';
 import {
+  ActionContextMode,
+  ActionRunContext,
   BeadStatus,
   Component,
   EventName,
   ProjectToolRootKind,
   RECOGNIZED_COARSE_SINK_STATUSES,
-  StateContextPolicy
+  StateContextPolicy,
+  ThinkingLevel
 } from '../constants/index.js';
 import { lintActiveToolSets } from './ActiveToolSetResolver.js';
 
@@ -3229,6 +3232,12 @@ export class ConfigValidator {
   }
 
   public validateSemantics(config: HarnessConfig): void {
+    // pi-experiment-amq0.12: hard-reject unknown enum values at admission.
+    // This is the load-bearing gate that enforces the RawHarnessConfig →
+    // ResolvedHarnessConfig split. Unknown thinking levels, context modes, run
+    // contexts, context policy modes, and worktree provisioning modes are
+    // rejected here with deterministic diagnostics. NO compat adapter/migration.
+    this.validateEnumAdmission(config);
     this.validateNoCompatibilityFields(config);
     this.validateNoLegacyOrrElseFrameworkRoot(config);
     this.validateNoDeprecatedTools(config);
@@ -3673,4 +3682,177 @@ export class ConfigValidator {
    * If a tool references a profile name that does not exist, a warning is logged and
    * the tool is left as-is (load does not fail).
    */
+
+  /**
+   * pi-experiment-amq0.12: Hard-reject unknown/removed enum values at admission.
+   *
+   * Called from validateSemantics AFTER AJV schema validation. Ensures that every
+   * field whose type is a canonical enum (ThinkingLevel, ActionContextMode,
+   * ActionRunContext, StateContextPolicy, WorktreeProvisioningMode) holds only a
+   * known member. Unknown values are startup-fatal with deterministic diagnostics.
+   *
+   * This is the load-bearing rejection gate: removing this call causes the
+   * unknown-enum-value tests to fail (compile-time enforcement of the
+   * RawHarnessConfig → ResolvedHarnessConfig split).
+   *
+   * Fields validated (enum dimensions checked here):
+   *   1. thinking (ThinkingLevel)        — settings.modelProviders[*].thinking,
+   *                                        states[*].thinking
+   *   2. action context mode (ActionContextMode) — settings.defaultActionContextMode,
+   *                                        states[*].defaultActionContextMode,
+   *                                        states[*].actions[*].contextMode
+   *   3. action run context (ActionRunContext)    — states[*].actions[*].context
+   *   4. context policy mode (StateContextPolicy) — states[*].contextPolicy (string form),
+   *                                        states[*].contextPolicy.mode (structured form)
+   *   5. worktree provisioning mode      — settings.worktreePolicy.default
+   *      ('always' | 'never'; already enforced by AJV schema — checked here for
+   *      belt-and-suspenders and to produce typed diagnostics)
+   *
+   * NOT checked here (handled elsewhere):
+   *   - project tool type (tools[*].type) — AJV schema rejects unknown type values via
+   *     the discriminated-union oneOf on the tools array; this method does NOT iterate tools.
+   *   - cwd mode (tools[*].cwd) — open union (CwdMode | path string); NOT rejected here.
+   *   - root kind (tools[*].argumentPathScope.rootKind) — open union; validated by
+   *     validateNamedRoots, not here.
+   *
+   * Outcome vocabulary is validated by validateSemantics transition/outcome checks.
+   */
+  public validateEnumAdmission(config: unknown): void {
+    if (!isRecord(config)) return;
+
+    const rejections: string[] = [];
+
+    const VALID_THINKING_LEVELS = new Set<string>(Object.values(ThinkingLevel));
+    const VALID_ACTION_CONTEXT_MODES = new Set<string>(Object.values(ActionContextMode));
+    const VALID_ACTION_RUN_CONTEXTS = new Set<string>(Object.values(ActionRunContext));
+    const VALID_CONTEXT_POLICY_MODES = new Set<string>(Object.values(StateContextPolicy));
+    const VALID_WORKTREE_MODES = new Set<string>(['always', 'never']);
+
+    // ── 1: settings.modelProviders[*].thinking ────────────────────────────────
+    const settingsRaw = config['settings'];
+    if (isRecord(settingsRaw)) {
+      const settings = settingsRaw as Record<string, unknown>;
+
+      // 2: settings.defaultActionContextMode
+      const settingsContextMode = settings['defaultActionContextMode'];
+      if (typeof settingsContextMode === 'string' && !VALID_ACTION_CONTEXT_MODES.has(settingsContextMode)) {
+        rejections.push(
+          `settings.defaultActionContextMode: "${settingsContextMode}" is not a valid ActionContextMode. ` +
+          `Valid values: ${[...VALID_ACTION_CONTEXT_MODES].join(', ')}.`
+        );
+      }
+
+      // 5: settings.worktreePolicy.default
+      const worktreePolicyRaw = settings['worktreePolicy'];
+      if (isRecord(worktreePolicyRaw)) {
+        const worktreeDefault = (worktreePolicyRaw as Record<string, unknown>)['default'];
+        if (typeof worktreeDefault === 'string' && !VALID_WORKTREE_MODES.has(worktreeDefault)) {
+          rejections.push(
+            `settings.worktreePolicy.default: "${worktreeDefault}" is not a valid worktree provisioning mode. ` +
+            `Valid values: always, never.`
+          );
+        }
+      }
+
+      // 1: settings.modelProviders[*].thinking
+      const modelProvidersRaw = settings['modelProviders'];
+      if (isRecord(modelProvidersRaw)) {
+        for (const [key, providerRaw] of Object.entries(modelProvidersRaw as Record<string, unknown>)) {
+          if (!isRecord(providerRaw)) continue;
+          const thinking = (providerRaw as Record<string, unknown>)['thinking'];
+          if (typeof thinking === 'string' && !VALID_THINKING_LEVELS.has(thinking)) {
+            rejections.push(
+              `settings.modelProviders.${key}.thinking: "${thinking}" is not a valid ThinkingLevel. ` +
+              `Valid values: ${[...VALID_THINKING_LEVELS].join(', ')}.`
+            );
+          }
+        }
+      }
+    }
+
+    // ── States: thinking, contextMode, context, contextPolicy ─────────────────
+    const statesRaw = config['states'];
+    if (isRecord(statesRaw)) {
+      for (const [stateId, stateRaw] of Object.entries(statesRaw as Record<string, unknown>)) {
+        if (!isRecord(stateRaw)) continue;
+        const state = stateRaw as Record<string, unknown>;
+
+        // 1: states[*].thinking
+        const stateThinking = state['thinking'];
+        if (typeof stateThinking === 'string' && !VALID_THINKING_LEVELS.has(stateThinking)) {
+          rejections.push(
+            `states.${stateId}.thinking: "${stateThinking}" is not a valid ThinkingLevel. ` +
+            `Valid values: ${[...VALID_THINKING_LEVELS].join(', ')}.`
+          );
+        }
+
+        // 2: states[*].defaultActionContextMode
+        const stateContextMode = state['defaultActionContextMode'];
+        if (typeof stateContextMode === 'string' && !VALID_ACTION_CONTEXT_MODES.has(stateContextMode)) {
+          rejections.push(
+            `states.${stateId}.defaultActionContextMode: "${stateContextMode}" is not a valid ActionContextMode. ` +
+            `Valid values: ${[...VALID_ACTION_CONTEXT_MODES].join(', ')}.`
+          );
+        }
+
+        // 4: states[*].contextPolicy (string shorthand or structured form)
+        const contextPolicyRaw = state['contextPolicy'];
+        if (typeof contextPolicyRaw === 'string') {
+          if (!VALID_CONTEXT_POLICY_MODES.has(contextPolicyRaw)) {
+            rejections.push(
+              `states.${stateId}.contextPolicy: "${contextPolicyRaw}" is not a valid StateContextPolicy. ` +
+              `Valid values: ${[...VALID_CONTEXT_POLICY_MODES].join(', ')}.`
+            );
+          }
+        } else if (isRecord(contextPolicyRaw)) {
+          const policyMode = (contextPolicyRaw as Record<string, unknown>)['mode'];
+          if (typeof policyMode === 'string' && !VALID_CONTEXT_POLICY_MODES.has(policyMode)) {
+            rejections.push(
+              `states.${stateId}.contextPolicy.mode: "${policyMode}" is not a valid StateContextPolicy. ` +
+              `Valid values: ${[...VALID_CONTEXT_POLICY_MODES].join(', ')}.`
+            );
+          }
+        }
+
+        // 2+3: states[*].actions[*].contextMode + context
+        const actionsRaw = state['actions'];
+        if (Array.isArray(actionsRaw)) {
+          for (let i = 0; i < actionsRaw.length; i++) {
+            const actionRaw = actionsRaw[i];
+            if (!isRecord(actionRaw)) continue;
+            const action = actionRaw as Record<string, unknown>;
+            const actionId = typeof action['id'] === 'string' ? action['id'] : `[${i}]`;
+
+            // 2: contextMode
+            const contextMode = action['contextMode'];
+            if (typeof contextMode === 'string' && !VALID_ACTION_CONTEXT_MODES.has(contextMode)) {
+              rejections.push(
+                `states.${stateId}.actions.${actionId}.contextMode: "${contextMode}" is not a valid ActionContextMode. ` +
+                `Valid values: ${[...VALID_ACTION_CONTEXT_MODES].join(', ')}.`
+              );
+            }
+
+            // 3: context (ActionRunContext)
+            const actionContext = action['context'];
+            if (typeof actionContext === 'string' && !VALID_ACTION_RUN_CONTEXTS.has(actionContext)) {
+              rejections.push(
+                `states.${stateId}.actions.${actionId}.context: "${actionContext}" is not a valid ActionRunContext. ` +
+                `Valid values: ${[...VALID_ACTION_RUN_CONTEXTS].join(', ')}.`
+              );
+            }
+          }
+        }
+      }
+    }
+
+    if (rejections.length > 0) {
+      const details = rejections.map(r => `  ${r}`).join('\n');
+      throw new Error(
+        `Harness config admission rejected ${rejections.length} unknown enum value(s):\n` +
+        details + '\n' +
+        `Unknown enum values are hard-rejected (no compatibility adapters, no warning-only migration). ` +
+        `Correct each value to a canonical member listed above.`
+      );
+    }
+  }
 }

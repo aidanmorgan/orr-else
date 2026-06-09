@@ -3,7 +3,7 @@ import { ConfigLoader } from './ConfigLoader.js';
 import { FlowManager } from './FlowManager.js';
 import { Logger } from './Logger.js';
 import { App, BeadStatus, Component, SchedulerDefaults } from '../constants/index.js';
-import type { HarnessConfig } from './ConfigLoader.js';
+import type { ResolvedHarnessConfig } from './ConfigLoader.js';
 
 /** Default terminal states when no statechart block is configured. */
 const DEFAULT_SCHEDULER_TERMINAL_STATES: readonly string[] = [BeadStatus.COMPLETED];
@@ -20,7 +20,7 @@ export class Scheduler {
     private readonly flowManager: FlowManager
   ) {}
 
-  private isResumableState(bead: Bead, stateId: string, config: HarnessConfig): boolean {
+  private isResumableState(bead: Bead, stateId: string, config: ResolvedHarnessConfig): boolean {
     return bead.assigned_to === App.DISPLAY_NAME
       && bead.status === stateId
       && Object.prototype.hasOwnProperty.call(config.states, stateId);

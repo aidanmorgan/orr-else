@@ -10,7 +10,7 @@ import type { ProjectToolConfig, ProjectCommandToolConfig } from '../../core/dom
 import type { InFlightProjectToolCall, ProjectToolBackpressure } from '../../core/RuntimeServices.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from '../../core/RuntimeEnvironment.js';
 import { Logger } from '../../core/Logger.js';
-import type { HarnessConfig } from '../../core/ConfigLoader.js';
+import type { ResolvedHarnessConfig } from '../../core/ConfigLoader.js';
 import { Component, CwdMode, EnvVars, ProjectToolDefaults, ProjectToolType, ToolDefaults, ToolResultStatus } from '../../constants/index.js';
 import {
   PathArgumentConfigKey,
@@ -88,7 +88,7 @@ function frameworkRootFromArgs(args: any, fallbackRoot?: string, env: RuntimeEnv
   return path.resolve(value);
 }
 
-export function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): string | undefined {
+export function frameworkRootFromConfig(config: ResolvedHarnessConfig, env: RuntimeEnvironment = nodeRuntimeEnvironment, injectedRoot: string = process.cwd()): string | undefined {
   // Fall back to the FRAMEWORK_ROOT environment variable so project configs need not
   // hard-code user-specific absolute paths.  The orrElseFrameworkRoot config key has
   // been retired (pi-experiment-5lbg); configs that set it are rejected at startup.
@@ -112,7 +112,7 @@ export function frameworkRootFromConfig(config: HarnessConfig, env: RuntimeEnvir
  * project has declared without requiring the harness to know their semantics.
  */
 export function namedRootsFromConfig(
-  config: HarnessConfig,
+  config: ResolvedHarnessConfig,
   env: RuntimeEnvironment = nodeRuntimeEnvironment,
   injectedRoot: string = process.cwd()
 ): Record<string, string> | undefined {

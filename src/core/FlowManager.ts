@@ -1,7 +1,7 @@
 import { SDLCState } from "./domain/StateModels.js";
 import { Bead } from "../types/index.js";
 import { BeadStatus, EventName, RestartKind } from "../constants/index.js";
-import { HarnessConfig } from "./ConfigLoader.js";
+import { HarnessConfig, type ResolvedHarnessConfig } from "./ConfigLoader.js";
 import { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Typed fail-closed outcome model (1elr.2) ─────────────────────────────────
@@ -45,7 +45,7 @@ export type OutcomeName = string & { readonly __outcomeName: unique symbol };
  */
 export function classifyOutcome(
   outcome: string | null | undefined,
-  config: HarnessConfig
+  config: ResolvedHarnessConfig
 ): OutcomeCategory {
   switch (outcomeCategory(outcome, config)) {
     case 'advance': return OutcomeCategory.ADVANCE;
@@ -61,7 +61,7 @@ export function classifyOutcome(
  * Requires a statechart block with terminalStates — configs without one are
  * rejected at startup by ConfigLoader.
  */
-export function isTerminalState(stateId: string, config: HarnessConfig): boolean {
+export function isTerminalState(stateId: string, config: ResolvedHarnessConfig): boolean {
   const sc = config.statechart;
   if (!sc) {
     throw new Error(
@@ -88,7 +88,7 @@ export function isTerminalState(stateId: string, config: HarnessConfig): boolean
  */
 export function outcomeCategory(
   outcome: string | null | undefined,
-  config: HarnessConfig
+  config: ResolvedHarnessConfig
 ): 'advance' | 'failed' | 'blocked' | 'custom' {
   // Missing/falsy outcomes always fail closed — no advance fallback.
   if (!outcome || typeof outcome !== 'string') {
@@ -122,7 +122,7 @@ export function outcomeCategory(
  * A falsy/missing outcome returns false. Requires a statechart block — configs
  * without one are rejected at startup by ConfigLoader.
  */
-export function isAdvanceOutcome(outcome: string | null | undefined, config: HarnessConfig): boolean {
+export function isAdvanceOutcome(outcome: string | null | undefined, config: ResolvedHarnessConfig): boolean {
   if (!outcome || typeof outcome !== 'string') return false;
   return outcomeCategory(outcome, config) === 'advance';
 }
@@ -141,7 +141,7 @@ export function isAdvanceOutcome(outcome: string | null | undefined, config: Har
  * Note: configs without a statechart block are rejected at ConfigLoader.load() time.
  * Passing such a config at runtime returns null (treated as permissive by the caller).
  */
-export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | null {
+export function declaredOutcomeVocabulary(config: ResolvedHarnessConfig): Set<string> | null {
   const sc = config.statechart;
   if (!sc) {
     // No statechart block: no declared vocabulary. Configs without a statechart are
@@ -176,7 +176,7 @@ export function declaredOutcomeVocabulary(config: HarnessConfig): Set<string> | 
  * Restart events (HARNESS_RESTART / CONTEXT_RESTART) are harness-internal and
  * are always considered declared regardless of mode.
  */
-export function isDeclaredOutcome(outcome: string, config: HarnessConfig): boolean {
+export function isDeclaredOutcome(outcome: string, config: ResolvedHarnessConfig): boolean {
   const normalized = outcome.toUpperCase();
   // Restart events are always valid (harness-internal)
   if (
@@ -194,7 +194,7 @@ export function isDeclaredOutcome(outcome: string, config: HarnessConfig): boole
  * @param context  Short description of the call site (e.g. state name) for the
  *                 error message.
  */
-export function assertDeclaredOutcome(outcome: string, config: HarnessConfig, context: string): void {
+export function assertDeclaredOutcome(outcome: string, config: ResolvedHarnessConfig, context: string): void {
   if (!isDeclaredOutcome(outcome, config)) {
     const vocab = declaredOutcomeVocabulary(config);
     const declared = vocab ? [...vocab].join(', ') : '(none)';
@@ -218,7 +218,7 @@ export interface RestartTransitionResult {
  * Returns a Map of normalized event name (upper-case) → category name.
  * Returns an empty map when the config has no events block (v1 or v2 without events).
  */
-export function buildV2EventVocabulary(config: HarnessConfig): Map<string, string> {
+export function buildV2EventVocabulary(config: ResolvedHarnessConfig): Map<string, string> {
   const events = config.events;
   if (!events) return new Map();
   const vocab = new Map<string, string>();
@@ -268,7 +268,7 @@ export class FlowManager {
     return state.id || fallbackStateId || '<unknown>';
   }
 
-  public initialState(config: HarnessConfig): string {
+  public initialState(config: ResolvedHarnessConfig): string {
     const startState = config.settings.startState;
     if (!startState) {
       throw new Error('No startState configured. Set settings.startState to a state defined in the statechart.');
@@ -279,7 +279,7 @@ export class FlowManager {
     return startState;
   }
 
-  public stateForBead(bead: Bead, config: HarnessConfig): string {
+  public stateForBead(bead: Bead, config: ResolvedHarnessConfig): string {
     if (bead.restartRequested && bead.restartTargetState && config.states[bead.restartTargetState]) {
       return bead.restartTargetState;
     }
@@ -307,7 +307,7 @@ export class FlowManager {
 
   public resolveRestartTransition(
     bead: Bead,
-    config: HarnessConfig
+    config: ResolvedHarnessConfig
   ): RestartTransitionResult {
     const kind = bead.restartKind === RestartKind.HARNESS ? RestartKind.HARNESS : RestartKind.CONTEXT;
     const event = kind === RestartKind.HARNESS
