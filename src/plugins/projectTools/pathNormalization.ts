@@ -12,10 +12,11 @@ import type {
 import { CwdMode } from '../../constants/index.js';
 import {
   PathArgumentConfigKey,
-  ProjectToolRootKind,
   PROJECT_TOOL_CONTROL_PARAMETERS,
   ProjectToolParameter
 } from './constants.js';
+// pi-experiment-amq0.19: import ProjectToolRootKind from the single typed source.
+import { ProjectToolRootKind } from './rootKind.js';
 import type {
   CommandArgumentPathNormalization,
   CommandArgumentPathRejection,
@@ -41,18 +42,6 @@ export function stripLeadingAt(value: string): string {
 function isInsidePath(root: string, candidate: string): boolean {
   const relativePath = path.relative(root, candidate);
   return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
-}
-
-function resolveCwdValue(value: CwdMode | string | undefined, templateContext: TemplateContext): string {
-  if (value === CwdMode.WORKTREE) return templateContext.worktreePath;
-  if (value === CwdMode.PROJECT) return templateContext.projectRoot;
-  if (value === ProjectToolRootKind.FRAMEWORK) {
-    if (!templateContext.frameworkRoot) throw new Error('Project tool configured framework root, but no framework root is available.');
-    return templateContext.frameworkRoot;
-  }
-  const resolved = value ? resolveTemplateString(value, templateContext) : undefined;
-  if (resolved) return path.isAbsolute(resolved) ? resolved : path.resolve(templateContext.projectRoot, resolved);
-  return templateContext.worktreePath;
 }
 
 export class PathArgumentRootEscapeError extends Error {
@@ -102,14 +91,18 @@ export function resolvePathArgumentRoot(config: ProjectToolPathArgumentConfig, t
     return { path: resolvePathAgainst(templateContext.projectRoot, workspaceRoot, templateContext), kind: rootKind };
   }
   // Named root: check if rootKind matches a key in namedRoots (generic project-defined roots).
+  // pi-experiment-amq0.19: named roots are validated at startup (ConfigValidator.validateNamedRoots).
+  // If we reach here at runtime and the rootKind is not in namedRoots, it is an unknown root kind —
+  // fail closed: do NOT fall through to a 'configured' string fallback (removed, no-backcompat).
   if (templateContext.namedRoots && Object.prototype.hasOwnProperty.call(templateContext.namedRoots, rootKind)) {
     const namedRootPath = templateContext.namedRoots[rootKind]!;
     return { path: namedRootPath, kind: rootKind };
   }
-  return {
-    path: resolveCwdValue(config[PathArgumentConfigKey.ROOT] || CwdMode.WORKTREE, templateContext),
-    kind: 'configured'
-  };
+  throw new Error(
+    `Project tool path argument rootKind "${rootKind}" is not a built-in root kind ` +
+    `(worktree, project, framework, workspace) and is not a configured named root in settings.roots. ` +
+    `Add "${rootKind}" to settings.roots in harness.yaml or use a built-in root kind.`
+  );
 }
 
 function stripConfiguredVirtualRoot(value: string, virtualRoot: string): string | undefined {
@@ -123,8 +116,9 @@ function stripConfiguredVirtualRoot(value: string, virtualRoot: string): string 
 }
 
 function pathArgumentExpectedRelativeForm(rootKind: string): string {
-  const normalizedRootKind = rootKind.trim() || 'configured';
-  return `<path-relative-to-${normalizedRootKind}-root>`;
+  // pi-experiment-amq0.19: rootKind is always a typed value from ResolvedRootKind.
+  // No 'configured' fallback — rootKind.trim() is always non-empty at this point.
+  return `<path-relative-to-${rootKind}-root>`;
 }
 
 function pathArgumentVirtualRootForm(virtualRoot: string, expectedRelativeForm: string): string {
@@ -136,7 +130,8 @@ export function pathArgumentEscapeGuidance(
   root: PathArgumentRootResolution,
   virtualRoots: string[]
 ): PathArgumentEscapeGuidance {
-  const rootKind = root.kind.trim() || 'configured';
+  // pi-experiment-amq0.19: root.kind is always typed (ResolvedRootKind) — no 'configured' fallback.
+  const rootKind = root.kind;
   const expectedRelativeForm = pathArgumentExpectedRelativeForm(rootKind);
   const virtualRootForms = virtualRoots.map(virtualRoot => pathArgumentVirtualRootForm(virtualRoot, expectedRelativeForm));
   const acceptedForms = [expectedRelativeForm, ...virtualRootForms];

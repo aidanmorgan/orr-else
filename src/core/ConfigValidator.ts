@@ -28,6 +28,7 @@ import {
   BeadStatus,
   Component,
   EventName,
+  ProjectToolRootKind,
   RECOGNIZED_COARSE_SINK_STATUSES,
   StateContextPolicy
 } from '../constants/index.js';
@@ -3152,6 +3153,81 @@ export class ConfigValidator {
     }
   }
 
+  /**
+   * pi-experiment-amq0.19: Validate that every named rootKind referenced in tool
+   * path argument configs is declared in settings.roots (startup lint).
+   *
+   * A tool whose argumentPathScope or pathArguments declares a rootKind that is
+   * neither a built-in kind (worktree/project/framework/workspace) nor a key in
+   * settings.roots is a startup-fatal error. This ensures unknown named roots
+   * are rejected before any worker is spawned.
+   *
+   * This is a NEW validation method — it does not refactor any existing validators
+   * (per amq0.19 scope: minimize conflict with concurrent amq0.10).
+   */
+  public validateNamedRoots(config: HarnessConfig): void {
+    // pi-experiment-amq0.19: derived from the single source in constants/index.ts — not a hand-typed copy.
+    const BUILTIN_KINDS: Set<string> = new Set(Object.values(ProjectToolRootKind));
+    const declaredRoots = new Set(Object.keys(config.settings?.roots ?? {}));
+
+    const toolsRaw: unknown = config.tools;
+    const tools: unknown[] = Array.isArray(toolsRaw)
+      ? toolsRaw
+      : isRecord(toolsRaw) ? Object.values(toolsRaw as Record<string, unknown>) : [];
+
+    const unknownNamedRoots: Array<{ tool: string; field: string; rootKind: string }> = [];
+
+    for (const tool of tools) {
+      if (!isRecord(tool)) continue;
+      const toolName = typeof tool['name'] === 'string' ? tool['name'] : String(tool['name'] ?? '(unknown)');
+      const toolType = tool['type'];
+
+      // Check command tool argumentPathScope
+      if (toolType === 'command' || toolType === undefined) {
+        const scope = tool['argumentPathScope'];
+        if (isRecord(scope)) {
+          const rootKind = scope['rootKind'];
+          if (typeof rootKind === 'string' && rootKind.trim() && !BUILTIN_KINDS.has(rootKind) && !declaredRoots.has(rootKind)) {
+            unknownNamedRoots.push({ tool: toolName, field: 'argumentPathScope.rootKind', rootKind });
+          }
+        }
+      }
+
+      // Check MCP tool pathArguments
+      if (toolType === 'mcp') {
+        const pathArguments = tool['pathArguments'];
+        if (isRecord(pathArguments)) {
+          for (const [opName, opArgs] of Object.entries(pathArguments as Record<string, unknown>)) {
+            if (!isRecord(opArgs)) continue;
+            for (const [argName, argConfig] of Object.entries(opArgs as Record<string, unknown>)) {
+              if (!isRecord(argConfig)) continue;
+              const rootKind = (argConfig as Record<string, unknown>)['rootKind'];
+              if (typeof rootKind === 'string' && rootKind.trim() && !BUILTIN_KINDS.has(rootKind) && !declaredRoots.has(rootKind)) {
+                unknownNamedRoots.push({ tool: toolName, field: `pathArguments.${opName}.${argName}.rootKind`, rootKind });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (unknownNamedRoots.length > 0) {
+      const declaredList = declaredRoots.size > 0
+        ? `Declared named roots: ${[...declaredRoots].sort().join(', ')}.`
+        : 'No named roots are declared in settings.roots.';
+      const details = unknownNamedRoots
+        .map(({ tool, field, rootKind }) => `  ${tool} (${field}): "${rootKind}"`)
+        .join('\n');
+      throw new Error(
+        `Startup validation failed: ${unknownNamedRoots.length} tool path argument(s) reference unknown named root kind(s):\n` +
+        details + '\n' +
+        declaredList + ' ' +
+        `Built-in root kinds are: worktree, project, framework, workspace. ` +
+        `Add the missing named root(s) to settings.roots in harness.yaml or correct the rootKind value.`
+      );
+    }
+  }
+
   public validateSemantics(config: HarnessConfig): void {
     this.validateNoCompatibilityFields(config);
     this.validateNoLegacyOrrElseFrameworkRoot(config);
@@ -3166,6 +3242,8 @@ export class ConfigValidator {
     this.validateSerializeRequiresSerializationKey(config);
     this.validateProbeContextDeclarations(config);
     this.validateRetryPolicyDeclarations(config);
+    // pi-experiment-amq0.19: validate named roots in tool path configs against settings.roots.
+    this.validateNamedRoots(config);
     // Note: validatePromptBudgetDeclarations checks route against the declared
     // outcome vocabulary, so it must run AFTER the statechart/vocabulary block
     // below. We call it at the end of validateSemantics once declaredOutcomes is

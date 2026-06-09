@@ -7,7 +7,8 @@ import {
   CwdMode,
   StateContextPolicy,
   ThinkingLevel,
-  ToolValidationCondition
+  ToolValidationCondition,
+  type ProjectToolBuiltinRootKind
 } from '../../constants/index.js';
 import type { RtkCancellationPolicy, RtkIdempotencyClass } from '../RtkContract.js';
 
@@ -408,7 +409,9 @@ export interface ProjectMcpToolConfig extends BaseProjectToolConfig {
 }
 
 export interface ProjectToolPathArgumentConfig {
-  rootKind?: 'worktree' | 'project' | 'framework' | 'workspace';
+  // pi-experiment-amq0.19: typed from single-source ProjectToolBuiltinRootKind.
+  // Named roots (settings.roots keys) are also valid at runtime; validated at startup.
+  rootKind?: ProjectToolBuiltinRootKind | string;
   root?: CwdMode | string;
   workspaceRoot?: string;
   virtualRoots?: string[];

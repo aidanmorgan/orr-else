@@ -4,6 +4,8 @@
  */
 import type { TemplateContext } from '../../core/TemplateResolver.js';
 import type { ProjectToolConfig, ProjectMcpToolConfig, ProjectCommandArgumentPathConfig } from '../../core/domain/StateModels.js';
+// pi-experiment-amq0.19: single typed source for resolved root kind.
+import type { ResolvedRootKind } from './rootKind.js';
 
 export interface ProjectToolExecutionContext {
   templateContext: TemplateContext;
@@ -98,11 +100,13 @@ export type CommandArgumentPathRejection = {
 
 export interface PathArgumentRootResolution {
   path: string;
-  kind: string;
+  // pi-experiment-amq0.19: typed from single-source ResolvedRootKind — no raw string.
+  kind: ResolvedRootKind;
 }
 
 export interface PathArgumentEscapeGuidance {
-  rootKind: string;
+  // pi-experiment-amq0.19: typed from single-source ResolvedRootKind.
+  rootKind: ResolvedRootKind;
   allowedRoot: string;
   expectedRelativeForm: string;
   acceptedForms: string[];

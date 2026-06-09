@@ -943,6 +943,26 @@ export enum ProjectToolType {
 }
 
 /**
+ * pi-experiment-amq0.19: Single typed source for project-tool root kind vocabulary.
+ *
+ * Built-in root kinds understood by the harness path-normalization pipeline.
+ * Named roots (from settings.roots) are also valid at runtime and are validated
+ * at startup by ConfigValidator.validateNamedRoots.
+ *
+ * This is the SINGLE SOURCE OF TRUTH — all consumers import from here.
+ * Do NOT re-declare this in plugin constants or domain models.
+ */
+export const ProjectToolRootKind = {
+  WORKTREE: 'worktree',
+  PROJECT: 'project',
+  FRAMEWORK: 'framework',
+  WORKSPACE: 'workspace'
+} as const;
+
+/** Union of the built-in root kind string literals. */
+export type ProjectToolBuiltinRootKind = typeof ProjectToolRootKind[keyof typeof ProjectToolRootKind];
+
+/**
  * CWD Modes for Project Tools
  */
 export enum CwdMode {

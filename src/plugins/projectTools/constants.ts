@@ -2,6 +2,10 @@
  * Internal constants for the projectTools plugin modules.
  * Package-internal — do not import from outside src/plugins/.
  */
+// pi-experiment-amq0.19: ProjectToolRootKind is the single typed source of
+// truth for root kind values. Re-exported from rootKind.ts so existing callers
+// inside this package continue to work via the same import path.
+export { ProjectToolRootKind } from './rootKind.js';
 
 export const DEFAULT_MCP_CONFIG_PATH = '{{projectRoot}}/.pi/mcp/config.json';
 export const MCP_SERVER_CONFIG_KEY = 'mcpServers';
@@ -176,13 +180,6 @@ export const PathArgumentConfigKey = {
   WORKSPACE_ROOT: 'workspaceRoot',
   VIRTUAL_ROOTS: 'virtualRoots',
   MUST_STAY_INSIDE_ROOT: 'mustStayInsideRoot'
-} as const;
-
-export const ProjectToolRootKind = {
-  WORKTREE: 'worktree',
-  PROJECT: 'project',
-  FRAMEWORK: 'framework',
-  WORKSPACE: 'workspace'
 } as const;
 
 export const PROJECT_TOOL_CONTROL_PARAMETERS = new Set<string>([
