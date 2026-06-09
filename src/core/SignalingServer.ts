@@ -1,6 +1,6 @@
 import http from 'http';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { TeammateEvent, validateTeammateEvent } from './TeammateEvents.js';
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
@@ -109,12 +109,16 @@ export class SignalingServer {
   /** Coalesces repeated invalid-event validation warn logs by fingerprint (r06o). */
   private readonly invalidEventCoalescer = new SignalNoiseCoalescer(TimeMs.MINUTE);
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly onSignal: SignalHandler,
     private readonly observability: Observability,
     private readonly eventStore: EventStore,
-    portOrOptions: number | RuntimeEnvironment | SignalingServerOptions = {}
+    portOrOptions: number | RuntimeEnvironment | SignalingServerOptions = {},
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.port = resolvePort(portOrOptions);
     const options = typeof portOrOptions === 'object' && !isRuntimeEnvironment(portOrOptions)
       ? (portOrOptions as SignalingServerOptions)
@@ -134,7 +138,7 @@ export class SignalingServer {
           next();
           return;
         }
-        Logger.warn(Component.SIGNALING, 'Malformed JSON in request body', { error: String(error) });
+        this.logger.warn(Component.SIGNALING, 'Malformed JSON in request body', { error: String(error) });
         res.status(HttpStatus.BAD_REQUEST).json({ error: `invalid JSON request body: ${String(error)}` });
       });
 
@@ -148,7 +152,7 @@ export class SignalingServer {
           const fp = [validation.error || 'invalid', body.type, body.beadId, body.workerId].join(':');
           const { shouldLog, suppressedCount } = this.invalidEventCoalescer.observe(fp);
           if (shouldLog) {
-            Logger.warn(Component.SIGNALING, 'Invalid teammate event received', {
+            this.logger.warn(Component.SIGNALING, 'Invalid teammate event received', {
               error: validation.error,
               body: req.body,
               ...(suppressedCount > 0 ? { suppressedCount } : {})
@@ -218,7 +222,7 @@ export class SignalingServer {
           [OtelAttr.ORR_ELSE_STATE_ID]: event.stateId,
           [OtelAttr.ORR_ELSE_WORKER_ID]: event.workerId
         }, async (event: TeammateEvent) => {
-          Logger.info(Component.SIGNALING, 'Received signal', {
+          this.logger.info(Component.SIGNALING, 'Received signal', {
             type: event.type,
             beadId: event.beadId,
             workerId: event.workerId,
@@ -234,7 +238,7 @@ export class SignalingServer {
         // sequentially per bead so a duplicate retry observes the original's
         // recorded idempotency key (xmp3).
         this.enqueueBeadSignal(event.beadId, () => tracedSignal(event).catch(async error => {
-          Logger.error(Component.SIGNALING, 'Asynchronous teammate signal handler failed', {
+          this.logger.error(Component.SIGNALING, 'Asynchronous teammate signal handler failed', {
             type: event.type,
             beadId: event.beadId,
             workerId: event.workerId,
@@ -254,7 +258,7 @@ export class SignalingServer {
                 error: String(error)
               });
             } catch (recordError) {
-              Logger.error(Component.SIGNALING, 'Failed to record asynchronous teammate signal failure', {
+              this.logger.error(Component.SIGNALING, 'Failed to record asynchronous teammate signal failure', {
                 error: String(recordError),
                 stack: (recordError as Error).stack
               });
@@ -300,7 +304,7 @@ export class SignalingServer {
             // The gated handler hung — record a failure event with held-timeout
             // metadata so operators can diagnose which handler stalled, then
             // return a retryable failure so the worker can act on it.
-            Logger.error(Component.SIGNALING, 'Held-ack timeout: gated handler did not call send() within deadline', {
+            this.logger.error(Component.SIGNALING, 'Held-ack timeout: gated handler did not call send() within deadline', {
               type: event.type,
               beadId: event.beadId,
               workerId: event.workerId,
@@ -318,7 +322,7 @@ export class SignalingServer {
                 idempotencyKey: event.idempotencyKey
               });
             } catch (recordError) {
-              Logger.error(Component.SIGNALING, 'Failed to record held-ack timeout failure', {
+              this.logger.error(Component.SIGNALING, 'Failed to record held-ack timeout failure', {
                 error: String(recordError),
                 stack: (recordError as Error).stack
               });
@@ -354,7 +358,7 @@ export class SignalingServer {
         const workerIdValue = body.workerId ?? body.pid;
         if (workerIdValue !== undefined) {
           const workerId = String(workerIdValue);
-          Logger.debug(Component.SIGNALING, 'Manual heartbeat received', { workerId });
+          this.logger.debug(Component.SIGNALING, 'Manual heartbeat received', { workerId });
           const timestampMs = Date.now();
           this.heartbeats.set(workerId, timestampMs);
           this.heartbeatDetails.set(workerId, { workerId, timestampMs });
@@ -372,12 +376,12 @@ export class SignalingServer {
       });
 
       app.use((req, res) => {
-        Logger.warn(Component.SIGNALING, 'Route not found', { method: req.method, pathname: req.path });
+        this.logger.warn(Component.SIGNALING, 'Route not found', { method: req.method, pathname: req.path });
         res.status(HttpStatus.NOT_FOUND).json({ error: 'not found' });
       });
 
       app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-        Logger.error(Component.SIGNALING, 'Internal server error', { error: String(error), stack: (error as Error).stack });
+        this.logger.error(Component.SIGNALING, 'Internal server error', { error: String(error), stack: (error as Error).stack });
         res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({ error: String(error) });
       });
 
@@ -385,7 +389,7 @@ export class SignalingServer {
         const address = this.server?.address();
         const actualPort = typeof address === 'object' && address ? address.port : this.port;
         this.boundPort = actualPort;
-        Logger.info(Component.SIGNALING, 'Orr Else signaling server started', { port: actualPort });
+        this.logger.info(Component.SIGNALING, 'Orr Else signaling server started', { port: actualPort });
         resolve(actualPort);
       });
 

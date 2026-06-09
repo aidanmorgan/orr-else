@@ -7,7 +7,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup.
  */
 
-import { Logger } from '../Logger.js';
+import { Logger, type LoggerPort } from '../Logger.js'
 import { DomainEventName } from '../../constants/domain.js';
 import { Component } from '../../constants/infra.js';
 import type { RetentionAreaSummary, RetentionCleanupResult } from './RetentionTypes.js';
@@ -30,7 +30,8 @@ export async function reportRetentionResult(
   diskHealthWarnBytes: number,
   maxToolCallFilesPerRun: number,
   maxToolCallDirsPerRun: number,
-  eventRecorder: RetentionEventRecorder
+  eventRecorder: RetentionEventRecorder,
+  logger: LoggerPort = Logger
 ): Promise<void> {
   const { areas, totalFilesRemoved, totalDirsRemoved, totalBytesReclaimed, totalErrors, backpressureActive } = result;
 
@@ -41,7 +42,7 @@ export async function reportRetentionResult(
       .filter((a: RetentionAreaSummary) => a.filesRemoved > 0 || a.dirsRemoved > 0 || a.errors > 0)
       .map((a: RetentionAreaSummary) => `${a.area}: ${a.filesRemoved}f/${a.dirsRemoved}d removed, ${a.bytesReclaimed}B reclaimed, ${a.errors} errors`);
 
-    Logger.info(Component.RETENTION, 'Retention cleanup completed', {
+    logger.info(Component.RETENTION, 'Retention cleanup completed', {
       totalFilesRemoved,
       totalDirsRemoved,
       totalBytesReclaimed,
@@ -68,7 +69,7 @@ export async function reportRetentionResult(
       errors: a.errors
     }))
   }).catch((error: unknown) => {
-    Logger.warn(Component.RETENTION, 'Failed to record RETENTION_CLEANUP_COMPLETED event', { error: String(error) });
+    logger.warn(Component.RETENTION, 'Failed to record RETENTION_CLEANUP_COMPLETED event', { error: String(error) });
   });
 
   // ── Disk-usage / backpressure health event ──────────────────────────────
@@ -93,7 +94,7 @@ export async function reportRetentionResult(
         ? `Retention batch ceiling hit (files≤${maxToolCallFilesPerRun}, dirs≤${maxToolCallDirsPerRun}); deferred remaining tool-call artifacts`
         : `Retention reclaimed ${totalBytesFreed} bytes (threshold: ${diskHealthWarnBytes})`
     }).catch((error: unknown) => {
-      Logger.warn(Component.RETENTION, 'Failed to record RETENTION_DISK_HEALTH event', { error: String(error) });
+      logger.warn(Component.RETENTION, 'Failed to record RETENTION_DISK_HEALTH event', { error: String(error) });
     });
   }
 }
@@ -101,9 +102,9 @@ export async function reportRetentionResult(
 /**
  * Log event-JSONL compaction result if anything was compacted or errored.
  */
-export function logCompactionResult(compactionSummary: CompactionRunSummary): void {
+export function logCompactionResult(compactionSummary: CompactionRunSummary, logger: LoggerPort = Logger): void {
   if (compactionSummary.eventsDropped > 0 || compactionSummary.errors > 0) {
-    Logger.info(Component.RETENTION, 'Event-JSONL compaction completed', {
+    logger.info(Component.RETENTION, 'Event-JSONL compaction completed', {
       filesProcessed: compactionSummary.filesProcessed,
       eventsKept: compactionSummary.eventsKept,
       eventsDropped: compactionSummary.eventsDropped,

@@ -22,7 +22,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { EnvVars } from '../constants/infra.js';
 import { type RuntimeEnvironment, nodeRuntimeEnvironment } from './RuntimeEnvironment.js';
-import { skeletons } from '../contract.js';
+import { skeletons as globalSkeletons, type SkeletonExtractor } from '../contract.js';
+import type { RegistryPort } from './ContractRegistrySet.js';
 import { PathContextStatus } from './vocabulary.js';
 import { nodePathScopeService, type PathScopeService } from './PathScopeService.js';
 
@@ -62,10 +63,10 @@ export const SKELETON_MAX_BYTES = 32_000;
  *   - string → the registered extractor's skeleton output (byte-capped at
  *              SKELETON_MAX_BYTES).
  */
-function extractSkeleton(filePath: string, source: string): string | null {
+function extractSkeleton(filePath: string, source: string, skeletonsReg: RegistryPort<SkeletonExtractor>): string | null {
   const ext = path.extname(filePath).toLowerCase();
 
-  const extractor = skeletons.get(ext);
+  const extractor = skeletonsReg.get(ext);
   if (!extractor) return null;
 
   const skeleton = extractor(source);
@@ -356,11 +357,18 @@ export type PathContextResult = PathContextFound | PathContextNotFound | PathCon
 // ─── PathContext class ────────────────────────────────────────────────────────
 
 export class PathContext {
+  private readonly skeletonsRegistry: RegistryPort<SkeletonExtractor>;
+
   constructor(
     private readonly projectRoot: string,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly pathScope: PathScopeService = nodePathScopeService
-  ) {}
+    private readonly pathScope: PathScopeService = nodePathScopeService,
+    skeletonsRegistry?: RegistryPort<SkeletonExtractor>
+  ) {
+    // Default to the global singleton proxy so behaviour is unchanged when no
+    // registry is injected. Tests pass a fresh registry from createFreshRegistrySet().
+    this.skeletonsRegistry = skeletonsRegistry ?? (globalSkeletons as unknown as RegistryPort<SkeletonExtractor>);
+  }
 
   /** The active teammate worktree root, resolved from the injected environment.
    * Falls back to the project root when no worktree is set (e.g. coordinator). */
@@ -462,7 +470,7 @@ export class PathContext {
     if (input.skeleton && isReadableFile) {
       try {
         const source = fs.readFileSync(resolved, 'utf8');
-        const result = extractSkeleton(resolved, source);
+        const result = extractSkeleton(resolved, source, this.skeletonsRegistry);
         if (result === null) {
           // No extractor registered for this extension — FAIL CLOSED: do not
           // return raw content. skeletonFallback signals the missing-extractor

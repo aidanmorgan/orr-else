@@ -19,11 +19,12 @@ import * as fs from 'node:fs';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ScoredBead } from './Scheduler.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js';
 import { Observability } from './Observability.js';
 import { App, DomainEventName, QuarantineReason, StateContextPolicy } from '../constants/domain.js';
 import { Component, Defaults, OtelAttr, SpanName } from '../constants/infra.js';
-import { checkMcpBridgeHealth, mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
+import { mcpBackedRequiredToolNames, type McpBridgeHealth } from './McpTransportPreflight.js';
+import { McpBridgeHealthService } from './McpBridgeHealthService.js';
 import {
   resolveStateContextPolicy,
   evaluateContinuationAdmission,
@@ -74,12 +75,6 @@ export class BeadSpawnCoordinator {
    */
   readonly contextKeyStore = new Map<string, ContextKeyRecord>();
 
-  /**
-   * Cached MCP bridge health result (s3wp.32).
-   * Set on first MCP preflight check; reused across scan-loop iterations.
-   */
-  private mcpBridgeHealth: McpBridgeHealth | undefined;
-
   constructor(
     private readonly beadsPort: BeadsPort,
     private readonly worktreePort: WorktreePort,
@@ -90,7 +85,9 @@ export class BeadSpawnCoordinator {
     private readonly flowManager: FlowManagerPort,
     private readonly projectRoot: string,
     private readonly clockNow: () => number,
-    private readonly clockDate: (ms?: number) => Date
+    private readonly clockDate: (ms?: number) => Date,
+    private readonly mcpBridgeHealthService: McpBridgeHealthService = new McpBridgeHealthService(),
+    private readonly logger: LoggerPort = Logger
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -164,7 +161,7 @@ export class BeadSpawnCoordinator {
           previousSignature: entry.signature,
           currentSignature: currentSig
         }).catch(() => {});
-        Logger.info(Component.SUPERVISOR, 'Rehydrated quarantine cleared — bead eligible for retry', {
+        this.logger.info(Component.SUPERVISOR, 'Rehydrated quarantine cleared — bead eligible for retry', {
           beadId: bead.id,
           reason: entry.reason,
           previousSignature: entry.signature,
@@ -189,7 +186,7 @@ export class BeadSpawnCoordinator {
       signature,
       ...details
     }).catch(() => {});
-    Logger.warn(Component.SUPERVISOR, 'Bead quarantined by supervisor preflight', {
+    this.logger.warn(Component.SUPERVISOR, 'Bead quarantined by supervisor preflight', {
       beadId: bead.id,
       reason,
       ...details
@@ -226,10 +223,10 @@ export class BeadSpawnCoordinator {
       }
 
       if (rehydrated > 0) {
-        Logger.info(Component.SUPERVISOR, 'Rehydrated bead quarantines from event store on startup', { rehydrated });
+        this.logger.info(Component.SUPERVISOR, 'Rehydrated bead quarantines from event store on startup', { rehydrated });
       }
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to rehydrate quarantines from event store; quarantine state is in-memory only this session', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Unable to rehydrate quarantines from event store; quarantine state is in-memory only this session', { error: String(error) });
     }
   }
 
@@ -238,7 +235,7 @@ export class BeadSpawnCoordinator {
   // ---------------------------------------------------------------------------
 
   getMcpBridgeHealth(): McpBridgeHealth | undefined {
-    return this.mcpBridgeHealth;
+    return this.mcpBridgeHealthService.getCachedHealth();
   }
 
   requiredMcpToolNamesForBead(stateId: string, config: HarnessConfig): string[] {
@@ -262,17 +259,10 @@ export class BeadSpawnCoordinator {
   }
 
   async runMcpPreflightForTools(mcpToolNames: string[]): Promise<McpBridgeHealth> {
-    const health = await checkMcpBridgeHealth(
+    return this.mcpBridgeHealthService.check(
       mcpToolNames,
       (data) => this.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
     );
-    if (!this.mcpBridgeHealth || (!this.mcpBridgeHealth.healthy && health.healthy)) {
-      this.mcpBridgeHealth = health;
-    }
-    if (!health.healthy && this.mcpBridgeHealth?.healthy !== false) {
-      this.mcpBridgeHealth = health;
-    }
-    return health;
   }
 
   // ---------------------------------------------------------------------------
@@ -313,13 +303,13 @@ export class BeadSpawnCoordinator {
     markBeadExited: (id: string, opts?: { preserveInactiveRestartBackoff?: boolean }) => void
   ): Promise<void> {
     await this.beadsPort.release(claimed.id).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease after scheduling pause', {
         beadId: claimed.id,
         error: String(error)
       });
     });
     markBeadExited(claimed.id, { preserveInactiveRestartBackoff: true });
-    Logger.warn(Component.SUPERVISOR, 'Stopped assignment dispatch after scheduling pause', {
+    this.logger.warn(Component.SUPERVISOR, 'Stopped assignment dispatch after scheduling pause', {
       beadId: claimed.id,
       pauseUntil: this.clockDate(pausedUntilMs).toISOString(),
       reason: pausedReason
@@ -405,7 +395,7 @@ export class BeadSpawnCoordinator {
         return 'quarantined';
       }
       worktreePath = this.projectRoot;
-      Logger.info(Component.SUPERVISOR, `Worktree provisioning skipped for state ${bead.stateId}; teammate will run at project root`, {
+      this.logger.info(Component.SUPERVISOR, `Worktree provisioning skipped for state ${bead.stateId}; teammate will run at project root`, {
         beadId: claimed.id,
         stateId: bead.stateId
       });
@@ -440,7 +430,7 @@ export class BeadSpawnCoordinator {
           contextKey: contextPolicy.contextKey,
           reason: admission.reason
         }).catch(() => {});
-        Logger.warn(Component.SUPERVISOR, 'Named-continuation admission denied — spawning fresh', {
+        this.logger.warn(Component.SUPERVISOR, 'Named-continuation admission denied — spawning fresh', {
           beadId: claimed.id,
           stateId: bead.stateId,
           contextKey: contextPolicy.contextKey,
@@ -449,7 +439,7 @@ export class BeadSpawnCoordinator {
       } else {
         spawnContextKey = admission.sessionPath;
         isResumption = true;
-        Logger.info(Component.SUPERVISOR, 'Named-continuation admission granted — resuming session', {
+        this.logger.info(Component.SUPERVISOR, 'Named-continuation admission granted — resuming session', {
           beadId: claimed.id,
           stateId: bead.stateId,
           contextKey: contextPolicy.contextKey,
@@ -507,7 +497,7 @@ export class BeadSpawnCoordinator {
         terminal: false
       };
       this.contextKeyStore.set(contextPolicy.producesContextKey, record);
-      Logger.info(Component.SUPERVISOR, 'Stored Pi session path for named continuation (AC7 record)', {
+      this.logger.info(Component.SUPERVISOR, 'Stored Pi session path for named continuation (AC7 record)', {
         beadId: claimed.id,
         stateId: bead.stateId,
         producesContextKey: contextPolicy.producesContextKey,
@@ -516,7 +506,7 @@ export class BeadSpawnCoordinator {
       });
     }
 
-    Logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
+    this.logger.info(Component.SUPERVISOR, `Teammate spawned for ${bead.id} in phase ${bead.stateId}`);
     return 'spawned';
   }
 }

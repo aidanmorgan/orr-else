@@ -298,7 +298,7 @@ export function wrapPluginTool(
       const projectRoot = process.env[EnvVars.PROJECT_ROOT] || ports.projectRoot;
       const stateIdForPersist = process.env[EnvVars.STATE_ID] || session.activeRun?.stateId;
       const actionIdForPersist = process.env[EnvVars.ACTION_ID] || session.activeRun?.action?.id;
-      const toolResultRecorder = new ToolResultRecorder(services.toolCallPathFactory, projectRoot);
+      const toolResultRecorder = new ToolResultRecorder(services.toolCallPathFactory, projectRoot, services.logger);
 
       // 1. Programmatic Behavioral Rules (Pre-conditions)
       const config = await services.configLoader.load();

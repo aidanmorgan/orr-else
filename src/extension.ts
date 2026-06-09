@@ -75,7 +75,7 @@ import { AgentFailureCode, AgentFailureSummary, Component, Defaults, EnvVars, Fi
 import { Supervisor } from './core/Supervisor.js';
 import { Orchestrator } from './core/Orchestrator.js';
 import { RetentionScheduler } from './core/RetentionScheduler.js';
-import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
+import { mcpBackedRequiredToolNames } from './core/McpBridgeHealthService.js';
 import { runV2SubstratePreflight } from './core/V2SubstratePreflight.js';
 import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
 import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
@@ -892,7 +892,7 @@ async function runParentSequenceActionsBeforeActive(
       stateId: run.stateId,
       actionId: action.id,
       arguments: action.arguments || {}
-    }, ctx, undefined, services.projectToolBackpressure, services.projectRoot);
+    }, ctx, undefined, services.projectToolBackpressure, services.projectRoot, undefined, services.logger);
     runtimeObservability.recordToolInvocation(action.tool, result);
 
     // Extract framework toolCalls from the explicit inline result only.
@@ -1019,8 +1019,8 @@ async function initializeWorkerRun(runtimeObservability: Observability, services
     configuredRequiredItems,
     dynamicChecklistItemsForRun(beadProjection as Bead, stateId, action.id)
   ).requiredItems;
-  const worklogManager = new WorklogManager(services.eventStore, services.projectRoot);
-  const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId });
+  const worklogManager = new WorklogManager(services.eventStore, services.projectRoot, undefined, services.logger);
+  const progressManager = new ProgressManager(worktreePath, services.eventStore, { beadId, stateId }, services.logger);
 
   // Generate directories for declared artifact types (ensureDir:true) so a teammate
   // can write them before any plan write set exists (e.g. lesson capture). g9ye.
@@ -1272,7 +1272,9 @@ async function applyV2EvidenceDrivenTransition(
         requiredToolResolver: services.requiredToolResolver,
         planWriteSet: services.planWriteSet,
         projectRoot: services.projectRoot,
-        config
+        config,
+        registry: services.registrySet.verifier,
+        logger: services.logger
       },
       {
         beadId,
@@ -1755,7 +1757,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             requiredToolResolver: services.requiredToolResolver,
             planWriteSet: services.planWriteSet,
             projectRoot: services.projectRoot,
-            config
+            config,
+            registry: services.registrySet.verifier,
+            logger: services.logger
           },
           {
             beadId,
@@ -1940,7 +1944,9 @@ async function handleTeammateEvent(pi: ExtensionAPI, ctx: ExtensionContext, even
             requiredToolResolver: services.requiredToolResolver,
             planWriteSet: services.planWriteSet,
             projectRoot: services.projectRoot,
-            config
+            config,
+            registry: services.registrySet.verifier,
+            logger: services.logger
           },
           {
             beadId,
@@ -2662,7 +2668,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
   // Build provenance: best-effort, never blocks startup.
   const buildProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
   if (buildProvenance) {
-    await runStalenessPreflightWarn(buildProvenance, services.eventStore).catch(() => {});
+    await runStalenessPreflightWarn(buildProvenance, services.eventStore, undefined, services.logger).catch(() => {});
   }
 
   // Host-SDK fingerprint: recorded alongside build provenance for audit/drift detection.
@@ -2736,6 +2742,12 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     Logger.warn(Component.ORR_ELSE, 'Coordinator worker-extension load encountered an error', { error: String(error) });
     return undefined;
   });
+  // amq0.3: drain global boundary registrations into the per-runtime registry set.
+  // All consumer extensions (cerdiwen etc.) register into the process-wide global
+  // singletons at module load and during loadCoordinatorWorkerExtensions above.
+  // After this call, services.registrySet holds a one-time snapshot of those
+  // registrations and core reads ONLY the per-runtime set — never the globals.
+  services.registrySet?.drainFromGlobals?.();
   // pi-experiment-amq0.15: pass the coordinator startup catalog to the verifier lint
   // so it can enforce that no COMMAND name appears in requiredTools (read FROM catalog).
   const startupCatalogForLint = (() => {
@@ -2745,7 +2757,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
       return buildToolSurfaceCatalog(startupConfig, piNames, obsNames);
     } catch { return undefined; }
   })();
-  validateRequiredToolVerifiers(startupConfig, undefined, startupCatalogForLint);
+  validateRequiredToolVerifiers(startupConfig, services.registrySet.verifier, startupCatalogForLint);
 
   // ── AC5 (pi-experiment-8ieq): startup readiness-probe admission ───────────
   // Run all probeContext:true tools before model/pi spawn. A required-tool probe
@@ -2771,7 +2783,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
 
   const server = new SignalingServer((event, ack) => handleTeammateEvent(pi, ctx, event, services, session, ack), runtimeObservability, services.eventStore, {
     allowedCustomEvents: startupConfig.statechart?.customEvents
-  });
+  }, services.logger);
   const apiPort = await server.start();
   const apiBase = `http://${Defaults.API_HOST}:${apiPort}`;
   await services.eventStore.record(DomainEventName.HARNESS_API_BOUND, {
@@ -2823,14 +2835,16 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     services.flowManager,
     services.scheduler,
     services.beadsPort,
-    options.maxSlots
+    options.maxSlots,
+    services.logger
   );
   const supervisorRetentionScheduler = new RetentionScheduler(
     services.projectRoot,
     { now: () => Date.now(), date: (ms?: number) => new Date(ms ?? Date.now()) },
     services.eventStore,
     services.configLoader,
-    factory
+    factory,
+    services.logger
   );
 
   session.supervisor = new Supervisor(pi, ctx, server, factory, runtimeObservability, services, {
@@ -2910,6 +2924,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   const session = createExtensionSession();
 
   const services = providedServices || createRuntimeServices();
+  // amq0.3: initial drain at extension load time — captures registrations that happened
+  // at module load before orrElseExtension was called (e.g. cerdiwen's skeletons.register).
+  // A second drain happens in startOrrElse after loadCoordinatorWorkerExtensions, to also
+  // capture worker-extension registrations.
+  services.registrySet?.drainFromGlobals?.();
   const seenTools = new Set<string>();
 
   pi.registerCommand(BuiltInToolName.ORR_ELSE, {
@@ -3351,7 +3370,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     if (isWorkerMode()) {
       const workerProvenance = await computeBuildProvenance(services.configLoader.getConfigPath()).catch(() => undefined);
       if (workerProvenance) {
-        await runStalenessPreflightWarn(workerProvenance, services.eventStore).catch(() => {});
+        await runStalenessPreflightWarn(workerProvenance, services.eventStore, undefined, services.logger).catch(() => {});
         await services.eventStore.record(DomainEventName.HARNESS_STARTED, {
           isWorker: true,
           beadId: process.env[EnvVars.BEAD_ID],
@@ -3516,7 +3535,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.queryArtifactToolRegistered) {
       session.queryArtifactToolRegistered = true;
-      const artifactQuery = new ArtifactQuery(services.artifactPaths);
+      const artifactQuery = new ArtifactQuery(services.artifactPaths, undefined, undefined, undefined, services.registrySet.projections);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.QUERY_ARTIFACT,
         description:
@@ -3607,7 +3626,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (!session.readPathContextToolRegistered) {
       session.readPathContextToolRegistered = true;
-      const pathContext = new PathContext(services.projectRoot, services.env);
+      const pathContext = new PathContext(services.projectRoot, services.env, undefined, services.registrySet.skeletons);
       pi.registerTool(wrapRuntimeTool({
         name: BuiltInToolName.READ_PATH_CONTEXT,
         description:
@@ -3697,7 +3716,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             let requiredToolsWithMcpStatus = gate.requiredTools;
             const mcpBlockingEvidence: string[] = [];
             if (requiredMcpToolNames.length > 0) {
-              const mcpHealth = await checkMcpBridgeHealth(
+              const mcpHealth = await services.mcpBridgeHealthService.check(
                 requiredMcpToolNames,
                 (data) => services.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
               );
@@ -3830,7 +3849,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
         stateId: session.activeRun.stateId,
         actionId: session.activeRun.action.id
       }
-      : undefined, undefined, services.projectToolBackpressure, services.projectRoot, catalog);
+      : undefined, undefined, services.projectToolBackpressure, services.projectRoot, catalog, services.logger);
     validateNativePiExtensionProjectToolInventory(pi, config);
 
     pi.registerTool(wrapRuntimeTool({

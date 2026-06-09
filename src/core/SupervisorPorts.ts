@@ -10,6 +10,8 @@ import type { HarnessConfig } from './ConfigLoader.js';
 import type { ProjectionCapableStore } from './EventStoreTypes.js';
 import type { BeadsPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Clock } from './Clock.js';
+import type { LoggerPort } from './Logger.js';
+import type { McpBridgeHealthService } from './McpBridgeHealthService.js';
 
 export type { ProjectionCapableStore };
 export type { BeadsPort, WorktreePort, TeammateSpawner };
@@ -47,6 +49,18 @@ export interface SupervisorServices {
   flowManager: FlowManagerPort;
   /** Absolute path to the project root. Used by RetentionScheduler. */
   projectRoot: string;
+  /**
+   * Per-runtime MCP bridge health service (amq0.3).
+   * Optional for backward compat with tests that build SupervisorServices
+   * without this field; BeadSpawnCoordinator will create a fresh instance
+   * when not supplied.
+   */
+  mcpBridgeHealthService?: McpBridgeHealthService;
+  /**
+   * Per-runtime logger port (amq0.3).
+   * Optional; defaults to a fresh LoggerService when not supplied.
+   */
+  logger?: LoggerPort;
 }
 
 /**

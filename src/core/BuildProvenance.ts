@@ -2,7 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { simpleGit } from 'simple-git';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { PATH_INSTALL_ROOT } from './Paths.js';
 import { DomainEventName } from '../constants/domain.js';
 import { BuildProvenanceDefaults, Component, TimeMs } from '../constants/infra.js';
@@ -199,7 +199,8 @@ function provenanceKey(provenance: BuildProvenance): string {
 export async function runStalenessPreflightWarn(
   provenance: BuildProvenance,
   eventStore?: Pick<EventStore, 'record'>,
-  coalescer: SignalNoiseCoalescer = defaultStaleCoalescer
+  coalescer: SignalNoiseCoalescer = defaultStaleCoalescer,
+  logger: LoggerPort = Logger
 ): Promise<void> {
   // Dist missing entirely
   if (provenance.distBuildTimestamp === undefined) {
@@ -210,7 +211,7 @@ export async function runStalenessPreflightWarn(
     const message =
       '[BuildProvenance] dist/extension.js is MISSING. ' +
       'Workers will not start. Run `npm run build` to produce the dist artifact.';
-    Logger.warn(Component.BUILD_PROVENANCE, message, {
+    logger.warn(Component.BUILD_PROVENANCE, message, {
       distArtifactHash: provenance.distArtifactHash,
       packageVersion: provenance.packageVersion,
       gitCommit: provenance.gitCommit,
@@ -233,7 +234,7 @@ export async function runStalenessPreflightWarn(
     const message =
       '[BuildProvenance] dist/extension.js is STALE: source files are newer than the compiled artifact. ' +
       'Workers may run old code. Run `npm run build` to rebuild.';
-    Logger.warn(Component.BUILD_PROVENANCE, message, {
+    logger.warn(Component.BUILD_PROVENANCE, message, {
       distBuildTimestamp: provenance.distBuildTimestamp,
       packageVersion: provenance.packageVersion,
       gitCommit: provenance.gitCommit,

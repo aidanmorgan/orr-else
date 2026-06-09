@@ -1,6 +1,6 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
 import { DomainEventName, EventName, QuarantineReason, RestartKind, TERMINAL_BEAD_STATUSES, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
@@ -56,6 +56,16 @@ export interface SupervisorServices {
   };
   /** Absolute path to the project root. Used by RetentionScheduler. */
   projectRoot: string;
+  /**
+   * Per-runtime MCP bridge health service (amq0.3).
+   * Optional for backward compat; BeadSpawnCoordinator creates a fresh instance when absent.
+   */
+  mcpBridgeHealthService?: import('./McpBridgeHealthService.js').McpBridgeHealthService;
+  /**
+   * Per-runtime logger port (amq0.3).
+   * Optional; defaults to a fresh LoggerService when not supplied.
+   */
+  logger?: import('./Logger.js').LoggerPort;
 }
 
 export interface SupervisorOptions {
@@ -119,6 +129,7 @@ export class Supervisor {
   private lastPauseHeartbeatMs = 0;
   private lastMissingStartedBeadIds = new Set<string>();
   private readonly clock: Clock;
+  private readonly logger: LoggerPort;
 
   // ---------------------------------------------------------------------------
   // Extracted sub-services (pi-experiment-amq0.2)
@@ -138,8 +149,9 @@ export class Supervisor {
     private readonly options: SupervisorOptions
   ) {
     this.clock = options.clock || systemClock;
+    this.logger = services.logger ?? Logger;
 
-    this.recoveryService = new SupervisorRecoveryService(services.eventStore);
+    this.recoveryService = new SupervisorRecoveryService(services.eventStore, this.logger);
 
     this.spawnCoordinator = new BeadSpawnCoordinator(
       services.beadsPort,
@@ -151,7 +163,9 @@ export class Supervisor {
       services.flowManager,
       services.projectRoot,
       () => this.clock.now(),
-      (ms?: number) => this.clock.date(ms)
+      (ms?: number) => this.clock.date(ms),
+      services.mcpBridgeHealthService,
+      services.logger
     );
 
     this.slotHealthMonitor = new SlotHealthMonitor(
@@ -171,7 +185,8 @@ export class Supervisor {
       (cls, phase, budget) => this.spawnCoordinator.taxonomyFields(cls, phase, budget),
       (cls, phase, budget) => this.spawnCoordinator.routeTaxonomy(cls, phase, budget),
       () => this.harnessRestartEvent(),
-      () => this.isSchedulingPaused()
+      () => this.isSchedulingPaused(),
+      this.logger
     );
 
     this.retentionScheduler = options.retentionScheduler;
@@ -198,7 +213,7 @@ export class Supervisor {
     try {
       startupEvents = await this.eventStore.readAll();
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to read event store on startup; signal-state restore skipped', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Unable to read event store on startup; signal-state restore skipped', { error: String(error) });
     }
     const rebuiltSignals = await this.recoveryService.rebuildProcessedSignalsFromEvents(startupEvents);
     for (const key of rebuiltSignals) {
@@ -208,7 +223,7 @@ export class Supervisor {
     await this.spawnCoordinator.rehydrateQuarantinesFromEvents(startupEvents);
 
     this.interval = setInterval(() => {
-      this.step().catch(error => Logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
+      this.step().catch(error => this.logger.error(Component.SUPERVISOR, 'Supervisor poll failed', { error: String(error) }));
     }, Defaults.POLL_INTERVAL_MS);
 
     await this.step();
@@ -308,7 +323,7 @@ export class Supervisor {
         // n8fg taxonomy: PROVIDER_LIMIT × RUNNING → SCHEDULING_PAUSE (budget irrelevant for this class)
         ...this.spawnCoordinator.taxonomyFields(FailureClass.PROVIDER_LIMIT, LifecyclePhase.RUNNING, RetryBudget.AVAILABLE)
       }).catch(() => {});
-      Logger.warn(Component.SUPERVISOR, 'Scheduling paused; entering quiet capacity-pause mode', {
+      this.logger.warn(Component.SUPERVISOR, 'Scheduling paused; entering quiet capacity-pause mode', {
         pauseUntil: pauseUntilIso,
         reason
       });
@@ -320,7 +335,7 @@ export class Supervisor {
     if (!restored) return;
     this.schedulingPausedUntilMs = restored.pauseUntilMs;
     this.schedulingPausedReason = restored.reason;
-    Logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
+    this.logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
       pauseUntil: this.pausedUntilIso(),
       reason: this.schedulingPausedReason
     });
@@ -348,7 +363,7 @@ export class Supervisor {
       pauseUntil,
       reason: this.schedulingPausedReason
     }).catch(() => {});
-    Logger.warn(Component.SUPERVISOR, 'Scheduling still paused (capacity-pause heartbeat)', {
+    this.logger.warn(Component.SUPERVISOR, 'Scheduling still paused (capacity-pause heartbeat)', {
       pauseUntil,
       reason: this.schedulingPausedReason
     });
@@ -412,7 +427,7 @@ export class Supervisor {
       stateId: asStateId(stateId),
       terminalOnly: true
     }).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to inspect terminal tool failure-limit before spawn', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to inspect terminal tool failure-limit before spawn', {
         beadId: bead.id,
         stateId,
         error: String(error)
@@ -422,7 +437,7 @@ export class Supervisor {
     if (!terminalFailureEvent) return undefined;
 
     const events = await this.eventStore.eventsForBead(bead.id).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to inspect restart events before spawn', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to inspect restart events before spawn', {
         beadId: bead.id,
         stateId,
         error: String(error)
@@ -545,10 +560,10 @@ export class Supervisor {
           ...restartDetails
         }
         : { beadId };
-      Logger.warn(Component.SUPERVISOR, 'Teammate process is no longer active; releasing scheduler slot', eventData);
+      this.logger.warn(Component.SUPERVISOR, 'Teammate process is no longer active; releasing scheduler slot', eventData);
       await this.eventStore.record(DomainEventName.TEAMMATE_PROCESS_EXITED, eventData).catch(() => {});
       await this.beadsPort().release(beadId).catch((error: unknown) => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease for exited teammate', {
+        this.logger.warn(Component.SUPERVISOR, 'Unable to release Bead lease for exited teammate', {
           beadId,
           error: String(error)
         });
@@ -570,7 +585,7 @@ export class Supervisor {
         };
       }
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart projection', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart projection', {
         beadId,
         error: String(error)
       });
@@ -605,7 +620,7 @@ export class Supervisor {
         }
       }
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart events', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to inspect missing started Bead restart events', {
         beadId,
         error: String(error)
       });
@@ -623,21 +638,21 @@ export class Supervisor {
       try {
         bead = await this.beadsPort().getBead(beadId);
       } catch (error) {
-        Logger.warn(Component.SUPERVISOR, 'Unable to inspect live teammate Bead status', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to inspect live teammate Bead status', { beadId, error: String(error) });
         continue;
       }
       if (!TERMINAL_BEAD_STATUSES.has(bead.status)) continue;
 
       const summary = `Live teammate is running for terminal Bead status ${bead.status}; terminating.`;
-      Logger.warn(Component.SUPERVISOR, 'Terminating live teammate for terminal Bead status', {
+      this.logger.warn(Component.SUPERVISOR, 'Terminating live teammate for terminal Bead status', {
         beadId,
         status: bead.status
       });
       await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to terminate terminal teammate panes', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to terminate terminal teammate panes', { beadId, error: String(error) });
       });
       await this.beadsPort().release(beadId).catch((error: unknown) => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release terminal Bead after teammate termination', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to release terminal Bead after teammate termination', { beadId, error: String(error) });
       });
       this.markBeadExited(beadId);
     }
@@ -682,14 +697,14 @@ export class Supervisor {
 
       // PREFLIGHT: skip terminal/closed beads before claiming a slot.
       if (TERMINAL_BEAD_STATUSES.has(bead.status)) {
-        Logger.info(Component.SUPERVISOR, 'Preflight: skipping terminal bead', {
+        this.logger.info(Component.SUPERVISOR, 'Preflight: skipping terminal bead', {
           beadId: bead.id,
           status: bead.status
         });
         continue;
       }
       if (await this.spawnCoordinator.isQuarantined(bead)) {
-        Logger.info(Component.SUPERVISOR, 'Preflight: skipping quarantined bead (unchanged signature)', {
+        this.logger.info(Component.SUPERVISOR, 'Preflight: skipping quarantined bead (unchanged signature)', {
           beadId: bead.id,
           reason: this.spawnCoordinator.quarantine.get(bead.id)?.reason
         });
@@ -724,7 +739,7 @@ export class Supervisor {
               taxonomyReason: 'MCP backend unavailable at spawn — BACKEND_READINESS × SPAWN → QUARANTINE'
             });
           } else {
-            Logger.warn(Component.SUPERVISOR, 'Preflight: skipping bead — required MCP tools unavailable', {
+            this.logger.warn(Component.SUPERVISOR, 'Preflight: skipping bead — required MCP tools unavailable', {
               beadId: bead.id,
               stateId: bead.stateId,
               unavailableTools: mcpHealth.affectedToolNames,
@@ -753,7 +768,7 @@ export class Supervisor {
           stateId: bead.stateId,
           error: String(error)
         }).catch(() => {});
-        Logger.error(Component.SUPERVISOR, 'Failed to claim or spawn teammate', { beadId: bead.id, error: String(error) });
+        this.logger.error(Component.SUPERVISOR, 'Failed to claim or spawn teammate', { beadId: bead.id, error: String(error) });
         if (this.ctx.hasUI) this.ctx.ui.notify(`Failed to spawn ${bead.id}: ${String(error)}`, 'error');
       }
     }
@@ -770,7 +785,7 @@ export class Supervisor {
     const missingStarted = [...this.startedBeads].filter(beadId => !liveBeadIds.has(beadId));
     this.lastMissingStartedBeadIds = new Set(missingStarted);
     if (missingStarted.length > 0) {
-      Logger.warn(Component.SUPERVISOR, 'Ignoring tracked Beads without live teammate panes for capacity calculation', {
+      this.logger.warn(Component.SUPERVISOR, 'Ignoring tracked Beads without live teammate panes for capacity calculation', {
         missingStartedBeadIds: missingStarted.sort(),
         liveBeadIds: [...liveBeadIds].sort()
       });
@@ -786,7 +801,7 @@ export class Supervisor {
     try {
       groupedEvents = await this.eventStore.eventsForBeads(candidates.map(asBeadId));
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
+      this.logger.warn(Component.SUPERVISOR, 'Unable to inspect tracked Bead release events', {
         beadIds: candidates.sort(),
         error: String(error)
       });
@@ -805,7 +820,7 @@ export class Supervisor {
       for (const beadId of prunedBeadIds) {
         this.slotHealthMonitor.addReleasedThisTick(beadId);
       }
-      Logger.info(Component.SUPERVISOR, 'Pruned released or exited Beads from slot health tracking', {
+      this.logger.info(Component.SUPERVISOR, 'Pruned released or exited Beads from slot health tracking', {
         beadIds: prunedBeadIds.sort()
       });
     }

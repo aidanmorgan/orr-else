@@ -68,7 +68,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ToolResultBase } from '../contract.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { ToolResultStatus } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 
@@ -165,10 +165,15 @@ export function isEvidenceBearingProjectToolFailedEvent(
  * wrapPluginTool and projectTools short-circuit exits.
  */
 export class ToolResultRecorder {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly factory: ToolCallPathFactory,
-    private readonly projectRoot: string
-  ) {}
+    private readonly projectRoot: string,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   /**
    * Write a minimal failure artifact to disk and return a ToolResultBase.
@@ -202,7 +207,7 @@ export class ToolResultRecorder {
         worktreePath: this.projectRoot,
       });
     } catch (error) {
-      Logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to allocate path for short-circuit artifact', {
+      this.logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to allocate path for short-circuit artifact', {
         tool: toolName, invocationId, error: String(error)
       });
       // Return a minimal stub that at least carries status so callers can proceed.
@@ -246,7 +251,7 @@ export class ToolResultRecorder {
       // The sha256 field records the hash of the preliminary (without self-hash),
       // so readers can verify: sha256(JSON.stringify({...artifact, sha256:'', byteCount:0})) === artifact.sha256
     } catch (error) {
-      Logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to serialize short-circuit artifact', {
+      this.logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to serialize short-circuit artifact', {
         tool: toolName, invocationId, error: String(error)
       });
       return { tool: toolName, status, failureCategory, outputFile: '', outputFileBytes: 0 };
@@ -257,11 +262,11 @@ export class ToolResultRecorder {
     try {
       await fs.promises.mkdir(allocation.outputDir, { recursive: true });
       await fs.promises.writeFile(artifactPath, serialized, 'utf8');
-      Logger.debug(Component.PROJECT_TOOLS, 'ToolResultRecorder: wrote short-circuit artifact', {
+      this.logger.debug(Component.PROJECT_TOOLS, 'ToolResultRecorder: wrote short-circuit artifact', {
         tool: toolName, invocationId, artifactPath, byteCount, failureCategory
       });
     } catch (error) {
-      Logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to write short-circuit artifact', {
+      this.logger.warn(Component.PROJECT_TOOLS, 'ToolResultRecorder: failed to write short-circuit artifact', {
         tool: toolName, invocationId, artifactPath, error: String(error)
       });
       // Return stub — the event still gets emitted; the artifact is just absent.

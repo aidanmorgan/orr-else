@@ -2,7 +2,7 @@
  * s3wp.32 — MCP transport preflight + collapsed health + no per-worker rediscovery.
  *
  * Tests:
- *  1. checkMcpBridgeHealth with a simulated module-load failure:
+ *  1. McpBridgeHealthService.check() with a simulated module-load failure:
  *     - recordEvent is called exactly ONCE for a unique failure key
  *     - repeated calls with the same failure reuse cached result (no new events)
  *     - affectedToolNames are accumulated correctly across calls
@@ -13,13 +13,11 @@
  *     - the spawnTeammateInTmux call count confirms no per-worker rediscovery
  */
 
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  checkMcpBridgeHealth,
   mcpBackedRequiredToolNames,
-  resetMcpBridgeHealthCache,
-  setBridgeProbeForTest
 } from '../src/core/McpTransportPreflight.js';
+import { McpBridgeHealthService } from '../src/core/McpBridgeHealthService.js';
 import { Supervisor } from '../src/core/Supervisor.js';
 import { fakeProjectionStore } from './support/fakeProjectionStore.js';
 import { DomainEventName, ProjectToolType } from '../src/constants/domain.js';
@@ -39,23 +37,14 @@ function passingProbe() {
   return async () => ({ ok: true as const });
 }
 
-// ── McpTransportPreflight unit tests ──────────────────────────────────────────
+// ── McpBridgeHealthService unit tests ─────────────────────────────────────────
 
-describe('s3wp.32 — McpTransportPreflight', () => {
-  beforeEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
-  afterEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
+describe('s3wp.32 — McpBridgeHealthService', () => {
   it('returns healthy when the bridge probe succeeds', async () => {
-    setBridgeProbeForTest(passingProbe());
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(passingProbe());
     const recordEvent = vi.fn(async () => {});
-    const health = await checkMcpBridgeHealth(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
+    const health = await svc.check(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
 
     expect(health.healthy).toBe(true);
     expect(health.affectedToolNames).toEqual([]);
@@ -63,9 +52,10 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   });
 
   it('returns unhealthy with affected tool names when bridge probe fails', async () => {
-    setBridgeProbeForTest(failingProbe());
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(failingProbe());
     const recordEvent = vi.fn(async () => {});
-    const health = await checkMcpBridgeHealth(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
+    const health = await svc.check(['fixture_mcp_tool_a', 'fixture_mcp_tool_b'], recordEvent);
 
     expect(health.healthy).toBe(false);
     expect(health.affectedToolNames).toEqual(expect.arrayContaining(['fixture_mcp_tool_a', 'fixture_mcp_tool_b']));
@@ -74,25 +64,27 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   });
 
   it('records the domain event exactly ONCE per unique failure — no per-worker spam', async () => {
-    setBridgeProbeForTest(failingProbe());
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(failingProbe());
     const recordEvent = vi.fn(async () => {});
 
     // Simulate 3 workers all discovering the same failure
-    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent);
-    await checkMcpBridgeHealth(['fixture_mcp_tool_b'], recordEvent);
-    await checkMcpBridgeHealth(['reference_docs'], recordEvent);
+    await svc.check(['fixture_mcp_tool_a'], recordEvent);
+    await svc.check(['fixture_mcp_tool_b'], recordEvent);
+    await svc.check(['reference_docs'], recordEvent);
 
     // Only ONE event recorded regardless of how many times it is called
     expect(recordEvent).toHaveBeenCalledTimes(1);
   });
 
   it('accumulates affected tool names across repeated unhealthy calls', async () => {
-    setBridgeProbeForTest(failingProbe());
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(failingProbe());
     const recordEvent = vi.fn(async () => {});
 
-    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent);
-    const health2 = await checkMcpBridgeHealth(['fixture_mcp_tool_b'], recordEvent);
-    const health3 = await checkMcpBridgeHealth(['reference_docs'], recordEvent);
+    await svc.check(['fixture_mcp_tool_a'], recordEvent);
+    await svc.check(['fixture_mcp_tool_b'], recordEvent);
+    const health3 = await svc.check(['reference_docs'], recordEvent);
 
     // Latest result includes all tool names seen since the first failure
     expect(health3.affectedToolNames).toEqual(
@@ -103,27 +95,29 @@ describe('s3wp.32 — McpTransportPreflight', () => {
   });
 
   it('returns empty affected tools when no tools are passed', async () => {
-    setBridgeProbeForTest(failingProbe()); // probe never runs
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(failingProbe()); // probe never runs
     const recordEvent = vi.fn(async () => {});
-    const health = await checkMcpBridgeHealth([], recordEvent);
+    const health = await svc.check([], recordEvent);
 
     expect(health.healthy).toBe(true);
     expect(health.affectedToolNames).toEqual([]);
     expect(recordEvent).not.toHaveBeenCalled();
   });
 
-  it('resets correctly: after resetMcpBridgeHealthCache a new probe is issued', async () => {
-    setBridgeProbeForTest(failingProbe());
+  it('resets correctly: after resetCache() a new probe is issued', async () => {
+    const svc = new McpBridgeHealthService();
+    svc.setProbe(failingProbe());
     const recordEvent1 = vi.fn(async () => {});
-    await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent1);
+    await svc.check(['fixture_mcp_tool_a'], recordEvent1);
     expect(recordEvent1).toHaveBeenCalledTimes(1);
 
     // Reset cache + change probe to passing
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(passingProbe());
+    svc.resetCache();
+    svc.setProbe(passingProbe());
 
     const recordEvent2 = vi.fn(async () => {});
-    const health2 = await checkMcpBridgeHealth(['fixture_mcp_tool_a'], recordEvent2);
+    const health2 = await svc.check(['fixture_mcp_tool_a'], recordEvent2);
 
     expect(health2.healthy).toBe(true);
     expect(recordEvent2).not.toHaveBeenCalled();
@@ -212,6 +206,9 @@ function buildSupervisorForMcpGating(options: {
     invalidateCache: vi.fn()
   };
 
+  const mcpBridgeHealthService = new McpBridgeHealthService();
+  mcpBridgeHealthService.setProbe(bridgeProbe);
+
   const supervisor = new Supervisor(
     {} as any,
     { hasUI: false } as any,
@@ -242,7 +239,8 @@ function buildSupervisorForMcpGating(options: {
       flowManager: {
         stateForBead: vi.fn((bead: any) => 'Planning')
       },
-      projectRoot: '/tmp/project'
+      projectRoot: '/tmp/project',
+      mcpBridgeHealthService
     } as any,
     {
       maxSlots: 5,
@@ -259,23 +257,10 @@ function buildSupervisorForMcpGating(options: {
     }
   );
 
-  // Inject the bridge probe
-  setBridgeProbeForTest(bridgeProbe);
-
   return { supervisor, spawnTeammateInTmux, records };
 }
 
 describe('s3wp.32 — Supervisor MCP spawn gating', () => {
-  beforeEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
-  afterEach(() => {
-    resetMcpBridgeHealthCache();
-    setBridgeProbeForTest(undefined);
-  });
-
   it('spawns beads normally when required MCP tools have a healthy bridge', async () => {
     const backlogBeads = [
       { id: 'bd-healthy-1', status: 'ready', stateId: 'Planning' },

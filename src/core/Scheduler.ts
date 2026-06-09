@@ -1,7 +1,7 @@
 import { Bead } from '../types/index.js';
 import { ConfigLoader } from './ConfigLoader.js';
 import { FlowManager } from './FlowManager.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { App, BeadStatus } from '../constants/domain.js';
 import { Component, SchedulerDefaults } from '../constants/infra.js';
 import type { ResolvedHarnessConfig } from './ConfigLoader.js';
@@ -15,11 +15,15 @@ export interface ScoredBead extends Bead {
 
 export class Scheduler {
   private progressScores: Record<string, number> | null = null;
+  private readonly logger: LoggerPort;
 
   constructor(
     private readonly configLoader: ConfigLoader,
-    private readonly flowManager: FlowManager
-  ) {}
+    private readonly flowManager: FlowManager,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   private isResumableState(bead: Bead, stateId: string, config: ResolvedHarnessConfig): boolean {
     return bead.assigned_to === App.DISPLAY_NAME
@@ -34,7 +38,7 @@ export class Scheduler {
     const states = config.states;
     const scores: Record<string, number> = {};
     
-    Logger.debug(Component.SCHEDULER, 'Calculating progress scores from statechart');
+    this.logger.debug(Component.SCHEDULER, 'Calculating progress scores from statechart');
 
     // Reverse adjacency list across every configured statechart edge.
     const adj: Record<string, string[]> = {};
@@ -93,7 +97,7 @@ export class Scheduler {
       }
     }
     
-    Logger.debug(Component.SCHEDULER, 'Progress scores calculated', { scores });
+    this.logger.debug(Component.SCHEDULER, 'Progress scores calculated', { scores });
     this.progressScores = scores;
     return scores;
   }
@@ -110,7 +114,7 @@ export class Scheduler {
     const maxWaitTimeMs = SchedulerDefaults.MAX_WAIT_TIME_MS;
     const maxExecTimeMs = SchedulerDefaults.MAX_EXECUTION_TIME_MS;
 
-    Logger.info(Component.SCHEDULER, `Sorting backlog of ${beads.length} beads`, { weights });
+    this.logger.info(Component.SCHEDULER, `Sorting backlog of ${beads.length} beads`, { weights });
 
     const schedulingRanks = new Map<string, { progressScore: number; resumable: boolean }>();
     const scoredBeads: ScoredBead[] = beads.map(bead => {
@@ -158,7 +162,7 @@ export class Scheduler {
         ((weights.restart ?? SchedulerDefaults.DEFAULT_WEIGHTS.restart) * restartScore) +
         ((weights.resume ?? SchedulerDefaults.DEFAULT_WEIGHTS.resume) * resumeScore);
 
-      Logger.debug(Component.SCHEDULER, `Scored bead ${bead.id}`, { 
+      this.logger.debug(Component.SCHEDULER, `Scored bead ${bead.id}`, { 
         id: bead.id, 
         stateId, 
         score, 
@@ -182,7 +186,7 @@ export class Scheduler {
       }
       return b.score - a.score;
     });
-    Logger.info(Component.SCHEDULER, 'Backlog sorted', { 
+    this.logger.info(Component.SCHEDULER, 'Backlog sorted', { 
       topBeads: sorted.slice(0, SchedulerDefaults.LOG_TOP_BEAD_COUNT).map(b => ({ id: b.id, score: b.score, status: b.status }))
     });
     return sorted;

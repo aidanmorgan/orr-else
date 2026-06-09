@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { DomainEventName } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
@@ -12,12 +12,15 @@ const existsSync = fs.existsSync;
 
 export class ProgressManager {
   private readonly filePath: string;
+  private readonly logger: LoggerPort;
 
   constructor(
     worktreePath: string,
     private readonly eventStore: EventStore,
-    private readonly context: { beadId?: string; stateId?: string } = {}
+    private readonly context: { beadId?: string; stateId?: string } = {},
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.filePath = path.join(worktreePath, 'PROGRESS.md');
   }
 
@@ -35,7 +38,7 @@ ${initialHistory}
       try {
         await writeFileAsync(this.filePath, content);
       } catch (error) {
-        Logger.error(Component.PROGRESS, `Failed to initialize progress file`, { path: this.filePath, error: String(error) });
+        this.logger.error(Component.PROGRESS, `Failed to initialize progress file`, { path: this.filePath, error: String(error) });
         return;
       }
       await this.eventStore.record(DomainEventName.PROGRESS_FILE_INITIALIZED, {
@@ -53,7 +56,7 @@ ${initialHistory}
     try {
       await appendFileAsync(this.filePath, entry);
     } catch (error) {
-      Logger.error(Component.PROGRESS, `Failed to append to progress file`, { path: this.filePath, error: String(error) });
+      this.logger.error(Component.PROGRESS, `Failed to append to progress file`, { path: this.filePath, error: String(error) });
       return;
     }
     await this.eventStore.record(DomainEventName.PROGRESS_LOG_APPENDED, {
@@ -69,7 +72,7 @@ ${initialHistory}
     try {
       return await readFileAsync(this.filePath, 'utf8');
     } catch (error) {
-      Logger.error(Component.PROGRESS, `Failed to read progress file`, { path: this.filePath, error: String(error) });
+      this.logger.error(Component.PROGRESS, `Failed to read progress file`, { path: this.filePath, error: String(error) });
       return '';
     }
   }

@@ -1,7 +1,7 @@
 import { Bead } from '../types/index.js';
 import { Scheduler, ScoredBead } from './Scheduler.js';
 import { ConfigLoader } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { Observability } from './Observability.js';
 import { App, BeadsIssueStatus, PluginToolName, TERMINAL_BEAD_STATUSES } from '../constants/domain.js';
 import { BeadsDefaults, Component, Defaults } from '../constants/infra.js';
@@ -12,14 +12,19 @@ import type { BeadsPort } from './OrchestrationPorts.js';
  * Plugin-native backlog helper.
  */
 export class Orchestrator {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly observability: Observability,
     private readonly configLoader: ConfigLoader,
     private readonly flowManager: FlowManager,
     private readonly scheduler: Scheduler,
     private readonly beadsPort: BeadsPort,
-    private readonly maxSlots: number = Defaults.MAX_SLOTS
-  ) {}
+    private readonly maxSlots: number = Defaults.MAX_SLOTS,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   public async getMaxSlots(): Promise<number> {
     const config = await this.configLoader.load();
@@ -119,13 +124,13 @@ export class Orchestrator {
       if (assignments.length >= availableSlots) break;
       const stateId = this.flowManager.stateForBead(bead, config);
       if (!config.states[stateId]) {
-        Logger.warn(Component.ORCHESTRATOR, 'Skipping Bead with unknown configured state', { beadId: bead.id, stateId });
+        this.logger.warn(Component.ORCHESTRATOR, 'Skipping Bead with unknown configured state', { beadId: bead.id, stateId });
         continue;
       }
       assignments.push({ ...bead, stateId });
     }
 
-    Logger.info(Component.ORCHESTRATOR, 'Orchestrator selected assignments', {
+    this.logger.info(Component.ORCHESTRATOR, 'Orchestrator selected assignments', {
       assignments: assignments.map(bead => ({ id: bead.id, stateId: bead.stateId, score: bead.score }))
     });
     return assignments;
@@ -134,7 +139,7 @@ export class Orchestrator {
   public async step(): Promise<ScoredBead[]> {
     return this.observability.tracedAsync('orchestrator_step', {}, async () => {
       const ready = await this.readyBacklog();
-      Logger.info(Component.ORCHESTRATOR, 'Orchestrator backlog inspected', {
+      this.logger.info(Component.ORCHESTRATOR, 'Orchestrator backlog inspected', {
         ready: ready.map(bead => bead.id)
       });
       return ready;

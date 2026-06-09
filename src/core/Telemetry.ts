@@ -1,4 +1,4 @@
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { Component, TelemetryDefaults } from '../constants/infra.js';
 
 export interface TurnTelemetry {
@@ -17,10 +17,15 @@ export interface TurnTelemetry {
 
 export class TelemetryStore {
   private turns: TurnTelemetry[] = [];
+  private readonly logger: LoggerPort;
+
+  constructor(logger?: LoggerPort) {
+    this.logger = logger ?? Logger;
+  }
 
   public recordTurn(telemetry: TurnTelemetry) {
     this.turns.push(telemetry);
-    Logger.debug(Component.OBSERVABILITY, `Turn recorded for Bead ${telemetry.beadId} (${telemetry.actionId}): ${telemetry.durationMs}ms`);
+    this.logger.debug(Component.OBSERVABILITY, `Turn recorded for Bead ${telemetry.beadId} (${telemetry.actionId}): ${telemetry.durationMs}ms`);
     this.detectLoops(telemetry.beadId);
   }
 
@@ -30,11 +35,11 @@ export class TelemetryStore {
 
     const recentTurns = beadTurns.slice(-TelemetryDefaults.LOOP_DETECTION_WINDOW);
     const allSameAction = recentTurns.every(t => t.actionId === recentTurns[0].actionId);
-    
+
     if (allSameAction) {
        const hasFailure = recentTurns.some(t => t.durationMs < TelemetryDefaults.IMMEDIATE_FAILURE_DURATION_MS);
        if (hasFailure) {
-         Logger.warn(Component.OBSERVABILITY, `High-frequency loop detected for Bead ${beadId} on action ${recentTurns[0].actionId}. Blocking.`);
+         this.logger.warn(Component.OBSERVABILITY, `High-frequency loop detected for Bead ${beadId} on action ${recentTurns[0].actionId}. Blocking.`);
        }
     }
   }

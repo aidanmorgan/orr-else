@@ -25,6 +25,13 @@ import { EnvVars } from '../constants/infra.js';
 import type { BeadStatus } from '../constants/domain.js';
 import type { BeadsPort, BeadCompletionPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
+import { LoggerService, type LoggerPort } from './Logger.js';
+import { ContractRegistrySet, createFreshRegistrySet, buildRegistryPort } from './ContractRegistrySet.js';
+import { McpBridgeHealthService } from './McpBridgeHealthService.js';
+
+export type { LoggerPort };
+export { ContractRegistrySet, createFreshRegistrySet, buildRegistryPort };
+export { McpBridgeHealthService };
 // WorktreeResult is defined in OrchestrationPorts; re-exported here for
 // backward compatibility with existing callers (git.ts, extension.ts, etc.)
 export type { WorktreeResult } from './OrchestrationPorts.js';
@@ -81,6 +88,26 @@ export interface RuntimeServices {
    * resolution. Exposed so collaborators (e.g. PathContext) resolve roots through
    * the same injected env rather than reading process.env directly. */
   env: RuntimeEnvironment;
+  /**
+   * Per-runtime logger instance (amq0.3).
+   * Core internals use this instead of the process-wide Logger singleton so
+   * each runtime has its own logger that can be isolated in tests.
+   */
+  logger: LoggerPort;
+  /**
+   * Per-runtime contract registry set (amq0.3).
+   * Drained from the public boundary singletons at startup admission so
+   * consuming extensions (e.g. cerdiwen) that call verifier.register() at
+   * module load are visible here. Core reads ONLY this set — never the
+   * process-global contract singletons.
+   */
+  registrySet: ContractRegistrySet;
+  /**
+   * Per-runtime MCP bridge health service (amq0.3).
+   * Owns the probe/cache state for the MCP transport preflight check.
+   * Tests create fresh instances; production creates one per runtime.
+   */
+  mcpBridgeHealthService: McpBridgeHealthService;
   configLoader: ConfigLoader;
   contextInjector: ContextInjector;
   eventStore: EventStore;
@@ -297,11 +324,26 @@ export function assembleRuntimeServices(
   // Use || (not ??) to match WI-1 precedence: empty-string PROJECT_ROOT falls back.
   const projectRoot = explicitProjectRoot || env.env(EnvVars.PROJECT_ROOT) || process.cwd();
 
-  const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot);
-  const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot);
-  const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot);
+  // ── amq0.3 per-runtime ports ──────────────────────────────────────────────
+  // Create one instance per runtime so isolated harness instances, tests, and
+  // replay scenarios each get independent state.
+  const logger: LoggerPort = new LoggerService();
+  // Create a FRESH per-runtime ContractRegistrySet. After assembleRuntimeServices
+  // returns, the composition root calls registrySet.drainFromGlobals() once all
+  // consumer extensions have loaded (i.e. after loadCoordinatorWorkerExtensions).
+  // Until drain, the set is empty; after drain it holds a one-time snapshot of the
+  // global registrations. Two runtimes built this way are independent — registrations
+  // in runtime A are never visible in runtime B.
+  const registrySet: ContractRegistrySet = createFreshRegistrySet();
+  // Per-runtime MCP bridge health cache — no shared module-level state.
+  const mcpBridgeHealthService = new McpBridgeHealthService();
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot, logger);
+  const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot, undefined, logger);
+  const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot, undefined, logger);
   const flowManager = new FlowManager();
-  const domainEventEmitter = new DomainEventEmitter(eventStore);
+  const domainEventEmitter = new DomainEventEmitter(eventStore, logger);
   const domainEvents = new DomainEvents(domainEventEmitter);
   const shellCommandParser = new ShellCommandParser();
 
@@ -321,6 +363,9 @@ export function assembleRuntimeServices(
   return {
     projectRoot,
     env,
+    logger,
+    registrySet,
+    mcpBridgeHealthService,
     configLoader,
     contextInjector: new ContextInjector(),
     eventStore,
@@ -332,14 +377,14 @@ export function assembleRuntimeServices(
     protocolInjector: new ProtocolInjector(),
     protocolParser: new ProtocolParser(),
     requiredToolResolver,
-    scheduler: new Scheduler(configLoader, flowManager),
+    scheduler: new Scheduler(configLoader, flowManager, logger),
     mediator: new Mediator(domainEvents),
-    telemetryStore: new TelemetryStore(),
+    telemetryStore: new TelemetryStore(logger),
     artifactPaths,
     planWriteSet,
-    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot, artifactPaths),
+    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot, artifactPaths, undefined, logger),
     shellCommandParser,
-    transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
+    transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet, undefined, logger),
     toolCallPathFactory: new ToolCallPathFactory(),
     projectToolBackpressure,
     apiAddress: plugins.apiAddress,

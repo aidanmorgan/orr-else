@@ -1,3 +1,5 @@
+import * as fs from 'fs';
+import * as os from 'os';
 import * as winston from 'winston';
 import 'winston-daily-rotate-file';
 import { resolveProjectFrom } from './Paths.js';
@@ -57,15 +59,19 @@ export class LoggerService {
   }
 
   private buildDefaultTransports(logDir: string, logLevel: string): winston.transport[] {
+    const fileTransport = new winston.transports.DailyRotateFile({
+      dirname: logDir,
+      filename: LoggingDefaults.FILE_NAME_TEMPLATE,
+      datePattern: LoggingDefaults.DATE_PATTERN,
+      maxSize: LoggingDefaults.MAX_FILE_SIZE,
+      maxFiles: LoggingDefaults.MAX_FILES,
+      level: LoggingDefaults.FILE_LEVEL
+    });
+    // Best-effort: swallow file-transport errors (e.g. ENOENT when the log dir
+    // is removed during test teardown) so they never crash the process.
+    fileTransport.on('error', () => {});
     return [
-      new winston.transports.DailyRotateFile({
-        dirname: logDir,
-        filename: LoggingDefaults.FILE_NAME_TEMPLATE,
-        datePattern: LoggingDefaults.DATE_PATTERN,
-        maxSize: LoggingDefaults.MAX_FILE_SIZE,
-        maxFiles: LoggingDefaults.MAX_FILES,
-        level: LoggingDefaults.FILE_LEVEL
-      }),
+      fileTransport,
       new winston.transports.Console({
         format: combine(
           colorize(),
@@ -106,6 +112,17 @@ export class LoggerService {
 
     const logLevel = this.resolveLevel();
 
+    // Skip the rotating-file transport if the resolved log directory is inside
+    // a system temp directory (e.g. /tmp/, /private/tmp/). This prevents
+    // ENOENT crashes during test teardown when temp dirs are cleaned up while
+    // an open log file handle still exists.
+    const sysTmp = os.tmpdir();
+    const isTempDir = logDir.startsWith(sysTmp) || logDir.startsWith('/tmp/') || logDir.startsWith('/private/tmp/');
+    if (!isTempDir) {
+      // Ensure the log directory exists before creating the rotating file transport.
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+
     this.logger = winston.createLogger({
       level: logLevel,
       format: combine(
@@ -114,7 +131,12 @@ export class LoggerService {
         json()
       ),
       defaultMeta: { pid: process.pid, version: App.VERSION },
-      transports: this.buildDefaultTransports(logDir, logLevel)
+      transports: isTempDir
+        ? [new winston.transports.Console({
+            format: combine(colorize(), tuiFormat),
+            level: logLevel
+          })]
+        : this.buildDefaultTransports(logDir, logLevel)
     });
     this.logDir = logDir;
 
@@ -158,4 +180,28 @@ export class LoggerService {
   }
 }
 
-export const Logger = new LoggerService();
+/**
+ * LoggerPort — the interface contract for logging.
+ * Core modules accept this type instead of the LoggerService class directly,
+ * so the composition root can inject a per-runtime instance while the public
+ * boundary still exposes the process-wide singleton.
+ */
+export type LoggerPort = LoggerService;
+
+/**
+ * Process-wide default logger instance.
+ * Imported by core module constructors as the default parameter value so
+ * tests can inject a fresh LoggerService without touching production behaviour.
+ *
+ * The named `Logger` export below is the public-boundary alias (used by
+ * extension.ts, plugins, bin scripts — NOT by core internals).
+ */
+export const nodeLogger: LoggerService = new LoggerService();
+
+/**
+ * Public-boundary alias for the process-wide default logger.
+ * Extension.ts, plugins, bin scripts, and Teammate.ts import THIS name.
+ * Core internals MUST NOT import this name — they receive a LoggerPort via
+ * their constructor (defaulting to nodeLogger).
+ */
+export const Logger = nodeLogger;

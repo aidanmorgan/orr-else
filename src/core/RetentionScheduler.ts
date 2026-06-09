@@ -14,7 +14,7 @@
  * RetentionService + its sub-roles).
  */
 
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { Component, RetentionDefaults } from '../constants/infra.js';
 import { RetentionService } from './retention/RetentionService.js';
 import { resolveRetentionConfig } from './retention/RetentionPlanner.js';
@@ -25,6 +25,7 @@ import type { TeammateSpawner } from './OrchestrationPorts.js';
 
 export class RetentionScheduler {
   private lastRetentionCleanupMs = 0;
+  private readonly logger: LoggerPort;
 
   constructor(
     private readonly projectRoot: string,
@@ -32,8 +33,11 @@ export class RetentionScheduler {
     /** Full EventStore (not the narrow ProjectionCapableStore) — RetentionService requires the concrete class. */
     private readonly eventStore: EventStore,
     private readonly configLoader: ConfigLoaderPort,
-    private readonly factory: Pick<TeammateSpawner, 'getLiveTeammateBeadIds'>
-  ) {}
+    private readonly factory: Pick<TeammateSpawner, 'getLiveTeammateBeadIds'>,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   /**
    * Run retention cleanup if the interval has elapsed since the last run.
@@ -56,11 +60,12 @@ export class RetentionScheduler {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.eventStore as any,
       resolvedConfig,
-      () => this.factory.getLiveTeammateBeadIds()
+      () => this.factory.getLiveTeammateBeadIds(),
+      this.logger
     );
 
     await service.run().catch(error => {
-      Logger.warn(Component.SUPERVISOR, 'Retention cleanup failed unexpectedly', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Retention cleanup failed unexpectedly', { error: String(error) });
     });
   }
 }

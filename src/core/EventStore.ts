@@ -3,7 +3,7 @@ import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
 import { resolveProjectFrom } from './Paths.js';
 import { ConfigLoader } from './ConfigLoader.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { systemClock, type Clock } from './Clock.js';
@@ -184,15 +184,19 @@ export class EventStore implements ProjectionCapableStore {
   private readonly beadIndex: BeadEventIndex;
   private readonly projection: BeadStateProjection;
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly eventLog: JsonlEventLog = new JsonlEventLog(),
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
     private readonly projectRoot: string = process.cwd(),
-    private readonly clock: Clock = systemClock
+    private readonly clock: Clock = systemClock,
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
-    this.beadIndex = new BeadEventIndex(this.eventLog, this.clock);
+    this.beadIndex = new BeadEventIndex(this.eventLog, this.clock, undefined, this.logger);
     this.projection = new BeadStateProjection();
   }
 
@@ -402,7 +406,7 @@ export class EventStore implements ProjectionCapableStore {
       }
     }
 
-    Logger.debug(Component.CORE, `Event recorded: ${event}`, this.compactEventRecordMetadata(entry));
+    this.logger.debug(Component.CORE, `Event recorded: ${event}`, this.compactEventRecordMetadata(entry));
   }
 
   // ---------------------------------------------------------------------------

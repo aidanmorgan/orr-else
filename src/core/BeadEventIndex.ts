@@ -11,7 +11,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { createHash } from 'node:crypto';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { JsonlEventLog } from './JsonlEventLog.js';
 import { Component, EventStoreDefaults } from '../constants/infra.js';
 import { systemClock, type Clock } from './Clock.js';
@@ -36,11 +36,16 @@ export interface BeadIndexLocation {
 }
 
 export class BeadEventIndex {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly eventLog: JsonlEventLog,
     private readonly clock: Clock = systemClock,
-    private readonly uniqueId: UniqueId = systemUniqueId
-  ) {}
+    private readonly uniqueId: UniqueId = systemUniqueId,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   // ---------------------------------------------------------------------------
   // Path helpers
@@ -152,7 +157,7 @@ export class BeadEventIndex {
     } catch (error) {
       await rmAsync(tempPath, { force: true }).catch(() => {});
       await this.removeIndexState(indexPath, readyPath);
-      Logger.warn(Component.CORE, 'Removed stale bead event index after ready marker update failure', {
+      this.logger.warn(Component.CORE, 'Removed stale bead event index after ready marker update failure', {
         beadId,
         indexPath,
         readyPath,
@@ -174,7 +179,7 @@ export class BeadEventIndex {
       }
     } catch (error) {
       await this.removeIndexState(iPath, rPath);
-      Logger.warn(Component.CORE, 'Removed stale bead event index after append failure', {
+      this.logger.warn(Component.CORE, 'Removed stale bead event index after append failure', {
         beadId,
         indexPath: iPath,
         readyPath: rPath,
@@ -250,7 +255,7 @@ export class BeadEventIndex {
       await rmAsync(indexJsonlPath, { force: true }).catch(() => {});
       await rmAsync(markerPath, { force: true }).catch(() => {});
 
-      Logger.debug(Component.CORE, 'Invalidated by-bead index after primary compaction', {
+      this.logger.debug(Component.CORE, 'Invalidated by-bead index after primary compaction', {
         indexJsonlPath,
         markerPath,
         compactedSources: [...sourceBasenames]

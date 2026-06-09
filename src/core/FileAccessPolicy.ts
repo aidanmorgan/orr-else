@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { quote as quoteShellArgs } from 'shell-quote';
 import { DomainEventName } from '../constants/domain.js';
 import { Component, EnvVars, FileMutationPolicyDefaults, NativePiToolName, OperationalArtifactPath, OperationalLogPath, ProcessFlag } from '../constants/infra.js';
-import { Logger } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js'
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import type { EffectiveShellCommand, ParsedShellCommand, ParsedShellWord, ShellCommandParser } from './ShellCommandParser.js';
 import type { EventStore } from './EventStore.js';
@@ -69,6 +69,8 @@ const PROJECT_TOOL_CALL_OUTPUT_READ_GUIDANCE =
   'Use the inline project-tool result preview, rerun the configured project tool with narrower arguments, or use a harness-owned project-tool output preview when available.';
 
 export class FileAccessPolicy {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly eventStore: EventStore,
     private readonly shellCommandParser: ShellCommandParser,
@@ -76,8 +78,11 @@ export class FileAccessPolicy {
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
     private readonly projectRoot: string = process.cwd(),
     private readonly artifactPaths?: ArtifactPaths,
-    private readonly pathScope: PathScopeService = nodePathScopeService
-  ) {}
+    private readonly pathScope: PathScopeService = nodePathScopeService,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   public async apply(event: any): Promise<PolicyResult | null> {
     if (this.env.env(EnvVars.WORKER_MODE) !== ProcessFlag.TRUE) return null;
@@ -278,7 +283,7 @@ export class FileAccessPolicy {
       targets: deletion.targets.map(target => target.text),
       trashDir: path.join(context.projectRoot, OperationalArtifactPath.PI_TRASH_DIR)
     }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record delete-to-trash conversion', { error: String(error) });
+      this.logger.warn(Component.ORR_ELSE, 'Failed to record delete-to-trash conversion', { error: String(error) });
     });
 
     return { rewritten: true };
@@ -522,7 +527,7 @@ export class FileAccessPolicy {
       resolvedPath,
       pathClass: 'systemArtifact'
     }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record system-artifact write permit', { error: String(error) });
+      this.logger.warn(Component.ORR_ELSE, 'Failed to record system-artifact write permit', { error: String(error) });
     });
   }
 
@@ -658,7 +663,7 @@ export class FileAccessPolicy {
       targetPath,
       reason
     }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record file mutation rejection', { error: String(error) });
+      this.logger.warn(Component.ORR_ELSE, 'Failed to record file mutation rejection', { error: String(error) });
     });
   }
 
@@ -676,7 +681,7 @@ export class FileAccessPolicy {
       targetPath,
       operation
     }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record file access attempt', { error: String(error) });
+      this.logger.warn(Component.ORR_ELSE, 'Failed to record file access attempt', { error: String(error) });
     });
   }
 
@@ -694,7 +699,7 @@ export class FileAccessPolicy {
       targetPath,
       reason
     }).catch(error => {
-      Logger.warn(Component.ORR_ELSE, 'Failed to record file access rejection', { error: String(error) });
+      this.logger.warn(Component.ORR_ELSE, 'Failed to record file access rejection', { error: String(error) });
     });
   }
 
@@ -702,7 +707,7 @@ export class FileAccessPolicy {
     try {
       return this.shellCommandParser.parse(command);
     } catch (error) {
-      Logger.warn(Component.ORR_ELSE, 'Failed to parse shell command for mutation policy', {
+      this.logger.warn(Component.ORR_ELSE, 'Failed to parse shell command for mutation policy', {
         beadId: context.beadId,
         toolCallId: event.toolCallId,
         error: String(error)

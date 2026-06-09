@@ -369,7 +369,11 @@ describe('Real-dispatch regression: terminalTransition wiring (Site 1)', () => {
       toolCallPathFactory: {} as any,
       scheduler: {} as any,
       fileMutationPolicy: {} as any,
-      transactionalStateGuard: {} as any
+      transactionalStateGuard: {} as any,
+      // amq0.3: per-runtime ports required by extension.ts
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), configure: vi.fn(), configureProjectRoot: vi.fn(), close: vi.fn() } as any,
+      registrySet: { verifier: { get: vi.fn(), has: vi.fn(), names: () => [], register: vi.fn(), withLogger: vi.fn() }, skeletons: { get: vi.fn(), has: vi.fn(), names: () => [], register: vi.fn(), withLogger: vi.fn() }, projections: { get: vi.fn(), has: vi.fn(), names: () => [], register: vi.fn(), withLogger: vi.fn() } } as any,
+      mcpBridgeHealthService: { check: vi.fn().mockResolvedValue({ healthy: true, affectedToolNames: [] }), getCachedHealth: vi.fn(), resetCache: vi.fn(), setProbe: vi.fn() } as any
     } as any;
 
     return { services, recordedEvents };
