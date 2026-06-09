@@ -9,6 +9,7 @@ import { ToolCallPathFactory } from '../src/core/ToolCallPathFactory.js';
 import { CommandErrorCode, CwdMode, DomainEventName, EnvVars, EventName, ProjectToolDefaults, ProjectToolType, TeammateEventType, ToolResultStatus } from '../src/constants/index.js';
 import type { ProjectCommandToolConfig, ProjectMcpToolConfig } from '../src/core/domain/StateModels.js';
 import { classifyProjectToolFailure, describeConfiguredProjectTools, executeConfiguredProjectTool, isAcceptedMaxBufferFailure, isSuccessfulCommandExitCode, mcpToolRequestTimeoutMs, normalizeCommandArguments, normalizeMcpPathArguments, ProjectToolBackpressure, ProjectToolFailureCategory, projectToolFailureLimitSuggestedOutcome, registerConfiguredProjectTools, resolveContextField, shouldSerializeCommandTool, shouldSerializeMcpTool } from '../src/plugins/projectTools.js';
+import { buildToolSurfaceCatalog } from '../src/core/ToolSurfaceCatalog.js';
 import { toolCallsFromRecord } from '../src/plugins/projectTools/commandExecutor.js';
 import { summarizeToolResult, persistAndBoundResult } from '../src/plugins/projectTools/resultEnvelope.js';
 import type { ProjectToolExecutionContext } from '../src/plugins/projectTools/types.js';
@@ -2579,14 +2580,16 @@ describe('pi-experiment-5p9t: no _internalOutputFile on project-tool results (ne
     };
 
     const registeredTools: any[] = [];
-    const config = await configLoader.load();
+    const config = configLoader.load();
+    const configWithTool = { ...config, tools: [definition] };
+    const catalog = buildToolSurfaceCatalog(configWithTool, [], []);
     registerConfiguredProjectTools(
       eventStore, toolCallPathFactory,
       { registerTool: (t: any) => registeredTools.push(t) } as any,
-      { ...config, tools: [definition] },
+      configWithTool,
       new Set(),
       (t: any) => t,
-      undefined, undefined, new Map(), tempRoot
+      undefined, undefined, new Map(), tempRoot, catalog
     );
 
     expect(registeredTools).toHaveLength(1);

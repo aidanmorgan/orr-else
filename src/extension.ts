@@ -3806,13 +3806,15 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       seenTools.add(tool.name);
       pi.registerTool(wrapRuntimeTool(tool as any) as any);
     }
+    // amq0.16: pass the catalog so the registrar uses the single source of truth
+    // (ToolSurfaceCatalog PROJECT_TOOL entries) instead of iterating config.tools.
     registerConfiguredProjectTools(services.eventStore, services.toolCallPathFactory, pi, config, seenTools, wrapRuntimeTool, () => session.activeRun
       ? {
         beadId: session.activeRun.beadId,
         stateId: session.activeRun.stateId,
         actionId: session.activeRun.action.id
       }
-      : undefined, undefined, services.projectToolBackpressure, services.projectRoot);
+      : undefined, undefined, services.projectToolBackpressure, services.projectRoot, catalog);
     validateNativePiExtensionProjectToolInventory(pi, config);
 
     pi.registerTool(wrapRuntimeTool({

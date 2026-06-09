@@ -65,8 +65,8 @@ const ALLOWLIST: AllowlistEntry[] = [
     deferredWI: undefined
   },
   {
-    file: 'src/plugins/projectTools.ts',
-    reason: 'Uses { ...process.env, ...env } spread to forward the full host environment to child command processes — this is a child-process boundary operation, not a static read of a named key. No DI equivalent exists for full env forwarding.',
+    file: 'src/plugins/projectTools/ProjectToolRunner.ts',
+    reason: 'pi-experiment-amq0.16: execution body moved verbatim from projectTools.ts. Uses { ...process.env } spread to forward the full host environment to child command processes — this is a child-process boundary operation, not a static read of a named key. No DI equivalent exists for full env forwarding.',
     deferredWI: undefined
   },
   {
