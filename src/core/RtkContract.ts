@@ -1000,6 +1000,37 @@ export function checkRtkInventoryCoverage(registeredToolNames: readonly string[]
   return violations;
 }
 
+/**
+ * Check RTK inventory coverage for all tool entries in a ToolSurfaceCatalog.
+ *
+ * pi-experiment-amq0.15: RTK inventory consumer for the catalog.
+ * This function derives the list of callable tool names FROM the catalog,
+ * then delegates to checkRtkInventoryCoverage.
+ *
+ * The catalog is the single source of truth for which tools exist;
+ * project_configured tools are excluded (they register their own RTK contracts).
+ *
+ * Returns violations for any catalog tool that has no RTK inventory entry.
+ * COMMAND entries are excluded — they are not model-callable tools.
+ * OBSERVE_ONLY entries are excluded — they are not harness-registered.
+ * project_configured entries are excluded — config-driven tools own their own RTK.
+ */
+export function checkRtkInventoryCoverageFromCatalog(catalog: {
+  getToolEntries(): ReadonlyArray<{ name: string; kind: string; rtkToolClass: string | undefined }>;
+}): RtkInventoryViolation[] {
+  // Include only built_in, plugin, and native_pi entries (the static inventory covers these).
+  // project_configured tools are config-driven; they are not statically enumerated.
+  const staticToolNames = catalog
+    .getToolEntries()
+    .filter(e =>
+      e.rtkToolClass === 'built_in' ||
+      e.rtkToolClass === 'plugin' ||
+      e.rtkToolClass === 'native_pi'
+    )
+    .map(e => e.name);
+  return checkRtkInventoryCoverage(staticToolNames);
+}
+
 // ---------------------------------------------------------------------------
 // Cerdiwen required-tool evidence-class classification (pi-experiment-zog2.19)
 // ---------------------------------------------------------------------------

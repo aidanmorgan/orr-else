@@ -46,6 +46,7 @@ import type { HarnessConfig } from './ConfigLoader.js';
 import { Logger } from './Logger.js';
 import { Component } from '../constants/index.js';
 import { asBeadId, asStateId, asActionId } from '../types/ids.js';
+import { checkRequiredToolsForCommandCollisions, type ToolSurfaceCatalog } from './ToolSurfaceCatalog.js';
 
 /** Default per-verify isolation timeout (ms). */
 export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
@@ -65,10 +66,55 @@ export const DEFAULT_VERIFY_TIMEOUT_MS = 30_000;
  * Throws an Error NAMING the first offending tool (and every offender) when a
  * verify()-expecting tool has no registered callback.
  */
+/**
+ * Validate that required tools in config are all model-callable (not commands).
+ *
+ * pi-experiment-amq0.15: if a catalog is provided, check every requiredTools entry
+ * against the catalog's command names. A COMMAND surface (pi.registerCommand)
+ * CANNOT satisfy requiredTools — only model-callable tools can.
+ *
+ * This is the requiredTool lint consumer for the ToolSurfaceCatalog.
+ */
+export function validateRequiredToolsNotCommands(
+  config: HarnessConfig,
+  catalog: ToolSurfaceCatalog
+): void {
+  const violations: string[] = [];
+
+  const inspectList = (tools: RequiredTool[] | undefined, location: string): void => {
+    const names = (tools || []).map(t => typeof t === 'string' ? t : t.name);
+    violations.push(...checkRequiredToolsForCommandCollisions(names, catalog, location));
+  };
+
+  for (const [stateId, state] of Object.entries(config.states || {})) {
+    inspectList(state.requiredTools, `State "${stateId}"`);
+    for (const action of state.actions || []) {
+      inspectList(action.requiredTools, `State "${stateId}" action "${action.id}"`);
+    }
+    for (const [outcome, routeTools] of Object.entries(state.routeEvidence || {})) {
+      inspectList(routeTools as RequiredTool[], `State "${stateId}" routeEvidence["${outcome}"]`);
+    }
+  }
+
+  if (violations.length > 0) {
+    throw new Error(
+      `Config fail-fast: requiredTools command-collision(s) detected:\n` +
+      violations.map(v => `  - ${v}`).join('\n')
+    );
+  }
+}
+
 export function validateRequiredToolVerifiers(
   config: HarnessConfig,
-  registry: Pick<Registry<VerifyCallback>, 'has'> = defaultVerifier
+  registry: Pick<Registry<VerifyCallback>, 'has'> = defaultVerifier,
+  catalog?: ToolSurfaceCatalog
 ): void {
+  // pi-experiment-amq0.15: if a catalog is provided, enforce that no COMMAND
+  // name appears in requiredTools (fail-closed: commands cannot satisfy gates).
+  if (catalog) {
+    validateRequiredToolsNotCommands(config, catalog);
+  }
+
   const offenders = new Set<string>();
 
   const inspect = (tools: RequiredTool[] | undefined): void => {

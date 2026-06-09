@@ -334,18 +334,6 @@ export function getConfiguredProjectToolNames(config: HarnessConfig): string[] {
   return (config.tools || []).map(tool => tool.name);
 }
 
-export function getHarnessRegisteredProjectToolNames(config: HarnessConfig): string[] {
-  return (config.tools || [])
-    .filter(tool => tool.type !== ProjectToolType.EXTENSION)
-    .map(tool => tool.name);
-}
-
-export function getNativePiExtensionProjectToolNames(config: HarnessConfig): string[] {
-  return (config.tools || [])
-    .filter(tool => tool.type === ProjectToolType.EXTENSION)
-    .map(tool => tool.name);
-}
-
 // ---- describeConfiguredProjectTools ----
 
 function operationSummary(tool: ProjectMcpToolConfig): string {

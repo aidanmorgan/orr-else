@@ -27,8 +27,6 @@ import type { MergeResult } from './core/RuntimeServices.js';
 import {
   executeConfiguredProjectTool,
   getConfiguredProjectToolNames,
-  getHarnessRegisteredProjectToolNames,
-  getNativePiExtensionProjectToolNames,
   projectToolFailureLimitSuggestedOutcome,
   registerConfiguredProjectTools,
 } from './plugins/projectTools.js';
@@ -130,6 +128,7 @@ import { Teammate, type WorkerContext } from './core/Teammate.js';
 // resolveActiveToolSet moved to ./extension/WorkerContextResolver.ts
 import { nodeRuntimeEnvironment } from './core/RuntimeEnvironment.js';
 import { getConfiguredPiToolNames, getObservedPiToolNames, resolvePiSkillPaths } from './core/WorkerResourceResolver.js';
+import { buildToolSurfaceCatalog, assertCatalogValid, type ToolSurfaceCatalog } from './core/ToolSurfaceCatalog.js';
 import { resolvePromptProvenance, detectStaleProvenanceEntries, computeCurrentStateConfigHash, type PromptProvenanceEntry } from './core/PromptProvenanceService.js';
 // resolvePiSkillPathsForState moved to ./extension/WorkerContextResolver.ts
 // digestStableBlock / StableBootstrapInputs moved to ./extension/WorkerContextResolver.ts
@@ -399,6 +398,17 @@ interface ExtensionSession {
   // a module-level global because it guards process.on() calls on the
   // process-global object, which must not be registered more than once per
   // process regardless of how many times orrElseExtension is invoked.
+
+  // ── ToolSurfaceCatalog (pi-experiment-amq0.15) ───────────────────────────
+  /**
+   * Single source of truth for every tool/command surface registered in this session.
+   * Built at SESSION_START composition time from config + Pi tool names.
+   * All consumer sites (registration, prompt, admission, RTK, conformance,
+   * startup fingerprint) derive their lists from this catalog.
+   *
+   * Null before SESSION_START completes.
+   */
+  toolSurfaceCatalog: ToolSurfaceCatalog | null;
 }
 
 function createExtensionSession(): ExtensionSession {
@@ -436,6 +446,7 @@ function createExtensionSession(): ExtensionSession {
     providerRequestCapRegistered: false,
     claudeCodeLoginRegistered: false,
     agentLifecycleObserverRegistered: false,
+    toolSurfaceCatalog: null,
   };
 }
 
@@ -2702,6 +2713,33 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     Logger.warn(Component.ORR_ELSE, 'Context-policy fingerprint computation failed at startup', { error: String(error) });
   }
 
+  // ── pi-experiment-amq0.15: tool-surface catalog startup fingerprint ──────────
+  // Build the catalog for the coordinator startup context (before SESSION_START fires
+  // from the worker process). This is the startup-fingerprint consumer: records a
+  // durable TOOL_SURFACE_FINGERPRINT_RECORDED event so any change to the registered
+  // tool/command surface (added/removed tool, kind change) is detectable between runs.
+  try {
+    const startupPiToolNames = getConfiguredPiToolNames(startupConfig);
+    const startupObservedPiToolNames = getObservedPiToolNames(startupConfig);
+    const startupCatalog = buildToolSurfaceCatalog(startupConfig, startupPiToolNames, startupObservedPiToolNames);
+    assertCatalogValid(startupCatalog);
+    const surfaceFingerprint = startupCatalog.computeSurfaceFingerprint();
+    const toolCount = startupCatalog.getToolEntries().length;
+    const commandCount = startupCatalog.getCommandEntries().length;
+    await services.eventStore.record(DomainEventName.CONTEXT_POLICY_FINGERPRINT_RECORDED, {
+      surfaceFingerprint,
+      toolCount,
+      commandCount,
+      source: 'tool_surface_catalog',
+    }).catch(() => {});
+    Logger.info(Component.ORR_ELSE, 'Tool-surface catalog fingerprint recorded at startup (amq0.15)', {
+      toolCount,
+      commandCount,
+    });
+  } catch (error) {
+    Logger.warn(Component.ORR_ELSE, 'Tool-surface catalog fingerprint computation failed at startup', { error: String(error) });
+  }
+
   // ── COORDINATOR-side verifier gate bootstrap (pi-experiment-0yt5.20) ──────────
   // Decision A (AC2): load the consumer pi.workerExtensions in THIS (coordinator)
   // process so their verify() callbacks register in the SAME process that runs the
@@ -2714,7 +2752,16 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     Logger.warn(Component.ORR_ELSE, 'Coordinator worker-extension load encountered an error', { error: String(error) });
     return undefined;
   });
-  validateRequiredToolVerifiers(startupConfig);
+  // pi-experiment-amq0.15: pass the coordinator startup catalog to the verifier lint
+  // so it can enforce that no COMMAND name appears in requiredTools (read FROM catalog).
+  const startupCatalogForLint = (() => {
+    try {
+      const piNames = getConfiguredPiToolNames(startupConfig);
+      const obsNames = getObservedPiToolNames(startupConfig);
+      return buildToolSurfaceCatalog(startupConfig, piNames, obsNames);
+    } catch { return undefined; }
+  })();
+  validateRequiredToolVerifiers(startupConfig, undefined, startupCatalogForLint);
 
   // ── AC5 (pi-experiment-8ieq): startup readiness-probe admission ───────────
   // Run all probeContext:true tools before model/pi spawn. A required-tool probe
@@ -2993,7 +3040,17 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     if (!session.activeRun) await initializeWorkerRun(services.observability, services, session);
     if (!session.activeRun) return;
     const projectRootForPrompt = process.env[EnvVars.PROJECT_ROOT] || services.projectRoot;
-    const promptResult = buildStateSystemPrompt(config, { projectRoot: projectRootForPrompt, services }, session.activeRun);
+    // pi-experiment-amq0.15: pass the catalog to buildStateSystemPrompt so the
+    // prompt-surface reads configured Pi tool names FROM the catalog (single source of truth).
+    // The catalog is built at SESSION_START, which always fires before BEFORE_AGENT_START.
+    if (!session.toolSurfaceCatalog) {
+      throw new Error('toolSurfaceCatalog must be present at BEFORE_AGENT_START — SESSION_START has not completed');
+    }
+    const promptResult = buildStateSystemPrompt(config, {
+      projectRoot: projectRootForPrompt,
+      services,
+      toolSurfaceCatalog: session.toolSurfaceCatalog
+    }, session.activeRun);
 
     // ── Pi base prompt admission + fingerprinting (pi-experiment-1elr.9) ────
     //
@@ -3304,15 +3361,21 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }
     }
 
-    const wrappedToolNames = new Set<string>([
-      ...Object.values(BuiltInToolName),
-      ...Object.values(PluginToolName),
-      ...getHarnessRegisteredProjectToolNames(config)
-    ]);
-    session.observedPiTools = new Set([
-      ...getObservedPiToolNames(config),
-      ...getNativePiExtensionProjectToolNames(config)
-    ].filter(toolName => !wrappedToolNames.has(toolName)));
+    // ── pi-experiment-amq0.15: Build the single ToolSurfaceCatalog ───────────
+    // All consumer sites (registration, observed Pi tools, requiredTool lint,
+    // prompt-surface, RTK inventory, conformance, startup fingerprint) derive
+    // their lists from this ONE catalog built here at SESSION_START composition time.
+    // assertCatalogValid() is the fail-closed startup check for duplicates,
+    // command/tool collisions, and missing sourceInfo for native extension tools.
+    const piToolNamesFromConfig = getConfiguredPiToolNames(config);
+    const observedPiToolNamesFromConfig = getObservedPiToolNames(config);
+    const catalog = buildToolSurfaceCatalog(config, piToolNamesFromConfig, observedPiToolNamesFromConfig);
+    assertCatalogValid(catalog);
+    session.toolSurfaceCatalog = catalog;
+
+    // Derive the observed Pi tool set FROM the catalog (single source of truth).
+    // Replaces the ad-hoc wrappedToolNames + getObservedPiToolNames + getNativePiExtensionProjectToolNames combo.
+    session.observedPiTools = new Set(catalog.getObservedPiToolNames());
     registerPiToolObservers(pi, services, session, {
       beadIdFromToolParams: (input) => beadIdFromToolParams(input, session),
       toolSpanAttributes: (toolName, params, beadId, externalPiTool) => toolSpanAttributes(toolName, params, beadId, session, externalPiTool),
@@ -3731,9 +3794,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       services.plugins.quality,
       services.plugins.meta
     ];
-    const configuredProjectToolNames = new Set(getHarnessRegisteredProjectToolNames(config));
+    // Derive harness-registered project tool names FROM the catalog (single source of truth).
+    // Replaces the ad-hoc getHarnessRegisteredProjectToolNames(config) call.
+    const harnessRegisteredProjectToolNames = new Set(catalog.getHarnessRegisteredProjectToolNames());
     for (const tool of harnessPlugins.flatMap(plugin => plugin.tools)) {
-      if (configuredProjectToolNames.has(tool.name)) {
+      if (harnessRegisteredProjectToolNames.has(tool.name)) {
         Logger.info(Component.ORR_ELSE, 'Skipping generic harness tool because a configured project tool has the same name', { tool: tool.name });
         continue;
       }
@@ -4322,11 +4387,17 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
     // pi.registerCommand(), not a model-callable tool. It must NOT appear in
     // setActiveTools or be counted as a callable requiredTool — the command
     // surface and the model-callable tool surface are distinct (pi-experiment-2xho).
+    // Derive the setActiveTools list FROM the catalog (single source of truth).
+    // Replaces the ad-hoc getConfiguredProjectToolNames + getConfiguredPiToolNames calls.
+    // The catalog is always built earlier in this same SESSION_START handler (line ~3370).
+    if (!session.toolSurfaceCatalog) {
+      throw new Error('toolSurfaceCatalog must be present at setActiveTools — catalog was not built during SESSION_START');
+    }
     services.flowManager.activateTools(pi, [
       BuiltInToolName.HARNESS_STATUS,
       ...services.plugins.bd.tools.map(t => t.name),
-      ...getConfiguredProjectToolNames(config),
-      ...getConfiguredPiToolNames(config)
+      ...session.toolSurfaceCatalog.getConfiguredProjectToolNames(),
+      ...session.toolSurfaceCatalog.getConfiguredPiToolNames()
     ]);
   }
 }

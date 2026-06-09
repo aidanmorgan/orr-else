@@ -12,9 +12,10 @@ import type { RuntimeServices } from '../composition/createRuntimeServices.js';
 import type { ActiveRun } from './SessionTypes.js';
 import { resolveActiveToolSet } from '../core/ActiveToolSetResolver.js';
 import { describeConfiguredProjectTools, resolveToolPromptProfileId } from '../plugins/projectTools.js';
-import { getConfiguredPiToolNames, resolvePiSkillPathsForState } from '../core/WorkerResourceResolver.js';
+import { resolvePiSkillPathsForState } from '../core/WorkerResourceResolver.js';
 import { type StableBootstrapInputs } from '../core/BootstrapDigest.js';
 import { EnvVars } from '../constants/index.js';
+import type { ToolSurfaceCatalog } from '../core/ToolSurfaceCatalog.js';
 
 /**
  * Shape returned by buildStateSystemPrompt.
@@ -64,6 +65,13 @@ export interface WorkerContextResolverPorts {
     | 'configLoader'
     | 'contextInjector'
   >;
+  /**
+   * pi-experiment-amq0.15: tool-surface catalog (required).
+   * The single source of truth for configured Pi tool names
+   * (used in the stable identity for prompt digest computation).
+   * Built at SESSION_START; always present before BEFORE_AGENT_START fires.
+   */
+  toolSurfaceCatalog: ToolSurfaceCatalog;
 }
 
 /**
@@ -136,11 +144,15 @@ export function buildStateSystemPrompt(
     // Append sorted active-tool fingerprint so cache-key changes when the active set changes.
     protocolLabel = `${protocolLabel}|activeTools:${resolvedActiveToolNames.join(',')}`;
   }
+  // pi-experiment-amq0.15: read configured Pi tool names FROM the catalog (single source of truth).
+  // The catalog is required — built at SESSION_START, guaranteed present before BEFORE_AGENT_START.
+  const configuredPiToolNames = Array.from(ports.toolSurfaceCatalog.getConfiguredPiToolNames());
+
   const identity: StableBootstrapInputs = {
     projectRoot,
     configIdentity: configPath,
     stateId: activeRun.stateId,
-    toolNames: getConfiguredPiToolNames(config),
+    toolNames: configuredPiToolNames,
     skillNames,
     ruleCategories: [],
     protocolLabel
