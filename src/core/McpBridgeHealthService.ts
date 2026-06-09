@@ -19,6 +19,7 @@
 import {
   mcpBackedRequiredToolNames,
   type McpBridgeHealth,
+  getGlobalBridgeProbeForTest,
 } from './McpTransportPreflight.js';
 
 export type { McpBridgeHealth };
@@ -74,7 +75,11 @@ export class McpBridgeHealthService {
    * Returns a structured health result. Never throws.
    */
   private async probeModule(): Promise<{ ok: boolean; errorMessage?: string; errorType?: string }> {
-    if (this.bridgeProbe) return this.bridgeProbe();
+    // Instance probe takes precedence. Fall back to the module-level test probe
+    // (set via setBridgeProbeForTest) so legacy tests that do not supply a per-runtime
+    // service continue to work.
+    const probe = this.bridgeProbe ?? getGlobalBridgeProbeForTest();
+    if (probe) return probe();
     for (const mod of BRIDGE_MODULES_TO_PROBE) {
       try {
         await import(mod);

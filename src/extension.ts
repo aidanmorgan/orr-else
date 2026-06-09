@@ -75,7 +75,7 @@ import { AgentFailureCode, AgentFailureSummary, Component, Defaults, EnvVars, Fi
 import { Supervisor } from './core/Supervisor.js';
 import { Orchestrator } from './core/Orchestrator.js';
 import { RetentionScheduler } from './core/RetentionScheduler.js';
-import { checkMcpBridgeHealth, mcpBackedRequiredToolNames } from './core/McpTransportPreflight.js';
+import { mcpBackedRequiredToolNames } from './core/McpBridgeHealthService.js';
 import { runV2SubstratePreflight } from './core/V2SubstratePreflight.js';
 import { validateNativePiExtensionProjectToolInventory } from './core/PiHostInventory.js';
 import { resolveHostSdkFingerprint } from './core/PackageConformance.js';
@@ -2742,6 +2742,12 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
     Logger.warn(Component.ORR_ELSE, 'Coordinator worker-extension load encountered an error', { error: String(error) });
     return undefined;
   });
+  // amq0.3: drain global boundary registrations into the per-runtime registry set.
+  // All consumer extensions (cerdiwen etc.) register into the process-wide global
+  // singletons at module load and during loadCoordinatorWorkerExtensions above.
+  // After this call, services.registrySet holds a one-time snapshot of those
+  // registrations and core reads ONLY the per-runtime set — never the globals.
+  services.registrySet?.drainFromGlobals?.();
   // pi-experiment-amq0.15: pass the coordinator startup catalog to the verifier lint
   // so it can enforce that no COMMAND name appears in requiredTools (read FROM catalog).
   const startupCatalogForLint = (() => {
@@ -2751,7 +2757,7 @@ async function startOrrElse(pi: ExtensionAPI, ctx: ExtensionContext, options: Fl
       return buildToolSurfaceCatalog(startupConfig, piNames, obsNames);
     } catch { return undefined; }
   })();
-  validateRequiredToolVerifiers(startupConfig, undefined, startupCatalogForLint);
+  validateRequiredToolVerifiers(startupConfig, services.registrySet.verifier, startupCatalogForLint);
 
   // ── AC5 (pi-experiment-8ieq): startup readiness-probe admission ───────────
   // Run all probeContext:true tools before model/pi spawn. A required-tool probe
@@ -2916,6 +2922,11 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   const session = createExtensionSession();
 
   const services = providedServices || createRuntimeServices();
+  // amq0.3: initial drain at extension load time — captures registrations that happened
+  // at module load before orrElseExtension was called (e.g. cerdiwen's skeletons.register).
+  // A second drain happens in startOrrElse after loadCoordinatorWorkerExtensions, to also
+  // capture worker-extension registrations.
+  services.registrySet?.drainFromGlobals?.();
   const seenTools = new Set<string>();
 
   pi.registerCommand(BuiltInToolName.ORR_ELSE, {
@@ -3703,7 +3714,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
             let requiredToolsWithMcpStatus = gate.requiredTools;
             const mcpBlockingEvidence: string[] = [];
             if (requiredMcpToolNames.length > 0) {
-              const mcpHealth = await checkMcpBridgeHealth(
+              const mcpHealth = await services.mcpBridgeHealthService.check(
                 requiredMcpToolNames,
                 (data) => services.eventStore.record(DomainEventName.MCP_TRANSPORT_PREFLIGHT_FAILED, data)
               );

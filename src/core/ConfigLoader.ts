@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { ResolvedLLMConfig, HarnessConfig, type ResolvedHarnessConfig, type RawHarnessConfig } from './domain/StateModels.js';
 import { resolveProjectFrom } from './Paths.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord, mergeReplacingArrays } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
@@ -96,17 +96,22 @@ export class ConfigLoader {
   private readonly validator: ConfigValidator;
   private readonly resolver: ConfigReferenceResolver;
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
-    private readonly projectRoot: string = process.cwd()
+    private readonly projectRoot: string = process.cwd(),
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.source = new ConfigFileSource(env, projectRoot);
     this.parser = new ConfigParser(projectRoot);
     this.normalizer = new ConfigNormalizer();
     this.validator = new ConfigValidator(
       projectRoot,
       () => this.getConfigPath(),
-      () => this.resolveInstallSchemaPath()
+      () => this.resolveInstallSchemaPath(),
+      this.logger
     );
     this.resolver = new ConfigReferenceResolver(projectRoot);
   }
@@ -192,7 +197,7 @@ export class ConfigLoader {
       this.cachedSignature = signature;
       return config;
     } catch (error) {
-      Logger.error(Component.CONFIG, 'Failed to load configuration', { error: String(error) });
+      this.logger.error(Component.CONFIG, 'Failed to load configuration', { error: String(error) });
       throw error;
     }
   }

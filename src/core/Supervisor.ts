@@ -1,6 +1,6 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Bead, BeadId, asBeadId, asStateId, type StateId } from '../types/index.js';
-import { nodeLogger, type LoggerPort } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js';
 import { Observability } from './Observability.js';
 import { SignalingServer } from './SignalingServer.js';
 import { DomainEventName, EventName, QuarantineReason, RestartKind, TERMINAL_BEAD_STATUSES, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
@@ -63,7 +63,7 @@ export interface SupervisorServices {
   mcpBridgeHealthService?: import('./McpBridgeHealthService.js').McpBridgeHealthService;
   /**
    * Per-runtime logger port (amq0.3).
-   * Optional for backward compat; defaults to nodeLogger when not supplied.
+   * Optional; defaults to a fresh LoggerService when not supplied.
    */
   logger?: import('./Logger.js').LoggerPort;
 }
@@ -149,9 +149,9 @@ export class Supervisor {
     private readonly options: SupervisorOptions
   ) {
     this.clock = options.clock || systemClock;
-    this.logger = services.logger ?? nodeLogger;
+    this.logger = services.logger ?? Logger;
 
-    this.recoveryService = new SupervisorRecoveryService(services.eventStore);
+    this.recoveryService = new SupervisorRecoveryService(services.eventStore, this.logger);
 
     this.spawnCoordinator = new BeadSpawnCoordinator(
       services.beadsPort,
@@ -185,7 +185,8 @@ export class Supervisor {
       (cls, phase, budget) => this.spawnCoordinator.taxonomyFields(cls, phase, budget),
       (cls, phase, budget) => this.spawnCoordinator.routeTaxonomy(cls, phase, budget),
       () => this.harnessRestartEvent(),
-      () => this.isSchedulingPaused()
+      () => this.isSchedulingPaused(),
+      this.logger
     );
 
     this.retentionScheduler = options.retentionScheduler;

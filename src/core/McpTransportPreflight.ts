@@ -71,6 +71,15 @@ export function setBridgeProbeForTest(probe: BridgeProbe | undefined): void {
 }
 
 /**
+ * Return the current module-level test probe (undefined if none is set).
+ * Used by McpBridgeHealthService as a fallback when no instance probe is set,
+ * so that tests calling setBridgeProbeForTest() work with the per-runtime service.
+ */
+export function getGlobalBridgeProbeForTest(): BridgeProbe | undefined {
+  return _activeBridgeProbe;
+}
+
+/**
  * Probe whether the @modelcontextprotocol/sdk bridge module can be loaded.
  *
  * Returns a structured health result.  Never throws.

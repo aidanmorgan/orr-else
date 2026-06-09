@@ -21,7 +21,7 @@ import {
   V2PromptFileProvenance
 } from './domain/StateModels.js';
 import { resolveProjectFrom } from './Paths.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { getPackagedSchemaPath } from './SchemaRegistry.js';
 import { isRecord } from './RecordUtils.js';
 import { ActionContextMode, ActionRunContext, BeadStatus, EventName, ProjectToolRootKind, RECOGNIZED_COARSE_SINK_STATUSES, StateContextPolicy, ThinkingLevel } from '../constants/domain.js';
@@ -41,11 +41,16 @@ export class ConfigValidator {
    */
   private static readonly V2_IDENTIFIER_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly projectRoot: string,
     private readonly getConfigPath: () => string,
-    private readonly schemaPathResolver: () => string = getPackagedSchemaPath
-  ) {}
+    private readonly schemaPathResolver: () => string = getPackagedSchemaPath,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   public preValidateNoDeprecatedToolFields(config: unknown): void {
     if (!isRecord(config)) return;
@@ -3138,7 +3143,7 @@ export class ConfigValidator {
         return { stateId, mode, contextKey, producesContextKey };
       });
       const digest = createHash('sha256').update(JSON.stringify(rows)).digest('hex');
-      Logger.info(Component.CONFIG, 'Context-policy fingerprint computed at config load (AC5)', {
+      this.logger.info(Component.CONFIG, 'Context-policy fingerprint computed at config load (AC5)', {
         digest,
         stateCount: stateIds.length
       });
@@ -3646,7 +3651,7 @@ export class ConfigValidator {
         const toolIds = tools.map((t: import('./domain/StateModels.js').RequiredTool) =>
           typeof t === 'string' ? t : (t.expectsVerify ? `${t.name}(verify)` : t.name)
         ).join(', ');
-        Logger.info('ConfigLoader', `routeEvidence lint: state "${stateId}" route "${routeKey}" requires [${toolIds}]`);
+        this.logger.info('ConfigLoader', `routeEvidence lint: state "${stateId}" route "${routeKey}" requires [${toolIds}]`);
       }
     }
   }

@@ -1,6 +1,6 @@
 import { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BeadId, WorkerId, StateId, ActionId } from '../types/index.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { Observability } from './Observability.js';
 import { EventStore } from './EventStore.js';
 import { postHarnessSignal } from './HarnessApiClient.js';
@@ -43,6 +43,8 @@ export interface WorkerContext {
 }
 
 export class Teammate {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly pi: ExtensionAPI,
     private readonly ctx: ExtensionContext,
@@ -55,8 +57,14 @@ export class Teammate {
     private readonly mailboxPlugin: RuntimePlugin,
     private readonly qualityPlugin: RuntimePlugin,
     private readonly workerContext: WorkerContext,
-    private readonly projectToolNameResolver: ProjectToolNameResolver = () => []
-  ) {}
+    private readonly projectToolNameResolver: ProjectToolNameResolver = () => [],
+    logger?: LoggerPort
+  ) {
+    // Default to the public boundary Logger (process-global) so test spies on
+    // Logger.configureProjectRoot continue to work. In production (extension.ts
+    // worker path) pass services.logger for the per-runtime instance.
+    this.logger = logger ?? Logger;
+  }
 
   public async start() {
     return this.observability.tracedAsync('teammate_mode', {}, async () => this.startInner())();
@@ -66,15 +74,15 @@ export class Teammate {
     const { beadId, stateId, projectRoot, worktreePath } = this.workerContext;
 
     if (!beadId || !stateId) {
-      Logger.error(Component.TEAMMATE, 'Teammate mode started without required environment variables', { beadId, stateId });
+      this.logger.error(Component.TEAMMATE, 'Teammate mode started without required environment variables', { beadId, stateId });
       return;
     }
 
     // Direct the Logger's rotating-file transport to the correct project root
     // for this worker process. The root comes from WorkerContext (WI-6), not
     // from the mutable module global.
-    Logger.configureProjectRoot(projectRoot);
-    Logger.info(Component.TEAMMATE, 'Teammate mode activated', { beadId, stateId, worktreePath });
+    this.logger.configureProjectRoot(projectRoot);
+    this.logger.info(Component.TEAMMATE, 'Teammate mode activated', { beadId, stateId, worktreePath });
     const config = await this.configLoader.load();
 
     // pi-experiment-6q0y.3: resolve the active project tool set for this state/action
@@ -155,13 +163,13 @@ export class Teammate {
       if (!active) return;
 
       compactionCount++;
-      Logger.info(Component.TEAMMATE, 'Session auto-compacted by Pi', { beadId, compactionCount });
+      this.logger.info(Component.TEAMMATE, 'Session auto-compacted by Pi', { beadId, compactionCount });
       void this.eventStore.record(DomainEventName.CONTEXT_COMPACTION_RECORDED, {
         beadId,
         stateId,
         compactionCount
       }).catch(error => {
-        Logger.warn(Component.TEAMMATE, 'Failed to record compaction event', { beadId, error: String(error) });
+        this.logger.warn(Component.TEAMMATE, 'Failed to record compaction event', { beadId, error: String(error) });
       });
 
       // pi-experiment-6q0y.35: when compactionSummary is enabled for this state,
@@ -173,7 +181,7 @@ export class Teammate {
       } | undefined;
       if (stateConfig?.compactionSummary?.enabled === true) {
         void this.generateCompactionSummary(beadId, stateId, stateConfig.compactionSummary.compactionRoute).catch(error => {
-          Logger.warn(Component.TEAMMATE, 'Failed to generate compaction summary', { beadId, stateId, error: String(error) });
+          this.logger.warn(Component.TEAMMATE, 'Failed to generate compaction summary', { beadId, stateId, error: String(error) });
         });
       }
 
@@ -187,14 +195,14 @@ export class Teammate {
         // AC2: first warning threshold — record CONTEXT_COMPACTION_WARNING, NO restart.
         if (!warningSent && compactionCount >= warnThreshold && compactionCount < autoThreshold) {
           warningSent = true;
-          Logger.info(Component.TEAMMATE, 'Compaction warning threshold reached', { beadId, compactionCount, warnThreshold });
+          this.logger.info(Component.TEAMMATE, 'Compaction warning threshold reached', { beadId, compactionCount, warnThreshold });
           void this.eventStore.record(DomainEventName.CONTEXT_COMPACTION_WARNING, {
             beadId,
             stateId,
             compactionCount,
             warnThreshold
           }).catch(error => {
-            Logger.warn(Component.TEAMMATE, 'Failed to record compaction warning', { beadId, error: String(error) });
+            this.logger.warn(Component.TEAMMATE, 'Failed to record compaction warning', { beadId, error: String(error) });
           });
         }
 
@@ -203,7 +211,7 @@ export class Teammate {
         if (compactionCount >= autoThreshold) {
           if (restartSignalSent) {
             // Duplicate suppression: diagnostic evidence already recorded above (CONTEXT_COMPACTION_RECORDED).
-            Logger.info(Component.TEAMMATE, 'Compaction fallback threshold exceeded again; restart already requested', {
+            this.logger.info(Component.TEAMMATE, 'Compaction fallback threshold exceeded again; restart already requested', {
               beadId,
               compactionCount
             });
@@ -211,7 +219,7 @@ export class Teammate {
           }
 
           restartSignalSent = true;
-          Logger.info(Component.TEAMMATE, 'Compaction fallback threshold reached. Triggering evidence-aware fallback restart.', {
+          this.logger.info(Component.TEAMMATE, 'Compaction fallback threshold reached. Triggering evidence-aware fallback restart.', {
             beadId,
             compactionCount,
             autoThreshold
@@ -223,7 +231,7 @@ export class Teammate {
 
           // Trigger evidence-aware fallback restart (AC3/AC4: carries compaction-artifact pointer + evidence refs).
           this.triggerFallbackRestart(beadId, stateId, compactionCount).catch(error => {
-            Logger.error(Component.TEAMMATE, 'Failed to trigger compaction fallback restart', { error: String(error) });
+            this.logger.error(Component.TEAMMATE, 'Failed to trigger compaction fallback restart', { error: String(error) });
           });
           return;
         }
@@ -246,7 +254,7 @@ export class Teammate {
     const heartbeat = setInterval(() => {
       this.sendHeartbeat(beadId, stateId).then(() => {
         if (consecutiveHeartbeatFailures > 0) {
-          Logger.info(Component.TEAMMATE, 'Worker heartbeat recovered', {
+          this.logger.info(Component.TEAMMATE, 'Worker heartbeat recovered', {
             beadId,
             previousFailures: consecutiveHeartbeatFailures
           });
@@ -256,9 +264,9 @@ export class Teammate {
         consecutiveHeartbeatFailures += 1;
         const detail = { beadId, error: String(error), consecutiveFailures: consecutiveHeartbeatFailures };
         if (consecutiveHeartbeatFailures === 1) {
-          Logger.warn(Component.TEAMMATE, 'Worker heartbeat failed', detail);
+          this.logger.warn(Component.TEAMMATE, 'Worker heartbeat failed', detail);
         } else {
-          Logger.debug(Component.TEAMMATE, 'Worker heartbeat still failing', detail);
+          this.logger.debug(Component.TEAMMATE, 'Worker heartbeat still failing', detail);
         }
       });
     }, WorkerDefaults.HEARTBEAT_INTERVAL_MS);
@@ -303,7 +311,7 @@ export class Teammate {
       ...payload,
       ...(compactionRoute !== undefined ? { compactionRoute } : {})
     });
-    Logger.info(Component.TEAMMATE, 'Compaction summary written', {
+    this.logger.info(Component.TEAMMATE, 'Compaction summary written', {
       beadId,
       stateId,
       artifactPath: written.artifactPath,
@@ -338,7 +346,7 @@ export class Teammate {
       // ConfigLoader lint (validateCompactionFallbackDeclarations) guarantees that
       // compactionSummary.enabled:true is co-declared, so this branch is unreachable
       // in valid configs. Record a diagnostic and do NOT post any restart signal.
-      Logger.error(Component.TEAMMATE, 'Compaction fallback: no COMPACTION_SUMMARY_RECORDED found; skipping restart (lint should have prevented this)', {
+      this.logger.error(Component.TEAMMATE, 'Compaction fallback: no COMPACTION_SUMMARY_RECORDED found; skipping restart (lint should have prevented this)', {
         beadId,
         stateId,
         compactionCount

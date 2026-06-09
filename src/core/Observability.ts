@@ -24,7 +24,7 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 import { v7 as uuidv7 } from 'uuid';
 import { ConfigLoader } from './ConfigLoader.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { resolveProjectFrom } from './Paths.js';
 import { isRecord } from './RecordUtils.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
@@ -84,7 +84,10 @@ export class JsonlSpanExporter implements SpanExporter {
   // Null until the first span is written (lazy creation).
   stream: fs.WriteStream | null = null;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly logger: LoggerPort = Logger
+  ) {}
 
   private getOrCreateStream(): fs.WriteStream {
     if (!this.stream) {
@@ -94,7 +97,7 @@ export class JsonlSpanExporter implements SpanExporter {
       // process. Observability is best-effort telemetry: log and swallow the error
       // so a failed trace write never takes down the harness.
       this.stream.on('error', error => {
-        Logger.warn(Component.OBSERVABILITY, 'OTEL JSONL trace stream write failed', {
+        this.logger.warn(Component.OBSERVABILITY, 'OTEL JSONL trace stream write failed', {
           filePath: this.filePath,
           error: String(error)
         });
@@ -202,14 +205,18 @@ export class Observability {
   private currentFileName: string | null = null;
   private currentFilePath: string | null = null;
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly env: RuntimeEnvironment = nodeRuntimeEnvironment,
     private readonly injectedProjectRoot: string = process.cwd(),
     // Injected so the 'process.pid' span attribute is deterministic under test
     // rather than read from the global directly (pf7v).
-    private readonly pid: number = process.pid
+    private readonly pid: number = process.pid,
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.sessionId = this.env.env(EnvVars.OBSERVABILITY_SESSION_ID) || uuidv7();
     this.sessionStateId = this.env.env(EnvVars.SESSION_STATE_ID) || null;
     this.sessionTraceId = this.sessionId.replace(/-/g, '');
@@ -311,7 +318,7 @@ export class Observability {
     }
 
     const spanProcessors: SpanProcessor[] = [
-      new SimpleSpanProcessor(new JsonlSpanExporter(filePath))
+      new SimpleSpanProcessor(new JsonlSpanExporter(filePath, this.logger))
     ];
 
     if (collector?.endpoint) {
@@ -331,7 +338,7 @@ export class Observability {
     this.currentFileName = fileName;
     this.currentFilePath = filePath;
 
-    Logger.debug(Component.OBSERVABILITY, 'Initialized OpenTelemetry observability', {
+    this.logger.debug(Component.OBSERVABILITY, 'Initialized OpenTelemetry observability', {
       sessionId: this.sessionId,
       filePath,
       collectorEndpoint: collector?.endpoint
@@ -512,7 +519,7 @@ export class Observability {
     this.activeSpans.clear();
     if (this.provider) {
       void this.provider.shutdown().catch(error => {
-        Logger.warn(Component.OBSERVABILITY, 'OpenTelemetry provider shutdown failed', { error: String(error) });
+        this.logger.warn(Component.OBSERVABILITY, 'OpenTelemetry provider shutdown failed', { error: String(error) });
       });
     }
     this.provider = null;

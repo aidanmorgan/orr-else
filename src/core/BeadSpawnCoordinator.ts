@@ -19,7 +19,7 @@ import * as fs from 'node:fs';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import type { ScoredBead } from './Scheduler.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { nodeLogger, type LoggerPort } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js';
 import { Observability } from './Observability.js';
 import { App, DomainEventName, QuarantineReason, StateContextPolicy } from '../constants/domain.js';
 import { Component, Defaults, OtelAttr, SpanName } from '../constants/infra.js';
@@ -87,7 +87,7 @@ export class BeadSpawnCoordinator {
     private readonly clockNow: () => number,
     private readonly clockDate: (ms?: number) => Date,
     private readonly mcpBridgeHealthService: McpBridgeHealthService = new McpBridgeHealthService(),
-    private readonly logger: LoggerPort = nodeLogger
+    private readonly logger: LoggerPort = Logger
   ) {}
 
   // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@ import type { BeadId } from '../types/index.js';
 import type { ArtifactPaths } from './ArtifactPaths.js';
 import type { ConfigLoader } from './ConfigLoader.js';
 import type { EventStore } from './EventStore.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import type { PlanWriteSet } from './PlanWriteSet.js';
 import { nodeGitWorkingTreePort, type GitWorkingTreePort } from './GitWorkingTreePort.js';
 
@@ -19,13 +19,18 @@ export interface TransactionalStateValidation {
 }
 
 export class TransactionalStateGuard {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly configLoader: ConfigLoader,
     private readonly artifactPaths: ArtifactPaths,
     private readonly eventStore: EventStore,
     private readonly planWriteSet: PlanWriteSet,
-    private readonly git: GitWorkingTreePort = nodeGitWorkingTreePort
-  ) {}
+    private readonly git: GitWorkingTreePort = nodeGitWorkingTreePort,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   /**
    * Read-only variant of validateSuccess: performs the same structural checks
@@ -138,7 +143,7 @@ export class TransactionalStateGuard {
         ignoredWriteSetPaths,
         reason
       }).catch((error: unknown) => {
-        Logger.warn(Component.CORE, 'Failed to record transactional state rejection (ignored write set)', { beadId, stateId, error: String(error) });
+        this.logger.warn(Component.CORE, 'Failed to record transactional state rejection (ignored write set)', { beadId, stateId, error: String(error) });
       });
       return result;
     }
@@ -194,7 +199,7 @@ export class TransactionalStateGuard {
       unapprovedPaths,
       reason
     }).catch((error: unknown) => {
-      Logger.warn(Component.CORE, 'Failed to record transactional state rejection (unapproved paths)', { beadId, stateId, error: String(error) });
+      this.logger.warn(Component.CORE, 'Failed to record transactional state rejection (unapproved paths)', { beadId, stateId, error: String(error) });
     });
 
     return result;

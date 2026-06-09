@@ -25,12 +25,12 @@ import { EnvVars } from '../constants/infra.js';
 import type { BeadStatus } from '../constants/domain.js';
 import type { BeadsPort, BeadCompletionPort, WorktreePort, TeammateSpawner } from './OrchestrationPorts.js';
 import type { Bead } from '../types/index.js';
-import { nodeLogger, type LoggerPort } from './Logger.js';
-import { ContractRegistrySet, createGlobalProxyRegistrySet, createFreshRegistrySet, buildRegistryPort } from './ContractRegistrySet.js';
+import { LoggerService, type LoggerPort } from './Logger.js';
+import { ContractRegistrySet, createFreshRegistrySet, buildRegistryPort } from './ContractRegistrySet.js';
 import { McpBridgeHealthService } from './McpBridgeHealthService.js';
 
 export type { LoggerPort };
-export { ContractRegistrySet, createGlobalProxyRegistrySet, createFreshRegistrySet, buildRegistryPort };
+export { ContractRegistrySet, createFreshRegistrySet, buildRegistryPort };
 export { McpBridgeHealthService };
 // WorktreeResult is defined in OrchestrationPorts; re-exported here for
 // backward compatibility with existing callers (git.ts, extension.ts, etc.)
@@ -327,22 +327,23 @@ export function assembleRuntimeServices(
   // ── amq0.3 per-runtime ports ──────────────────────────────────────────────
   // Create one instance per runtime so isolated harness instances, tests, and
   // replay scenarios each get independent state.
-  const logger: LoggerPort = nodeLogger;
-  // Create a ContractRegistrySet that proxies the process-wide public boundary
-  // singletons (verifier/skeletons/projections). Reads/writes pass through to
-  // the global singletons so callbacks registered at any time (module load,
-  // loadCoordinatorWorkerExtensions, etc.) are immediately visible to core.
-  // Tests use createFreshRegistrySet() to get an isolated set without globals.
-  const registrySet: ContractRegistrySet = createGlobalProxyRegistrySet();
+  const logger: LoggerPort = new LoggerService();
+  // Create a FRESH per-runtime ContractRegistrySet. After assembleRuntimeServices
+  // returns, the composition root calls registrySet.drainFromGlobals() once all
+  // consumer extensions have loaded (i.e. after loadCoordinatorWorkerExtensions).
+  // Until drain, the set is empty; after drain it holds a one-time snapshot of the
+  // global registrations. Two runtimes built this way are independent — registrations
+  // in runtime A are never visible in runtime B.
+  const registrySet: ContractRegistrySet = createFreshRegistrySet();
   // Per-runtime MCP bridge health cache — no shared module-level state.
   const mcpBridgeHealthService = new McpBridgeHealthService();
   // ─────────────────────────────────────────────────────────────────────────
 
-  const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot);
-  const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot);
-  const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot);
+  const configLoader = coreOverride?.configLoader ?? new ConfigLoader(env, projectRoot, logger);
+  const eventStore = coreOverride?.eventStore ?? new EventStore(configLoader, undefined, env, projectRoot, undefined, logger);
+  const observability = coreOverride?.observability ?? new Observability(configLoader, env, projectRoot, undefined, logger);
   const flowManager = new FlowManager();
-  const domainEventEmitter = new DomainEventEmitter(eventStore);
+  const domainEventEmitter = new DomainEventEmitter(eventStore, logger);
   const domainEvents = new DomainEvents(domainEventEmitter);
   const shellCommandParser = new ShellCommandParser();
 
@@ -376,14 +377,14 @@ export function assembleRuntimeServices(
     protocolInjector: new ProtocolInjector(),
     protocolParser: new ProtocolParser(),
     requiredToolResolver,
-    scheduler: new Scheduler(configLoader, flowManager),
+    scheduler: new Scheduler(configLoader, flowManager, logger),
     mediator: new Mediator(domainEvents),
-    telemetryStore: new TelemetryStore(),
+    telemetryStore: new TelemetryStore(logger),
     artifactPaths,
     planWriteSet,
-    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot, artifactPaths),
+    fileMutationPolicy: new FileAccessPolicy(eventStore, shellCommandParser, planWriteSet, env, projectRoot, artifactPaths, undefined, logger),
     shellCommandParser,
-    transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet),
+    transactionalStateGuard: new TransactionalStateGuard(configLoader, artifactPaths, eventStore, planWriteSet, undefined, logger),
     toolCallPathFactory: new ToolCallPathFactory(),
     projectToolBackpressure,
     apiAddress: plugins.apiAddress,

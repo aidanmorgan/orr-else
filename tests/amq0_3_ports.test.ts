@@ -460,6 +460,144 @@ describe('amq0.3 SELF-VERIFY — LoggerPort injection is load-bearing', () => {
   });
 });
 
+// ── SELF-VERIFY: two assembleRuntimeServices runtimes are fully independent ────
+//
+// This is the empirical success check for amq0.3:
+//  1. logger instances are independent (not the shared nodeLogger singleton)
+//  2. a verifier registered in runtime A's registrySet is NOT visible in runtime B's
+//  3. MCP health cache is per-runtime (resetting A does not affect B)
+//
+// This test MUST FAIL on the cosmetic (proxy/global-alias) code and PASS after
+// the genuine per-runtime instance-scoping is in place.
+
+import { verifier as globalVerifier } from '../src/contract.js';
+
+describe('amq0.3 SELF-VERIFY — two runtimes are fully independent', () => {
+  function makeMinimalPlugins() {
+    const makePlugin = (name: string) => ({ name, tools: [] });
+    const fakeTool = (name: string) => ({ name, execute: async () => ({}) });
+    const bdPlugin = {
+      name: 'bd',
+      invalidateCache: () => {},
+      tools: [
+        fakeTool(PluginToolName.BD_READY),
+        fakeTool(PluginToolName.BD_LIST),
+        fakeTool(PluginToolName.BD_GET_BEAD),
+        fakeTool(PluginToolName.BD_CLAIM),
+        fakeTool(PluginToolName.BD_RELEASE),
+        fakeTool(PluginToolName.BD_UPDATE_STATUS),
+      ]
+    };
+    const gitPlugin = {
+      name: 'git',
+      tools: [fakeTool(PluginToolName.CREATE_WORKTREE)]
+    };
+    return {
+      bd: bdPlugin as any,
+      git: gitPlugin,
+      mailbox: makePlugin('mailbox'),
+      quality: makePlugin('quality'),
+      signaling: makePlugin('signaling'),
+      meta: makePlugin('meta'),
+      teammateSpawner: {} as any,
+      beadsClientInvalidateCache: () => {},
+      apiAddress: {}
+    };
+  }
+
+  it('(1) logger instances are distinct — not the shared nodeLogger singleton', () => {
+    const s1 = assembleRuntimeServices(makeMinimalPlugins() as any);
+    const s2 = assembleRuntimeServices(makeMinimalPlugins() as any);
+    // Each runtime gets its own LoggerService, not a shared reference
+    expect(s1.logger).not.toBe(s2.logger);
+    // Both have the required methods
+    expect(typeof s1.logger.info).toBe('function');
+    expect(typeof s2.logger.info).toBe('function');
+  });
+
+  it('(2) registrySet is per-runtime: registering in A is NOT visible in B', () => {
+    const s1 = assembleRuntimeServices(makeMinimalPlugins() as any);
+    const s2 = assembleRuntimeServices(makeMinimalPlugins() as any);
+
+    // Register a verifier into s1's per-runtime set only
+    s1.registrySet.verifier.register('tool_in_A_only', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
+    s1.registrySet.projections.register('art:proj_in_A_only', { selectors: ['foo'], description: 'a-only' });
+    s1.registrySet.skeletons.register('.a_only', (src) => `a_only:${src.length}`);
+
+    // s2 must NOT see s1's registrations (independent fresh sets, not a global proxy)
+    expect(s1.registrySet.verifier.has('tool_in_A_only')).toBe(true);
+    expect(s2.registrySet.verifier.has('tool_in_A_only')).toBe(false);
+    expect(s1.registrySet.projections.has('art:proj_in_A_only')).toBe(true);
+    expect(s2.registrySet.projections.has('art:proj_in_A_only')).toBe(false);
+    expect(s1.registrySet.skeletons.has('.a_only')).toBe(true);
+    expect(s2.registrySet.skeletons.has('.a_only')).toBe(false);
+  });
+
+  it('(2b) drainFromGlobals() copies global registrations once — then A and B stay independent', () => {
+    // Register something into the global boundary before creating runtimes
+    const globalTestKey = '__amq0_3_drain_test__';
+    if (!globalVerifier.has(globalTestKey)) {
+      globalVerifier.register(globalTestKey, () => ({ verdict: VerifyVerdict.PASS, reasons: ['global'] }));
+    }
+
+    const s1 = assembleRuntimeServices(makeMinimalPlugins() as any);
+    const s2 = assembleRuntimeServices(makeMinimalPlugins() as any);
+
+    // Before drain: neither runtime sees the global registration (fresh empty sets)
+    expect(s1.registrySet.verifier.has(globalTestKey)).toBe(false);
+    expect(s2.registrySet.verifier.has(globalTestKey)).toBe(false);
+
+    // Drain s1 only
+    s1.registrySet.drainFromGlobals();
+
+    // After drain: s1 sees the global registration, s2 still does NOT
+    expect(s1.registrySet.verifier.has(globalTestKey)).toBe(true);
+    expect(s2.registrySet.verifier.has(globalTestKey)).toBe(false);
+
+    // Post-drain: registering into s1 is still NOT visible in s2
+    s1.registrySet.verifier.register('post_drain_A', () => ({ verdict: VerifyVerdict.PASS, reasons: [] }));
+    expect(s2.registrySet.verifier.has('post_drain_A')).toBe(false);
+  });
+
+  it('(3) MCP health cache is per-runtime: resetting A does not affect B', async () => {
+    const s1 = assembleRuntimeServices(makeMinimalPlugins() as any);
+    const s2 = assembleRuntimeServices(makeMinimalPlugins() as any);
+
+    // Give each runtime a different probe result
+    s1.mcpBridgeHealthService.setProbe(async () => ({ ok: false, errorMessage: 'bridge-A-fail', errorType: 'Error' }));
+    s2.mcpBridgeHealthService.setProbe(async () => ({ ok: true }));
+
+    const r1 = vi.fn(async () => {});
+    const r2 = vi.fn(async () => {});
+
+    const h1 = await s1.mcpBridgeHealthService.check(['tool_x'], r1);
+    const h2 = await s2.mcpBridgeHealthService.check(['tool_x'], r2);
+
+    expect(h1.healthy).toBe(false);
+    expect(h2.healthy).toBe(true);
+    expect(r1).toHaveBeenCalledTimes(1); // A recorded a failure event
+    expect(r2).not.toHaveBeenCalled();   // B was healthy, no event
+
+    // Reset A's cache
+    s1.mcpBridgeHealthService.resetCache();
+
+    // After reset, A re-probes (and records again), B is still cached healthy
+    await s1.mcpBridgeHealthService.check(['tool_x'], r1);
+    await s2.mcpBridgeHealthService.check(['tool_x'], r2);
+
+    expect(r1).toHaveBeenCalledTimes(2); // A re-probed
+    expect(r2).not.toHaveBeenCalled();   // B still cached, no re-probe
+  });
+
+  it('(core has no process-global logger) assembleRuntimeServices logger is NOT the nodeLogger singleton', async () => {
+    // Import nodeLogger to compare identity
+    const { nodeLogger } = await import('../src/core/Logger.js');
+    const s = assembleRuntimeServices(makeMinimalPlugins() as any);
+    // The per-runtime logger must be a FRESH instance, not the module-global
+    expect(s.logger).not.toBe(nodeLogger);
+  });
+});
+
 // ── 10. buildRegistryPort last-wins semantics ─────────────────────────────────
 
 describe('amq0.3 buildRegistryPort — last-wins semantics', () => {

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { BeadId } from '../types/index.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { resolveProjectFrom } from './Paths.js';
 import { DomainEventName } from '../constants/domain.js';
@@ -13,6 +13,7 @@ const existsSync = fs.existsSync;
 
 export class WorklogManager {
   private readonly baseDir: string;
+  private readonly logger: LoggerPort;
 
   /**
    * Worklogs are an operational log artifact resolved against the injected
@@ -23,8 +24,10 @@ export class WorklogManager {
   constructor(
     private readonly eventStore: EventStore,
     projectRoot: string,
-    baseDir: string = OperationalLogPath.WORKLOG_DIR
+    baseDir: string = OperationalLogPath.WORKLOG_DIR,
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.baseDir = path.isAbsolute(baseDir) ? baseDir : resolveProjectFrom(projectRoot, baseDir);
     if (!existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
@@ -55,7 +58,7 @@ ${handover || 'N/A'}
     try {
       await appendFileAsync(filePath, entry);
     } catch (error) {
-      Logger.error(Component.WORKLOG, `Failed to write worklog for ${beadId}`, { error: String(error) });
+      this.logger.error(Component.WORKLOG, `Failed to write worklog for ${beadId}`, { error: String(error) });
       return;
     }
     await this.eventStore.record(DomainEventName.WORKLOG_ENTRY_APPENDED, {
@@ -80,7 +83,7 @@ ${handover || 'N/A'}
       const match = latest.match(/### Handover \/ Worklog\n([\s\S]*)/);
       return match ? match[1].trim() : undefined;
     } catch (error) {
-      Logger.error(Component.WORKLOG, `Failed to read worklog for ${beadId}`, { error: String(error) });
+      this.logger.error(Component.WORKLOG, `Failed to read worklog for ${beadId}`, { error: String(error) });
       return undefined;
     }
   }

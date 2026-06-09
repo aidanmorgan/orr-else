@@ -224,7 +224,10 @@ export async function runConfigExplain(opts: ExplainOptions): Promise<void> {
   // Admission errors are still surfaced via the caught exception below.
   Logger.configure('error');
 
-  const loader = new ConfigLoader(undefined, projectRoot);
+  // Pass the global Logger so Logger.configure('error') above suppresses its
+  // output — without this, ConfigLoader's default logger is a fresh instance
+  // that does not inherit the 'error' level setting.
+  const loader = new ConfigLoader(undefined, projectRoot, Logger);
 
   let config: HarnessConfig;
   try {

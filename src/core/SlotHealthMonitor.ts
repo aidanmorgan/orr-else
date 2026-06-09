@@ -12,7 +12,7 @@
  */
 
 import { asBeadId } from '../types/index.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { SignalingServer } from './SignalingServer.js';
 import { BeadStatus, DomainEventName, EventName, PluginToolName, QuarantineReason, TERMINAL_BEAD_STATUSES, TeammateEventType } from '../constants/domain.js';
 import { AgentFailureSummary, Component, SupervisorDefaults } from '../constants/infra.js';
@@ -120,8 +120,13 @@ export class SlotHealthMonitor {
       budget: RetryBudget
     ) => ReturnType<typeof routeFailure>,
     private readonly harnessRestartEvent: () => Promise<string>,
-    private readonly isSchedulingPaused: () => boolean
-  ) {}
+    private readonly isSchedulingPaused: () => boolean,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
+
+  private readonly logger: LoggerPort;
 
   /** Expose releasedThisTick for recording in slot-health snapshot. */
   addReleasedThisTick(beadId: string): void {
@@ -316,9 +321,9 @@ export class SlotHealthMonitor {
       if (isUnderfilled && this.isSchedulingPaused()) {
         // Silently absorb the digest change.
       } else if (isUnderfilled) {
-        Logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
+        this.logger.warn(Component.SUPERVISOR, 'Teammate slot health check found underfilled or stale work', details);
       } else {
-        Logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
+        this.logger.info(Component.SUPERVISOR, 'Teammate slot health check passed', details);
       }
     }
 
@@ -392,7 +397,7 @@ export class SlotHealthMonitor {
 
     await this.eventStore.record(DomainEventName.TEAMMATE_CAPACITY_UNDERFILLED, eventData).catch(() => {});
     if (this.isSchedulingPaused()) return;
-    Logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
+    this.logger.warn(Component.SUPERVISOR, 'Teammate capacity underfilled', eventData);
   }
 
   // ---------------------------------------------------------------------------
@@ -443,7 +448,7 @@ export class SlotHealthMonitor {
       const lastHeartbeatAt = lastHeartbeatMs > 0 ? this.clock.date(lastHeartbeatMs).toISOString() : undefined;
       const stateId = this.latestStateForBead(beadId, heartbeatDetails);
 
-      Logger.warn(Component.SUPERVISOR, 'Heartbeat-only live gap declared orphaned; suppressing', {
+      this.logger.warn(Component.SUPERVISOR, 'Heartbeat-only live gap declared orphaned; suppressing', {
         beadId,
         workerIds,
         lastHeartbeatAt,
@@ -464,7 +469,7 @@ export class SlotHealthMonitor {
       this.heartbeatOnlyGapFirstSeenMs.delete(beadId);
 
       await this.beadsPort.release(beadId).catch(error => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release orphaned heartbeat-only gap bead', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to release orphaned heartbeat-only gap bead', { beadId, error: String(error) });
       });
     }
   }
@@ -513,7 +518,7 @@ export class SlotHealthMonitor {
         this.finalBlockedPollCounts.set(beadId, newCount);
 
         if (newCount < FINAL_BLOCKED_CONFIRM_POLLS) {
-          Logger.info(Component.SUPERVISOR, 'Final-blocked pane candidate; awaiting temporal confirmation', {
+          this.logger.info(Component.SUPERVISOR, 'Final-blocked pane candidate; awaiting temporal confirmation', {
             beadId,
             pollCount: newCount,
             requiredPolls: FINAL_BLOCKED_CONFIRM_POLLS,
@@ -547,7 +552,7 @@ export class SlotHealthMonitor {
         ].join(' ');
         const evidence = `${summary}\n\nPane snapshot (reasoning redacted):\n${paneSnapshot}`;
 
-        Logger.warn(Component.SUPERVISOR, 'Final-blocked pane detected; recovering bead immediately', {
+        this.logger.warn(Component.SUPERVISOR, 'Final-blocked pane detected; recovering bead immediately', {
           beadId,
           stateId,
           category: blockedCategory,
@@ -575,7 +580,7 @@ export class SlotHealthMonitor {
               reason: 'Worker process loss retry budget exhausted — final-blocked'
             });
           } else {
-            Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
+            this.logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
           }
         } else {
           const finalBlockedRestartKey = `supervisor-final-blocked-${beadId}-${stateId}-${now2}`;
@@ -592,10 +597,10 @@ export class SlotHealthMonitor {
         }
 
         await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
-          Logger.warn(Component.SUPERVISOR, 'Unable to terminate final-blocked teammate panes', { beadId, error: String(error) });
+          this.logger.warn(Component.SUPERVISOR, 'Unable to terminate final-blocked teammate panes', { beadId, error: String(error) });
         });
         await this.beadsPort.release(beadId).catch((error: unknown) => {
-          Logger.warn(Component.SUPERVISOR, 'Unable to release final-blocked Bead after teammate termination', { beadId, error: String(error) });
+          this.logger.warn(Component.SUPERVISOR, 'Unable to release final-blocked Bead after teammate termination', { beadId, error: String(error) });
         });
         this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
       }
@@ -648,7 +653,7 @@ export class SlotHealthMonitor {
             reason: 'Worker process loss retry budget exhausted — no-progress timeout'
           });
         } else {
-          Logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
+          this.logger.warn(Component.SUPERVISOR, 'Unable to fetch bead for quarantine after budget exhaustion; skipping quarantine entry', { beadId });
         }
       } else {
         const noProgressRestartKey = `supervisor-no-progress-${beadId}-${stateId}-${now}`;
@@ -665,10 +670,10 @@ export class SlotHealthMonitor {
       }
 
       await this.factory.terminateTeammatesForBead(beadId, summary).catch(error => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to terminate inactive teammate panes', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to terminate inactive teammate panes', { beadId, error: String(error) });
       });
       await this.beadsPort.release(beadId).catch((error: unknown) => {
-        Logger.warn(Component.SUPERVISOR, 'Unable to release inactive Bead after teammate termination', { beadId, error: String(error) });
+        this.logger.warn(Component.SUPERVISOR, 'Unable to release inactive Bead after teammate termination', { beadId, error: String(error) });
       });
       this.markBeadExited(beadId, { preserveInactiveRestartBackoff: true });
     }

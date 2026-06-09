@@ -1,5 +1,5 @@
 import { EventStore } from './EventStore.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { DomainEventName } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 
@@ -13,8 +13,11 @@ export type DomainEventHook = (data: unknown) => Promise<void> | void;
 
 export class DomainEventEmitter {
   private readonly handlers = new Map<string, DomainEventHook[]>();
+  private readonly logger: LoggerPort;
 
-  constructor(private readonly eventStore: EventStore) {}
+  constructor(private readonly eventStore: EventStore, logger?: LoggerPort) {
+    this.logger = logger ?? Logger;
+  }
 
   public registerHook(event: DomainEvent, handler: DomainEventHook): void {
     const eventHandlers = this.handlers.get(event) || [];
@@ -27,7 +30,7 @@ export class DomainEventEmitter {
   }
 
   public async emitEvent(event: DomainEvent, data: unknown): Promise<void> {
-    Logger.debug(Component.CORE, `Emitting event: ${event}`, { data });
+    this.logger.debug(Component.CORE, `Emitting event: ${event}`, { data });
     await this.eventStore.record(event, data);
     await Promise.all((this.handlers.get(event) || []).map(handler => handler(data)));
   }

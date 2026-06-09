@@ -11,13 +11,20 @@
  *   - Restore the capacity-pause state from SCHEDULING_PAUSED events.
  */
 
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { DomainEventName, TeammateEventDecisionAction, TeammateEventType } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
 import type { DomainEvent, ProjectionCapableStore } from './EventStoreTypes.js';
 
 export class SupervisorRecoveryService {
-  constructor(private readonly eventStore: ProjectionCapableStore) {}
+  private readonly logger: LoggerPort;
+
+  constructor(
+    private readonly eventStore: ProjectionCapableStore,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   /**
    * Rebuilds `processedSignals` from durable TEAMMATE_EVENT records so that
@@ -38,10 +45,10 @@ export class SupervisorRecoveryService {
         count++;
       }
       if (count > 0) {
-        Logger.info(Component.SUPERVISOR, 'Rebuilt processed-signal idempotency set from event store', { rebuilt: count });
+        this.logger.info(Component.SUPERVISOR, 'Rebuilt processed-signal idempotency set from event store', { rebuilt: count });
       }
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to rebuild processed-signal set from event store; idempotency layer is in-memory only this session', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Unable to rebuild processed-signal set from event store; idempotency layer is in-memory only this session', { error: String(error) });
     }
     return rebuilt;
   }
@@ -88,7 +95,7 @@ export class SupervisorRecoveryService {
       for (const key of unacknowledgedKeys) {
         const intentEvent = intentsByKey.get(key)!;
         const intentData = intentEvent.data || {};
-        Logger.warn(Component.SUPERVISOR, 'Reconciling unacknowledged signal intent on startup', {
+        this.logger.warn(Component.SUPERVISOR, 'Reconciling unacknowledged signal intent on startup', {
           idempotencyKey: key,
           beadId: intentData.beadId,
           type: intentData.type,
@@ -105,10 +112,10 @@ export class SupervisorRecoveryService {
       }
 
       if (unacknowledgedKeys.length > 0) {
-        Logger.info(Component.SUPERVISOR, 'Signal intent reconciliation complete', { unacknowledgedCount: unacknowledgedKeys.length });
+        this.logger.info(Component.SUPERVISOR, 'Signal intent reconciliation complete', { unacknowledgedCount: unacknowledgedKeys.length });
       }
     } catch (error) {
-      Logger.warn(Component.SUPERVISOR, 'Unable to reconcile unacknowledged signal intents', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Unable to reconcile unacknowledged signal intents', { error: String(error) });
     }
   }
 
@@ -118,14 +125,14 @@ export class SupervisorRecoveryService {
    */
   async restoreCapacityPauseFromStore(clockNow: () => number): Promise<{ pauseUntilMs: number; reason: string } | undefined> {
     const latestPausedEvent = await this.eventStore.latestEventByType(DomainEventName.SCHEDULING_PAUSED).catch((error: unknown) => {
-      Logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
+      this.logger.warn(Component.SUPERVISOR, 'Unable to restore capacity pause from event store', { error: String(error) });
       return undefined;
     });
     const pauseUntilMs = Date.parse(String(latestPausedEvent?.data?.pauseUntil || ''));
     if (!Number.isFinite(pauseUntilMs) || pauseUntilMs <= clockNow()) return undefined;
 
     const reason = String(latestPausedEvent?.data?.reason || 'Scheduling paused');
-    Logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
+    this.logger.warn(Component.SUPERVISOR, 'Restored scheduling pause from event store', {
       pauseUntil: new Date(pauseUntilMs).toISOString(),
       reason
     });

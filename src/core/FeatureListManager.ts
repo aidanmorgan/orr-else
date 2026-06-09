@@ -3,7 +3,7 @@ import * as path from 'path';
 import { EventStore } from './EventStore.js';
 import { DomainEventName, FeatureStatus } from '../constants/domain.js';
 import { Component } from '../constants/infra.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 
 export interface Feature {
   id: string;
@@ -14,11 +14,14 @@ export interface Feature {
 
 export class FeatureListManager {
   private filePath: string;
+  private readonly logger: LoggerPort;
 
   constructor(
     worktreePath: string,
-    private readonly eventStore: EventStore
+    private readonly eventStore: EventStore,
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.filePath = path.join(worktreePath, 'feature_list.json');
   }
 
@@ -27,7 +30,7 @@ export class FeatureListManager {
     try {
       return JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
     } catch (error) {
-      Logger.warn(Component.CORE, 'Failed to parse feature list file', { filePath: this.filePath, error: String(error) });
+      this.logger.warn(Component.CORE, 'Failed to parse feature list file', { filePath: this.filePath, error: String(error) });
       return [];
     }
   }

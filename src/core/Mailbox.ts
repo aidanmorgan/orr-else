@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { v7 as uuidv7 } from 'uuid';
 import { resolveProjectFrom } from './Paths.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { EventStore } from './EventStore.js';
 import { DomainEventName, MailboxMessageType } from '../constants/domain.js';
 import { Component, MailboxDefaults } from '../constants/infra.js';
@@ -65,11 +65,15 @@ export interface MailboxFetchResult {
 export class NativeMailbox {
   private readonly baseDir: string;
 
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly eventStore: EventStore,
     baseDir: string = MailboxDefaults.DIR,
-    projectRoot: string = process.cwd()
+    projectRoot: string = process.cwd(),
+    logger?: LoggerPort
   ) {
+    this.logger = logger ?? Logger;
     this.baseDir = path.isAbsolute(baseDir) ? baseDir : resolveProjectFrom(projectRoot, baseDir);
     if (!existsSync(this.baseDir)) {
       fs.mkdirSync(this.baseDir, { recursive: true });
@@ -88,7 +92,7 @@ export class NativeMailbox {
     try {
       await writeFileAsync(filePath, JSON.stringify(message, null, 2));
     } catch (error) {
-      Logger.error(Component.CORE, `Failed to send mailbox message`, { to: msg.to, error: String(error) });
+      this.logger.error(Component.CORE, `Failed to send mailbox message`, { to: msg.to, error: String(error) });
       throw error;
     }
     await this.eventStore.record(DomainEventName.MAILBOX_MESSAGE_SENT, {
@@ -114,7 +118,7 @@ export class NativeMailbox {
 
       return messages.filter(m => m.to === to);
     } catch (error) {
-      Logger.error(Component.CORE, `Failed to read mailbox messages`, { to, error: String(error) });
+      this.logger.error(Component.CORE, `Failed to read mailbox messages`, { to, error: String(error) });
       return [];
     }
   }
@@ -150,7 +154,7 @@ export class NativeMailbox {
       const message = JSON.parse(content) as MailboxMessage;
       return { messageId: id, found: true, message };
     } catch (error) {
-      Logger.error(Component.CORE, `Failed to fetch mailbox message`, { id, error: String(error) });
+      this.logger.error(Component.CORE, `Failed to fetch mailbox message`, { id, error: String(error) });
       return { messageId: id, found: false };
     }
   }
@@ -162,7 +166,7 @@ export class NativeMailbox {
     try {
       await unlinkAsync(filePath);
     } catch (error) {
-      Logger.error(Component.CORE, `Failed to delete mailbox message`, { id, error: String(error) });
+      this.logger.error(Component.CORE, `Failed to delete mailbox message`, { id, error: String(error) });
       return;
     }
     await this.eventStore.record(DomainEventName.MAILBOX_MESSAGE_DELETED, {

@@ -7,9 +7,10 @@
  * The public boundary (`src/contract.ts`) exports process-wide singleton
  * registries for backward compatibility with consuming-project extensions
  * (e.g. cerdiwen calls `verifier.register(...)` at load). The production
- * runtime ContractRegistrySet is a live PROXY to those singletons — reads
- * and writes pass through transparently, so callbacks registered after startup
- * admission (e.g. by loadCoordinatorWorkerExtensions) are immediately visible.
+ * runtime ContractRegistrySet starts FRESH and is DRAINED from the global
+ * singletons at startup admission (after all extensions have loaded) via
+ * drainFromGlobals(). Thereafter core reads ONLY the per-runtime instance,
+ * never the global singletons — two runtimes are fully independent.
  *
  * Tests create FRESH registry sets with empty, standalone registries so they
  * need no global reset hooks.
@@ -54,6 +55,14 @@ export interface RegistryPort<Fn> {
  * Created once per `assembleRuntimeServices` call and threaded through to
  * core consumers (VerifierGate, ArtifactQuery, PathContext). Tests create
  * fresh ContractRegistrySets without needing global reset hooks.
+ *
+ * Production usage pattern:
+ *   1. assembleRuntimeServices() creates a fresh (empty) registrySet.
+ *   2. loadCoordinatorWorkerExtensions() imports consumer modules which call
+ *      verifier.register() / skeletons.register() / projections.register() on
+ *      the GLOBAL singletons.
+ *   3. registrySet.drainFromGlobals() copies all current global registrations
+ *      into this per-runtime set. Thereafter core reads ONLY this set.
  */
 export class ContractRegistrySet {
   constructor(
@@ -61,6 +70,38 @@ export class ContractRegistrySet {
     public readonly skeletons: RegistryPort<SkeletonExtractor>,
     public readonly projections: RegistryPort<ProjectionDef>
   ) {}
+
+  /**
+   * One-time drain: copy all registrations currently in the process-wide
+   * global singletons (verifier / skeletons / projections from src/contract.ts)
+   * into THIS per-runtime set. Existing entries in this set are NOT overwritten
+   * (first-registration wins within the set), but new names from the globals are
+   * added.
+   *
+   * Call ONCE after loadCoordinatorWorkerExtensions() has finished so that
+   * consumer callbacks registered during extension load are captured here.
+   * After this call, core reads ONLY this set and never touches the globals.
+   */
+  drainFromGlobals(): void {
+    for (const name of globalVerifier.names()) {
+      if (!this.verifier.has(name)) {
+        const fn = globalVerifier.get(name);
+        if (fn !== undefined) this.verifier.register(name, fn);
+      }
+    }
+    for (const name of globalSkeletons.names()) {
+      if (!this.skeletons.has(name)) {
+        const fn = globalSkeletons.get(name);
+        if (fn !== undefined) this.skeletons.register(name, fn);
+      }
+    }
+    for (const name of globalProjections.names()) {
+      if (!this.projections.has(name)) {
+        const fn = globalProjections.get(name);
+        if (fn !== undefined) this.projections.register(name, fn);
+      }
+    }
+  }
 }
 
 /**
@@ -115,14 +156,12 @@ export function createFreshRegistrySet(): ContractRegistrySet {
  * Create a ContractRegistrySet that PROXIES the process-wide public boundary
  * singletons (verifier / skeletons / projections from src/contract.ts).
  *
- * All reads and writes pass through to the global singleton, so:
- *  - callbacks registered by consuming extensions (e.g. cerdiwen) at module
- *    load are immediately visible — no timing issue with snapshot-at-creation;
- *  - callbacks registered after startup (e.g. loadCoordinatorWorkerExtensions)
- *    are also visible without a separate sync step.
+ * DEPRECATED in favour of createFreshRegistrySet() + drainFromGlobals().
+ * Two runtimes built with this function share the global singleton state,
+ * which means registrations in one runtime are visible in the other.
  *
- * This is the instance used by `assembleRuntimeServices` in production.
- * Tests use `createFreshRegistrySet()` for isolation.
+ * Retained only for test code that explicitly wants the global proxy.
+ * assembleRuntimeServices no longer uses this function.
  */
 export function createGlobalProxyRegistrySet(): ContractRegistrySet {
   return new ContractRegistrySet(

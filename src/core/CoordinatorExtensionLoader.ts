@@ -20,7 +20,7 @@
 
 import { resolveWorkerExtensionPaths } from './WorkerResourceResolver.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { nodeLogger as Logger } from './Logger.js'
+import { Logger, type LoggerPort } from './Logger.js'
 import { Component } from '../constants/infra.js';
 
 /** A dynamic-import seam so tests can inject a fake loader. */
@@ -48,7 +48,8 @@ export async function loadCoordinatorWorkerExtensions(
   config: HarnessConfig,
   projectRoot: string,
   primaryExtensionPath: string,
-  importer: ExtensionImporter = defaultImporter
+  importer: ExtensionImporter = defaultImporter,
+  logger: LoggerPort = Logger
 ): Promise<CoordinatorExtensionLoadResult> {
   const loaded: string[] = [];
   const failed: Array<{ path: string; error: string }> = [];
@@ -63,13 +64,13 @@ export async function loadCoordinatorWorkerExtensions(
     try {
       await importer(resolvedPath);
       loaded.push(resolvedPath);
-      Logger.info(Component.ORR_ELSE, 'Coordinator loaded worker extension (verify() callbacks registered in gate process)', {
+      logger.info(Component.ORR_ELSE, 'Coordinator loaded worker extension (verify() callbacks registered in gate process)', {
         path: resolvedPath
       });
     } catch (error) {
       const message = String(error);
       failed.push({ path: resolvedPath, error: message });
-      Logger.warn(Component.ORR_ELSE, 'Coordinator failed to load a worker extension (verify() callbacks for it will be absent in the gate process)', {
+      logger.warn(Component.ORR_ELSE, 'Coordinator failed to load a worker extension (verify() callbacks for it will be absent in the gate process)', {
         path: resolvedPath,
         error: message
       });

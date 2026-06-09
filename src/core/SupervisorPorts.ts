@@ -58,7 +58,7 @@ export interface SupervisorServices {
   mcpBridgeHealthService?: McpBridgeHealthService;
   /**
    * Per-runtime logger port (amq0.3).
-   * Optional for backward compat; defaults to nodeLogger when not supplied.
+   * Optional; defaults to a fresh LoggerService when not supplied.
    */
   logger?: LoggerPort;
 }

@@ -11,7 +11,7 @@
  * pi-experiment-amq0.17: extracted from RetentionCleanup; pass-through deleted.
  */
 
-import { nodeLogger as Logger } from '../Logger.js'
+import { Logger, type LoggerPort } from '../Logger.js'
 import { Component, OperationalArtifactPath } from '../../constants/infra.js';
 import { resolveProjectFrom } from '../Paths.js';
 import {
@@ -56,13 +56,14 @@ export interface RetentionServiceEventPort extends RetentionEventRecorder {
 }
 
 /**
- * Injected log adapter so the scanner/compactor don't touch the Logger singleton.
+ * Injected log adapter so the scanner/compactor receive a plain function
+ * rather than a direct Logger reference.
  */
-function makeLogAdapter() {
+function makeLogAdapter(logger: LoggerPort) {
   return (level: 'debug' | 'warn' | 'info', msg: string, meta?: Record<string, unknown>) => {
-    if (level === 'debug') Logger.debug(Component.RETENTION, msg, meta);
-    else if (level === 'warn') Logger.warn(Component.RETENTION, msg, meta);
-    else Logger.info(Component.RETENTION, msg, meta);
+    if (level === 'debug') logger.debug(Component.RETENTION, msg, meta);
+    else if (level === 'warn') logger.warn(Component.RETENTION, msg, meta);
+    else logger.info(Component.RETENTION, msg, meta);
   };
 }
 
@@ -73,13 +74,18 @@ function makeLogAdapter() {
  * to `run()`).
  */
 export class RetentionService {
+  private readonly logger: LoggerPort;
+
   constructor(
     private readonly projectRoot: string,
     private readonly clock: Clock,
     private readonly eventPort: RetentionServiceEventPort,
     private readonly config: ResolvedRetentionConfig,
-    private readonly liveBeadIds: (() => Set<string> | Promise<Set<string>>) | null
-  ) {}
+    private readonly liveBeadIds: (() => Set<string> | Promise<Set<string>>) | null,
+    logger?: LoggerPort
+  ) {
+    this.logger = logger ?? Logger;
+  }
 
   /**
    * Run retention cleanup across all configured harness areas.
@@ -87,7 +93,7 @@ export class RetentionService {
    */
   public async run(): Promise<RetentionCleanupResult> {
     const nowMs = this.clock.now();
-    const log = makeLogAdapter();
+    const log = makeLogAdapter(this.logger);
     const areas: RetentionAreaSummary[] = [];
 
     // Resolve live bead IDs once for the whole run.  Errors are caught here so
@@ -97,7 +103,7 @@ export class RetentionService {
       try {
         resolvedLiveBeadIds = await this.liveBeadIds();
       } catch (error) {
-        Logger.warn(Component.RETENTION, 'Failed to resolve live bead IDs for retention cleanup; tool-output area will be skipped', {
+        this.logger.warn(Component.RETENTION, 'Failed to resolve live bead IDs for retention cleanup; tool-output area will be skipped', {
           error: String(error)
         });
         // resolvedLiveBeadIds stays null — scanToolOutputArea will skip
@@ -159,7 +165,7 @@ export class RetentionService {
         nowMs,
         this.config.compactionWindowMs,
         resolvedLiveBeadIds,
-        (msg, meta) => Logger.warn(Component.RETENTION, msg, meta)
+        (msg, meta) => this.logger.warn(Component.RETENTION, msg, meta)
       );
 
       // MUST-FIX 2: After compaction rewrites primary JSONL files, the by-bead
@@ -167,10 +173,10 @@ export class RetentionService {
       await invalidateBeadIndexAfterCompaction(
         eventsDir,
         compactionSummary.compactedFileBasenames,
-        (msg, meta) => Logger.warn(Component.RETENTION, msg, meta)
+        (msg, meta) => this.logger.warn(Component.RETENTION, msg, meta)
       );
 
-      logCompactionResult(compactionSummary);
+      logCompactionResult(compactionSummary, this.logger);
     }
 
     const result: RetentionCleanupResult = {
@@ -189,7 +195,8 @@ export class RetentionService {
       this.config.diskHealthWarnBytes,
       this.config.maxToolCallFilesPerRun,
       this.config.maxToolCallDirsPerRun,
-      this.eventPort
+      this.eventPort,
+      this.logger
     );
 
     return result;
@@ -219,7 +226,7 @@ export class RetentionService {
           currentActionId: projection.activeActionId
         });
       } catch (error) {
-        Logger.debug(Component.RETENTION, 'Failed to project current transition for live bead; its tool-output dir will be fully preserved', {
+        this.logger.debug(Component.RETENTION, 'Failed to project current transition for live bead; its tool-output dir will be fully preserved', {
           beadId,
           error: String(error)
         });

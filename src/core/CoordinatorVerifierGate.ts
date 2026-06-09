@@ -43,7 +43,7 @@ import {
 } from './VerifierGate.js';
 import type { RequiredTool } from './domain/StateModels.js';
 import type { HarnessConfig } from './ConfigLoader.js';
-import { nodeLogger, type LoggerPort } from './Logger.js';
+import { Logger, type LoggerPort } from './Logger.js';
 import { Component } from '../constants/infra.js';
 import { asBeadId, asStateId, asActionId } from '../types/ids.js';
 import { checkRequiredToolsForCommandCollisions, type ToolSurfaceCatalog } from './ToolSurfaceCatalog.js';
@@ -205,8 +205,8 @@ export interface CoordinatorVerifierGateDeps {
    */
   registry?: VerifierGateOptions['registry'];
   /**
-   * Per-runtime logger port (amq0.3). Defaults to the process-wide nodeLogger
-   * for backward compat with callers that do not yet supply one.
+   * Per-runtime logger port (amq0.3). Defaults to a fresh LoggerService when not
+   * supplied (no process-wide singleton fallback).
    */
   logger?: LoggerPort;
 }
@@ -237,7 +237,7 @@ async function resolveArtifacts(
     });
     return resolution.artifactPaths ?? {};
   } catch (error) {
-    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: artifact path resolution failed (degrading to empty map)', {
+    (deps.logger ?? Logger).warn(Component.ORR_ELSE, 'Coordinator gate: artifact path resolution failed (degrading to empty map)', {
       beadId: input.beadId,
       stateId: input.stateId,
       actionId: input.actionId,
@@ -266,7 +266,7 @@ async function resolveWriteSet(
     });
     return resolution.allowedWriteSet ?? [];
   } catch (error) {
-    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: write-set resolution failed (degrading to empty array)', {
+    (deps.logger ?? Logger).warn(Component.ORR_ELSE, 'Coordinator gate: write-set resolution failed (degrading to empty array)', {
       beadId: input.beadId,
       stateId: input.stateId,
       error: String(error)
@@ -331,7 +331,7 @@ export async function evaluateCoordinatorGate(
     perTool: result.perTool,
     blocked: !result.pass
   }).catch((error: unknown) => {
-    (deps.logger ?? nodeLogger).warn(Component.ORR_ELSE, 'Coordinator gate: failed to record VERIFY_EVALUATED event', {
+    (deps.logger ?? Logger).warn(Component.ORR_ELSE, 'Coordinator gate: failed to record VERIFY_EVALUATED event', {
       beadId: input.beadId,
       stateId: input.stateId,
       actionId: input.actionId,
