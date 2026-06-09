@@ -102,6 +102,9 @@ import { computeConfigFingerprint } from './core/RouteEventContract.js';
 import { ArtifactQuery } from './core/ArtifactQuery.js';
 import { HarnessEventQuery } from './core/HarnessEventQuery.js';
 import { ToolOutputQuery } from './core/ToolOutputQuery.js';
+import { HarnessLogQuery } from './core/HarnessLogQuery.js';
+import { TmuxTranscriptQuery } from './core/TmuxTranscriptQuery.js';
+import { OtelSpanQuery } from './core/OtelSpanQuery.js';
 import { PathContext } from './core/PathContext.js';
 import { PathContextStatus } from './core/vocabulary.js';
 import type { ActiveRun } from './extension/SessionTypes.js';
@@ -372,6 +375,9 @@ interface ExtensionSession {
   queryArtifactToolRegistered: boolean;
   queryHarnessEventsToolRegistered: boolean;
   queryToolOutputToolRegistered: boolean;
+  queryHarnessLogsToolRegistered: boolean;
+  queryTmuxTranscriptsToolRegistered: boolean;
+  queryOtelSpansToolRegistered: boolean;
   readPathContextToolRegistered: boolean;
   preSignalAuditToolRegistered: boolean;
   piToolObserverRegistered: boolean;
@@ -424,6 +430,9 @@ function createExtensionSession(): ExtensionSession {
     queryArtifactToolRegistered: false,
     queryHarnessEventsToolRegistered: false,
     queryToolOutputToolRegistered: false,
+    queryHarnessLogsToolRegistered: false,
+    queryTmuxTranscriptsToolRegistered: false,
+    queryOtelSpansToolRegistered: false,
     readPathContextToolRegistered: false,
     preSignalAuditToolRegistered: false,
     piToolObserverRegistered: false,
@@ -3602,6 +3611,75 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
           textTail: Type.Optional(Type.Number({ description: 'Return the last N characters of the artifact file (capped at 24,000). Mutually exclusive with selector and schema.' }))
         }),
         execute: async (params: any) => toolOutputQuery.query(params)
+      }) as any);
+    }
+
+    if (!session.queryHarnessLogsToolRegistered) {
+      session.queryHarnessLogsToolRegistered = true;
+      const harnessLogQuery = new HarnessLogQuery(services.projectRoot);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_HARNESS_LOGS,
+        description:
+          'Query harness log files (.pi/logs/orr-else-*.log) in a bounded, progressive-disclosure way. ' +
+          'DEFAULT mode (excerpt:false) returns counts by level/component and latest line metadata — no raw messages. ' +
+          'EXCERPT mode (excerpt:true) returns truncated log messages (300 chars each, total capped at 24 KB). ' +
+          'FILTERS: fromTime/toTime (ISO 8601), level (info/warn/error/debug), component (exact), search (substring in message). ' +
+          'Malformed lines are counted as malformedCount — never inlined.',
+        parameters: Type.Object({
+          fromTime: Type.Optional(Type.String({ description: 'ISO 8601 lower bound — log lines at or after this time.' })),
+          toTime: Type.Optional(Type.String({ description: 'ISO 8601 upper bound — log lines at or before this time.' })),
+          level: Type.Optional(Type.String({ description: 'Filter by log level (info, warn, error, debug). Case-insensitive.' })),
+          component: Type.Optional(Type.String({ description: 'Filter by component field (exact match).' })),
+          search: Type.Optional(Type.String({ description: 'Filter by substring in message field (case-insensitive).' })),
+          excerpt: Type.Optional(Type.Boolean({ description: 'When true, return truncated message excerpts (300 chars, 24 KB cap). Default false: return counts only.' }))
+        }),
+        execute: async (params: any) => harnessLogQuery.query(params)
+      }) as any);
+    }
+
+    if (!session.queryTmuxTranscriptsToolRegistered) {
+      session.queryTmuxTranscriptsToolRegistered = true;
+      const tmuxTranscriptQuery = new TmuxTranscriptQuery(services.projectRoot);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_TMUX_TRANSCRIPTS,
+        description:
+          'Query tmux pane transcripts (.pi/logs/tmux/) in a bounded, progressive-disclosure way. ' +
+          'Reasoning blocks are redacted BEFORE truncation. Path traversal is rejected. ' +
+          'DEFAULT mode returns transcript metadata + at most 80 tail lines. ' +
+          'SEARCH mode (search param) returns at most 10 hits with 2 context lines each. ' +
+          'IDENTITY: paneId (e.g. "%42") reads that specific pane; latest:true reads the most recently recorded pane. ' +
+          'Missing or expired transcripts return a structured not_found response.',
+        parameters: Type.Object({
+          paneId: Type.Optional(Type.String({ description: 'Pane ID (e.g. "%42") to read the transcript for. Mutually exclusive with latest.' })),
+          latest: Type.Optional(Type.Boolean({ description: 'When true, read the most recently recorded pane transcript (current.path pointer). Mutually exclusive with paneId.' })),
+          search: Type.Optional(Type.String({ description: 'Search term — return up to 10 hits with 2 context lines each. Case-insensitive. When absent, tail mode is used.' }))
+        }),
+        execute: (params: any) => tmuxTranscriptQuery.query(params)
+      }) as any);
+    }
+
+    if (!session.queryOtelSpansToolRegistered) {
+      session.queryOtelSpansToolRegistered = true;
+      const otelSpanQuery = new OtelSpanQuery(services.projectRoot);
+      pi.registerTool(wrapRuntimeTool({
+        name: BuiltInToolName.QUERY_OTEL_SPANS,
+        description:
+          'Query OTEL trace spans (.pi/otel/*.jsonl) in a bounded, progressive-disclosure way. ' +
+          'DEFAULT mode (detail:false) returns summary stats: span count, error count, p50/p95/p99 durations, top slow span names. ' +
+          'DETAIL mode (detail:true) returns up to 100 spans with attributes truncated to 300 chars. ' +
+          'FILTERS: traceId (exact), spanName (substring), action (orr_else.action_id, substring), tool (span name or invocation ID, substring), status (ok/error), fromTime/toTime (ISO 8601). ' +
+          'Malformed/rotated records are counted, never cause the query to fail.',
+        parameters: Type.Object({
+          traceId: Type.Optional(Type.String({ description: 'Filter by trace ID (exact match).' })),
+          spanName: Type.Optional(Type.String({ description: 'Filter by span name (substring, case-insensitive).' })),
+          action: Type.Optional(Type.String({ description: 'Filter by orr_else.action_id attribute (substring).' })),
+          tool: Type.Optional(Type.String({ description: 'Filter by span name or orr_else.tool_invocation_id attribute (substring).' })),
+          status: Type.Optional(Type.String({ description: 'Filter by span status: "ok" or "error".' })),
+          fromTime: Type.Optional(Type.String({ description: 'ISO 8601 lower bound — spans starting at or after this time.' })),
+          toTime: Type.Optional(Type.String({ description: 'ISO 8601 upper bound — spans starting at or before this time.' })),
+          detail: Type.Optional(Type.Boolean({ description: 'When true, return up to 100 span records with attributes truncated to 300 chars. Default false: return summary stats only.' }))
+        }),
+        execute: async (params: any) => otelSpanQuery.query(params)
       }) as any);
     }
 

@@ -912,7 +912,13 @@ export enum BuiltInToolName {
    * call alone — transition requires a schema-valid deterministic route
    * event (ROUTE_EVENT_EMITTED) from a configured emitter.
    */
-  SUBMIT_ACTION_EVIDENCE = 'submit_action_evidence'
+  SUBMIT_ACTION_EVIDENCE = 'submit_action_evidence',
+  /** pi-experiment-6q0y.24: bounded, progressive-disclosure harness log query. */
+  QUERY_HARNESS_LOGS = 'query_harness_logs',
+  /** pi-experiment-6q0y.25: bounded, progressive-disclosure tmux transcript query. */
+  QUERY_TMUX_TRANSCRIPTS = 'query_tmux_transcripts',
+  /** pi-experiment-6q0y.26: bounded, progressive-disclosure OTEL span query. */
+  QUERY_OTEL_SPANS = 'query_otel_spans'
 }
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,9 @@ import { buildReadPathContextRtkSummary } from './read_path_context.js';
 import { buildQueryHarnessEventsRtkSummary } from './query_harness_events.js';
 import { buildQueryToolOutputRtkSummary } from './query_tool_output.js';
 import { buildSubmitActionEvidenceRtkSummary } from './submit_action_evidence.js';
+import { buildQueryHarnessLogsRtkSummary } from './query_harness_logs.js';
+import { buildQueryTmuxTranscriptsRtkSummary } from './query_tmux_transcripts.js';
+import { buildQueryOtelSpansRtkSummary } from './query_otel_spans.js';
 
 // ---------------------------------------------------------------------------
 // Factory type
@@ -131,6 +134,18 @@ export const BUILTIN_RTK_SUMMARY_REGISTRY: ReadonlyMap<string, BuiltInRtkSummary
 
   [BuiltInToolName.QUERY_TOOL_OUTPUT, (result: unknown, _params: unknown): ToolEvidenceRtkSummary =>
     buildQueryToolOutputRtkSummary({ result })
+  ],
+
+  [BuiltInToolName.QUERY_HARNESS_LOGS, (result: unknown, _params: unknown): ToolEvidenceRtkSummary =>
+    buildQueryHarnessLogsRtkSummary({ result })
+  ],
+
+  [BuiltInToolName.QUERY_TMUX_TRANSCRIPTS, (result: unknown, _params: unknown): ToolEvidenceRtkSummary =>
+    buildQueryTmuxTranscriptsRtkSummary({ result })
+  ],
+
+  [BuiltInToolName.QUERY_OTEL_SPANS, (result: unknown, _params: unknown): ToolEvidenceRtkSummary =>
+    buildQueryOtelSpansRtkSummary({ result })
   ],
 
   // ── Checklist tools ──────────────────────────────────────────────────────
