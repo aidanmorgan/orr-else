@@ -183,26 +183,64 @@ describe('pi-experiment-6q0y.25: query_tmux_transcripts progressive-disclosure t
 
   // ── (C) Redaction before truncation ──────────────────────────────────────
 
-  it('(C1) reasoning blocks are redacted BEFORE truncation (AC5)', async () => {
-    // Build a transcript where reasoning block is in the first part (before tail)
-    // so that without pre-truncation redaction, the reasoning content would appear.
+  it('(C1) reasoning block opening BEFORE tail window still redacts secrets INSIDE tail window (AC5)', async () => {
+    // Proves redaction is applied to the FULL transcript BEFORE the tail is sliced.
+    //
+    // Layout (90 lines total → truncated to last 80):
+    //   line  0     : <thinking>  ← open marker falls OUTSIDE the 80-line tail
+    //   lines 1-89  : 89 × "secret reasoning line N"  ← all in tail window
+    //
+    // Redact-before-truncation (correct):
+    //   The redactor sees <thinking> on line 0, opens the block, suppresses all 89
+    //   secret lines, and emits a single [reasoning redacted] placeholder.
+    //   The tail slice contains only the placeholder — secrets are absent.
+    //
+    // Truncate-before-redact (wrong order — mutation catches this):
+    //   The tail starts at line 10, so <thinking> is gone.  The redactor sees
+    //   89 plain-text "secret reasoning line N" lines with no open marker and
+    //   emits them unchanged — secrets appear in the output.
     const lines: string[] = [];
-    // First 50 lines: reasoning block that should be redacted
     lines.push('<thinking>');
-    for (let i = 0; i < 48; i++) lines.push(`secret reasoning line ${i}`);
-    lines.push('</thinking>');
-    // Next 80 lines: normal actionable lines that form the tail
-    for (let i = 0; i < 80; i++) lines.push(`action line ${i}`);
+    for (let i = 0; i < 89; i++) lines.push(`secret reasoning line ${i}`);
+    // Total: 90 lines → tail = lines 10-89 (all secret lines, no open marker)
 
     writeTranscript('%55', lines.join('\n'));
 
     const tool = await registeredTool();
     const result = await callTool(tool, { paneId: '%55' });
     expect(result.status).toBe('found');
-    // The reasoning content must not appear anywhere in the tail
     const tailText = result.tailLines.join('\n');
+    // Sensitive content must be absent when redaction precedes truncation.
+    // If redaction were skipped (mutation), the 80-line tail slice would return
+    // 80 raw "secret reasoning line N" lines — this assertion would then fail.
     expect(tailText).not.toContain('secret reasoning line');
-    // Note: redaction is applied to full text first, THEN tail is taken
+    // The redactor replaces suppressed blocks with a placeholder.
+    expect(tailText).toContain('[reasoning redacted]');
+  });
+
+  it('(C2) reasoning block in beadId-resolved transcript is redacted (AC5)', async () => {
+    // Same redaction guarantee must hold on the beadId resolution path.
+    // Transcript has a <thinking> block within the 80-line tail window.
+    const lines: string[] = [];
+    lines.push('<thinking>');
+    for (let i = 0; i < 5; i++) lines.push(`bead secret reasoning ${i}`);
+    lines.push('</thinking>');
+    for (let i = 0; i < 10; i++) lines.push(`bead action line ${i}`);
+
+    writeTranscript('%56', lines.join('\n'));
+    await writeFixtureEvent(tempRoot, DomainEventName.TEAMMATE_SPAWNED, {
+      beadId: 'bd-redact-test',
+      stateId: 'Planning',
+      workerId: 'w-redact-test',
+      paneId: '%56'
+    });
+
+    const tool = await registeredTool();
+    const result = await callTool(tool, { beadId: 'bd-redact-test' });
+    expect(result.status).toBe('found');
+    const tailText = result.tailLines.join('\n');
+    expect(tailText).not.toContain('bead secret reasoning');
+    expect(tailText).toContain('[reasoning redacted]');
   });
 
   // ── (D) Path traversal rejected ───────────────────────────────────────────
