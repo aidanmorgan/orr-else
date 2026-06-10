@@ -3004,7 +3004,23 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   // through PiRegistrationService / pi.on()) and defined here as named functions
   // so they are hoisted and available at the bootstrapExtension call site above.
 
-  function sessionShutdownHandler() {
+  // pi-experiment-ejv1: shared helper — flush pending STATE_RUN_INITIALIZED exactly once.
+  // Called on two paths: (1) failure/blocked path (runParentSequenceActionsBeforeActive threw)
+  // and (2) SESSION_SHUTDOWN (covers teammate.start() failure + host-exits-without-shutdown).
+  // Idempotent: clears pendingRunInitPayload BEFORE the await so a concurrent or subsequent
+  // call (failure-path flush then SESSION_SHUTDOWN) records at most once.
+  async function flushPendingRunInit(): Promise<void> {
+    if (!session.pendingRunInitPayload) return;
+    const payload = session.pendingRunInitPayload;
+    session.pendingRunInitPayload = undefined;
+    await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
+      ...payload,
+      finalPromptHashPending: true,
+      admittedHarnessFingerprint: session.admittedHarnessFingerprint,
+    }).catch(() => {});
+  }
+
+  async function sessionShutdownHandler() {
     // pi-experiment-1elr.10: transition the lifecycle machine before side effects.
     // SESSION_SHUTDOWN always proceeds even on violation — cleanup must never be blocked.
     const shutdownResult = transition(session.lifecycleMachine, PiLifecycleEvent.SESSION_SHUTDOWN);
@@ -3022,6 +3038,14 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       applyTransition(session.lifecycleMachine, shutdownResult);
       session.lifecycleMachine.supervisorHealthStage = SupervisorHealthStage.STOPPED;
     }
+
+    // pi-experiment-ejv1: flush any pending STATE_RUN_INITIALIZED that was never
+    // flushed via BEFORE_AGENT_START (e.g. runParentSequenceActionsBeforeActive threw,
+    // or teammate.start() failed before the first agent turn).  Record without
+    // finalPromptHash (BEFORE_AGENT_START never fired to compute it) so the attempt
+    // is visible for audit/replay.  Idempotent: clears pendingRunInitPayload after
+    // recording so a later flush (or a double-shutdown) cannot re-record.
+    await flushPendingRunInit();
 
     Logger.info(Component.ORR_ELSE, 'Pi session shutdown observed', { isWorker: isWorkerMode() });
     if (session.supervisor) session.supervisor.stop();
@@ -4503,7 +4527,16 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
 
     if (isWorkerMode()) {
       await initializeWorkerRun(runtimeObservability, services, session);
-      await runParentSequenceActionsBeforeActive(config, ctx, runtimeObservability, services, session);
+      // pi-experiment-ejv1: wrap so a throw from runParentSequenceActionsBeforeActive
+      // flushes pendingRunInitPayload BEFORE propagating.  SESSION_SHUTDOWN is not
+      // guaranteed to fire when SESSION_START rejects, so we must flush here.
+      // Re-throw preserves existing error-handling behaviour unchanged.
+      try {
+        await runParentSequenceActionsBeforeActive(config, ctx, runtimeObservability, services, session);
+      } catch (parentSeqErr) {
+        await flushPendingRunInit();
+        throw parentSeqErr;
+      }
       const env = nodeRuntimeEnvironment;
       const workerContext: WorkerContext = {
         beadId: env.env(EnvVars.BEAD_ID) as BeadId | undefined,
