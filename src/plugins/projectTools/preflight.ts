@@ -169,20 +169,31 @@ function eventsForActiveProjectToolRun(
   if (!stateId) return events;
   let startIndex = 0;
   let terminalOutcomeAcknowledged = false;
+  // pi-experiment-ejv1: track the index immediately after the acknowledgment event.
+  // When STATE_RUN_INITIALIZED follows in the deferral gap, we set startIndex to
+  // ackWindowStart (not index + 1) so that PROJECT_TOOL_FAILED events recorded
+  // between the acknowledgment and the deferred STATE_RUN_INITIALIZED are attributed
+  // to the correct (new) run window.
+  let ackWindowStart = 0;
   for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     if (isProjectToolFailureWindowBoundary(event, stateId, actionId)) {
       startIndex = index + 1;
       terminalOutcomeAcknowledged = false;
+      ackWindowStart = 0;
       continue;
     }
     if (isProjectToolTerminalOutcomeAcknowledged(event, stateId, actionId)) {
       terminalOutcomeAcknowledged = true;
+      ackWindowStart = index + 1;
       continue;
     }
     if (terminalOutcomeAcknowledged && isProjectToolStateRunStart(event, stateId, actionId)) {
-      startIndex = index + 1;
+      // Use ackWindowStart so failures in the deferral gap (recorded after the
+      // acknowledgment but before STATE_RUN_INITIALIZED) fall inside the active window.
+      startIndex = ackWindowStart;
       terminalOutcomeAcknowledged = false;
+      ackWindowStart = 0;
     }
   }
   return events.slice(startIndex);

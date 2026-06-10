@@ -1161,6 +1161,70 @@ process.exit(sawOther ? 0 : 1);
     });
   });
 
+  it('LOAD-BEARING (ejv1): attributes a PROJECT_TOOL_FAILED in the STATE_RUN_INITIALIZED deferral gap to the correct run window', async () => {
+    // pi-experiment-ejv1 fix #2: a PROJECT_TOOL_FAILED recorded AFTER a terminal-outcome
+    // acknowledgment but BEFORE STATE_RUN_INITIALIZED (the deferral gap, where
+    // runParentSequenceActionsBeforeActive runs before BEFORE_AGENT_START) must be
+    // counted in the per-state failure window for the new run — not silently dropped.
+    //
+    // LOAD-BEARING proof: restoring `startIndex = index + 1` (the pre-fix behaviour)
+    // causes the deferral-gap failure to fall BEFORE the active window (events.slice(startIndex)),
+    // so failureCount drops to 0 on the post-gap tool call — the assertion below FAILS.
+    const tool: ProjectCommandToolConfig = {
+      name: 'artifact_validator',
+      type: ProjectToolType.COMMAND,
+      command: process.execPath,
+      defaultArgs: ['-e', 'process.stderr.write("invalid artifact"); process.exit(1);'],
+      cwd: CwdMode.WORKTREE,
+      failureLimit: {
+        maxFailuresPerState: 2,
+        suggestedOutcome: EventName.FAILURE,
+        terminal: true
+      }
+    };
+    const context = {
+      beadId: 'bd-1',
+      stateId: 'Planning',
+      actionId: 'formulate-plan'
+    };
+
+    // Run 1: one failure then a terminal acknowledgment.
+    await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
+    await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+    await eventStore.record(DomainEventName.SIGNAL_ACKNOWLEDGED, {
+      type: TeammateEventType.STATE_FAILED,
+      ...context,
+      transitionEvent: EventName.FAILURE
+    });
+
+    // Deferral gap: PROJECT_TOOL_FAILED recorded BEFORE the new STATE_RUN_INITIALIZED
+    // (simulates runParentSequenceActionsBeforeActive running before BEFORE_AGENT_START).
+    await eventStore.record(DomainEventName.PROJECT_TOOL_FAILED, {
+      beadId: context.beadId,
+      stateId: context.stateId,
+      actionId: context.actionId,
+      tool: tool.name,
+      type: tool.type,
+      status: ToolResultStatus.REJECTED,
+      result: {}
+    });
+
+    // New run STATE_RUN_INITIALIZED arrives after the gap failure.
+    await eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, context);
+
+    // The next tool execution should see failureCount = 2 (1 gap failure + 1 this call).
+    // LOAD-BEARING: if the gap failure is excluded, failureCount would be 1 (only this call).
+    const result = await executeConfiguredProjectTool(eventStore, toolCallPathFactory, tool, context, {} as any, undefined, new Map());
+
+    expect(result).toMatchObject({
+      status: ToolResultStatus.REJECTED,
+      failureLimit: {
+        failureCount: 2,
+        terminal: true
+      }
+    });
+  });
+
   it('uses state-specific project tool failure-limit routing outcomes', async () => {
     const tool: ProjectCommandToolConfig = {
       name: 'pytest',

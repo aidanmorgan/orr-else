@@ -557,3 +557,138 @@ describe('LOAD-BEARING (f): restart/reload idempotency — fresh session on each
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// (g) pi-experiment-ejv1: flush pendingRunInitPayload when BEFORE_AGENT_START never fires
+// ---------------------------------------------------------------------------
+
+describe('LOAD-BEARING (g ejv1): STATE_RUN_INITIALIZED flushed at SESSION_SHUTDOWN when BEFORE_AGENT_START never fires', () => {
+  /**
+   * pi-experiment-ejv1 fix #1: initializeWorkerRun stages pendingRunInitPayload but
+   * does NOT record STATE_RUN_INITIALIZED — that flush happens at BEFORE_AGENT_START.
+   * If BEFORE_AGENT_START never fires (e.g. runParentSequenceActionsBeforeActive threw
+   * or teammate.start() failed before the first agent turn), the payload is left pending.
+   * SESSION_SHUTDOWN must flush it so the attempt is visible for audit/replay.
+   *
+   * LOAD-BEARING proof: removing the `if (session.pendingRunInitPayload)` flush block
+   * from sessionShutdownHandler causes the event to be silently dropped when
+   * BEFORE_AGENT_START has not fired.  The assertion below FAILS because no
+   * STATE_RUN_INITIALIZED event is written to the event store.
+   *
+   * Double-record prevention: the normal path (BEFORE_AGENT_START fires) clears
+   * pendingRunInitPayload before SESSION_SHUTDOWN, so shutdown's flush is a no-op.
+   * This is verified by the success-path sub-test: only one STATE_RUN_INITIALIZED
+   * event is present in the store.
+   */
+
+  it('LOAD-BEARING: SESSION_SHUTDOWN flushes STATE_RUN_INITIALIZED when BEFORE_AGENT_START never fired', async () => {
+    const previousCwd = process.cwd();
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-ejv1-no-baf-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'logs'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), MINIMAL_YAML);
+    const savedEnv = saveEnv(
+      EnvVars.WORKER_MODE, EnvVars.BEAD_ID, EnvVars.STATE_ID,
+      EnvVars.PROJECT_ROOT, EnvVars.WORKTREE_PATH, EnvVars.API_BASE
+    );
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ejv1-no-baf';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      process.env[EnvVars.API_BASE] = 'http://127.0.0.1:1';
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      // SESSION_START fires initializeWorkerRun (sets pendingRunInitPayload).
+      // BEFORE_AGENT_START is NOT fired — simulates teammate start failure or
+      // runParentSequenceActionsBeforeActive throwing before the first agent turn.
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+
+      // Wait briefly for SESSION_START's async work to settle.
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Confirm no STATE_RUN_INITIALIZED yet (BEFORE_AGENT_START hasn't fired).
+      const eventsBeforeShutdown = readEventStoreLines(tempRoot);
+      const initBeforeShutdown = eventsBeforeShutdown.filter(e => e.type === DomainEventName.STATE_RUN_INITIALIZED);
+      expect(initBeforeShutdown).toHaveLength(0);
+
+      // SESSION_SHUTDOWN without any BEFORE_AGENT_START — must flush the pending payload.
+      await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // LOAD-BEARING: STATE_RUN_INITIALIZED must be present exactly once.
+      const eventsAfterShutdown = readEventStoreLines(tempRoot);
+      const initEvents = eventsAfterShutdown.filter(e => e.type === DomainEventName.STATE_RUN_INITIALIZED);
+      expect(initEvents).toHaveLength(1);
+
+      // The flushed event must carry finalPromptHashPending: true (BEFORE_AGENT_START
+      // never computed the finalPromptHash).
+      const initData = (initEvents[0] as any).data ?? {};
+      expect(initData.finalPromptHashPending).toBe(true);
+      expect(initData.beadId).toBe('bd-ejv1-no-baf');
+      expect(initData.stateId).toBe('Planning');
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv(savedEnv);
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('success path: STATE_RUN_INITIALIZED recorded exactly once via BEFORE_AGENT_START (no double-record at shutdown)', async () => {
+    const previousCwd = process.cwd();
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-ejv1-baf-ok-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'logs'), { recursive: true });
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), MINIMAL_YAML);
+    const savedEnv = saveEnv(
+      EnvVars.WORKER_MODE, EnvVars.BEAD_ID, EnvVars.STATE_ID,
+      EnvVars.PROJECT_ROOT, EnvVars.WORKTREE_PATH, EnvVars.API_BASE
+    );
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ejv1-baf-ok';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      process.env[EnvVars.API_BASE] = 'http://127.0.0.1:1';
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+      await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      // Normal path: BEFORE_AGENT_START fires and flushes the pending payload.
+      await harness.callbacks[PiEventName.BEFORE_AGENT_START]?.({ systemPrompt: '' }, { hasUI: false, cwd: worktreePath });
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // SESSION_SHUTDOWN fires — must NOT double-record STATE_RUN_INITIALIZED.
+      await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      const events = readEventStoreLines(tempRoot);
+      const initEvents = events.filter(e => e.type === DomainEventName.STATE_RUN_INITIALIZED);
+
+      // Exactly one — no double-record from shutdown flush.
+      expect(initEvents).toHaveLength(1);
+
+      // Normal path event must NOT have finalPromptHashPending (it has the real hash).
+      const initData = (initEvents[0] as any).data ?? {};
+      expect(initData.finalPromptHashPending).toBeUndefined();
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv(savedEnv);
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+});

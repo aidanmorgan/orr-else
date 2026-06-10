@@ -3004,7 +3004,7 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
   // through PiRegistrationService / pi.on()) and defined here as named functions
   // so they are hoisted and available at the bootstrapExtension call site above.
 
-  function sessionShutdownHandler() {
+  async function sessionShutdownHandler() {
     // pi-experiment-1elr.10: transition the lifecycle machine before side effects.
     // SESSION_SHUTDOWN always proceeds even on violation — cleanup must never be blocked.
     const shutdownResult = transition(session.lifecycleMachine, PiLifecycleEvent.SESSION_SHUTDOWN);
@@ -3021,6 +3021,22 @@ export default async function orrElseExtension(pi: ExtensionAPI, providedService
       }
       applyTransition(session.lifecycleMachine, shutdownResult);
       session.lifecycleMachine.supervisorHealthStage = SupervisorHealthStage.STOPPED;
+    }
+
+    // pi-experiment-ejv1: flush any pending STATE_RUN_INITIALIZED that was never
+    // flushed via BEFORE_AGENT_START (e.g. runParentSequenceActionsBeforeActive threw,
+    // or teammate.start() failed before the first agent turn).  Record without
+    // finalPromptHash (BEFORE_AGENT_START never fired to compute it) so the attempt
+    // is visible for audit/replay.  Idempotent: clears pendingRunInitPayload after
+    // recording so a later flush (or a double-shutdown) cannot re-record.
+    if (session.pendingRunInitPayload) {
+      const payload = session.pendingRunInitPayload;
+      session.pendingRunInitPayload = undefined;
+      await services.eventStore.record(DomainEventName.STATE_RUN_INITIALIZED, {
+        ...payload,
+        finalPromptHashPending: true,
+        admittedHarnessFingerprint: session.admittedHarnessFingerprint,
+      }).catch(() => {});
     }
 
     Logger.info(Component.ORR_ELSE, 'Pi session shutdown observed', { isWorker: isWorkerMode() });
