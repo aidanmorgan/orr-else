@@ -76,6 +76,9 @@ export interface Bead {
     expiresAt: string;
   };
   leaseSessionId?: string;
+  /** Free-form bead metadata from `bd show --json` with reserved keys stripped.
+   *  Values are native JSON types (bd infers booleans/integers). */
+  metadata?: Record<string, string | number | boolean>;
 }
 
 export interface BeadDependencyRecord {
