@@ -641,6 +641,181 @@ describe('LOAD-BEARING (g ejv1): STATE_RUN_INITIALIZED flushed at SESSION_SHUTDO
     }
   });
 
+  /**
+   * pi-experiment-ejv1 fix #2 (failure-path flush): when runParentSequenceActionsBeforeActive
+   * THROWS during SESSION_START and SESSION_SHUTDOWN never fires, STATE_RUN_INITIALIZED
+   * MUST still be recorded exactly once (with finalPromptHashPending: true).
+   *
+   * LOAD-BEARING proof (mutation check): removing the `try { ... } catch (parentSeqErr) {
+   * await flushPendingRunInit(); throw parentSeqErr; }` wrapper in extension.ts causes this
+   * test to FAIL because no STATE_RUN_INITIALIZED is written to the event store (the payload
+   * is left pending and SESSION_SHUTDOWN never fires to flush it).
+   */
+  it('LOAD-BEARING (ejv1 failure-path): runParentSequenceActionsBeforeActive throws → STATE_RUN_INITIALIZED flushed, error propagates, no SESSION_SHUTDOWN needed', async () => {
+    const previousCwd = process.cwd();
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-ejv1-seq-fail-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'logs'), { recursive: true });
+
+    // Config with two sequential actions:
+    //   pre-action (type: prompt, context: parent) — not a TOOL action
+    //   main-action (type: prompt) — the active action we target via ACTION_ID
+    // runParentSequenceActionsBeforeActive sees pre-action is uncompleted + non-TOOL → throws.
+    const PARENT_SEQ_YAML = `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: pre-action
+        type: prompt
+        prompt: "Pre-step"
+      - id: main-action
+        type: prompt
+        prompt: "Plan"
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`;
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), PARENT_SEQ_YAML);
+
+    const savedEnv = saveEnv(
+      EnvVars.WORKER_MODE, EnvVars.BEAD_ID, EnvVars.STATE_ID, EnvVars.ACTION_ID,
+      EnvVars.PROJECT_ROOT, EnvVars.WORKTREE_PATH, EnvVars.API_BASE
+    );
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ejv1-seq-fail';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      // Target main-action so runParentSequenceActionsBeforeActive must process pre-action first.
+      process.env[EnvVars.ACTION_ID] = 'main-action';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      process.env[EnvVars.API_BASE] = 'http://127.0.0.1:1';
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+
+      // SESSION_START must REJECT because runParentSequenceActionsBeforeActive throws
+      // (pre-action is a non-TOOL parent-context action that is not yet completed).
+      // LOAD-BEARING: the failure-path flush must fire BEFORE the rejection propagates.
+      let caughtError: unknown;
+      try {
+        await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      } catch (err) {
+        caughtError = err;
+      }
+
+      // The error must propagate (existing error-handling behaviour is unchanged).
+      expect(caughtError, 'SESSION_START must reject when runParentSequenceActionsBeforeActive throws').toBeDefined();
+
+      // NO SESSION_SHUTDOWN — the host did not fire it after the rejection.
+      // Wait briefly for the async flush to settle.
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // LOAD-BEARING: STATE_RUN_INITIALIZED must be present exactly once — flushed
+      // by the failure-path catch, NOT by SESSION_SHUTDOWN.
+      const events = readEventStoreLines(tempRoot);
+      const initEvents = events.filter(e => e.type === DomainEventName.STATE_RUN_INITIALIZED);
+      expect(initEvents, 'STATE_RUN_INITIALIZED must be recorded exactly once on failure path').toHaveLength(1);
+
+      const initData = (initEvents[0] as any).data ?? {};
+      expect(initData.finalPromptHashPending, 'flushed event must carry finalPromptHashPending:true').toBe(true);
+      expect(initData.beadId).toBe('bd-ejv1-seq-fail');
+      expect(initData.stateId).toBe('Planning');
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv(savedEnv);
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('no-double-record: failure-path flush fires THEN SESSION_SHUTDOWN fires → still exactly one STATE_RUN_INITIALIZED', async () => {
+    const previousCwd = process.cwd();
+    const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-ejv1-no-dbl-')));
+    const worktreePath = path.join(tempRoot, 'worktree');
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'events'), { recursive: true });
+    fs.mkdirSync(path.join(tempRoot, '.pi', 'logs'), { recursive: true });
+
+    const PARENT_SEQ_YAML = `
+settings:
+  startState: Planning
+  worktreePolicy:
+    default: always
+statechart:
+  terminalStates: [completed]
+  advanceOutcomes: [SUCCESS]
+  failedOutcomes: [FAILURE]
+  blockedOutcomes: [BLOCKED]
+states:
+  Planning:
+    identity: { role: "Planner", expertise: "Planning", constraints: [] }
+    baseInstructions: "Plan"
+    actions:
+      - id: pre-action
+        type: prompt
+        prompt: "Pre-step"
+      - id: main-action
+        type: prompt
+        prompt: "Plan"
+    transitions: { SUCCESS: "completed", FAILURE: "Planning" }
+`;
+    fs.writeFileSync(path.join(tempRoot, 'harness.yaml'), PARENT_SEQ_YAML);
+
+    const savedEnv = saveEnv(
+      EnvVars.WORKER_MODE, EnvVars.BEAD_ID, EnvVars.STATE_ID, EnvVars.ACTION_ID,
+      EnvVars.PROJECT_ROOT, EnvVars.WORKTREE_PATH, EnvVars.API_BASE
+    );
+    let harness: ReturnType<typeof fakePi> | undefined;
+
+    try {
+      process.chdir(tempRoot);
+      process.env[EnvVars.WORKER_MODE] = ProcessFlag.TRUE;
+      process.env[EnvVars.BEAD_ID] = 'bd-ejv1-no-dbl';
+      process.env[EnvVars.STATE_ID] = 'Planning';
+      process.env[EnvVars.ACTION_ID] = 'main-action';
+      process.env[EnvVars.PROJECT_ROOT] = tempRoot;
+      process.env[EnvVars.WORKTREE_PATH] = worktreePath;
+      process.env[EnvVars.API_BASE] = 'http://127.0.0.1:1';
+      harness = fakePi();
+
+      await orrElseExtension(harness.pi);
+
+      // SESSION_START rejects — failure-path flush fires and clears pendingRunInitPayload.
+      try {
+        await harness.callbacks[PiEventName.SESSION_START]?.({}, { hasUI: false, cwd: tempRoot });
+      } catch { /* expected */ }
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // SESSION_SHUTDOWN fires after the failure — must NOT re-record (payload already cleared).
+      await harness.callbacks[PiEventName.SESSION_SHUTDOWN]?.();
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Exactly ONE event, not two.
+      const events = readEventStoreLines(tempRoot);
+      const initEvents = events.filter(e => e.type === DomainEventName.STATE_RUN_INITIALIZED);
+      expect(initEvents, 'must be exactly one STATE_RUN_INITIALIZED (no double-record)').toHaveLength(1);
+    } finally {
+      process.chdir(previousCwd);
+      restoreEnv(savedEnv);
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    }
+  });
+
   it('success path: STATE_RUN_INITIALIZED recorded exactly once via BEFORE_AGENT_START (no double-record at shutdown)', async () => {
     const previousCwd = process.cwd();
     const tempRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'orr-else-ejv1-baf-ok-')));
