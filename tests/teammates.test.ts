@@ -9,7 +9,7 @@ import { ConfigLoader } from '../src/core/ConfigLoader.js';
 import { EventStore } from '../src/core/EventStore.js';
 import { Logger } from '../src/core/Logger.js';
 import { Observability } from '../src/core/Observability.js';
-import type { ApiAddress } from '../src/core/RuntimeServices.js';
+import type { ApiAddress } from '../src/types/index.js';
 import { TeammateFactory, parseOrrWorkerPaneOption, formatOrrWorkerPaneOption } from '../src/plugins/teammates.js';
 import {
   redactPaneText,

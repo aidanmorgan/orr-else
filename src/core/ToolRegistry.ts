@@ -41,17 +41,11 @@ export function createToolRegistryComposition(services: RuntimePluginProvider): 
   };
 }
 
-function isRuntimePluginProvider(input: ToolRegistryComposition | RuntimePluginProvider): input is RuntimePluginProvider {
-  return 'plugins' in input;
-}
-
 export class ToolRegistry {
   private readonly composition: ToolRegistryComposition;
 
-  constructor(composition: ToolRegistryComposition | RuntimePluginProvider) {
-    this.composition = isRuntimePluginProvider(composition)
-      ? createToolRegistryComposition(composition)
-      : composition;
+  constructor(composition: ToolRegistryComposition) {
+    this.composition = composition;
   }
 
   public getOrchestratorTools(): HarnessTool[] {

@@ -262,3 +262,51 @@ describe('PiIntegration re-export facade is deleted', () => {
     ).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Test 6: RuntimeServices compat shims are gone (0iyt no-backcompat-ever)
+// ---------------------------------------------------------------------------
+
+describe('RuntimeServices backward-compat shims are removed', () => {
+  const runtimeServicesPath = 'src/core/RuntimeServices.ts';
+  const createRuntimeServicesPath = 'src/composition/createRuntimeServices.ts';
+
+  it('RuntimeServices.ts does not re-export WorktreeResult for backward compatibility', () => {
+    const source = readSource(runtimeServicesPath);
+    // The compat re-export was: export type { WorktreeResult } from './OrchestrationPorts.js'
+    // WorktreeResult is now imported only from OrchestrationPorts directly by each consumer.
+    const compatExport = /export\s+type\s+\{[^}]*WorktreeResult[^}]*\}\s+from\s+['"]\.\/OrchestrationPorts/;
+    expect(
+      compatExport.test(source),
+      'RuntimeServices.ts must not re-export WorktreeResult from OrchestrationPorts — callers import from OrchestrationPorts directly'
+    ).toBe(false);
+  });
+
+  it('RuntimeServices.ts does not re-export ApiAddress for backward compatibility', () => {
+    const source = readSource(runtimeServicesPath);
+    // The compat re-export was: export type { ApiAddress } from '../types/index.js'
+    // ApiAddress is defined in types/index.ts; callers import from there directly.
+    const compatExport = /export\s+type\s+\{[^}]*ApiAddress[^}]*\}\s+from\s+['"]/;
+    expect(
+      compatExport.test(source),
+      'RuntimeServices.ts must not re-export ApiAddress — callers import from types/index.js directly'
+    ).toBe(false);
+  });
+
+  it('createRuntimeServices.ts does not re-export ApiAddress via RuntimeServices', () => {
+    const source = readSource(createRuntimeServicesPath);
+    const compatExport = /export\s+type\s+\{[^}]*ApiAddress[^}]*\}/;
+    expect(
+      compatExport.test(source),
+      'createRuntimeServices.ts must not re-export ApiAddress — it was a compat shim removed under no-backcompat-ever'
+    ).toBe(false);
+  });
+
+  it('createRuntimeServices.ts has no old-path migration comments', () => {
+    const source = readSource(createRuntimeServicesPath);
+    expect(
+      source,
+      'createRuntimeServices.ts must not contain old-import-path migration guidance'
+    ).not.toMatch(/previously imported createRuntimeServices from src\/core\/RuntimeServices/);
+  });
+});
