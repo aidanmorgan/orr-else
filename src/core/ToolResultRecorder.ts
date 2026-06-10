@@ -6,8 +6,8 @@
  * PROBLEM
  * -------
  * Several tool exit paths in wrapPluginTool (circuit-breaker, terminal-failure-
- * limit, validation-reject, worker-merge-guard) and in projectTools (deprecated,
- * extension-type, backpressure) emit TOOL_INVOCATION_FAILED or PROJECT_TOOL_FAILED
+ * limit, validation-reject, worker-merge-guard) and in projectTools (extension-type,
+ * backpressure) emit TOOL_INVOCATION_FAILED or PROJECT_TOOL_FAILED
  * events WITHOUT a durable verifier-visible result handle:
  *
  *   - TOOL_INVOCATION_FAILED short-circuit exits lack `toolResult.outputFile`, so
