@@ -328,6 +328,25 @@ function statusFor(issue: BeadsIssueRecord, metadata: HarnessBeadMetadata): stri
   }
 }
 
+/** Reserved metadata keys that belong to the runtime projection namespace.
+ *  Exported so myv3.3/myv3.4 write-guard beads can reuse this set. */
+export const RESERVED_BEAD_METADATA_KEYS = new Set(['orr_else']);
+
+/** Strip reserved keys from raw bead metadata before surfacing to callers.
+ *  Exported for reuse by write-guard beads (myv3.3, myv3.4). */
+export function stripReservedMetadataKeys(
+  raw: Record<string, unknown>
+): Record<string, string | number | boolean> {
+  const result: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (RESERVED_BEAD_METADATA_KEYS.has(k)) continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      result[k] = v;
+    }
+  }
+  return result;
+}
+
 function normalizeIssueWithProjection(
   issue: BeadsIssueRecord,
   projectedMetadata: Partial<HarnessBeadMetadata> = {},
@@ -361,6 +380,17 @@ function normalizeIssueWithProjection(
     lease: metadata.lease,
     leaseSessionId: metadata.leaseSessionId
   };
+
+  // Surface free-form metadata from the issue record (e.g. phase, pre_review_verdict).
+  // Strip reserved keys so the runtime projection namespace never leaks to callers.
+  // Event-store projection already won above — this only adds non-reserved free-form keys.
+  const rawMeta = issue.metadata && typeof issue.metadata === 'object' && !Array.isArray(issue.metadata)
+    ? issue.metadata as Record<string, unknown>
+    : null;
+  if (rawMeta) {
+    const stripped = stripReservedMetadataKeys(rawMeta);
+    if (Object.keys(stripped).length > 0) bead.metadata = stripped;
+  }
 
   const acceptanceCriteria = previewText(issue.acceptance_criteria, BeadsDefaults.LONG_TEXT_PREVIEW_CHARS);
   if (acceptanceCriteria) bead.acceptance_criteria = acceptanceCriteria;
