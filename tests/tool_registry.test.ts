@@ -40,10 +40,12 @@ describe('ToolRegistry composition', () => {
     ]);
   });
 
-  it('keeps the RuntimeServices constructor path behavior-compatible', () => {
-    const registry = new ToolRegistry(createRuntimeServices());
-
-    expect(registry.getAllTools().map(tool => tool.name)).toContain(BuiltInToolName.SIGNAL_COMPLETION);
+  it('requires explicit createToolRegistryComposition call — RuntimeServices object is a type error', () => {
+    const services = createRuntimeServices();
+    // Passing RuntimeServices directly is now a compile-time error.
+    // The canonical construction path requires explicit composition.
+    // @ts-expect-error — ToolRegistry constructor only accepts ToolRegistryComposition
+    new ToolRegistry(services);
   });
 });
 

@@ -8,8 +8,8 @@ import { BeadStatus, DomainEventName, PluginToolName, WorktreePreserveReason } f
 import { Component, EnvVars, FileMutationPolicyDefaults, OtelAttr, SpanName, TransactionalStateDefaults, WorktreeDefaults } from '../constants/infra.js';
 import type { Observability } from '../core/Observability.js';
 import type { ConfigLoader } from '../core/ConfigLoader.js';
-import type { MergeResult, RuntimePlugin, RuntimeTool, WorktreeResult } from '../core/RuntimeServices.js';
-import type { BeadCompletionPort } from '../core/OrchestrationPorts.js';
+import type { MergeResult, RuntimePlugin, RuntimeTool } from '../core/RuntimeServices.js';
+import type { BeadCompletionPort, WorktreeResult } from '../core/OrchestrationPorts.js';
 import { type GitWorkingTreePort, nodeGitWorkingTreePort } from '../core/GitWorkingTreePort.js';
 import { type FileSystemPort, nodeFileSystemPort } from '../core/FileSystemPort.js';
 

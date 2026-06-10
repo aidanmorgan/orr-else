@@ -15,7 +15,6 @@ import { RequiredToolResolver } from './RequiredToolResolver.js';
 import { nodeRuntimeEnvironment, type RuntimeEnvironment } from './RuntimeEnvironment.js';
 import { Scheduler } from './Scheduler.js';
 import type { ApiAddress } from '../types/index.js';
-export type { ApiAddress } from '../types/index.js';
 import { ShellCommandParser } from './ShellCommandParser.js';
 import { TelemetryStore } from './Telemetry.js';
 import { ToolCallPathFactory } from './ToolCallPathFactory.js';
@@ -32,9 +31,6 @@ import { McpBridgeHealthService } from './McpBridgeHealthService.js';
 export type { LoggerPort };
 export { ContractRegistrySet, createFreshRegistrySet, buildRegistryPort };
 export { McpBridgeHealthService };
-// WorktreeResult is defined in OrchestrationPorts; re-exported here for
-// backward compatibility with existing callers (git.ts, extension.ts, etc.)
-export type { WorktreeResult } from './OrchestrationPorts.js';
 import type {
   WorktreeResult,
   BeadReadyOptions,
@@ -289,8 +285,7 @@ export interface PluginBundle {
 /**
  * Optional pre-built core services that the composition layer may pass to
  * assembleRuntimeServices so that plugins and RuntimeServices share the same
- * EventStore / ConfigLoader / Observability instances (preserving the original
- * shared-object behaviour of the old createRuntimeServices).
+ * EventStore / ConfigLoader / Observability instances.
  */
 export interface CoreServicesOverride {
   configLoader: ConfigLoader;
